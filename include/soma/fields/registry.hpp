@@ -400,8 +400,10 @@ class FieldRegistry {
   // so check is_current() on handles that are kept across commits. A member
   // entity is written straight into the data. A
   // non-member of a subset field is recorded in a sorted host buffer and joins
-  // the domain at the next commit, which every mirror also performs first. A
-  // field over a full domain has no non-members.
+  // the domain at the next commit, which every mirror of the field performs
+  // first. A field over a full domain has no non-members. Throws FieldOverlap
+  // when the entity is a member of another field of the same family: such a
+  // write could never be committed.
   template <class T>
   void set_pending(FieldId id, LO lid, std::span<const T> values) {
     Entry& e = entry_mut(id);
@@ -441,10 +443,6 @@ class FieldRegistry {
     e.pending.reset();
     e.pending_count = 0;
   }
-
-  // set_pending throws FieldOverlap when the entity is a member of another
-  // field of the same family: such a write could never be committed, and
-  // a buffered write that cannot commit would make every later mirror fail.
 
   // Entities waiting to be merged into the field's domain.
   std::size_t pending_count(FieldId id) const { return entry(id).pending_count; }
