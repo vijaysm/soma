@@ -454,8 +454,10 @@ class FieldRegistry {
     for (Entry& e : entries_) {
       if (e.alive && selected(e, all, names, dims)) commit_entry(e);
     }
-    dst.epoch_ = epoch_;
-    for (const Family& f : families_) dst.families_.push_back(typename FieldRegistry<Dst>::Family{f.key});
+    // Built aside and swapped in, so a throw leaves `dst` empty and reusable.
+    FieldRegistry<Dst> built;
+    built.epoch_ = epoch_;
+    for (const Family& f : families_) built.families_.push_back(typename FieldRegistry<Dst>::Family{f.key});
 
     std::map<const void*, Domain<Dst>> domains;
     std::map<const void*, Space<Dst>> spaces;
@@ -487,10 +489,13 @@ class FieldRegistry {
                                     src.global_value(), src.revision());
         });
         out.alive = true;
-        dst.families_[out.info.family].members.push_back(out.info.id);
+        built.families_[out.info.family].members.push_back(out.info.id);
       }
-      dst.entries_.push_back(std::move(out));
+      built.entries_.push_back(std::move(out));
     }
+    dst.entries_.swap(built.entries_);
+    dst.families_.swap(built.families_);
+    dst.epoch_ = built.epoch_;
   }
 
  private:

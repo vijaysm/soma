@@ -122,3 +122,53 @@ TEST(ExceptionSafety, AFailedAddOfANewFamilyLeavesNoFamilyBehind) {
   EXPECT_NO_THROW(reg.family<double>("U", 1));
 }
 
+TEST(ExceptionSafety, AFailedMirrorLeavesTheDestinationEmptyAndRetryable) {
+  for (const bool alias : {true, false}) {
+    Reg reg;
+    reg.set_entities(2, 30);
+    soma::FieldOptions<double> opt;
+    opt.default_value = std::vector<double>{2.5};
+    const auto a = reg.add<double>("a", subset(reg, 30, {3, 8}), 1, opt);
+    const auto b = reg.add<float>("b", subset(reg, 30, {4}), 2);
+    reg.add_tag<std::int32_t>("c", 2, 1);
+    Reg dst;
+    const long failures = sweep(
+        [&] { reg.mirror_into<HostMem>(dst, {"*"}, {true, true, true, true}, alias); },
+        [&](long n) {
+          EXPECT_TRUE(dst.list().empty()) << "alias " << alias << ", failed allocation " << n;
+          EXPECT_FALSE(dst.contains("a")) << n;
+        });
+    EXPECT_GT(failures, 0);
+    EXPECT_EQ(dst.list().size(), 3u);
+    EXPECT_EQ(dst.get<double>(a.id()).rows(), 2);
+    EXPECT_EQ(dst.get<float>(b.id()).rows(), 1);
+    EXPECT_DOUBLE_EQ(dst.get<double>("a").view()(0, 0), 2.5);
+  }
+}
+
+TEST(ExceptionSafety, AStaleSelectedFieldLeavesTheDestinationEmpty) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  reg.add_tag<double>("old", 2, 1);
+  reg.set_epoch(reg.epoch() + 1);
+  const auto fresh = reg.add_tag<double>("fresh", 2, 1);
+  Reg dst;
+  EXPECT_THROW(reg.mirror_into<HostMem>(dst, {"fresh", "old"}, {true, true, true, true}, false),
+               soma::StaleField);
+  EXPECT_TRUE(dst.list().empty());
+  EXPECT_NO_THROW(reg.mirror_into<HostMem>(dst, {"fresh"}, {true, true, true, true}, false));
+  EXPECT_EQ(dst.get<double>(fresh.id()).rows(), 30);
+  EXPECT_FALSE(dst.contains("old"));
+}
+
+TEST(ExceptionSafety, AFailedMirrorKeepsTheEntityCountsOfTheDestination) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  reg.add<double>("a", subset(reg, 30, {3, 8}), 1);
+  Reg dst;
+  dst.set_entities(2, 30);
+  sweep([&] { reg.mirror_into<HostMem>(dst, {"*"}, {true, true, true, true}, false); },
+        [&](long n) { EXPECT_TRUE(dst.has_entities(2)) << n; });
+  EXPECT_TRUE(dst.has_entities(2));
+  EXPECT_EQ(dst.get<double>("a").rows(), 2);
+}
