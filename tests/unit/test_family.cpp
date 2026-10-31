@@ -268,20 +268,43 @@ TYPED_TEST(FamilyTyped, AViewCopiedFromANamedHandleStaysValidWhileTheHandleLives
   EXPECT_EQ(got(2 * 9), -1);
 }
 
+namespace soma_test {
+
+// A handle whose indexes no one else owns: the registry has replaced its own
+// since, so the temporary is the last owner of the member lists.
+template <class M>
+soma::FamilyHandle<M> sole_owner_handle(soma::FieldRegistry<M>& reg, soma::FamilyId fam) {
+  auto handle = reg.family_handle(fam);
+  reg.template add<double>("other", soma::Space<M>(soma::Domain<M>::all(3, 4, reg.epoch()),
+                                                   soma::Layout::per_entity()),
+                           1);
+  reg.template add<double>("T", soma::Space<M>(soma::Domain<M>::from_list(
+                                                   2, 100, reg.epoch(), std::vector<LO>{50}),
+                                               soma::Layout::per_entity()),
+                           1);
+  (void)reg.lookup(fam, 2, 50);  // the registry now holds a newer index
+  return handle;
+}
+
+}  // namespace soma_test
+
 TYPED_TEST(FamilyTyped, RangeForOverMembersOfATemporaryHandleIsSafe) {
+  this->reg.set_entities(3, 4);
   const auto a = this->reg.template add<double>("T", this->space(this->list(2, 100, {4, 8})), 1);
   const auto fam = this->reg.template family<double>("T", 1);
   std::size_t count = 0;
-  soma::FieldId seen = soma::invalid_field;
-  for (const soma::FieldId id : this->reg.family_handle(fam).members(2)) {
+  for (const soma::FieldId id : soma_test::sole_owner_handle<TypeParam>(this->reg, fam).members(2)) {
+    EXPECT_EQ(id, a.id());
     ++count;
-    seen = id;
   }
   EXPECT_EQ(count, 1u);
-  EXPECT_EQ(seen, a.id());
+}
+
+TYPED_TEST(FamilyTyped, MembersOfATemporaryHandleAreCopiesAndOfANamedHandleAreReferences) {
   using H = soma::FamilyHandle<TypeParam>;
   static_assert(std::is_same_v<decltype(std::declval<const H&>().members(0)), const std::vector<soma::FieldId>&>);
   static_assert(std::is_same_v<decltype(std::declval<H&&>().members(0)), std::vector<soma::FieldId>>);
+  SUCCEED();
 }
 
 TYPED_TEST(FamilyTyped, HandleCopiesShareTheIndexes) {
