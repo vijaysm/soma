@@ -82,7 +82,7 @@ add_library(soma_warnings INTERFACE)
 target_compile_options(soma_warnings INTERFACE
   "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang,IntelLLVM,NVHPC>:-Wall;-Wextra>")
 
-set(SOMA_SOURCES src/runtime/scope_guard.cpp src/core/segments.cpp)
+set(SOMA_SOURCES src/runtime/scope_guard.cpp src/core/segments.cpp src/fields/node_tables.cpp)
 if(SOMA_ENABLE_MPI)
   list(APPEND SOMA_SOURCES src/parallel/comm_mpi.cpp)
 else()
