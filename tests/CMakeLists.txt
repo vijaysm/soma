@@ -95,3 +95,5 @@ if(SOMA_INSTALL)
       -P ${PROJECT_SOURCE_DIR}/tests/packaging/run_packaging_test.cmake)
   set_tests_properties(packaging.find_package PROPERTIES TIMEOUT 300)
 endif()
+
+soma_add_test(test_node_tables SOURCES unit/test_node_tables.cpp)
