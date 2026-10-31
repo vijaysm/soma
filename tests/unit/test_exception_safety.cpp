@@ -51,7 +51,8 @@ bool inside_kokkos_deallocate() {
   char** symbols = backtrace_symbols(frames, depth);
   bool found = false;
   for (int i = 0; symbols != nullptr && i < depth && !found; ++i) {
-    found = std::strstr(symbols[i], "deallocate") != nullptr;
+    found = std::strstr(symbols[i], "Kokkos") != nullptr &&
+            std::strstr(symbols[i], "deallocate") != nullptr;
   }
   std::free(symbols);
   return found;
