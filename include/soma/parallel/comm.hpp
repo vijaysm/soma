@@ -36,8 +36,8 @@ class Comm {
   static Comm world();
   static Comm self();
 
-  int rank() const noexcept { return rank_; }
-  int size() const noexcept { return size_; }
+  [[nodiscard]] int rank() const noexcept { return rank_; }
+  [[nodiscard]] int size() const noexcept { return size_; }
 
   void barrier() const;
 
@@ -61,7 +61,7 @@ class Comm {
 
 #if SOMA_ENABLE_MPI
   explicit Comm(MPI_Comm comm);
-  MPI_Comm native() const noexcept { return comm_; }
+  [[nodiscard]] MPI_Comm native() const noexcept { return comm_; }
 #endif
 
  private:
