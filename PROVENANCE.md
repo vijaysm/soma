@@ -8,7 +8,7 @@ commit `c4a45fd`), authored by the same team:
 |---|---|---|
 | `include/soma/topology/canonical.hpp` | `include/moabx/mesh/subentity_topology.hpp` | tables ported, device-callable rewrite |
 | `tests/reference/test_canonical_moab.cpp` | `src/moabx_subentity_topology_tests.cpp` | ported to GoogleTest |
-| `cmake/CPM.cmake` | `cmake/CPM.cmake` | verbatim (MIT, CPM.cmake project) |
+| `cmake/CPM.cmake` | `cmake/CPM.cmake` | verbatim, v0.43.2 (MIT, CPM.cmake project) |
 | `cmake/SomaAppleOpenMP.cmake` | `CMakeLists.txt` OpenMP block, `cmake/moabxConfig.cmake.in` (c6e82ba) | adapted |
 | `tests/packaging/*` | `tests/packaging/*` | adapted |
 | `data/*.h5m`, `*.vtk`, `*.msh` | `data/` | verbatim |
