@@ -388,7 +388,8 @@ void expect_failed_mirrors_leave_the_destination_empty(bool alias) {
 
 TEST(ExceptionSafety, AFailedMirrorIntoTheDefaultSpaceLeavesTheDestinationEmpty) {
   for (const bool alias : {true, false}) {
-    expect_failed_mirrors_leave_the_destination_empty<Kokkos::DefaultExecutionSpace::memory_space>(alias);
+    using DefaultMemory = Kokkos::DefaultExecutionSpace::memory_space;
+    expect_failed_mirrors_leave_the_destination_empty<DefaultMemory>(alias);
   }
 }
 

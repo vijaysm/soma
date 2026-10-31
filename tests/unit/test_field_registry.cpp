@@ -433,7 +433,9 @@ TYPED_TEST(RegistryTyped, RangeForOverAccessorsOfATemporaryFieldIsSafe) {
   opt.global_value = std::vector<double>{7.0, 8.0, 9.0};
   this->reg.template add_tag<double>("temperature", 0, 3, opt);
   double defaults = 0;
-  for (const double d : this->reg.template get<double>("temperature").default_value()) defaults += d;
+  for (const double d : this->reg.template get<double>("temperature").default_value()) {
+    defaults += d;
+  }
   EXPECT_DOUBLE_EQ(defaults, 7.5);
   double globals = 0;
   for (const double g : this->reg.template get<double>("temperature").global_value()) globals += g;
@@ -442,10 +444,13 @@ TYPED_TEST(RegistryTyped, RangeForOverAccessorsOfATemporaryFieldIsSafe) {
 
 TYPED_TEST(RegistryTyped, AccessorsOfATemporaryFieldAreCopiesAndNamedFieldsStayReferences) {
   using F = soma::Field<double, TypeParam>;
-  static_assert(std::is_same_v<decltype(std::declval<F&>().default_value()), const std::vector<double>&>);
-  static_assert(std::is_same_v<decltype(std::declval<const F&>().global_value()), const std::vector<double>&>);
-  static_assert(std::is_same_v<decltype(std::declval<const F&>().space()), const soma::Space<TypeParam>&>);
-  static_assert(std::is_same_v<decltype(std::declval<const F&>().domain()), const soma::Domain<TypeParam>&>);
+  using Values = std::vector<double>;
+  using Sp = soma::Space<TypeParam>;
+  using Dm = soma::Domain<TypeParam>;
+  static_assert(std::is_same_v<decltype(std::declval<F&>().default_value()), const Values&>);
+  static_assert(std::is_same_v<decltype(std::declval<const F&>().global_value()), const Values&>);
+  static_assert(std::is_same_v<decltype(std::declval<const F&>().space()), const Sp&>);
+  static_assert(std::is_same_v<decltype(std::declval<const F&>().domain()), const Dm&>);
   static_assert(std::is_same_v<decltype(std::declval<F&&>().default_value()), std::vector<double>>);
   static_assert(std::is_same_v<decltype(std::declval<F&&>().global_value()), std::vector<double>>);
   static_assert(std::is_same_v<decltype(std::declval<F&&>().space()), soma::Space<TypeParam>>);

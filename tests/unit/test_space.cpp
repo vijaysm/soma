@@ -284,7 +284,8 @@ TYPED_TEST(SpaceTyped, UniformBlockRowsPastTheLimitOfLOThrowLengthError) {
   const auto info = soma_test::cells<TypeParam>(
       3, std::vector<Topology>(static_cast<std::size_t>(n), Topology::hex));
   try {
-    const soma::Space<TypeParam> sp(D::all(3, static_cast<LO>(n), 1), soma_test::hex_layout(), info);
+    const soma::Space<TypeParam> sp(D::all(3, static_cast<LO>(n), 1), soma_test::hex_layout(),
+                                    info);
     FAIL() << "expected std::length_error, rows = " << sp.rows();
   } catch (const std::length_error& e) {
     const std::string msg = e.what();
@@ -311,7 +312,8 @@ TYPED_TEST(SpaceTyped, RowsSummedOverBlocksPastTheLimitOfLOThrowLengthError) {
   soma::ElementInfo<TypeParam> info;
   info.topology[3] = soma_test::topology_view<TypeParam>(
       std::vector<Topology>(static_cast<std::size_t>(hexes), Topology::hex));
-  info.topology[2] = soma_test::topology_view<TypeParam>(std::vector<Topology>(1000, Topology::quad));
+  info.topology[2] =
+      soma_test::topology_view<TypeParam>(std::vector<Topology>(1000, Topology::quad));
   const auto dom = D::combine(D::all(2, 1000, 1), D::all(3, static_cast<LO>(hexes), 1));
   EXPECT_THROW(soma::Space<TypeParam>(dom, soma_test::hex_layout(), info), std::length_error);
 }

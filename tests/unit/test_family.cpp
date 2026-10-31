@@ -293,7 +293,8 @@ TYPED_TEST(FamilyTyped, RangeForOverMembersOfATemporaryHandleIsSafe) {
   const auto a = this->reg.template add<double>("T", this->space(this->list(2, 100, {4, 8})), 1);
   const auto fam = this->reg.template family<double>("T", 1);
   std::size_t count = 0;
-  for (const soma::FieldId id : soma_test::sole_owner_handle<TypeParam>(this->reg, fam).members(2)) {
+  using soma_test::sole_owner_handle;
+  for (const soma::FieldId id : sole_owner_handle<TypeParam>(this->reg, fam).members(2)) {
     EXPECT_EQ(id, a.id());
     ++count;
   }
@@ -302,8 +303,9 @@ TYPED_TEST(FamilyTyped, RangeForOverMembersOfATemporaryHandleIsSafe) {
 
 TYPED_TEST(FamilyTyped, MembersOfATemporaryHandleAreCopiesAndOfANamedHandleAreReferences) {
   using H = soma::FamilyHandle<TypeParam>;
-  static_assert(std::is_same_v<decltype(std::declval<const H&>().members(0)), const std::vector<soma::FieldId>&>);
-  static_assert(std::is_same_v<decltype(std::declval<H&&>().members(0)), std::vector<soma::FieldId>>);
+  using Ids = std::vector<soma::FieldId>;
+  static_assert(std::is_same_v<decltype(std::declval<const H&>().members(0)), const Ids&>);
+  static_assert(std::is_same_v<decltype(std::declval<H&&>().members(0)), Ids>);
   SUCCEED();
 }
 
