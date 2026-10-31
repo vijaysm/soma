@@ -6,6 +6,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -328,4 +329,41 @@ TYPED_TEST(SpaceTyped, PolygonArityBeyondIntIsRejected) {
                                         info),
                  std::invalid_argument);
   }
+}
+
+TYPED_TEST(SpaceTyped, MovedFromSpaceIsEmptyAndUsable) {
+  using D = soma::Domain<TypeParam>;
+  const auto info = soma_test::cells<TypeParam>(3, std::vector<Topology>(4, Topology::hex));
+  soma::Space<TypeParam> a(D::all(3, 4, 1), Layout::element_nodes(NodeFamily::gll, 2), info);
+  const soma::Space<TypeParam> copy = a;
+  soma::Space<TypeParam> b(std::move(a));
+  EXPECT_EQ(a.rows(), 0);
+  EXPECT_EQ(a.num_blocks(), 0);
+  EXPECT_TRUE(a.domain().empty());
+  EXPECT_TRUE(a.layout() == Layout::per_entity());
+  EXPECT_FALSE(a.entity_rows(3, 1).valid());
+  EXPECT_EQ(a.view().rows, 0);
+  EXPECT_EQ(a.view().num_blocks, 0);
+  EXPECT_THROW((void)a.block(0), std::out_of_range);
+  EXPECT_TRUE(a == soma::Space<TypeParam>());
+  EXPECT_EQ(a.template mirror<HostMem>(a.domain().template mirror<HostMem>()).rows(), 0);
+  EXPECT_EQ(b.rows(), 4 * 27);
+  EXPECT_TRUE(b == copy);
+
+  soma::Space<TypeParam> c(D::all(3, 2, 1), Layout::per_entity());
+  c = std::move(b);
+  EXPECT_EQ(b.rows(), 0);
+  EXPECT_TRUE(b.domain().empty());
+  EXPECT_EQ(c.rows(), 4 * 27);
+
+  b = copy;
+  EXPECT_EQ(b.rows(), 4 * 27);
+}
+
+TYPED_TEST(SpaceTyped, SelfMoveLeavesTheSpaceUnchanged) {
+  using D = soma::Domain<TypeParam>;
+  soma::Space<TypeParam> a(D::all(3, 4, 1), Layout::per_entity());
+  soma::Space<TypeParam>& alias = a;
+  a = std::move(alias);
+  EXPECT_EQ(a.rows(), 4);
 }

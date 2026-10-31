@@ -135,7 +135,16 @@ class Space {
  public:
   using memory_space = MemSpace;
 
-  Space() : data_(std::make_shared<const Data>()) {}
+  // The empty space has no rows. All empty spaces share one snapshot, which is
+  // also what a moved-from space refers to afterwards.
+  Space() : data_(empty_data()) {}
+  Space(const Space&) = default;
+  Space& operator=(const Space&) = default;
+  Space(Space&& o) noexcept : data_(std::exchange(o.data_, empty_data())) {}
+  Space& operator=(Space&& o) noexcept {
+    if (this != &o) data_ = std::exchange(o.data_, empty_data());
+    return *this;
+  }
 
   // `info` is read only for element_nodes layouts. shared_nodes and quadrature
   // layouts are accepted by Layout but cannot back a Space yet.
@@ -239,6 +248,11 @@ class Space {
     std::vector<detail::SpaceBlockData<MemSpace>> blocks;
     LO rows = 0;
   };
+
+  static const std::shared_ptr<const Data>& empty_data() {
+    static const std::shared_ptr<const Data> empty = std::make_shared<const Data>();
+    return empty;
+  }
 
   static void check_rows(const Layout& layout, std::int64_t rows) {
     constexpr auto limit = static_cast<std::int64_t>(std::numeric_limits<LO>::max());
