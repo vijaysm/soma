@@ -4,6 +4,7 @@
 #include "soma/parallel/comm.hpp"
 
 #include <climits>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -92,7 +93,7 @@ void Comm::allreduce(std::span<T> values, Op op) const {
 
 template <class T>
 T Comm::exscan(T value) const {
-  T out{};
+  T out = std::numeric_limits<T>::max();
   check(MPI_Exscan(&value, &out, 1, datatype<T>(), MPI_SUM, comm_), "MPI_Exscan");
   // MPI leaves rank 0's receive buffer undefined.
   return rank_ == 0 ? T{} : out;

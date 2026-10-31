@@ -49,6 +49,8 @@ TEST(Comm, AllreduceSpanIsElementwise) {
 TEST(Comm, ExscanIsExclusive) {
   const Comm c = Comm::world();
   EXPECT_EQ(c.exscan(1), c.rank());
+  const auto r = static_cast<std::int64_t>(c.rank());
+  EXPECT_EQ(c.exscan<std::int64_t>(r + 1), r * (r + 1) / 2);
 }
 
 TEST(Comm, BcastDeliversRootBuffer) {
