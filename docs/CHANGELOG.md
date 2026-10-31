@@ -47,6 +47,13 @@ All notable changes to SOMA are recorded here. The format follows
   topology, with vertex order that encodes orientation.
 - Variable-arity topologies (polygon, polyhedron) have no table. The tables return 0 sides.
 
+### Node tables
+
+- Reference-element node coordinates for edge, triangle, quad, tetrahedron, prism, hex and
+  pyramid, as equispaced or GLL sets up to order 32, with `tensor_lexicographic`,
+  `hierarchical` and `moab_native` orderings, serendipity sets at order 2, permutations between
+  orderings, and a cache of device Views.
+
 ### Testing
 
 - GoogleTest harness with a shared `main` that creates the runtime scope first and agrees on
