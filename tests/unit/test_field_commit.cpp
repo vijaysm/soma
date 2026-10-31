@@ -664,10 +664,13 @@ TEST(FieldCommit, TheFencedDirectPathFencesOnceNotPerComponent) {
   Kokkos::deep_copy(data, -1.0);
   const std::vector<double> v{1.0, 2.0, 3.0};
   using soma::detail::RowWritePath;
+  // One global fence reaches every enabled execution space, one callback each.
+  const int one_fence = soma_test::fences_during([] { Kokkos::fence("soma::test::one"); });
+  ASSERT_GE(one_fence, 1);
   const int fenced = soma_test::fences_during([&] {
     soma::detail::write_row_via<RowWritePath::fenced_direct, double, HostMem>(data, 2, v);
   });
-  EXPECT_EQ(fenced, 1);
+  EXPECT_EQ(fenced, one_fence);
   EXPECT_DOUBLE_EQ(data(2, 0), 1.0);
   EXPECT_DOUBLE_EQ(data(2, 2), 3.0);
   EXPECT_DOUBLE_EQ(data(1, 0), -1.0);
