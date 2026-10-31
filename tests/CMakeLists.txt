@@ -38,7 +38,7 @@ function(soma_add_test name)
       add_test(NAME ${name}.np${np}
         COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
                 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:${name}> ${MPIEXEC_POSTFLAGS})
-      set_tests_properties(${name}.np${np} PROPERTIES TIMEOUT 300 PROCESSORS ${np})
+      set_tests_properties(${name}.np${np} PROPERTIES TIMEOUT 60 PROCESSORS ${np})
     endforeach()
   else()
     gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST)
