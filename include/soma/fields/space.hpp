@@ -220,7 +220,8 @@ class Space {
 
   const void* storage_id() const noexcept { return data_.get(); }
   // Number of handles that share this snapshot; 0 for the empty snapshot, which
-  // has no reference count.
+  // has no reference count. A test seam: under concurrent use the value is only
+  // a hint.
   long snapshot_use_count() const noexcept { return data_.use_count(); }
 
   // `domain` must be the mirror of this space's domain in Dst.

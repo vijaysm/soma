@@ -412,7 +412,8 @@ class Domain {
   bool shares_storage_with(const Domain& o) const noexcept { return data_ == o.data_; }
   const void* storage_id() const noexcept { return data_.get(); }
   // Number of handles that share this snapshot; 0 for the empty snapshot, which
-  // has no reference count.
+  // has no reference count. A test seam: under concurrent use the value is only
+  // a hint.
   long snapshot_use_count() const noexcept { return data_.use_count(); }
 
   // Domains are immutable, so the same memory space shares the snapshot.
