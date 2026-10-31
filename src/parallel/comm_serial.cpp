@@ -14,14 +14,31 @@ Comm Comm::self() { return Comm(0, 1); }
 
 void Comm::barrier() const {}
 
-std::int32_t Comm::allreduce(std::int32_t value, Op) const { return value; }
-std::int64_t Comm::allreduce(std::int64_t value, Op) const { return value; }
-double Comm::allreduce(double value, Op) const { return value; }
-void Comm::allreduce(std::span<std::int64_t>, Op) const {}
-void Comm::allreduce(std::span<double>, Op) const {}
+template <class T>
+T Comm::allreduce(T value, Op) const {
+  return value;
+}
 
-std::int64_t Comm::exscan(std::int64_t) const { return 0; }
+template <class T>
+void Comm::allreduce(std::span<T>, Op) const {}
 
-void Comm::bcast(std::span<std::byte>, int) const {}
+template <class T>
+T Comm::exscan(T) const {
+  return T{};
+}
+
+void Comm::bcast_bytes(std::span<std::byte>, int) const {}
+
+#define SOMA_INSTANTIATE_COMM(T)                              \
+  template T Comm::allreduce<T>(T, Op) const;                 \
+  template void Comm::allreduce<T>(std::span<T>, Op) const;   \
+  template T Comm::exscan<T>(T) const;
+
+SOMA_INSTANTIATE_COMM(std::int32_t)
+SOMA_INSTANTIATE_COMM(std::int64_t)
+SOMA_INSTANTIATE_COMM(std::uint64_t)
+SOMA_INSTANTIATE_COMM(double)
+
+#undef SOMA_INSTANTIATE_COMM
 
 }  // namespace soma

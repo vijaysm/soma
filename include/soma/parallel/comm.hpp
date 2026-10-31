@@ -9,12 +9,12 @@
 // data model and every algorithm are identical in both builds.
 //
 // This header, src/parallel/comm_*.cpp, and src/runtime/scope_guard.cpp are
-// the only files permitted to test SOMA_ENABLE_MPI (enforced by the
-// policy.mpi_seam test).
+// the only files permitted to test SOMA_ENABLE_MPI.
 
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <type_traits>
 
 #include "soma/config.hpp"
 
@@ -26,7 +26,11 @@ namespace soma {
 
 enum class Op : std::uint8_t { sum, min, max, prod };
 
-// Non-owning: a Comm never frees the communicator it wraps.
+// Non-owning: a Comm never frees the communicator it wraps, which must
+// outlive every copy of the Comm.
+//
+// Reductions are defined for std::int32_t, std::int64_t, std::uint64_t and
+// double; other types fail to link.
 class Comm {
  public:
   static Comm world();
@@ -37,16 +41,23 @@ class Comm {
 
   void barrier() const;
 
-  std::int32_t allreduce(std::int32_t value, Op op) const;
-  std::int64_t allreduce(std::int64_t value, Op op) const;
-  double allreduce(double value, Op op) const;
-  void allreduce(std::span<std::int64_t> values, Op op) const;
-  void allreduce(std::span<double> values, Op op) const;
+  template <class T>
+  [[nodiscard]] T allreduce(T value, Op op) const;
+  template <class T>
+  void allreduce(std::span<T> values, Op op) const;
 
-  // Exclusive prefix sum. Rank 0 receives 0.
-  std::int64_t exscan(std::int64_t value) const;
+  // Exclusive prefix sum. Rank 0 receives T{}.
+  template <class T>
+  [[nodiscard]] T exscan(T value) const;
 
-  void bcast(std::span<std::byte> buffer, int root) const;
+  template <class T>
+  void bcast(std::span<T> buffer, int root) const {
+    static_assert(std::is_trivially_copyable_v<T>);
+    bcast_bytes(std::as_writable_bytes(buffer), root);
+  }
+
+  // Untyped primitive behind bcast.
+  void bcast_bytes(std::span<std::byte> buffer, int root) const;
 
 #if SOMA_ENABLE_MPI
   explicit Comm(MPI_Comm comm);
