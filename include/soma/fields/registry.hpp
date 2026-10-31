@@ -929,16 +929,20 @@ class FieldRegistry {
     }
     const View2<T, MemSpace> data = Kokkos::create_mirror_view_and_copy(MemSpace{}, merged);
 
-    // Nothing above modified the registry, so a throw leaves it untouched.
+    // Everything that allocates happens before the first change to the entry,
+    // and the changes below cannot throw, so a failure leaves the entry as it
+    // was.
     Field<T, MemSpace> grown(e.info.id, space, data, old_field.default_value(),
                              old_field.global_value(), e.info.revision + 1, serial_);
+    std::any grown_any(grown);
+    Family& family = families_[e.info.family];
+    e.field.swap(grown_any);
     e.space = space;
-    e.field = std::any(grown);
     e.info.rows = space.rows();
     ++e.info.revision;
     e.pending.reset();
     e.pending_count = 0;
-    ++families_[e.info.family].version;
+    ++family.version;
   }
 
   const Entry& entry(FieldId id) const {
