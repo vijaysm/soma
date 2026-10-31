@@ -17,7 +17,11 @@ namespace {
 
 void check(int rc, const char* what) {
   if (rc != MPI_SUCCESS) {
-    throw std::runtime_error(std::string("soma::Comm: ") + what + " failed");
+    char msg[MPI_MAX_ERROR_STRING] = {};
+    int len = 0;
+    MPI_Error_string(rc, msg, &len);
+    throw std::runtime_error(std::string("soma::Comm: ") + what + " failed: " +
+                             std::string(msg, static_cast<std::size_t>(len)));
   }
 }
 
