@@ -250,8 +250,10 @@ class Space {
   };
 
   static const std::shared_ptr<const Data>& empty_data() {
-    static const std::shared_ptr<const Data> empty = std::make_shared<const Data>();
-    return empty;
+    // Never destroyed: a static-storage Space moved from during shutdown still
+    // needs it. The empty Data holds no Views, so nothing is lost by leaking it.
+    static const auto* const empty = new std::shared_ptr<const Data>(std::make_shared<const Data>());
+    return *empty;
   }
 
   static void check_rows(const Layout& layout, std::int64_t rows) {
