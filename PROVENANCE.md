@@ -12,7 +12,7 @@ commit `c4a45fd`), authored by the same team:
 | `cmake/SomaAppleOpenMP.cmake` | `CMakeLists.txt` OpenMP block, `cmake/moabxConfig.cmake.in` (c6e82ba) | adapted |
 | `tests/packaging/*` | `tests/packaging/*` | adapted |
 | `data/*.h5m`, `*.vtk`, `*.msh` | `data/` | verbatim |
-| `porting/moabx-c4a45fd/*` | various | staging copies, deleted once ported |
+| `porting/moabx-c4a45fd/*` | various | staging copies, deleted once ported (the sub-entity topology files are already gone) |
 
 `porting/` holds reference copies only: they are never compiled or installed, and each file is
 deleted in the commit that finishes its port. Text from MOAB-derived (LGPL) files must not be
