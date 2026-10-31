@@ -165,6 +165,11 @@ class Space {
   LO block_rows(int b) const { return data_->blocks.at(static_cast<std::size_t>(b)).rows; }
   LO block_row_begin(int b) const { return data_->blocks.at(static_cast<std::size_t>(b)).row_begin; }
 
+  LO block_stride(int b) const { return data_->blocks.at(static_cast<std::size_t>(b)).stride; }
+  View1<const LO, Kokkos::HostSpace> block_host_offsets(int b) const {
+    return data_->blocks.at(static_cast<std::size_t>(b)).host_offsets;
+  }
+
   SpaceBlockView<MemSpace> block(int b) const {
     const auto& s = data_->blocks.at(static_cast<std::size_t>(b));
     SpaceBlockView<MemSpace> v;
