@@ -60,6 +60,7 @@ soma_add_test(test_field_commit SOURCES unit/test_field_commit.cpp)
 soma_add_test(test_exception_safety SOURCES unit/test_exception_safety.cpp)
 soma_add_test(test_device_structs SOURCES unit/test_device_structs.cpp)
 soma_add_test(test_static_lifetime SOURCES unit/test_static_lifetime.cpp)
+soma_add_test(test_move_noexcept SOURCES unit/test_move_noexcept.cpp)
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   find_package(MOAB REQUIRED)
