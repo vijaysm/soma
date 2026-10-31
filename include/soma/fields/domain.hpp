@@ -490,7 +490,7 @@ class Domain {
     // contends across threads. The empty Data holds no Views, so nothing is lost
     // by leaking it.
     static const auto* const empty =
-        new std::shared_ptr<const Data>(std::make_shared<const Data>());
+        new std::shared_ptr<const Data>(std::shared_ptr<void>(), new const Data());
     return *empty;
   }
 
