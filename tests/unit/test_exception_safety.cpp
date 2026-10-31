@@ -146,19 +146,22 @@ TEST(ExceptionSafety, AFailedMirrorLeavesTheDestinationEmptyAndRetryable) {
   }
 }
 
-TEST(ExceptionSafety, AStaleSelectedFieldLeavesTheDestinationEmpty) {
+// "good" is mirrored first; "late" was defined at another epoch and is stale.
+TEST(ExceptionSafety, AStaleSelectedFieldAfterAGoodOneLeavesTheDestinationEmpty) {
   Reg reg;
   reg.set_entities(2, 30);
-  reg.add_tag<double>("old", 2, 1);
+  const auto good = reg.add_tag<double>("good", 2, 1);
   reg.set_epoch(reg.epoch() + 1);
-  const auto fresh = reg.add_tag<double>("fresh", 2, 1);
+  reg.add_tag<double>("late", 2, 1);
+  reg.set_epoch(reg.epoch() - 1);
   Reg dst;
-  EXPECT_THROW(reg.mirror_into<HostMem>(dst, {"fresh", "old"}, {true, true, true, true}, false),
+  EXPECT_THROW(reg.mirror_into<HostMem>(dst, {"good", "late"}, {true, true, true, true}, false),
                soma::StaleField);
   EXPECT_TRUE(dst.list().empty());
-  EXPECT_NO_THROW(reg.mirror_into<HostMem>(dst, {"fresh"}, {true, true, true, true}, false));
-  EXPECT_EQ(dst.get<double>(fresh.id()).rows(), 30);
-  EXPECT_FALSE(dst.contains("old"));
+  EXPECT_FALSE(dst.contains("good"));
+  EXPECT_NO_THROW(reg.mirror_into<HostMem>(dst, {"good"}, {true, true, true, true}, false));
+  EXPECT_EQ(dst.get<double>(good.id()).rows(), 30);
+  EXPECT_FALSE(dst.contains("late"));
 }
 
 TEST(ExceptionSafety, AFailedMirrorKeepsTheEntityCountsOfTheDestination) {
