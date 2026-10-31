@@ -35,7 +35,6 @@
 
 namespace soma {
 
-inline constexpr int max_node_order = 32;
 inline constexpr int max_optimized_simplex_order = 15;
 
 struct NodeTableKey {

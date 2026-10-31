@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <climits>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
@@ -138,6 +139,35 @@ TEST(Layout, ValidateNamesTheCombination) {
   EXPECT_NO_THROW(soma::validate(Topology::hex, eq(3)));
   EXPECT_NO_THROW(soma::validate(Topology::polygon, eq(1), 6));
   EXPECT_NO_THROW(soma::validate(Topology::polyhedron, Layout::per_entity()));
+}
+
+TEST(Layout, CountsAtTheOrderLimitFitAnInt) {
+  const int p = soma::max_node_order;
+  EXPECT_EQ(soma::num_element_nodes(Topology::hex, eq(p)), 33 * 33 * 33);
+  EXPECT_EQ(soma::num_element_nodes(Topology::prism, eq(p)), 33 * 33 * 34 / 2);
+  EXPECT_EQ(soma::num_element_nodes(Topology::tet, eq(p)), 33 * 34 * 35 / 6);
+  EXPECT_NO_THROW(soma::validate(Topology::hex, eq(p)));
+}
+
+TEST(Layout, OrdersAboveTheLimitCountZero) {
+  for (const int p : {soma::max_node_order + 1, 2000, INT_MAX}) {
+    for (const Topology t : {Topology::edge, Topology::tri, Topology::quad, Topology::tet,
+                             Topology::prism, Topology::hex}) {
+      EXPECT_EQ(soma::num_element_nodes(t, eq(p)), 0) << soma::name(t) << " p=" << p;
+    }
+  }
+}
+
+TEST(Layout, ValidateRejectsOrdersAboveTheLimitAndNamesThem) {
+  try {
+    soma::validate(Topology::hex, eq(2000));
+    FAIL() << "expected std::invalid_argument";
+  } catch (const std::invalid_argument& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("order 2000"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("32"), std::string::npos) << msg;
+  }
+  EXPECT_THROW(soma::validate(Topology::tri, eq(soma::max_node_order + 1)), std::invalid_argument);
 }
 
 TEST(Layout, FactoriesAndEquality) {

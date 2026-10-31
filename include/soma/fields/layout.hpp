@@ -14,6 +14,9 @@
 
 namespace soma {
 
+// Highest supported element order. Node counts at this order fit an int.
+inline constexpr int max_node_order = 32;
+
 enum class NodeFamily : std::uint8_t { lagrange_equispaced, gll, gauss };
 enum class NodeOrdering : std::uint8_t { moab_native, tensor_lexicographic, hierarchical };
 
@@ -105,7 +108,7 @@ inline std::string describe(const Layout& l) {
 }
 
 // Value points per entity of one element topology. Returns 0 for a combination
-// that has no node table: unsupported order, a family the topology does not
+// that has no node table: an order outside [1, max_node_order], a family the topology does not
 // support, serendipity where no such element exists, knife and polyhedron, and
 // layout kinds that are not element-local. `arity` is the vertex count of a
 // polygon and is ignored otherwise.
@@ -114,7 +117,7 @@ KOKKOS_INLINE_FUNCTION constexpr int num_element_nodes(Topology t, const Layout&
   if (l.kind == Layout::Kind::per_entity) return 1;
   if (l.kind != Layout::Kind::element_nodes) return 0;
   const int p = l.order;
-  if (p < 1 || l.family == NodeFamily::gauss) return 0;
+  if (p < 1 || p > max_node_order || l.family == NodeFamily::gauss) return 0;
 
   if (l.serendipity) {
     if (p != 2) return 0;
@@ -149,6 +152,7 @@ inline void validate(Topology t, const Layout& l, int arity = 0) {
   if (num_element_nodes(t, l, arity) > 0) return;
   std::string why = std::string("unsupported layout ") + describe(l) + " on " + name(t);
   if (t == Topology::polygon) why += " (arity " + std::to_string(arity) + ")";
+  if (l.order > max_node_order) why += " (the maximum order is " + std::to_string(max_node_order) + ")";
   throw std::invalid_argument(why);
 }
 
