@@ -5,19 +5,21 @@
 #define SOMA_FIELDS_REGISTRY_HPP_
 
 // Host-side owner of fields. Type erasure exists only here; kernels receive
-// concretely typed Views. A field is identified by (name, value type, space);
-// a second definition with all three equal is a FieldClash. FieldIds are
-// indices that are never reused, so a removed field leaves a gap.
+// concretely typed Views. A field is defined by (name, value type, component
+// count, space); a second definition with all four equal is a FieldClash.
+// FieldIds are indices that are never reused, so a removed field leaves a gap.
 //
-// Fields with the same name, value type, component count, and layout form a
-// family (the layout is part of the key so that a per_entity field and a node
-// field of one name can coexist on the same entities).
+// A family is the set of fields that share a name, a value type, a component
+// count, and a layout (the family key; the domain is not part of it). The
+// layout is in the key so that a per_entity field and a node field of one name
+// can coexist on the same entities, and the component count so that a
+// 1-component and a 3-component field of one name stay apart.
 // Members of a family must be disjoint: add() throws FieldOverlap otherwise
 // (the check is exact and only compares members that share a dimension). A
 // family resolves an entity to (member, row) through a per-dimension index that
 // is built on first use and rebuilt after the epoch or the membership changes;
 // see resolver.hpp. Fields of one family on the same dimension may differ in
-// layout, so a family lookup returns the first value point of the entity.
+// domain only, so a family lookup returns the first value point of the entity.
 //
 // The registry holds the current mesh epoch. Mesh (or a test) sets it with
 // set_epoch(), and fetching a field whose domain was built against another
