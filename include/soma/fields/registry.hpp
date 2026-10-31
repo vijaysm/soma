@@ -112,9 +112,8 @@ void write_row_staged(const View2<T, MemSpace>& data, std::size_t row, std::span
   Kokkos::fence("soma::field::write_row");
 }
 
-template <class T, class MemSpace>
-void write_row(const View2<T, MemSpace>& data, std::size_t row, std::span<const T> values) {
-  constexpr RowWritePath path = write_row_path<MemSpace>();
+template <RowWritePath path, class T, class MemSpace>
+void write_row_via(const View2<T, MemSpace>& data, std::size_t row, std::span<const T> values) {
   if constexpr (path == RowWritePath::direct) {
     write_row_direct<T, MemSpace>(data, row, values);
   } else if constexpr (path == RowWritePath::fenced_direct) {
@@ -123,6 +122,11 @@ void write_row(const View2<T, MemSpace>& data, std::size_t row, std::span<const 
   } else {
     write_row_staged<T, MemSpace>(data, row, values);
   }
+}
+
+template <class T, class MemSpace>
+void write_row(const View2<T, MemSpace>& data, std::size_t row, std::span<const T> values) {
+  write_row_via<write_row_path<MemSpace>(), T, MemSpace>(data, row, values);
 }
 
 }  // namespace detail

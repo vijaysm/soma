@@ -657,6 +657,27 @@ TEST(FieldCommit, AHostWriteToAMemberRowIssuesNoFence) {
   EXPECT_DOUBLE_EQ(f.view()(1, 2), 3.0);
 }
 
+// Each path run on HostSpace memory (the only memory these tests can write
+// directly), so the fences each one issues can be counted.
+TEST(FieldCommit, TheFencedDirectPathFencesOnceNotPerComponent) {
+  soma::View2<double, HostMem> data("soma::test::rows", 4, 3);
+  Kokkos::deep_copy(data, -1.0);
+  const std::vector<double> v{1.0, 2.0, 3.0};
+  using soma::detail::RowWritePath;
+  const int fenced = soma_test::fences_during([&] {
+    soma::detail::write_row_via<RowWritePath::fenced_direct, double, HostMem>(data, 2, v);
+  });
+  EXPECT_EQ(fenced, 1);
+  EXPECT_DOUBLE_EQ(data(2, 0), 1.0);
+  EXPECT_DOUBLE_EQ(data(2, 2), 3.0);
+  EXPECT_DOUBLE_EQ(data(1, 0), -1.0);
+  const int direct = soma_test::fences_during([&] {
+    soma::detail::write_row_via<RowWritePath::direct, double, HostMem>(data, 3, v);
+  });
+  EXPECT_EQ(direct, 0);
+  EXPECT_DOUBLE_EQ(data(3, 1), 2.0);
+}
+
 TYPED_TEST(MemberWriteTyped, TheStagedPathWritesTheSameRow) {
   for (std::size_t ncomp = 1; ncomp <= 3; ++ncomp) {
     soma::View2<double, TypeParam> data("soma::test::rows", 4, ncomp);
