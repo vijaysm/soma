@@ -302,6 +302,72 @@ class FieldRegistry {
     }
   }
 
+  // ---- sparse growth: pending writes and commit --------------------------
+
+  // Host write of one entity's values (ncomp of them) into a per_entity field
+  // with one block. A member entity is written straight into the data. A
+  // non-member of a subset field is recorded in a sorted host buffer and joins
+  // the domain at the next commit, which every mirror also performs first. A
+  // field over a full domain has no non-members.
+  template <class T>
+  void set_pending(FieldId id, LO lid, std::span<const T> values) {
+    Entry& e = entry_mut(id);
+    if (e.info.type != data_type_of<T>()) {
+      throw std::invalid_argument("field '" + e.info.name + "' written as the wrong value type (stored " +
+                                  name(e.info.type) + ")");
+    }
+    require_growable(e);
+    require_current(e);
+    if (static_cast<int>(values.size()) != e.info.ncomp) {
+      throw std::invalid_argument("field '" + e.info.name + "': " + std::to_string(values.size()) +
+                                  " values for " + std::to_string(e.info.ncomp) + " components");
+    }
+    const DomainBlockInfo& bi = e.space.domain().info(0);
+    if (lid < 0 || lid >= bi.count) {
+      throw std::out_of_range("field '" + e.info.name + "': entity " + std::to_string(lid) +
+                              " is outside [0, " + std::to_string(bi.count) + ")");
+    }
+    const auto field = std::any_cast<const Field<T, MemSpace>&>(e.field);
+    const LO row = e.space.domain().host_block(0).row(lid);
+    if (row != invalid_lo) {
+      for (std::size_t c = 0; c < values.size(); ++c) {
+        Kokkos::deep_copy(Kokkos::subview(field.view(), static_cast<std::size_t>(row), c), values[c]);
+      }
+      return;
+    }
+    using Buffer = std::map<LO, std::vector<T>>;
+    if (!e.pending.has_value()) e.pending = Buffer{};
+    auto& buf = std::any_cast<Buffer&>(e.pending);
+    if (buf.find(lid) == buf.end()) check_free(e, lid);
+    buf[lid].assign(values.begin(), values.end());
+    e.pending_count = buf.size();
+  }
+
+  // Drops the buffered writes of one field. Data already written to member
+  // rows is not affected.
+  void discard_pending(FieldId id) {
+    Entry& e = entry_mut(id);
+    e.pending.reset();
+    e.pending_count = 0;
+  }
+
+  // set_pending throws FieldOverlap when the entity is a member of another
+  // field of the same family: such a write could never be committed, and
+  // a buffered write that cannot commit would make every later mirror fail.
+
+  // Entities waiting to be merged into the field's domain.
+  std::size_t pending_count(FieldId id) const { return entry(id).pending_count; }
+
+  // Merges the pending writes of one field into a new domain and data. The
+  // field keeps its id and its mesh epoch; its revision advances. Idempotent
+  // and cheap when nothing is pending. If the grown domain would overlap
+  // another member of the family, FieldOverlap is thrown and the field keeps
+  // its previous domain, data, and pending buffer.
+  void commit(FieldId id) { commit_entry(entry_mut(id)); }
+
+  // Throws StaleField if any live field is stale, like commit on that field.
+  void commit_all() { commit_everything(); }
+
   // Frees the storage. The id stays retired.
   void remove(FieldId id) {
     Entry& e = entry_mut(id);
@@ -317,12 +383,16 @@ class FieldRegistry {
   // ids. The entity counts and global ids (set_entities) belong to whoever owns
   // those arrays, so the caller sets them on `dst`. names: {"*"} = all. A field is skipped when any dimension it has
   // members on is switched off in `dims`. Domains and spaces are mirrored once
-  // and shared by every field that shares them. alias = true reuses storage
+  // and shared by every field that shares them. Pending writes are committed
+  // first (stale fields that are not selected are left alone), so the mirror and
+  // the source agree. A selected stale field throws StaleField. Note that
+  // this const member commits on the source: the registry keeps its storage
+  // mutable for that reason. alias = true reuses storage
   // when Dst can access it (create_mirror_view_and_copy); alias = false always
   // allocates (create_mirror + deep_copy).
   template <class Dst>
   void mirror_into(FieldRegistry<Dst>& dst, const std::vector<std::string>& names,
-                   const std::array<bool, 4>& dims, bool alias) {
+                   const std::array<bool, 4>& dims, bool alias) const {
     if (!dst.entries_.empty()) {
       throw std::logic_error("mirror_into: the destination registry must be empty");
     }
@@ -332,19 +402,21 @@ class FieldRegistry {
         if (!contains(n)) throw std::out_of_range("mirror: no field named '" + n + "'");
       }
     }
+    for (const Entry& e : entries_) {
+      if (e.alive && selected(e, all, names, dims)) require_current(e);
+    }
+    for (Entry& e : entries_) {
+      if (e.alive && e.space.domain().epoch() == epoch_) commit_entry(e);
+    }
     dst.epoch_ = epoch_;
     for (const Family& f : families_) dst.families_.push_back(typename FieldRegistry<Dst>::Family{f.key});
 
     std::map<const void*, Domain<Dst>> domains;
     std::map<const void*, Space<Dst>> spaces;
-    for (Entry& e : entries_) {
+    for (const Entry& e : entries_) {
       typename FieldRegistry<Dst>::Entry out;
       out.info = e.info;
-      const bool wanted = all || std::find(names.begin(), names.end(), e.info.name) != names.end();
-      const bool dims_on = std::all_of(e.info.dims.begin(), e.info.dims.end(), [&](int d) {
-        return dims[static_cast<std::size_t>(d)];
-      });
-      if (e.alive && wanted && dims_on) {
+      if (e.alive && selected(e, all, names, dims)) {
         auto sp = spaces.find(e.space.storage_id());
         if (sp == spaces.end()) {
           auto dm = domains.find(e.space.domain().storage_id());
@@ -366,7 +438,7 @@ class FieldRegistry {
             Kokkos::deep_copy(view, src.view());
           }
           out.field = Field<T, Dst>(src.id(), out.space, view, src.default_value(),
-                                    src.global_value());
+                                    src.global_value(), src.revision());
         });
         out.alive = true;
         dst.families_[out.info.family].members.push_back(out.info.id);
@@ -390,6 +462,8 @@ class FieldRegistry {
     Space<MemSpace> space;
     std::any field;  // Field<T, MemSpace>
     bool alive = false;
+    std::any pending{};  // std::map<LO, std::vector<T>>, sorted by entity
+    std::size_t pending_count = 0;
   };
 
   struct FamilyKey {
@@ -563,6 +637,112 @@ class FieldRegistry {
     return fam.index[d];
   }
 
+  // Throws FieldOverlap when another live member of e's family already holds
+  // entity `lid` (one lookup in the family index of that dimension).
+  void check_free(const Entry& e, LO lid) const {
+    const int dim = e.space.domain().info(0).dim;
+    const detail::FamilyDimData<MemSpace>& idx = dim_index(e.info.family, dim);
+    const FamilyHit hit = idx.host_view().lookup(lid);
+    if (!hit.found()) return;
+    const Entry& other = entries_[idx.slots[static_cast<std::size_t>(hit.slot)]];
+    throw FieldOverlap("field '" + e.info.name + "' (" + type_text(e.info.type, e.info.ncomp) +
+                       ") cannot take entity " + entity_text(dim, lid) + " in dim " +
+                       std::to_string(dim) + ": it belongs to existing '" + other.info.name + "' (" +
+                       type_text(other.info.type, other.info.ncomp) + ") on " +
+                       describe_members(other.space, 0));
+  }
+
+  static bool selected(const Entry& e, bool all, const std::vector<std::string>& names,
+                       const std::array<bool, 4>& dims) {
+    const bool wanted = all || std::find(names.begin(), names.end(), e.info.name) != names.end();
+    const bool dims_on = std::all_of(e.info.dims.begin(), e.info.dims.end(), [&](int d) {
+      return dims[static_cast<std::size_t>(d)];
+    });
+    return wanted && dims_on;
+  }
+
+  void require_current(const Entry& e) const {
+    if (e.space.domain().epoch() != epoch_) {
+      throw StaleField(stale_message(e.info.name, e.space.domain()));
+    }
+  }
+
+  static void require_growable(const Entry& e) {
+    if (e.info.layout.kind != Layout::Kind::per_entity || e.space.domain().num_blocks() != 1) {
+      throw std::invalid_argument("field '" + e.info.name +
+                                  "': pending writes need a per_entity field over one dimension");
+    }
+  }
+
+  void commit_everything() const {
+    for (Entry& e : entries_) {
+      if (e.alive) commit_entry(e);
+    }
+  }
+
+  void commit_entry(Entry& e) const {
+    require_current(e);
+    if (e.pending_count == 0) return;
+    dispatch_data_type(e.info.type, [&]<class T>() { commit_typed<T>(e); });
+  }
+
+  template <class T>
+  void commit_typed(Entry& e) const {
+    using Buffer = std::map<LO, std::vector<T>>;
+    const auto& buf = std::any_cast<const Buffer&>(e.pending);
+    const auto old_field = std::any_cast<const Field<T, MemSpace>&>(e.field);
+    const Domain<MemSpace>& old_domain = e.space.domain();
+    const DomainBlockInfo& bi = old_domain.info(0);
+    const int ncomp = e.info.ncomp;
+
+    // Merged member list, sorted by entity; remember where each old row goes.
+    const std::vector<LO> old_members = old_domain.members(0);
+    std::vector<LO> lids;
+    lids.reserve(old_members.size() + buf.size());
+    std::vector<std::size_t> from_old(old_members.size() + buf.size(), old_members.size());
+    {
+      auto o = old_members.begin();
+      auto p = buf.begin();
+      while (o != old_members.end() || p != buf.end()) {
+        if (p == buf.end() || (o != old_members.end() && *o < p->first)) {
+          from_old[lids.size()] = static_cast<std::size_t>(o - old_members.begin());
+          lids.push_back(*o++);
+        } else {
+          lids.push_back((p++)->first);
+        }
+      }
+    }
+    GidView gids;
+    const Entities& ent = entities_[static_cast<std::size_t>(bi.dim)];
+    if (ent.set) gids = ent.gids;
+    const auto domain = Domain<MemSpace>::from_list(bi.dim, bi.count, old_domain.epoch(), lids, gids);
+    const Space<MemSpace> space(domain, Layout::per_entity());
+    check_disjoint(e.info.name, e.info.type, ncomp, space, e.info.id);
+
+    const auto old_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, old_field.view());
+    View2<T, Kokkos::HostSpace> merged(
+        Kokkos::view_alloc("soma::field::" + e.info.name, Kokkos::WithoutInitializing),
+        lids.size(), static_cast<std::size_t>(ncomp));
+    for (std::size_t r = 0; r < lids.size(); ++r) {
+      const auto it = buf.find(lids[r]);
+      for (std::size_t c = 0; c < static_cast<std::size_t>(ncomp); ++c) {
+        merged(r, c) = it != buf.end() ? it->second[c] : old_host(from_old[r], c);
+      }
+    }
+    const View2<T, MemSpace> data = Kokkos::create_mirror_view_and_copy(MemSpace{}, merged);
+
+    // Nothing above modified the registry, so a throw leaves it untouched.
+    Field<T, MemSpace> grown(e.info.id, space, data, old_field.default_value(),
+                             old_field.global_value(), e.info.revision + 1);
+    e.space = space;
+    e.field = std::any(grown);
+    e.info.rows = space.rows();
+    ++e.info.revision;
+    e.pending.reset();
+    e.pending_count = 0;
+    ++families_[e.info.family].version;
+  }
+
   const Entry& entry(FieldId id) const {
     if (id >= entries_.size() || !entries_[id].alive) {
       throw std::out_of_range("no field with id " + std::to_string(id));
@@ -590,8 +770,10 @@ class FieldRegistry {
     return std::any_cast<Field<T, MemSpace>>(e.field);
   }
 
-  std::vector<Entry> entries_;
-  std::vector<Family> families_;
+  // Mutable because commit is logically const: it replaces storage by storage
+  // with the same observable content, and mirrors perform it on a const source.
+  mutable std::vector<Entry> entries_;
+  mutable std::vector<Family> families_;
   mutable std::uint64_t index_builds_ = 0;
   std::uint64_t epoch_ = 1;
   std::array<Entities, 4> entities_{};
