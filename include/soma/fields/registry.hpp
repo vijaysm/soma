@@ -479,9 +479,14 @@ class FieldRegistry {
   // mirror and the source agree; fields that are not selected are left alone,
   // stale or with pending writes. A selected stale field throws StaleField.
   // Note that this const member commits on the source: the registry keeps its
-  // storage mutable for that reason. alias = true reuses storage when Dst can
-  // access it (create_mirror_view_and_copy); alias = false always allocates
-  // (create_mirror + deep_copy).
+  // storage mutable for that reason. alias = false always allocates and copies
+  // (create_mirror + deep_copy). alias = true reuses storage when Dst can access
+  // it (create_mirror_view_and_copy): from host to host (or any pair of
+  // spaces with the same memory) the mirror then shares the Views of the
+  // source, so writes through either are seen by both, and the destination
+  // does not follow later commits on the source (a commit gives the source new
+  // storage; mirror again to see it). A destination that cannot access the
+  // source always gets its own copy.
   template <class Dst>
   void mirror_into(FieldRegistry<Dst>& dst, const std::vector<std::string>& names,
                    const std::array<bool, 4>& dims, bool alias) const {
