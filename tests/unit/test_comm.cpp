@@ -93,3 +93,13 @@ TEST(Comm, AllreduceInt32MinMax) {
   EXPECT_EQ(c.allreduce(-r, Op::min), -(c.size() - 1));
   EXPECT_EQ(c.allreduce(-r, Op::max), 0);
 }
+
+TEST(Comm, AllreduceProduct) {
+  const Comm c = Comm::world();
+  EXPECT_EQ(c.allreduce(std::int64_t{2}, Op::prod), std::int64_t{1} << c.size());
+  double factorial = 1.0;
+  for (int k = 2; k <= c.size(); ++k) {
+    factorial *= k;
+  }
+  EXPECT_DOUBLE_EQ(c.allreduce(static_cast<double>(c.rank() + 1), Op::prod), factorial);
+}
