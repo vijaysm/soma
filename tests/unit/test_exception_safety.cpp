@@ -284,3 +284,39 @@ TEST(ExceptionSafety, AFailedReplacementOfAPendingValueKeepsTheOldValue) {
   fx->reg.commit(fx->id);
   EXPECT_DOUBLE_EQ(fx->reg.get<double>(fx->id).view()(2, 2), 9.0);
 }
+
+// The registry's vectors double when full. Whatever the growth policy, some
+// count of existing fields puts the next add on a capacity boundary of the
+// entry list, the family list or a member list; sweep every count in a range.
+TEST(ExceptionSafety, AFailedAddChangesNothingAtEveryCapacityBoundary) {
+  for (int existing = 0; existing <= 9; ++existing) {
+    for (const bool same_family : {false, true}) {
+      Reg reg;
+      reg.set_entities(2, 100);
+      for (int i = 0; i < existing; ++i) {
+        const std::string name = same_family ? "T" : "T" + std::to_string(i);
+        reg.add<double>(name, subset(reg, 100, {static_cast<LO>(i)}), 1);
+      }
+      const Spc space = subset(reg, 100, {50});
+      const std::string name = same_family ? "T" : "new";
+      const long failures = sweep(
+          [&] { reg.add<double>(name, space, 1); },
+          [&](long n) {
+            EXPECT_EQ(reg.list().size(), static_cast<std::size_t>(existing))
+                << existing << " fields, failed allocation " << n;
+            EXPECT_FALSE(reg.contains("new")) << existing << " " << n;
+            if (!(same_family && existing > 0)) {
+              EXPECT_THROW(reg.family<double>(name, 1), std::out_of_range) << existing << " " << n;
+            }
+            if (same_family && existing > 0) {
+              EXPECT_EQ(reg.family_members(reg.family<double>("T", 1), 2).size(),
+                        static_cast<std::size_t>(existing))
+                  << n;
+            }
+          });
+      EXPECT_GT(failures, 0) << existing;
+      EXPECT_EQ(reg.list().size(), static_cast<std::size_t>(existing) + 1);
+      EXPECT_TRUE(reg.lookup(reg.family<double>(name, 1), 2, 50).found());
+    }
+  }
+}
