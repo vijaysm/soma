@@ -44,3 +44,5 @@ function(soma_add_test name)
     gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST)
   endif()
 endfunction()
+
+soma_add_test(test_smoke SOURCES unit/test_smoke.cpp)
