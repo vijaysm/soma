@@ -256,9 +256,15 @@ function(_soma_fetch_kokkos)
   endif()
 
   include("${PROJECT_SOURCE_DIR}/cmake/CPM.cmake")
+  # An excluded directory also drops its install rules; SOMA's installed
+  # config needs this Kokkos in the same prefix.
+  set(_exclude YES)
+  if(SOMA_INSTALL)
+    set(_exclude NO)
+  endif()
   CPMAddPackage(NAME Kokkos GITHUB_REPOSITORY kokkos/kokkos
     GIT_TAG ${SOMA_KOKKOS_VERSION} GIT_SHALLOW TRUE
-    EXCLUDE_FROM_ALL YES SYSTEM YES)
+    EXCLUDE_FROM_ALL ${_exclude} SYSTEM YES)
   if(NOT TARGET Kokkos::kokkos)
     add_library(Kokkos::kokkos ALIAS kokkos)
   endif()
