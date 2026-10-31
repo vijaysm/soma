@@ -24,6 +24,11 @@ endif()
 option(SOMA_ENABLE_MPI "Multi-rank distribution through MPI" OFF)
 option(SOMA_ENABLE_TESTS "Build the test suite (requires GoogleTest)" OFF)
 option(SOMA_FETCH_GTEST "Download GoogleTest when no installed copy is found" OFF)
+option(SOMA_FETCH_KOKKOS "Download and build Kokkos when no installed copy is found" OFF)
+set(SOMA_KOKKOS_VERSION "5.1.0" CACHE STRING "Kokkos tag to fetch with SOMA_FETCH_KOKKOS")
+set(SOMA_KOKKOS_GPU "AUTO" CACHE STRING
+  "GPU backend of a fetched Kokkos: AUTO, NONE, CUDA, HIP, SYCL")
+set_property(CACHE SOMA_KOKKOS_GPU PROPERTY STRINGS AUTO NONE CUDA HIP SYCL)
 option(SOMA_ENABLE_MOAB_REFERENCE "Build MOAB reference tests and benchmarks" OFF)
 option(SOMA_LO_64 "64-bit local ordinals (ABI-breaking)" OFF)
 option(SOMA_OFFSET_64 "64-bit CSR offsets (ABI-breaking)" OFF)
@@ -36,20 +41,14 @@ option(SOMA_INSTALL "Generate install and export rules" OFF)
 set(SOMA_LARGE_DATA_DIR "" CACHE PATH "Directory of large meshes for scale tests")
 
 include(GNUInstallDirs)
-include(SomaAppleOpenMP)
+include(SomaKokkos)
 
-soma_seed_apple_openmp()
-find_package(Kokkos 5.0 REQUIRED)
-soma_patch_apple_openmp_target()
+soma_find_or_fetch_kokkos()
 
 if(SOMA_ENABLE_MPI)
   find_package(MPI REQUIRED COMPONENTS CXX)
 endif()
 
-set(SOMA_KOKKOS_HAS_GPU OFF)
-if(Kokkos_ENABLE_CUDA OR Kokkos_ENABLE_HIP OR Kokkos_ENABLE_SYCL)
-  set(SOMA_KOKKOS_HAS_GPU ON)
-endif()
 string(TOUPPER "${SOMA_GPU_AWARE_MPI}" SOMA_GPU_AWARE_MPI_MODE)
 if(NOT SOMA_GPU_AWARE_MPI_MODE MATCHES "^(AUTO|ON|OFF)$")
   message(FATAL_ERROR
@@ -110,7 +109,9 @@ if(SOMA_INSTALL)
   include(SomaInstall)
 endif()
 
-message(STATUS "SOMA ${PROJECT_VERSION}: Kokkos ${Kokkos_VERSION} [${Kokkos_DEVICES}]"
+message(STATUS "SOMA ${PROJECT_VERSION}: Kokkos ${SOMA_KOKKOS_VERSION_FOUND}"
+  " (${SOMA_KOKKOS_SOURCE}) host=${SOMA_KOKKOS_HOST_BACKEND}"
+  " gpu=${SOMA_KOKKOS_GPU_BACKEND} [${SOMA_KOKKOS_DEVICES}]"
   " MPI=${SOMA_ENABLE_MPI} tests=${SOMA_ENABLE_TESTS}"
   " GPU-aware-MPI=${SOMA_GPU_AWARE_MPI_RESOLVED}"
   " MOAB-reference=${SOMA_ENABLE_MOAB_REFERENCE} LO64=${SOMA_LO_64}"
