@@ -67,3 +67,20 @@ endif()
 add_test(NAME policy.mpi_seam
   COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
           -P ${CMAKE_CURRENT_SOURCE_DIR}/policy/check_mpi_seam.cmake)
+
+if(SOMA_INSTALL)
+  # '|' stands for ';' so the prefix list survives as one argument
+  string(REPLACE ";" "|" SOMA_PACKAGING_PREFIX_PATH "${CMAKE_PREFIX_PATH}")
+  add_test(NAME packaging.find_package
+    COMMAND ${CMAKE_COMMAND}
+      -DSOMA_BINARY_DIR=${PROJECT_BINARY_DIR} -DSOMA_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+      -DSCRATCH_DIR=${PROJECT_BINARY_DIR}/packaging_test
+      -DBUILD_TYPE=${CMAKE_BUILD_TYPE} -DGENERATOR=${CMAKE_GENERATOR}
+      -DMAKE_PROGRAM=${CMAKE_MAKE_PROGRAM} -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
+      -DPREFIX_PATH=${SOMA_PACKAGING_PREFIX_PATH}
+      -DKOKKOS_SOURCE=${SOMA_KOKKOS_SOURCE} -DKOKKOS_DIR=${Kokkos_DIR}
+      -DENABLE_MPI=${SOMA_ENABLE_MPI} -DMPI_HOME=${MPI_HOME}
+      -DMPIEXEC=${MPIEXEC_EXECUTABLE}
+      -P ${PROJECT_SOURCE_DIR}/tests/packaging/run_packaging_test.cmake)
+  set_tests_properties(packaging.find_package PROPERTIES TIMEOUT 300)
+endif()
