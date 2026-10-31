@@ -77,7 +77,8 @@ configure_file(cmake/config.hpp.in
   "${PROJECT_BINARY_DIR}/generated/soma/config.hpp" @ONLY)
 
 add_library(soma_warnings INTERFACE)
-target_compile_options(soma_warnings INTERFACE -Wall -Wextra)
+target_compile_options(soma_warnings INTERFACE
+  "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang,IntelLLVM,NVHPC>:-Wall;-Wextra>")
 
 set(SOMA_SOURCES src/runtime/scope_guard.cpp)
 if(SOMA_ENABLE_MPI)
