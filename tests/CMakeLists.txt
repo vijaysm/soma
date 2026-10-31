@@ -63,3 +63,7 @@ if(SOMA_ENABLE_MOAB_REFERENCE)
   soma_add_test(test_canonical_moab SOURCES reference/test_canonical_moab.cpp
     LIBS ${SOMA_MOAB_TARGET})
 endif()
+
+add_test(NAME policy.mpi_seam
+  COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/policy/check_mpi_seam.cmake)
