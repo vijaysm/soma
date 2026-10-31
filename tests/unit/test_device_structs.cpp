@@ -12,12 +12,15 @@
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
 
+#include "soma/core/segments.hpp"
 #include "soma/core/types.hpp"
 #include "soma/fields/domain.hpp"
+#include "soma/fields/layout.hpp"
 #include "soma/fields/node_tables.hpp"
 #include "soma/fields/registry.hpp"
 #include "soma/fields/resolver.hpp"
 #include "soma/fields/space.hpp"
+#include "soma/topology/canonical.hpp"
 
 namespace soma_test {
 
@@ -35,7 +38,8 @@ static_assert(views_are_trivially_copyable<Kokkos::HostSpace>);
 static_assert(views_are_trivially_copyable<Kokkos::DefaultExecutionSpace::memory_space>);
 
 static_assert(all_trivially_copyable<soma::RowRange, soma::FamilyHit, soma::detail::MemberRec,
-                                     soma::Fingerprint, soma::Interval>);
+                                     soma::Fingerprint, soma::Interval, soma::Layout,
+                                     soma::NodeTableKey, soma::canonical::SideDef, soma::Segment>);
 
 }  // namespace soma_test
 
