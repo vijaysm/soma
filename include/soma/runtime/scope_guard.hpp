@@ -11,7 +11,10 @@ namespace soma {
 //
 // Kokkos forbids constructing a View before initialize(), so every SOMA
 // program -- tests and benchmarks included -- starts with one of these.
-class ScopeGuard {
+//
+// Kokkos removes its own command-line options from argv, so any argument
+// parser (GoogleTest, for one) must run after the guard is constructed.
+class [[nodiscard]] ScopeGuard {
  public:
   ScopeGuard(int& argc, char**& argv);
   ~ScopeGuard();

@@ -27,7 +27,17 @@ ScopeGuard::ScopeGuard(int& argc, char**& argv) {
   // Under MPI, Kokkos maps one device per node-local rank from the launcher's
   // environment; no explicit binding is needed here.
   if (!Kokkos::is_initialized()) {
-    Kokkos::initialize(argc, argv);
+    try {
+      Kokkos::initialize(argc, argv);
+    } catch (...) {
+      // The destructor does not run for a throwing constructor.
+#if SOMA_ENABLE_MPI
+      if (owns_mpi_) {
+        MPI_Finalize();
+      }
+#endif
+      throw;
+    }
     owns_kokkos_ = true;
   }
 }
