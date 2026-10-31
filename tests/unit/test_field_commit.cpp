@@ -432,3 +432,64 @@ TYPED_TEST(CommitMirrorTyped, MirrorCommitsEveryFieldEvenWhenOnlySomeAreSelected
   EXPECT_FALSE(dst.contains("b"));
   EXPECT_EQ(reg.pending_count(b.id()), 0u);
 }
+
+// A new member may not take an entity that a sibling is waiting to commit:
+// whichever commit came first would make the other one impossible.
+TEST(FieldCommit, AddRejectsAMemberThatTakesAnEntityAPendingWriteWaitsFor) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto a = reg.add<double>("T", subset(reg, 2, 30, {1, 2}), 1);
+  put<double>(reg, a.id(), 20, {1.0});
+  try {
+    reg.add<double>("T", subset(reg, 2, 30, {20, 21}), 1);
+    FAIL() << "expected FieldOverlap";
+  } catch (const soma::FieldOverlap& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("pending write"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("'T'"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("lid 20"), std::string::npos) << msg;
+  }
+  EXPECT_EQ(reg.list().size(), 1u);
+  EXPECT_EQ(reg.family_members(reg.family<double>("T", 1), 2).size(), 1u);
+  EXPECT_EQ(reg.pending_count(a.id()), 1u);
+  EXPECT_NO_THROW(reg.commit_all());
+  EXPECT_EQ(reg.get<double>(a.id()).domain().members(0), (std::vector<LO>{1, 2, 20}));
+  soma::FieldRegistry<HostMem> dst;
+  EXPECT_NO_THROW(reg.mirror_into<HostMem>(dst, {"*"}, {true, true, true, true}, false));
+}
+
+TEST(FieldCommit, AddAcceptsMembersThatAvoidEveryPendingEntity) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  reg.set_entities(3, 30);
+  const auto a = reg.add<double>("T", subset(reg, 2, 30, {1, 2}), 1);
+  put<double>(reg, a.id(), 20, {1.0});
+  put<double>(reg, a.id(), 22, {1.0});
+  EXPECT_NO_THROW(reg.add<double>("T", subset(reg, 2, 30, {21, 23}), 1));
+  EXPECT_NO_THROW(reg.add<double>("T", subset(reg, 3, 30, {20, 22}), 1));
+  EXPECT_NO_THROW(reg.add<double>("U", subset(reg, 2, 30, {20, 22}), 1));
+  EXPECT_NO_THROW(reg.add<float>("T", subset(reg, 2, 30, {20, 22}), 1));
+  EXPECT_EQ(reg.pending_count(a.id()), 2u);
+}
+
+TEST(FieldCommit, AddChecksEveryBlockOfTheNewSpaceAgainstPendingWrites) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  reg.set_entities(3, 30);
+  const auto a = reg.add<double>("T", subset(reg, 3, 30, {1}), 1);
+  put<double>(reg, a.id(), 20, {1.0});
+  const Spc both(Dom::combine(Dom::from_list(2, 30, 1, std::vector<LO>{5}),
+                              Dom::from_list(3, 30, 1, std::vector<LO>{20})),
+                 Layout::per_entity());
+  EXPECT_THROW(reg.add<double>("T", both, 1), soma::FieldOverlap);
+}
+
+TEST(FieldCommit, AddIsAcceptedOnceThePendingWriteIsDiscarded) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto a = reg.add<double>("T", subset(reg, 2, 30, {1}), 1);
+  put<double>(reg, a.id(), 20, {1.0});
+  EXPECT_THROW(reg.add<double>("T", subset(reg, 2, 30, {20}), 1), soma::FieldOverlap);
+  reg.discard_pending(a.id());
+  EXPECT_NO_THROW(reg.add<double>("T", subset(reg, 2, 30, {20}), 1));
+}

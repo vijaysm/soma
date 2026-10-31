@@ -123,6 +123,7 @@ class FieldRegistry {
     }
 
     check_disjoint(name, type, ncomp, space);
+    check_pending(name, type, ncomp, space);
     check_member_limit(name, type, ncomp, space);
 
     View2<T, MemSpace> data(
@@ -566,6 +567,34 @@ class FieldRegistry {
                            describe_members(e.space, ob) + " in dim " + std::to_string(dim) +
                            " at entity " + entity_text(dim, lid));
       }
+    }
+  }
+
+  // Throws FieldOverlap when `space` contains an entity that a live member of the
+  // family it would join has a pending write for: that write could then never
+  // be committed. Cost: one inverse-map lookup per pending entity. Nothing is
+  // modified.
+  void check_pending(const std::string& name, DataType type, int ncomp,
+                     const Space<MemSpace>& space) const {
+    const FamilyId fid = find_family(name, type, ncomp, space.layout());
+    if (fid == invalid_family) return;
+    for (const FieldId other : families_[fid].members) {
+      const Entry& e = entries_[other];
+      if (e.pending_count == 0) continue;
+      const int dim = e.space.domain().info(0).dim;
+      const int b = space.domain().find_block(dim);
+      if (b < 0) continue;
+      const auto block = space.domain().host_block(b);
+      dispatch_data_type(e.info.type, [&]<class T>() {
+        for (const auto& [lid, values] : std::any_cast<const std::map<LO, std::vector<T>>&>(e.pending)) {
+          if (block.row(lid) == invalid_lo) continue;
+          throw FieldOverlap("field '" + name + "' (" + type_text(type, ncomp) + ") on " +
+                             describe_members(space, b) + " contains entity " +
+                             entity_text(dim, lid) + " in dim " + std::to_string(dim) +
+                             ", which has a pending write of existing '" + e.info.name + "' (" +
+                             type_text(e.info.type, e.info.ncomp) + ")");
+        }
+      });
     }
   }
 
