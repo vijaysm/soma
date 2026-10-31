@@ -4,7 +4,6 @@
 # AppleClang ships without OpenMP. A Kokkos built with its OpenMP backend calls
 # find_dependency(OpenMP), which FindOpenMP cannot satisfy unaided on macOS, so
 # every configure fails. Seed FindOpenMP from Homebrew's libomp first.
-# Adapted from moabX (CMakeLists.txt OpenMP block; cmake/moabxConfig.cmake.in, c6e82ba).
 
 macro(soma_seed_apple_openmp)
   set(SOMA_APPLE_OPENMP_MANUAL OFF)
