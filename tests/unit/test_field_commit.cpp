@@ -43,6 +43,36 @@ int fences_during(Op&& op) {
 
 }  // namespace soma_test
 
+namespace soma_test {
+
+// A memory space the host can access that is not HostSpace, standing in for
+// managed or unified memory (not available in this build).
+struct ManagedLikeSpace {
+  using execution_space = Kokkos::DefaultExecutionSpace;
+  using memory_space = ManagedLikeSpace;
+  using device_type = Kokkos::Device<execution_space, memory_space>;
+  static constexpr const char* name() { return "ManagedLike"; }
+};
+
+}  // namespace soma_test
+
+namespace Kokkos {
+template <>
+struct SpaceAccessibility<Kokkos::HostSpace, soma_test::ManagedLikeSpace> {
+  enum : bool { assignable = false, accessible = true, deepcopy = true };
+};
+}  // namespace Kokkos
+
+namespace soma_test {
+
+using soma::detail::RowWritePath;
+static_assert(soma::detail::write_row_path<Kokkos::HostSpace>() == RowWritePath::direct);
+static_assert(soma::detail::write_row_path<ManagedLikeSpace>() == RowWritePath::fenced_direct);
+static_assert(soma::detail::write_row_path<Kokkos::DefaultExecutionSpace::memory_space>() !=
+              RowWritePath::staged);
+
+}  // namespace soma_test
+
 namespace {
 
 using Reg = soma::FieldRegistry<HostMem>;

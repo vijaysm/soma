@@ -46,6 +46,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -74,16 +75,31 @@ struct RowScatter {
   KOKKOS_INLINE_FUNCTION void operator()(const std::size_t c) const { data(row, c) = values(c); }
 };
 
-// Writes one row of a field. A host-accessible View is assigned directly: a
+// Writing one row of a field. Plain HostSpace memory is assigned directly: a
 // per-component deep_copy fences the execution space every time, which costs
-// tens of microseconds with threads.
+// tens of microseconds with threads. Another host-accessible space (managed or
+// unified memory) may have a kernel in flight on the device, so it gets one
+// fence and then the same direct writes. Anything else is staged.
+enum class RowWritePath { direct, fenced_direct, staged };
+
+template <class MemSpace>
+constexpr RowWritePath write_row_path() {
+  if constexpr (std::is_same_v<MemSpace, Kokkos::HostSpace>) {
+    return RowWritePath::direct;
+  } else if constexpr (Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible) {
+    return RowWritePath::fenced_direct;
+  } else {
+    return RowWritePath::staged;
+  }
+}
+
 template <class T, class MemSpace>
 void write_row_direct(const View2<T, MemSpace>& data, std::size_t row, std::span<const T> values) {
   for (std::size_t c = 0; c < values.size(); ++c) data(row, c) = values[c];
 }
 
-// Any other space: stage the values in one host View, move them with one
-// deep_copy, and scatter them into the row with one kernel.
+// Stages the values in one host View, moves them with one deep_copy, and
+// scatters them into the row with one kernel.
 template <class T, class MemSpace>
 void write_row_staged(const View2<T, MemSpace>& data, std::size_t row, std::span<const T> values) {
   View1<T, Kokkos::HostSpace> host(Kokkos::view_alloc("soma::field::row", Kokkos::WithoutInitializing),
@@ -98,7 +114,11 @@ void write_row_staged(const View2<T, MemSpace>& data, std::size_t row, std::span
 
 template <class T, class MemSpace>
 void write_row(const View2<T, MemSpace>& data, std::size_t row, std::span<const T> values) {
-  if constexpr (Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible) {
+  constexpr RowWritePath path = write_row_path<MemSpace>();
+  if constexpr (path == RowWritePath::direct) {
+    write_row_direct<T, MemSpace>(data, row, values);
+  } else if constexpr (path == RowWritePath::fenced_direct) {
+    Kokkos::fence("soma::field::write_row");
     write_row_direct<T, MemSpace>(data, row, values);
   } else {
     write_row_staged<T, MemSpace>(data, row, values);
