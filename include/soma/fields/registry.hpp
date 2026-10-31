@@ -103,12 +103,12 @@ void write_row_direct(const View2<T, MemSpace>& data, std::size_t row, std::span
 // scatters them into the row with one kernel.
 template <class T, class MemSpace>
 void write_row_staged(const View2<T, MemSpace>& data, std::size_t row, std::span<const T> values) {
-  View1<T, Kokkos::HostSpace> host(Kokkos::view_alloc("soma::field::row", Kokkos::WithoutInitializing),
-                                   values.size());
+  View1<T, Kokkos::HostSpace> host(
+      Kokkos::view_alloc("soma::field::row", Kokkos::WithoutInitializing), values.size());
   for (std::size_t c = 0; c < values.size(); ++c) host(c) = values[c];
   const View1<T, MemSpace> staged = Kokkos::create_mirror_view_and_copy(MemSpace{}, host);
-  Kokkos::parallel_for("soma::field::write_row",
-                       Kokkos::RangePolicy<typename MemSpace::execution_space, std::size_t>(0, values.size()),
+  using Policy = Kokkos::RangePolicy<typename MemSpace::execution_space, std::size_t>;
+  Kokkos::parallel_for("soma::field::write_row", Policy(0, values.size()),
                        RowScatter<T, MemSpace>{data, staged, row});
   Kokkos::fence("soma::field::write_row");
 }
@@ -216,7 +216,9 @@ class FieldRegistry {
     info.ncomp = ncomp;
     info.layout = space.layout();
     info.rows = space.rows();
-    for (int b = 0; b < space.domain().num_blocks(); ++b) info.dims.push_back(space.domain().info(b).dim);
+    for (int b = 0; b < space.domain().num_blocks(); ++b) {
+      info.dims.push_back(space.domain().info(b).dim);
+    }
     std::optional<Family> created;
     if (existing == invalid_family) {
       created.emplace(FamilyKey{name, type, ncomp, space.layout()});
@@ -556,7 +558,9 @@ class FieldRegistry {
     // Built aside and swapped in, so a throw leaves `dst` empty and reusable.
     FieldRegistry<Dst> built;
     built.epoch_ = epoch_;
-    for (const Family& f : families_) built.families_.push_back(typename FieldRegistry<Dst>::Family{f.key});
+    for (const Family& f : families_) {
+      built.families_.push_back(typename FieldRegistry<Dst>::Family{f.key});
+    }
 
     std::map<const void*, Domain<Dst>> domains;
     std::map<const void*, Space<Dst>> spaces;
@@ -740,7 +744,8 @@ class FieldRegistry {
       if (b < 0) continue;
       const auto block = space.domain().host_block(b);
       dispatch_data_type(e.info.type, [&]<class T>() {
-        for (const auto& [lid, values] : std::any_cast<const std::map<LO, std::vector<T>>&>(e.pending)) {
+        using Buffer = std::map<LO, std::vector<T>>;
+        for (const auto& [lid, values] : std::any_cast<const Buffer&>(e.pending)) {
           if (block.row(lid) == invalid_lo) continue;
           throw FieldOverlap("field '" + name + "' (" + type_text(type, ncomp) + ") on " +
                              describe_members(space, b) + " contains entity " +
