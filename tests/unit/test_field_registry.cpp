@@ -371,3 +371,54 @@ TYPED_TEST(RegistryTyped, MirroredFieldKeepsDefaultsAndValues) {
   EXPECT_DOUBLE_EQ(m.global_value()[0], 9.0);
   EXPECT_DOUBLE_EQ((soma_test::sum_on_space<double, TypeParam>(m.view())), -2.0 + 5.5);
 }
+
+TYPED_TEST(RegistryTyped, MovedFromFieldIsEmptyAndUsable) {
+  auto a = this->reg.template add_tag<double>("temperature", 0, 3);
+  const auto keep = a;
+  soma::Field<double, TypeParam> b(std::move(a));
+  EXPECT_EQ(a.rows(), 0);
+  EXPECT_EQ(a.ncomp(), 0);
+  EXPECT_EQ(a.id(), soma::invalid_field);
+  EXPECT_EQ(a.revision(), 0u);
+  EXPECT_EQ(a.view().extent(0), 0u);
+  EXPECT_EQ(a.view().data(), nullptr);
+  EXPECT_EQ(a.space().rows(), 0);
+  EXPECT_TRUE(a.domain().empty());
+  EXPECT_FALSE(a.has_default());
+  EXPECT_FALSE(a.has_global());
+  EXPECT_EQ(b.rows(), 10);
+  EXPECT_EQ(b.view().data(), keep.view().data());
+
+  soma::Field<double, TypeParam> c;
+  c = std::move(b);
+  EXPECT_EQ(b.rows(), 0);
+  EXPECT_EQ(b.view().data(), nullptr);
+  EXPECT_EQ(c.rows(), 10);
+
+  b = keep;
+  EXPECT_EQ(b.rows(), 10);
+  soma::Field<double, TypeParam>& alias = b;
+  b = std::move(alias);
+  EXPECT_EQ(b.rows(), 10);
+}
+
+TEST(Registry, MovedFromFieldReadsOnTheHost) {
+  soma::FieldRegistry<HostMem> reg;
+  reg.set_entities(2, 7);
+  soma::FieldOptions<double> opt;
+  opt.default_value = std::vector<double>{4.5};
+  auto a = reg.add_tag<double>("q", 2, 1, opt);
+  soma::Field<double, HostMem> b(std::move(a));
+  EXPECT_DOUBLE_EQ(a.value_or_default(2, 3), 0.0);
+  EXPECT_DOUBLE_EQ(b.value_or_default(2, 3), 4.5);
+}
+
+TYPED_TEST(RegistryTyped, RegistryStaysConsistentWhileItsHandlesAreMoved) {
+  auto a = this->reg.template add_tag<double>("q", 2, 1);
+  soma::Field<double, TypeParam> moved(std::move(a));
+  const auto again = this->reg.template get<double>("q");
+  EXPECT_EQ(again.view().data(), moved.view().data());
+  soma::FieldRegistry<TypeParam> other(std::move(this->reg));
+  EXPECT_TRUE(this->reg.list().empty());
+  EXPECT_EQ(other.template get<double>("q").rows(), 7);
+}

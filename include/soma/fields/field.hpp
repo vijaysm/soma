@@ -9,6 +9,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <Kokkos_Core.hpp>
@@ -48,7 +49,8 @@ struct FieldInfo {
 
 // Typed handle on one field. It aliases the registry's storage, so it stays
 // valid after the registry changes but not after remove(). Kernels capture
-// view() (a View, not a Field).
+// view() (a View, not a Field). A moved-from Field is empty: no rows, no
+// components, an empty space, and invalid_field as its id.
 template <class T, class MemSpace>
 class Field {
  public:
@@ -65,6 +67,26 @@ class Field {
         data_(std::move(data)),
         default_(std::move(default_value)),
         global_(std::move(global_value)) {}
+
+  Field(const Field&) = default;
+  Field& operator=(const Field&) = default;
+  // A moved View still references its data, so move by swapping with an empty
+  // field.
+  Field(Field&& o) noexcept { swap(o); }
+  Field& operator=(Field&& o) noexcept {
+    Field tmp(std::move(o));
+    swap(tmp);
+    return *this;
+  }
+
+  void swap(Field& o) noexcept {
+    std::swap(revision_, o.revision_);
+    std::swap(id_, o.id_);
+    std::swap(space_, o.space_);
+    std::swap(data_, o.data_);
+    default_.swap(o.default_);
+    global_.swap(o.global_);
+  }
 
   FieldId id() const noexcept { return id_; }
   // Handles are snapshots: after a commit replaces the domain, fetch the field again.
