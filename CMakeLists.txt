@@ -32,7 +32,7 @@ option(SOMA_DEBUG "Device-side bounds and contract checks" OFF)
 # find_package(Kokkos) below, because it depends on whether Kokkos has a GPU backend.
 set(SOMA_GPU_AWARE_MPI "AUTO" CACHE STRING "Pass device buffers to MPI: AUTO, ON, OFF")
 set_property(CACHE SOMA_GPU_AWARE_MPI PROPERTY STRINGS AUTO ON OFF)
-option(SOMA_INSTALL "Generate install and export rules" ON)
+option(SOMA_INSTALL "Generate install and export rules" OFF)
 set(SOMA_LARGE_DATA_DIR "" CACHE PATH "Directory of large meshes for scale tests")
 
 include(GNUInstallDirs)
