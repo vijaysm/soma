@@ -252,8 +252,16 @@ class Domain {
   using memory_space = MemSpace;
   using GidView = View1<const GO, MemSpace>;
 
-  // The empty domain: no blocks, epoch 0.
-  Domain() : data_(std::make_shared<const Data>()) {}
+  // The empty domain: no blocks, epoch 0. All empty domains share one snapshot,
+  // which is also what a moved-from domain refers to afterwards.
+  Domain() : data_(empty_data()) {}
+  Domain(const Domain&) = default;
+  Domain& operator=(const Domain&) = default;
+  Domain(Domain&& o) noexcept : data_(std::exchange(o.data_, empty_data())) {}
+  Domain& operator=(Domain&& o) noexcept {
+    if (this != &o) data_ = std::exchange(o.data_, empty_data());
+    return *this;
+  }
 
   // Every entity of `dim`. `count` is the number of entities of that dimension.
   // `gids` (one per entity) feed the fingerprint; local ids are used when empty.
@@ -456,6 +464,11 @@ class Domain {
   };
 
   explicit Domain(std::shared_ptr<const Data> d) : data_(std::move(d)) {}
+
+  static const std::shared_ptr<const Data>& empty_data() {
+    static const std::shared_ptr<const Data> empty = std::make_shared<const Data>();
+    return empty;
+  }
 
   static void check_dim(int dim, LO count) {
     if (dim < 0 || dim > 3) {

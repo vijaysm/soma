@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <numeric>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -266,4 +267,68 @@ TEST(Domain, DefaultDomainIsEmpty) {
   EXPECT_TRUE(d.empty());
   EXPECT_EQ(d.size(), 0);
   EXPECT_EQ(d.num_blocks(), 0);
+}
+
+namespace soma_test {
+
+template <class M>
+void expect_empty_domain(const soma::Domain<M>& d) {
+  EXPECT_TRUE(d.empty());
+  EXPECT_EQ(d.size(), 0);
+  EXPECT_EQ(d.num_blocks(), 0);
+  EXPECT_EQ(d.epoch(), 0u);
+  EXPECT_EQ(d.find_block(2), -1);
+  EXPECT_FALSE(d.contains_dim(2));
+  EXPECT_EQ(d.row(2, 3), soma::invalid_lo);
+  EXPECT_EQ(d.view().num_blocks, 0);
+  EXPECT_EQ(d.view().size, 0);
+  EXPECT_EQ(d.view().locate(0).lid, soma::invalid_lo);
+  EXPECT_TRUE(d == soma::Domain<M>());
+  EXPECT_THROW((void)d.info(0), std::out_of_range);
+  EXPECT_TRUE(d.template mirror<HostMem>().empty());
+  EXPECT_TRUE(d.template mirror<DevMem>().empty());
+}
+
+}  // namespace soma_test
+
+TYPED_TEST(DomainTyped, MovedFromDomainIsEmptyAndUsable) {
+  using D = soma::Domain<TypeParam>;
+  D a = D::from_list(2, 40, 7, std::vector<LO>{3, 9, 20});
+  const D copy = a;
+  D b(std::move(a));
+  soma_test::expect_empty_domain(a);
+  EXPECT_EQ(b.size(), 3);
+  EXPECT_TRUE(b == copy);
+  EXPECT_TRUE(b.shares_storage_with(copy));
+
+  D c = D::all(3, 5, 1);
+  c = std::move(b);
+  soma_test::expect_empty_domain(b);
+  EXPECT_EQ(c.size(), 3);
+  EXPECT_EQ(c.row(2, 9), 1);
+
+  b = D::all(1, 4, 2);  // a moved-from object can be assigned to and used again
+  EXPECT_EQ(b.size(), 4);
+  EXPECT_EQ(b.epoch(), 2u);
+}
+
+TYPED_TEST(DomainTyped, SelfMoveLeavesTheDomainUnchanged) {
+  using D = soma::Domain<TypeParam>;
+  D a = D::from_list(2, 40, 7, std::vector<LO>{3, 9, 20});
+  const D copy = a;
+  D& alias = a;
+  a = std::move(alias);
+  EXPECT_TRUE(a == copy);
+  EXPECT_EQ(a.size(), 3);
+}
+
+TYPED_TEST(DomainTyped, CopiesStayCheapAndShareTheSnapshot) {
+  using D = soma::Domain<TypeParam>;
+  const D a = D::all(2, 9, 1);
+  D b = a;
+  EXPECT_TRUE(b.shares_storage_with(a));
+  D c;
+  c = a;
+  EXPECT_TRUE(c.shares_storage_with(a));
+  EXPECT_EQ(a.size(), 9);
 }
