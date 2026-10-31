@@ -47,3 +47,4 @@ endfunction()
 
 soma_add_test(test_smoke SOURCES unit/test_smoke.cpp)
 soma_add_test(test_comm SOURCES unit/test_comm.cpp RANKS 1 2 4)
+soma_add_test(test_canonical SOURCES unit/test_canonical.cpp)
