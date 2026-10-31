@@ -1,0 +1,247 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2022-2026, Vijay Mahadevan.
+
+#include <cstdint>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include <gtest/gtest.h>
+#include <Kokkos_Core.hpp>
+
+#include "soma/core/topology.hpp"
+#include "soma/core/types.hpp"
+#include "soma/fields/domain.hpp"
+#include "soma/fields/layout.hpp"
+#include "soma/fields/space.hpp"
+
+using soma::Layout;
+using soma::LO;
+using soma::NodeFamily;
+using soma::Topology;
+
+using HostMem = Kokkos::HostSpace;
+using DevMem = Kokkos::DefaultExecutionSpace::memory_space;
+
+namespace soma_test {
+
+template <class M>
+soma::View1<const std::uint8_t, M> topology_view(const std::vector<Topology>& t) {
+  soma::View1<std::uint8_t, Kokkos::HostSpace> h("soma::test::topo", t.size());
+  for (std::size_t i = 0; i < t.size(); ++i) h(i) = static_cast<std::uint8_t>(t[i]);
+  return Kokkos::create_mirror_view_and_copy(M{}, h);
+}
+
+template <class M>
+soma::View1<const soma::Offset, M> offsets_view(const std::vector<soma::Offset>& o) {
+  soma::View1<soma::Offset, Kokkos::HostSpace> h("soma::test::offsets", o.size());
+  for (std::size_t i = 0; i < o.size(); ++i) h(i) = o[i];
+  return Kokkos::create_mirror_view_and_copy(M{}, h);
+}
+
+template <class M>
+soma::ElementInfo<M> cells(int dim, const std::vector<Topology>& t) {
+  soma::ElementInfo<M> info;
+  info.topology[static_cast<std::size_t>(dim)] = topology_view<M>(t);
+  return info;
+}
+
+// Row range of each entity and the entity of each row, evaluated on the device.
+template <class M>
+Kokkos::View<LO*, Kokkos::HostSpace> rows_of_entities(soma::SpaceView<M> sv, int dim, LO count) {
+  Kokkos::View<LO*, M> out("soma::test::first_rows", 2 * count);
+  Kokkos::parallel_for(
+      "soma::test::first_rows", Kokkos::RangePolicy<typename M::execution_space>(0, count),
+      KOKKOS_LAMBDA(const LO l) {
+        const soma::RowRange r = sv.entity_rows(dim, l);
+        out(2 * l) = r.begin;
+        out(2 * l + 1) = r.end;
+      });
+  return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, out);
+}
+
+template <class M>
+Kokkos::View<LO*, Kokkos::HostSpace> entities_of_rows(soma::SpaceView<M> sv, LO rows) {
+  Kokkos::View<LO*, M> out("soma::test::row_entities", 2 * rows);
+  Kokkos::parallel_for(
+      "soma::test::row_entities", Kokkos::RangePolicy<typename M::execution_space>(0, rows),
+      KOKKOS_LAMBDA(const LO r) {
+        const auto loc = sv.locate(r);
+        out(2 * r) = loc.lid;
+        out(2 * r + 1) = loc.node;
+      });
+  return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, out);
+}
+
+}  // namespace soma_test
+
+template <class M>
+class SpaceTyped : public ::testing::Test {};
+using Spaces = ::testing::Types<HostMem, DevMem>;
+TYPED_TEST_SUITE(SpaceTyped, Spaces);
+
+TYPED_TEST(SpaceTyped, PerEntityRowsEqualDomainSize) {
+  using D = soma::Domain<TypeParam>;
+  const soma::Space<TypeParam> all(D::all(3, 10, 1), Layout::per_entity());
+  EXPECT_EQ(all.rows(), 10);
+  EXPECT_EQ(all.entity_rows(3, 4).begin, 4);
+  EXPECT_EQ(all.entity_rows(3, 4).end, 5);
+
+  const soma::Space<TypeParam> some(D::from_list(2, 40, 1, std::vector<LO>{3, 9, 20}),
+                                    Layout::per_entity());
+  EXPECT_EQ(some.rows(), 3);
+  EXPECT_EQ(some.entity_rows(2, 9).begin, 1);
+  EXPECT_FALSE(some.entity_rows(2, 10).valid());
+  EXPECT_FALSE(some.entity_rows(3, 9).valid());
+}
+
+TYPED_TEST(SpaceTyped, UniformBlocksUseAConstantStride) {
+  using D = soma::Domain<TypeParam>;
+  const std::vector<Topology> topo(6, Topology::hex);
+  const auto info = soma_test::cells<TypeParam>(3, topo);
+  const soma::Space<TypeParam> sp(D::all(3, 6, 1),
+                                  Layout::element_nodes(NodeFamily::gll, 2), info);
+  EXPECT_EQ(sp.rows(), 6 * 27);
+  EXPECT_EQ(sp.block(0).stride, 27);
+  EXPECT_EQ(sp.entity_rows(3, 2).begin, 54);
+  EXPECT_EQ(sp.entity_rows(3, 2).end, 81);
+}
+
+TYPED_TEST(SpaceTyped, MixedBlocksUseAPrefixArray) {
+  using D = soma::Domain<TypeParam>;
+  const std::vector<Topology> topo{Topology::quad, Topology::quad, Topology::tri, Topology::tri,
+                                   Topology::quad};
+  const auto info = soma_test::cells<TypeParam>(2, topo);
+  const soma::Space<TypeParam> sp(D::all(2, 5, 1),
+                                  Layout::element_nodes(NodeFamily::gll, 2), info);
+  EXPECT_EQ(sp.rows(), 9 + 9 + 6 + 6 + 9);
+  EXPECT_EQ(sp.block(0).stride, 0);
+  const std::vector<LO> begin{0, 9, 18, 24, 30};
+  for (LO l = 0; l < 5; ++l) {
+    EXPECT_EQ(sp.entity_rows(2, l).begin, begin[static_cast<std::size_t>(l)]) << l;
+  }
+  EXPECT_EQ(sp.entity_rows(2, 4).end, 39);
+}
+
+TYPED_TEST(SpaceTyped, SubsetOfAMixedBlockCountsOnlyItsMembers) {
+  using D = soma::Domain<TypeParam>;
+  const std::vector<Topology> topo{Topology::quad, Topology::tri, Topology::tri, Topology::quad};
+  const auto info = soma_test::cells<TypeParam>(2, topo);
+  const soma::Space<TypeParam> sp(D::from_list(2, 4, 1, std::vector<LO>{1, 2, 3}),
+                                  Layout::element_nodes(NodeFamily::gll, 2), info);
+  EXPECT_EQ(sp.rows(), 6 + 6 + 9);
+  EXPECT_EQ(sp.entity_rows(2, 3).begin, 12);
+  EXPECT_FALSE(sp.entity_rows(2, 0).valid());
+}
+
+TYPED_TEST(SpaceTyped, SubsetWithOneTopologyIsUniform) {
+  using D = soma::Domain<TypeParam>;
+  const std::vector<Topology> topo{Topology::quad, Topology::tri, Topology::tri, Topology::quad};
+  const auto info = soma_test::cells<TypeParam>(2, topo);
+  const soma::Space<TypeParam> sp(D::from_list(2, 4, 1, std::vector<LO>{0, 3}),
+                                  Layout::element_nodes(NodeFamily::gll, 3), info);
+  EXPECT_EQ(sp.block(0).stride, 16);
+  EXPECT_EQ(sp.rows(), 32);
+}
+
+TYPED_TEST(SpaceTyped, PolygonsTakeTheirArityFromTheOffsets) {
+  using D = soma::Domain<TypeParam>;
+  soma::ElementInfo<TypeParam> info;
+  info.topology[2] = soma_test::topology_view<TypeParam>(
+      {Topology::polygon, Topology::polygon, Topology::polygon});
+  info.conn_offsets[2] = soma_test::offsets_view<TypeParam>({0, 5, 11, 16});
+  const soma::Space<TypeParam> sp(
+      D::all(2, 3, 1), Layout::element_nodes(NodeFamily::lagrange_equispaced, 1), info);
+  EXPECT_EQ(sp.rows(), 5 + 6 + 5);
+  EXPECT_EQ(sp.entity_rows(2, 1).begin, 5);
+  EXPECT_EQ(sp.entity_rows(2, 1).end, 11);
+}
+
+TYPED_TEST(SpaceTyped, MultiBlockDomainStacksRowRanges) {
+  using D = soma::Domain<TypeParam>;
+  soma::ElementInfo<TypeParam> info;
+  info.topology[2] = soma_test::topology_view<TypeParam>(std::vector<Topology>(4, Topology::quad));
+  info.topology[3] = soma_test::topology_view<TypeParam>(std::vector<Topology>(2, Topology::hex));
+  const auto dom = D::combine(D::all(2, 4, 1), D::all(3, 2, 1));
+  const soma::Space<TypeParam> sp(dom, Layout::element_nodes(NodeFamily::gll, 1), info);
+  EXPECT_EQ(sp.rows(), 4 * 4 + 2 * 8);
+  EXPECT_EQ(sp.block_row_begin(1), 16);
+  EXPECT_EQ(sp.entity_rows(3, 1).begin, 16 + 8);
+  EXPECT_EQ(sp.entity_rows(2, 3).begin, 12);
+}
+
+TYPED_TEST(SpaceTyped, DeviceViewMatchesTheHostInBothDirections) {
+  using D = soma::Domain<TypeParam>;
+  const std::vector<Topology> topo{Topology::quad, Topology::tri, Topology::tri, Topology::quad,
+                                   Topology::quad, Topology::tri};
+  const auto info = soma_test::cells<TypeParam>(2, topo);
+  const soma::Space<TypeParam> sp(D::from_list(2, 6, 1, std::vector<LO>{1, 2, 3, 5}),
+                                  Layout::element_nodes(NodeFamily::gll, 2), info);
+  const auto ranges = soma_test::rows_of_entities<TypeParam>(sp.view(), 2, 6);
+  for (LO l = 0; l < 6; ++l) {
+    const soma::RowRange h = sp.entity_rows(2, l);
+    EXPECT_EQ(ranges(2 * l), h.begin) << l;
+    EXPECT_EQ(ranges(2 * l + 1), h.end) << l;
+  }
+  const auto owners = soma_test::entities_of_rows<TypeParam>(sp.view(), sp.rows());
+  for (LO r = 0; r < sp.rows(); ++r) {
+    const LO lid = owners(2 * r);
+    const LO node = owners(2 * r + 1);
+    ASSERT_NE(lid, soma::invalid_lo) << "row " << r;
+    EXPECT_EQ(sp.entity_rows(2, lid).begin + node, r) << "row " << r;
+  }
+}
+
+TYPED_TEST(SpaceTyped, UnsupportedCombinationsThrowWithTheirName) {
+  using D = soma::Domain<TypeParam>;
+  const auto info = soma_test::cells<TypeParam>(3, {Topology::pyramid, Topology::pyramid});
+  try {
+    const soma::Space<TypeParam> sp(D::all(3, 2, 1), Layout::element_nodes(NodeFamily::gll, 3),
+                                    info);
+    FAIL() << "expected std::invalid_argument";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_NE(std::string(e.what()).find("pyramid"), std::string::npos) << e.what();
+  }
+  EXPECT_THROW(soma::Space<TypeParam>(D::all(3, 2, 1),
+                                      Layout::element_nodes(NodeFamily::gll, 2)),
+               std::invalid_argument);
+  EXPECT_THROW(soma::Space<TypeParam>(D::all(0, 2, 1),
+                                      Layout::element_nodes(NodeFamily::gll, 2)),
+               std::invalid_argument);
+}
+
+TYPED_TEST(SpaceTyped, DeferredLayoutKindsAreRejected) {
+  using D = soma::Domain<TypeParam>;
+  try {
+    const soma::Space<TypeParam> sp(D::all(3, 2, 1), Layout::shared_nodes(NodeFamily::gll, 2));
+    FAIL() << "expected std::invalid_argument";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_NE(std::string(e.what()).find("is not supported yet"), std::string::npos)
+        << e.what();
+  }
+  EXPECT_THROW(soma::Space<TypeParam>(D::all(3, 2, 1), Layout::quadrature(2)),
+               std::invalid_argument);
+}
+
+TYPED_TEST(SpaceTyped, EqualityNeedsDomainAndLayout) {
+  using D = soma::Domain<TypeParam>;
+  const auto info = soma_test::cells<TypeParam>(3, std::vector<Topology>(4, Topology::hex));
+  const soma::Space<TypeParam> a(D::all(3, 4, 1), Layout::per_entity());
+  const soma::Space<TypeParam> b(D::all(3, 4, 1), Layout::per_entity());
+  const soma::Space<TypeParam> c(D::all(3, 4, 1), Layout::element_nodes(NodeFamily::gll, 2), info);
+  const soma::Space<TypeParam> d(D::from_list(3, 4, 1, std::vector<LO>{0, 2}), Layout::per_entity());
+  EXPECT_TRUE(a == b);
+  EXPECT_FALSE(a == c);
+  EXPECT_FALSE(a == d);
+}
+
+TYPED_TEST(SpaceTyped, MirrorKeepsRowNumbering) {
+  const std::vector<Topology> topo{Topology::quad, Topology::tri, Topology::tri, Topology::quad};
+  const auto info = soma_test::cells<HostMem>(2, topo);
+  const auto dom = soma::Domain<HostMem>::from_list(2, 4, 1, std::vector<LO>{1, 2, 3});
+  const soma::Space<HostMem> h(dom, Layout::element_nodes(NodeFamily::gll, 2), info);
+  const auto m = h.template mirror<TypeParam>(dom.template mirror<TypeParam>());
+  EXPECT_EQ(m.rows(), h.rows());
+  const auto ranges = soma_test::rows_of_entities<TypeParam>(m.view(), 2, 4);
+  for (LO l = 0; l < 4; ++l) EXPECT_EQ(ranges(2 * l), h.entity_rows(2, l).begin) << l;
+}
