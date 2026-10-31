@@ -103,3 +103,16 @@ TEST(Comm, AllreduceProduct) {
   }
   EXPECT_DOUBLE_EQ(c.allreduce(static_cast<double>(c.rank() + 1), Op::prod), factorial);
 }
+
+TEST(Comm, BcastFromNonZeroRoot) {
+  const Comm c = Comm::world();
+  const int root = c.size() - 1;
+  std::array<std::int32_t, 3> b{-1, -1, -1};
+  if (c.rank() == root) {
+    b = {root + 10, root + 20, root + 30};
+  }
+  c.bcast(std::span<std::int32_t>(b), root);
+  EXPECT_EQ(b[0], root + 10);
+  EXPECT_EQ(b[1], root + 20);
+  EXPECT_EQ(b[2], root + 30);
+}
