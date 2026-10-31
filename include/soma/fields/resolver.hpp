@@ -22,8 +22,9 @@
 // dangle after any add, remove, commit, or epoch change. FamilyHandle is the
 // host-side owner: it keeps the indexes it was built from alive (shared
 // ownership) and hands out the FamilyView. Keep the handle alive for as long as
-// any launch that uses its view() can run; a handle never sees later changes to
-// the family, it keeps answering from the state it was taken at.
+// any launch that uses its view() can run (view() on a temporary handle does
+// not compile); a handle never sees later changes to the family, it keeps
+// answering from the state it was taken at.
 
 #include <algorithm>
 #include <array>
@@ -373,7 +374,16 @@ class FamilyHandle {
     for (std::size_t d = 0; d < 4; ++d) view_.dims[d] = index_[d]->view();
   }
 
-  const FamilyView<MemSpace>& view() const noexcept { return view_; }
+  // The view borrows from this handle: it holds unmanaged Views into the
+  // indexes the handle owns and does not extend their lifetime. Copying it is
+  // cheap, but a copy is valid only while a handle (or a copy of the handle)
+  // lives. Asking a temporary handle for a view is deleted, because the index
+  // behind it can be replaced by the next change to the family:
+  //   auto v = registry.family_handle(f).view();   // does not compile
+  //   const auto h = registry.family_handle(f);    // keep the handle
+  //   const auto v = h.view();
+  FamilyView<MemSpace> view() const& noexcept { return view_; }
+  FamilyView<MemSpace> view() const&& = delete;
 
   // Fields behind the member slots that lookups report on `dim`.
   const std::vector<FieldId>& members(int dim) const {

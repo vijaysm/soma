@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <array>
 #include <cstdint>
 #include <memory>
 #include <numeric>
@@ -56,6 +57,18 @@ soma::View1<const GO, M> gids(LO n, GO first) {
 }
 
 }  // namespace soma_test
+
+// A FamilyView borrows from its handle, so asking a temporary handle for one
+// must not compile.
+template <class M>
+void expect_view_needs_a_live_handle() {
+  using H = soma::FamilyHandle<M>;
+  static_assert(requires(const H& h) { h.view(); });
+  static_assert(requires(H& h) { h.view(); });
+  static_assert(!requires(H&& h) { std::move(h).view(); });
+  static_assert(!requires(const H&& h) { std::move(h).view(); });
+  static_assert(!requires { H(std::array<typename H::Index, 4>{}).view(); });
+}
 
 template <class M>
 class FamilyTyped : public ::testing::Test {
@@ -235,6 +248,23 @@ TYPED_TEST(FamilyTyped, HandleKeepsServingTheOldIndexesAfterTheFamilyChanges) {
   EXPECT_EQ(after(2 * 9), -1);
   EXPECT_EQ(after(2 * 55), -1);
   EXPECT_EQ(handle.members(2), std::vector<soma::FieldId>{a.id()});
+}
+
+TYPED_TEST(FamilyTyped, TemporaryHandlesCannotHandOutAView) {
+  expect_view_needs_a_live_handle<TypeParam>();
+}
+
+TYPED_TEST(FamilyTyped, AViewCopiedFromANamedHandleStaysValidWhileTheHandleLives) {
+  const auto a = this->reg.template add<double>("T", this->space(this->list(2, 100, {4, 8})), 1);
+  const auto fam = this->reg.template family<double>("T", 1);
+  const auto handle = this->reg.family_handle(fam);
+  const auto view = handle.view();
+  this->reg.template add<double>("T", this->space(this->list(2, 100, {9, 10})), 1);
+  this->reg.remove(a.id());
+  EXPECT_FALSE(this->reg.lookup(fam, 2, 8).found());  // rebuilds the registry's index
+  const auto got = soma_test::lookup_on_space<TypeParam>(view, 2, 100);
+  EXPECT_EQ(got(2 * 8 + 1), 1);
+  EXPECT_EQ(got(2 * 9), -1);
 }
 
 TYPED_TEST(FamilyTyped, HandleCopiesShareTheIndexes) {
