@@ -60,8 +60,9 @@ class Field {
 
   Field() = default;
   Field(FieldId id, Space<MemSpace> space, ViewType data, std::vector<T> default_value,
-        std::vector<T> global_value, std::uint64_t revision = 0)
+        std::vector<T> global_value, std::uint64_t revision = 0, std::uint64_t owner = 0)
       : revision_(revision),
+        owner_(owner),
         id_(id),
         space_(std::move(space)),
         data_(std::move(data)),
@@ -81,6 +82,7 @@ class Field {
 
   void swap(Field& o) noexcept {
     std::swap(revision_, o.revision_);
+    std::swap(owner_, o.owner_);
     std::swap(id_, o.id_);
     std::swap(space_, o.space_);
     std::swap(data_, o.data_);
@@ -92,6 +94,11 @@ class Field {
   // Handles are snapshots: after a commit replaces the domain, fetch the field
   // again (FieldRegistry::is_current).
   std::uint64_t revision() const noexcept { return revision_; }
+  // Serial of the registry that produced this handle (0: none). Together with
+  // id() and revision() it identifies the storage the handle belongs to; it
+  // does not depend on the View, whose data pointer can be null when empty and
+  // is shared between a source and an aliasing mirror.
+  std::uint64_t owner() const noexcept { return owner_; }
   // The reference-returning accessors have an rvalue overload that returns a
   // copy, so `for (x : reg.get<T>("n").default_value())` does not read a
   // destroyed temporary. Named fields still get references.
@@ -126,6 +133,7 @@ class Field {
 
  private:
   std::uint64_t revision_ = 0;
+  std::uint64_t owner_ = 0;
   FieldId id_ = invalid_field;
   Space<MemSpace> space_;
   ViewType data_;

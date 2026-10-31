@@ -39,6 +39,7 @@
 #include <algorithm>
 #include <any>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -153,6 +154,7 @@ class FieldRegistry {
     entries_.swap(o.entries_);
     families_.swap(o.families_);
     std::swap(epoch_, o.epoch_);
+    std::swap(serial_, o.serial_);
     std::swap(index_builds_, o.index_builds_);
     std::swap(entities_, o.entities_);
   }
@@ -222,7 +224,7 @@ class FieldRegistry {
     }
 
     Field<T, MemSpace> f(info.id, space, data, options.default_value.value_or(std::vector<T>{}),
-                         options.global_value.value_or(std::vector<T>{}));
+                         options.global_value.value_or(std::vector<T>{}), 0, serial_);
     Entry entry{std::move(info), space, std::any(f), true};
 
     // Everything that can throw has happened by now. Make room for the family
@@ -323,8 +325,9 @@ class FieldRegistry {
   template <class T>
   bool is_current(const Field<T, MemSpace>& f) const noexcept {
     if (f.id() >= entries_.size()) return false;
-    const auto* held = std::any_cast<Field<T, MemSpace>>(&entries_[f.id()].field);
-    return held != nullptr && held->view().data() == f.view().data();
+    const Entry& e = entries_[f.id()];
+    return e.alive && f.owner() == serial_ && f.revision() == e.info.revision &&
+           e.info.type == data_type_of<T>();
   }
 
   // Revision of the field's current storage (the value Field::revision() has
@@ -582,7 +585,7 @@ class FieldRegistry {
             Kokkos::deep_copy(view, src.view());
           }
           out.field = Field<T, Dst>(src.id(), out.space, view, src.default_value(),
-                                    src.global_value(), src.revision());
+                                    src.global_value(), src.revision(), dst.serial_);
         });
         out.alive = true;
         built.families_[out.info.family].members.push_back(out.info.id);
@@ -597,6 +600,11 @@ class FieldRegistry {
  private:
   template <class>
   friend class FieldRegistry;
+
+  static std::uint64_t next_serial() noexcept {
+    static std::atomic<std::uint64_t> counter{0};
+    return ++counter;
+  }
 
   struct Entities {
     LO count = 0;
@@ -923,7 +931,7 @@ class FieldRegistry {
 
     // Nothing above modified the registry, so a throw leaves it untouched.
     Field<T, MemSpace> grown(e.info.id, space, data, old_field.default_value(),
-                             old_field.global_value(), e.info.revision + 1);
+                             old_field.global_value(), e.info.revision + 1, serial_);
     e.space = space;
     e.field = std::any(grown);
     e.info.rows = space.rows();
@@ -966,6 +974,9 @@ class FieldRegistry {
   mutable std::vector<Family> families_;
   mutable std::uint64_t index_builds_ = 0;
   std::uint64_t epoch_ = 1;
+  // Identifies this registry in the handles it hands out; moves carry it along
+  // with the storage. Never 0, which marks a handle that no registry made.
+  std::uint64_t serial_ = next_serial();
   std::array<Entities, 4> entities_{};
 };
 

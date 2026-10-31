@@ -572,6 +572,71 @@ TEST(FieldCommit, ACurrentHandleOfAnotherRegistryIsNotCurrentHere) {
   EXPECT_FALSE(a.is_current(fb));
 }
 
+// Zero-row Views may carry a null data pointer on every backend, so identity
+// must not come from it: a handle is current only for the registry that made it.
+TEST(FieldCommit, EmptyFieldsOfTwoRegistriesAreNotInterchangeable) {
+  Reg a;
+  Reg b;
+  a.set_entities(2, 30);
+  b.set_entities(2, 30);
+  const auto fa = a.add<double>("q", subset(a, 2, 30, {}), 1);
+  const auto fb = b.add<double>("q", subset(b, 2, 30, {}), 1);
+  ASSERT_EQ(fa.id(), fb.id());
+  ASSERT_EQ(fa.rows(), 0);
+  EXPECT_TRUE(a.is_current(fa));
+  EXPECT_TRUE(b.is_current(fb));
+  EXPECT_FALSE(a.is_current(fb));
+  EXPECT_FALSE(b.is_current(fa));
+}
+
+TEST(FieldCommit, AMirrorIsAnotherRegistryWhetherOrNotItAliasesTheStorage) {
+  for (const bool alias : {true, false}) {
+    Reg reg;
+    reg.set_entities(2, 30);
+    const auto f = reg.add<double>("q", subset(reg, 2, 30, {3, 8}), 1);
+    const auto empty = reg.add<double>("e", subset(reg, 2, 30, {}), 1);
+    Reg mirror;
+    reg.mirror_into<HostMem>(mirror, {"*"}, {true, true, true, true}, alias);
+    const auto m = mirror.get<double>(f.id());
+    const auto me = mirror.get<double>(empty.id());
+    EXPECT_TRUE(mirror.is_current(m)) << alias;
+    EXPECT_TRUE(mirror.is_current(me)) << alias;
+    EXPECT_FALSE(mirror.is_current(f)) << "source handle, alias " << alias;
+    EXPECT_FALSE(reg.is_current(m)) << "mirror handle, alias " << alias;
+    EXPECT_FALSE(mirror.is_current(empty)) << alias;
+    EXPECT_TRUE(reg.is_current(f)) << alias;
+  }
+}
+
+TEST(FieldCommit, HandlesFollowTheStorageWhenARegistryIsMoved) {
+  Reg a;
+  a.set_entities(2, 30);
+  const auto f = a.add<double>("q", subset(a, 2, 30, {3, 8}), 1);
+  const auto empty = a.add<double>("e", subset(a, 2, 30, {}), 1);
+  Reg b(std::move(a));
+  EXPECT_TRUE(b.is_current(f));
+  EXPECT_TRUE(b.is_current(empty));
+  EXPECT_FALSE(a.is_current(f));
+  EXPECT_FALSE(a.is_current(empty));
+  Reg c;
+  c = std::move(b);
+  EXPECT_TRUE(c.is_current(f));
+  EXPECT_FALSE(b.is_current(f));
+}
+
+TEST(FieldCommit, ACopiedHandleIsCurrentExactlyWhenTheOriginalIs) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto f = reg.add<double>("q", subset(reg, 2, 30, {}), 1);
+  const auto copy = f;
+  EXPECT_TRUE(reg.is_current(copy));
+  put<double>(reg, f.id(), 5, {1.0});
+  reg.commit(f.id());
+  EXPECT_FALSE(reg.is_current(copy));
+  EXPECT_FALSE(reg.is_current(f));
+  EXPECT_TRUE(reg.is_current(reg.get<double>(f.id())));
+}
+
 TEST(FieldCommit, CurrentRevisionFollowsCommits) {
   Reg reg;
   reg.set_entities(2, 30);
