@@ -385,8 +385,13 @@ class FamilyHandle {
   FamilyView<MemSpace> view() const& noexcept { return view_; }
   FamilyView<MemSpace> view() const&& = delete;
 
-  // Fields behind the member slots that lookups report on `dim`.
-  const std::vector<FieldId>& members(int dim) const {
+  // Fields behind the member slots that lookups report on `dim`. On a
+  // temporary handle the list is returned as a copy, so a range-for over
+  // `registry.family_handle(f).members(d)` is safe.
+  const std::vector<FieldId>& members(int dim) const& {
+    return index_.at(static_cast<std::size_t>(dim))->slots;
+  }
+  std::vector<FieldId> members(int dim) const&& {
     return index_.at(static_cast<std::size_t>(dim))->slots;
   }
 

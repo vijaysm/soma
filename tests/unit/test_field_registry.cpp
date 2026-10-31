@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -421,4 +422,46 @@ TYPED_TEST(RegistryTyped, RegistryStaysConsistentWhileItsHandlesAreMoved) {
   soma::FieldRegistry<TypeParam> other(std::move(this->reg));
   EXPECT_TRUE(this->reg.list().empty());
   EXPECT_EQ(other.template get<double>("q").rows(), 7);
+}
+
+// A range-for over an accessor of a temporary Field keeps the temporary alive
+// only if the accessor returns by value; with a reference the loop reads freed
+// memory (AddressSanitizer: stack-use-after-scope).
+TYPED_TEST(RegistryTyped, RangeForOverAccessorsOfATemporaryFieldIsSafe) {
+  soma::FieldOptions<double> opt;
+  opt.default_value = std::vector<double>{1.5, 2.5, 3.5};
+  opt.global_value = std::vector<double>{7.0, 8.0, 9.0};
+  this->reg.template add_tag<double>("temperature", 0, 3, opt);
+  double defaults = 0;
+  for (const double d : this->reg.template get<double>("temperature").default_value()) defaults += d;
+  EXPECT_DOUBLE_EQ(defaults, 7.5);
+  double globals = 0;
+  for (const double g : this->reg.template get<double>("temperature").global_value()) globals += g;
+  EXPECT_DOUBLE_EQ(globals, 24.0);
+}
+
+TYPED_TEST(RegistryTyped, AccessorsOfATemporaryFieldAreCopiesAndNamedFieldsStayReferences) {
+  using F = soma::Field<double, TypeParam>;
+  static_assert(std::is_same_v<decltype(std::declval<F&>().default_value()), const std::vector<double>&>);
+  static_assert(std::is_same_v<decltype(std::declval<const F&>().global_value()), const std::vector<double>&>);
+  static_assert(std::is_same_v<decltype(std::declval<const F&>().space()), const soma::Space<TypeParam>&>);
+  static_assert(std::is_same_v<decltype(std::declval<const F&>().domain()), const soma::Domain<TypeParam>&>);
+  static_assert(std::is_same_v<decltype(std::declval<F&&>().default_value()), std::vector<double>>);
+  static_assert(std::is_same_v<decltype(std::declval<F&&>().global_value()), std::vector<double>>);
+  static_assert(std::is_same_v<decltype(std::declval<F&&>().space()), soma::Space<TypeParam>>);
+  static_assert(std::is_same_v<decltype(std::declval<F&&>().domain()), soma::Domain<TypeParam>>);
+  const auto f = this->reg.template add_tag<double>("t", 2, 1);
+  EXPECT_EQ(&f.default_value(), &f.default_value());
+  EXPECT_EQ(this->reg.template get<double>("t").domain().size(), 7);
+  EXPECT_EQ(this->reg.template get<double>("t").space().rows(), 7);
+  EXPECT_EQ(this->reg.template get<double>("t").view().extent(0), 7u);
+}
+
+TYPED_TEST(RegistryTyped, ADomainTakenFromATemporaryFieldOutlivesIt) {
+  this->reg.template add_tag<double>("t", 2, 1);
+  const auto domain = this->reg.template get<double>("t").domain();
+  const auto space = this->reg.template get<double>("t").space();
+  EXPECT_EQ(domain.size(), 7);
+  EXPECT_EQ(space.rows(), 7);
+  EXPECT_EQ(domain.row(2, 3), 3);
 }

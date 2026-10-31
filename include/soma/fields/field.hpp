@@ -92,8 +92,13 @@ class Field {
   // Handles are snapshots: after a commit replaces the domain, fetch the field
   // again (FieldRegistry::is_current).
   std::uint64_t revision() const noexcept { return revision_; }
-  const Space<MemSpace>& space() const noexcept { return space_; }
-  const Domain<MemSpace>& domain() const noexcept { return space_.domain(); }
+  // The reference-returning accessors have an rvalue overload that returns a
+  // copy, so `for (x : reg.get<T>("n").default_value())` does not read a
+  // destroyed temporary. Named fields still get references.
+  const Space<MemSpace>& space() const& noexcept { return space_; }
+  Space<MemSpace> space() && { return space_; }
+  const Domain<MemSpace>& domain() const& noexcept { return space_.domain(); }
+  Domain<MemSpace> domain() && { return space_.domain(); }
   // The View of this handle's storage. After a commit replaces the field the
   // registry holds new storage; writes through a stale handle's view are lost.
   // FieldRegistry::is_current(field) tells.
@@ -102,9 +107,11 @@ class Field {
   int ncomp() const noexcept { return static_cast<int>(data_.extent(1)); }
 
   bool has_default() const noexcept { return !default_.empty(); }
-  const std::vector<T>& default_value() const noexcept { return default_; }
+  const std::vector<T>& default_value() const& noexcept { return default_; }
+  std::vector<T> default_value() && { return default_; }
   bool has_global() const noexcept { return !global_.empty(); }
-  const std::vector<T>& global_value() const noexcept { return global_; }
+  const std::vector<T>& global_value() const& noexcept { return global_; }
+  std::vector<T> global_value() && { return global_; }
 
   // Host read of component `c` at the first value point of entity (dim, lid):
   // the stored value for a member, the default otherwise (zero without one).

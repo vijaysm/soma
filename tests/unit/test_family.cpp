@@ -7,6 +7,7 @@
 #include <numeric>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -265,6 +266,22 @@ TYPED_TEST(FamilyTyped, AViewCopiedFromANamedHandleStaysValidWhileTheHandleLives
   const auto got = soma_test::lookup_on_space<TypeParam>(view, 2, 100);
   EXPECT_EQ(got(2 * 8 + 1), 1);
   EXPECT_EQ(got(2 * 9), -1);
+}
+
+TYPED_TEST(FamilyTyped, RangeForOverMembersOfATemporaryHandleIsSafe) {
+  const auto a = this->reg.template add<double>("T", this->space(this->list(2, 100, {4, 8})), 1);
+  const auto fam = this->reg.template family<double>("T", 1);
+  std::size_t count = 0;
+  soma::FieldId seen = soma::invalid_field;
+  for (const soma::FieldId id : this->reg.family_handle(fam).members(2)) {
+    ++count;
+    seen = id;
+  }
+  EXPECT_EQ(count, 1u);
+  EXPECT_EQ(seen, a.id());
+  using H = soma::FamilyHandle<TypeParam>;
+  static_assert(std::is_same_v<decltype(std::declval<const H&>().members(0)), const std::vector<soma::FieldId>&>);
+  static_assert(std::is_same_v<decltype(std::declval<H&&>().members(0)), std::vector<soma::FieldId>>);
 }
 
 TYPED_TEST(FamilyTyped, HandleCopiesShareTheIndexes) {
