@@ -12,6 +12,7 @@
 
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -147,14 +148,15 @@ class Space {
     Data d;
     d.domain = domain;
     d.layout = layout;
-    LO row = 0;
+    std::int64_t row = 0;
     for (int b = 0; b < domain.num_blocks(); ++b) {
       detail::SpaceBlockData<MemSpace> blk = build_block(domain, b, layout, info);
-      blk.row_begin = row;
+      check_rows(layout, row + blk.rows);
+      blk.row_begin = static_cast<LO>(row);
       row += blk.rows;
       d.blocks.push_back(std::move(blk));
     }
-    d.rows = row;
+    d.rows = static_cast<LO>(row);
     data_ = std::make_shared<const Data>(std::move(d));
   }
 
@@ -238,6 +240,14 @@ class Space {
     LO rows = 0;
   };
 
+  static void check_rows(const Layout& layout, std::int64_t rows) {
+    constexpr auto limit = static_cast<std::int64_t>(std::numeric_limits<LO>::max());
+    if (rows > limit) {
+      throw std::length_error("Space: " + describe(layout) + " needs more than " +
+                              std::to_string(limit) + " rows, the largest local ordinal");
+    }
+  }
+
   static detail::SpaceBlockData<MemSpace> build_block(const Domain<MemSpace>& domain, int b,
                                                       const Layout& layout,
                                                       const ElementInfo<MemSpace>& info) {
@@ -262,7 +272,7 @@ class Space {
     }
     const auto offs = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, info.conn_offsets[dim]);
     const auto members = domain.members(b);
-    std::vector<LO> prefix(members.size() + 1, 0);
+    std::vector<std::int64_t> prefix(members.size() + 1, 0);
     bool uniform = true;
     for (std::size_t m = 0; m < members.size(); ++m) {
       const auto lid = static_cast<std::size_t>(members[m]);
@@ -272,18 +282,26 @@ class Space {
         if (offs.extent(0) <= lid + 1) {
           throw std::invalid_argument("Space: polygon arity needs connectivity offsets");
         }
-        arity = static_cast<int>(offs(lid + 1) - offs(lid));
+        const std::int64_t width = static_cast<std::int64_t>(offs(lid + 1)) -
+                                   static_cast<std::int64_t>(offs(lid));
+        if (width < 0 || width > std::numeric_limits<int>::max()) {
+          throw std::invalid_argument("Space: polygon " + std::to_string(lid) + " has " +
+                                      std::to_string(width) + " vertices");
+        }
+        arity = static_cast<int>(width);
       }
       validate(t, layout, arity);
       const int n = num_element_nodes(t, layout, arity);
       prefix[m + 1] = prefix[m] + n;
+      check_rows(layout, prefix[m + 1]);
       uniform = uniform && n == prefix[1];
     }
-    blk.rows = prefix.back();
+    blk.rows = static_cast<LO>(prefix.back());
     if (uniform && !members.empty()) {
-      blk.stride = prefix[1];
+      blk.stride = static_cast<LO>(prefix[1]);
     } else if (!members.empty()) {
-      blk.host_offsets = detail::host_copy(prefix, "soma::space::offsets");
+      blk.host_offsets = detail::host_copy(std::vector<LO>(prefix.begin(), prefix.end()),
+                                           "soma::space::offsets");
       blk.offsets = Kokkos::create_mirror_view_and_copy(MemSpace{}, blk.host_offsets);
     } else {
       blk.stride = 1;

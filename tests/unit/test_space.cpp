@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -244,4 +246,86 @@ TYPED_TEST(SpaceTyped, MirrorKeepsRowNumbering) {
   EXPECT_EQ(m.rows(), h.rows());
   const auto ranges = soma_test::rows_of_entities<TypeParam>(m.view(), 2, 4);
   for (LO l = 0; l < 4; ++l) EXPECT_EQ(ranges(2 * l), h.entity_rows(2, l).begin) << l;
+}
+
+namespace soma_test {
+
+constexpr std::int64_t lo_max = std::numeric_limits<LO>::max();
+constexpr int hex_order = 31;  // 32^3 = 32768 nodes per hex
+constexpr std::int64_t hex_nodes = 32768;
+constexpr std::int64_t max_cells = 1 << 20;
+
+soma::Layout hex_layout() { return Layout::element_nodes(NodeFamily::gll, hex_order); }
+
+template <class M>
+soma::ElementInfo<M> hexes_then_prisms(std::int64_t hexes, std::int64_t prisms) {
+  std::vector<Topology> t(static_cast<std::size_t>(hexes), Topology::hex);
+  t.insert(t.end(), static_cast<std::size_t>(prisms), Topology::prism);
+  return cells<M>(3, t);
+}
+
+}  // namespace soma_test
+
+TYPED_TEST(SpaceTyped, RowsAtTheLimitOfLOAreAccepted) {
+  using D = soma::Domain<TypeParam>;
+  const std::int64_t n = std::min(soma_test::lo_max / soma_test::hex_nodes, soma_test::max_cells);
+  const auto info = soma_test::cells<TypeParam>(
+      3, std::vector<Topology>(static_cast<std::size_t>(n), Topology::hex));
+  const soma::Space<TypeParam> sp(D::all(3, static_cast<LO>(n), 1), soma_test::hex_layout(), info);
+  EXPECT_EQ(static_cast<std::int64_t>(sp.rows()), n * soma_test::hex_nodes);
+  EXPECT_GT(sp.rows(), 0);
+}
+
+TYPED_TEST(SpaceTyped, UniformBlockRowsPastTheLimitOfLOThrowLengthError) {
+  using D = soma::Domain<TypeParam>;
+  const std::int64_t n = soma_test::lo_max / soma_test::hex_nodes + 1;
+  if (n > soma_test::max_cells) GTEST_SKIP() << "needs " << n << " entities with this LO";
+  const auto info = soma_test::cells<TypeParam>(
+      3, std::vector<Topology>(static_cast<std::size_t>(n), Topology::hex));
+  try {
+    const soma::Space<TypeParam> sp(D::all(3, static_cast<LO>(n), 1), soma_test::hex_layout(), info);
+    FAIL() << "expected std::length_error, rows = " << sp.rows();
+  } catch (const std::length_error& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("order 31"), std::string::npos) << msg;
+    EXPECT_NE(msg.find(std::to_string(soma_test::lo_max)), std::string::npos) << msg;
+  }
+}
+
+TYPED_TEST(SpaceTyped, MixedBlockRowsPastTheLimitOfLOThrowLengthError) {
+  using D = soma::Domain<TypeParam>;
+  const std::int64_t hexes = soma_test::lo_max / soma_test::hex_nodes;
+  if (hexes > soma_test::max_cells) GTEST_SKIP() << "needs " << hexes << " entities with this LO";
+  const std::int64_t prisms = 40;
+  const auto info = soma_test::hexes_then_prisms<TypeParam>(hexes, prisms);
+  EXPECT_THROW(soma::Space<TypeParam>(D::all(3, static_cast<LO>(hexes + prisms), 1),
+                                      soma_test::hex_layout(), info),
+               std::length_error);
+}
+
+TYPED_TEST(SpaceTyped, RowsSummedOverBlocksPastTheLimitOfLOThrowLengthError) {
+  using D = soma::Domain<TypeParam>;
+  const std::int64_t hexes = soma_test::lo_max / soma_test::hex_nodes;
+  if (hexes > soma_test::max_cells) GTEST_SKIP() << "needs " << hexes << " entities with this LO";
+  soma::ElementInfo<TypeParam> info;
+  info.topology[3] = soma_test::topology_view<TypeParam>(
+      std::vector<Topology>(static_cast<std::size_t>(hexes), Topology::hex));
+  info.topology[2] = soma_test::topology_view<TypeParam>(std::vector<Topology>(1000, Topology::quad));
+  const auto dom = D::combine(D::all(2, 1000, 1), D::all(3, static_cast<LO>(hexes), 1));
+  EXPECT_THROW(soma::Space<TypeParam>(dom, soma_test::hex_layout(), info), std::length_error);
+}
+
+TYPED_TEST(SpaceTyped, PolygonArityBeyondIntIsRejected) {
+  using D = soma::Domain<TypeParam>;
+  if constexpr (sizeof(soma::Offset) < 8) {
+    GTEST_SKIP() << "needs 64-bit Offset";
+  } else {
+    soma::ElementInfo<TypeParam> info;
+    info.topology[2] = soma_test::topology_view<TypeParam>({Topology::polygon});
+    info.conn_offsets[2] = soma_test::offsets_view<TypeParam>({0, (soma::Offset{1} << 32) + 5});
+    EXPECT_THROW(soma::Space<TypeParam>(D::all(2, 1, 1),
+                                        Layout::element_nodes(NodeFamily::lagrange_equispaced, 1),
+                                        info),
+                 std::invalid_argument);
+  }
 }
