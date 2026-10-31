@@ -320,3 +320,38 @@ TEST(ExceptionSafety, AFailedAddChangesNothingAtEveryCapacityBoundary) {
     }
   }
 }
+
+// The same sweep for a mirror into the default memory space and into the host.
+// Both are HostSpace in a Serial or OpenMP build, so this only differs from the
+// HostSpace sweep above on a GPU build, where it runs the device-copy path.
+template <class Dst>
+void expect_failed_mirrors_leave_the_destination_empty(bool alias) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  soma::FieldOptions<double> opt;
+  opt.default_value = std::vector<double>{2.5};
+  const auto a = reg.add<double>("a", subset(reg, 30, {3, 8}), 1, opt);
+  reg.add<float>("b", subset(reg, 30, {4}), 2);
+  reg.add_tag<std::int32_t>("c", 2, 1);
+  soma::FieldRegistry<Dst> dst;
+  const long failures = sweep(
+      [&] { reg.mirror_into<Dst>(dst, {"*"}, {true, true, true, true}, alias); },
+      [&](long n) {
+        EXPECT_TRUE(dst.list().empty()) << "alias " << alias << ", failed allocation " << n;
+      });
+  EXPECT_GT(failures, 0);
+  EXPECT_EQ(dst.list().size(), 3u);
+  EXPECT_EQ(dst.template get<double>(a.id()).rows(), 2);
+}
+
+TEST(ExceptionSafety, AFailedMirrorIntoTheDefaultSpaceLeavesTheDestinationEmpty) {
+  for (const bool alias : {true, false}) {
+    expect_failed_mirrors_leave_the_destination_empty<Kokkos::DefaultExecutionSpace::memory_space>(alias);
+  }
+}
+
+TEST(ExceptionSafety, AFailedMirrorIntoTheHostSpaceLeavesTheDestinationEmpty) {
+  for (const bool alias : {true, false}) {
+    expect_failed_mirrors_leave_the_destination_empty<Kokkos::HostSpace>(alias);
+  }
+}
