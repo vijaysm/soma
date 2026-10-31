@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <algorithm>
 #include <cstdint>
+#include <map>
+#include <set>
+#include <utility>
 
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
@@ -50,7 +54,50 @@ Kokkos::View<int*, Kokkos::HostSpace> codes_from_default_space() {
   return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, codes);
 }
 
+using Edge = std::pair<int, int>;
+
+bool has_distinct_vertices(const canonical::SideDef& s) {
+  std::set<int> seen(s.v, s.v + s.num_vertices);
+  return static_cast<int>(seen.size()) == s.num_vertices;
+}
+
+Edge unordered(int a, int b) { return Edge{std::min(a, b), std::max(a, b)}; }
+
 }  // namespace soma_test
+
+TEST(Canonical, FaceOrientationIsConsistent) {
+  constexpr Topology cells[] = {Topology::tet, Topology::pyramid, Topology::prism, Topology::knife,
+                                Topology::hex};
+  for (const Topology t : cells) {
+    std::set<soma_test::Edge> cell_edges;
+    for (int dim = 1; dim <= 2; ++dim) {
+      for (int i = 0; i < canonical::num_sides(t, dim); ++i) {
+        EXPECT_TRUE(soma_test::has_distinct_vertices(canonical::side(t, dim, i)))
+            << soma::name(t) << " dim " << dim << " side " << i;
+      }
+    }
+    for (int i = 0; i < canonical::num_sides(t, 1); ++i) {
+      const auto e = canonical::side(t, 1, i);
+      cell_edges.insert(soma_test::unordered(e.v[0], e.v[1]));
+    }
+    std::map<soma_test::Edge, int> directed;
+    for (int i = 0; i < canonical::num_sides(t, 2); ++i) {
+      const auto f = canonical::side(t, 2, i);
+      for (int k = 0; k < f.num_vertices; ++k) {
+        const int a = f.v[k];
+        const int b = f.v[(k + 1) % f.num_vertices];
+        EXPECT_EQ(cell_edges.count(soma_test::unordered(a, b)), 1u)
+            << soma::name(t) << " face " << i << " edge " << a << "," << b;
+        ++directed[{a, b}];
+      }
+    }
+    for (const auto& [e, count] : directed) {
+      EXPECT_EQ(count, 1) << soma::name(t) << " edge " << e.first << "," << e.second;
+      EXPECT_EQ(directed.count({e.second, e.first}), 1u)
+          << soma::name(t) << " edge " << e.first << "," << e.second << " has no reverse";
+    }
+  }
+}
 
 TEST(Canonical, SideVertexIndicesAreInRange) {
   for (const Topology t : soma_test::fixed) {
