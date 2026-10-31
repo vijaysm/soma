@@ -457,10 +457,20 @@ TYPED_TEST(RegistryTyped, AccessorsOfATemporaryFieldAreCopiesAndNamedFieldsStayR
   EXPECT_EQ(this->reg.template get<double>("t").view().extent(0), 7u);
 }
 
-TYPED_TEST(RegistryTyped, ADomainTakenFromATemporaryFieldOutlivesIt) {
+// Binding a reference to what an accessor of a temporary Field returns is the
+// idiom that dangles when the accessor returns a reference into the temporary.
+// The Field here is the last owner of its Space, so its destruction frees the
+// Domain the reference would point into.
+TYPED_TEST(RegistryTyped, AReferenceBoundToTheDomainOfATemporaryFieldIsSafe) {
   this->reg.template add_tag<double>("t", 2, 1);
-  const auto domain = this->reg.template get<double>("t").domain();
-  const auto space = this->reg.template get<double>("t").space();
+  this->reg.template add_tag<double>("u", 2, 1);
+  const auto make = [&](const char* name) {
+    auto field = this->reg.template get<double>(name);
+    this->reg.remove(field.id());
+    return field;
+  };
+  const auto& domain = make("t").domain();
+  const auto& space = make("u").space();
   EXPECT_EQ(domain.size(), 7);
   EXPECT_EQ(space.rows(), 7);
   EXPECT_EQ(domain.row(2, 3), 3);
