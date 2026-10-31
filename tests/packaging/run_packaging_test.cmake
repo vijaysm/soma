@@ -10,6 +10,9 @@
 #                     survives CTest's argument handling
 #   KOKKOS_SOURCE     installed | fetched
 #   KOKKOS_DIR        passed through for an installed Kokkos
+#   EXTRA_PREFIX      fetched only: a prefix with another Kokkos, listed first
+#                     in a second consumer configure that must still use the
+#                     Kokkos in the SOMA prefix (skipped if it does not exist)
 #   ENABLE_MPI MPI_HOME MPIEXEC
 
 foreach(var SOMA_BINARY_DIR SOMA_SOURCE_DIR SCRATCH_DIR GENERATOR KOKKOS_SOURCE)
@@ -63,25 +66,33 @@ if(NOT libs)
   message(FATAL_ERROR "packaging test: libsoma was not installed")
 endif()
 
-set(configure_cmd ${CMAKE_COMMAND}
-  -S "${SOMA_SOURCE_DIR}/tests/packaging" -B "${consumer_build}" -G "${GENERATOR}"
-  "-DCMAKE_PREFIX_PATH=${prefix};${consumer_prefix_path}")
-if(MAKE_PROGRAM)
-  list(APPEND configure_cmd "-DCMAKE_MAKE_PROGRAM=${MAKE_PROGRAM}")
-endif()
-if(CXX_COMPILER)
-  list(APPEND configure_cmd "-DCMAKE_CXX_COMPILER=${CXX_COMPILER}")
-endif()
-if(BUILD_TYPE)
-  list(APPEND configure_cmd "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}")
-endif()
-if(KOKKOS_DIR AND NOT KOKKOS_SOURCE STREQUAL "fetched")
-  list(APPEND configure_cmd "-DKokkos_DIR=${KOKKOS_DIR}")
-endif()
-if(MPI_HOME)
-  list(APPEND configure_cmd "-DMPI_HOME=${MPI_HOME}")
-endif()
-run_step("consumer configure" ${configure_cmd})
+# The search path is a list; an initial-cache file keeps its semicolons intact
+# where a -D argument would be split.
+function(configure_consumer build_dir search_path)
+  set(init_cache "${build_dir}.cache.cmake")
+  file(WRITE "${init_cache}" "set(CMAKE_PREFIX_PATH \"${search_path}\" CACHE STRING \"\")\n")
+  set(cmd ${CMAKE_COMMAND}
+    -S "${SOMA_SOURCE_DIR}/tests/packaging" -B "${build_dir}" -G "${GENERATOR}"
+    -C "${init_cache}")
+  if(MAKE_PROGRAM)
+    list(APPEND cmd "-DCMAKE_MAKE_PROGRAM=${MAKE_PROGRAM}")
+  endif()
+  if(CXX_COMPILER)
+    list(APPEND cmd "-DCMAKE_CXX_COMPILER=${CXX_COMPILER}")
+  endif()
+  if(BUILD_TYPE)
+    list(APPEND cmd "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}")
+  endif()
+  if(KOKKOS_DIR AND NOT KOKKOS_SOURCE STREQUAL "fetched")
+    list(APPEND cmd "-DKokkos_DIR=${KOKKOS_DIR}")
+  endif()
+  if(MPI_HOME)
+    list(APPEND cmd "-DMPI_HOME=${MPI_HOME}")
+  endif()
+  run_step("consumer configure (${build_dir})" ${cmd})
+endfunction()
+
+configure_consumer("${consumer_build}" "${prefix};${consumer_prefix_path}")
 
 # The imported Kokkos must come from the install prefix, not from a Kokkos
 # that happens to be reachable.
@@ -90,6 +101,17 @@ if(KOKKOS_SOURCE STREQUAL "fetched")
   string(FIND "${kokkos_dir}" "=${prefix}/" in_prefix)
   if(in_prefix EQUAL -1)
     message(FATAL_ERROR "packaging test: Kokkos was not found in the install prefix (${kokkos_dir})")
+  endif()
+endif()
+
+if(KOKKOS_SOURCE STREQUAL "fetched" AND EXTRA_PREFIX AND EXISTS "${EXTRA_PREFIX}")
+  set(shadow_build "${SCRATCH_DIR}/consumer_shadow")
+  configure_consumer("${shadow_build}" "${EXTRA_PREFIX};${prefix};${consumer_prefix_path}")
+  file(STRINGS "${shadow_build}/CMakeCache.txt" shadow_dir REGEX "^Kokkos_DIR:")
+  string(FIND "${shadow_dir}" "=${prefix}/" in_prefix)
+  if(in_prefix EQUAL -1)
+    message(FATAL_ERROR
+      "packaging test: another Kokkos shadowed the installed one (${shadow_dir})")
   endif()
 endif()
 

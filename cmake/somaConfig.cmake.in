@@ -26,11 +26,13 @@ if("@SOMA_APPLE_OPENMP_MANUAL@" AND NOT OpenMP_CXX_FOUND)
   endif()
 endif()
 
-if(SOMA_KOKKOS_SOURCE STREQUAL "fetched")
-  find_dependency(Kokkos 5.0 HINTS "${PACKAGE_PREFIX_DIR}")
-else()
-  find_dependency(Kokkos 5.0)
+# The Kokkos installed alongside SOMA must win over any other Kokkos on the
+# consumer's search path (it has the backends and ABI SOMA was built with).
+if(SOMA_KOKKOS_SOURCE STREQUAL "fetched" AND NOT Kokkos_DIR)
+  set(Kokkos_DIR "${PACKAGE_PREFIX_DIR}/lib/cmake/Kokkos" CACHE PATH
+    "Kokkos installed alongside SOMA" FORCE)
 endif()
+find_dependency(Kokkos 5.0)
 if(SOMA_ENABLE_MPI)
   find_dependency(MPI COMPONENTS CXX)
 endif()

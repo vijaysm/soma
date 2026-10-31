@@ -69,6 +69,8 @@ add_test(NAME policy.mpi_seam
           -P ${CMAKE_CURRENT_SOURCE_DIR}/policy/check_mpi_seam.cmake)
 
 if(SOMA_INSTALL)
+  set(SOMA_PACKAGING_SHADOW_PREFIX "/opt/kokkos" CACHE PATH
+    "Prefix of another Kokkos the fetched-Kokkos packaging test lists first (ignored if absent)")
   # '|' stands for ';' so the prefix list survives as one argument
   string(REPLACE ";" "|" SOMA_PACKAGING_PREFIX_PATH "${CMAKE_PREFIX_PATH}")
   add_test(NAME packaging.find_package
@@ -79,6 +81,7 @@ if(SOMA_INSTALL)
       -DMAKE_PROGRAM=${CMAKE_MAKE_PROGRAM} -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
       -DPREFIX_PATH=${SOMA_PACKAGING_PREFIX_PATH}
       -DKOKKOS_SOURCE=${SOMA_KOKKOS_SOURCE} -DKOKKOS_DIR=${Kokkos_DIR}
+      -DEXTRA_PREFIX=${SOMA_PACKAGING_SHADOW_PREFIX}
       -DENABLE_MPI=${SOMA_ENABLE_MPI} -DMPI_HOME=${MPI_HOME}
       -DMPIEXEC=${MPIEXEC_EXECUTABLE}
       -P ${PROJECT_SOURCE_DIR}/tests/packaging/run_packaging_test.cmake)
