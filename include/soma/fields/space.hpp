@@ -219,6 +219,9 @@ class Space {
   }
 
   const void* storage_id() const noexcept { return data_.get(); }
+  // Number of handles that share this snapshot; 0 for the empty snapshot, which
+  // has no reference count.
+  long snapshot_use_count() const noexcept { return data_.use_count(); }
 
   // `domain` must be the mirror of this space's domain in Dst.
   template <class Dst>
@@ -254,8 +257,12 @@ class Space {
 
   static const std::shared_ptr<const Data>& empty_data() {
     // Never destroyed: a static-storage Space moved from during shutdown still
-    // needs it. The empty Data holds no Views, so nothing is lost by leaking it.
-    static const auto* const empty = new std::shared_ptr<const Data>(std::make_shared<const Data>());
+    // needs it. It has no control block (an aliasing pointer to an empty owner),
+    // so default construction and moves do not touch a shared refcount, which
+    // contends across threads. The empty Data holds no Views, so nothing is lost
+    // by leaking it.
+    static const auto* const empty =
+        new std::shared_ptr<const Data>(std::make_shared<const Data>());
     return *empty;
   }
 

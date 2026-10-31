@@ -367,3 +367,22 @@ TYPED_TEST(SpaceTyped, SelfMoveLeavesTheSpaceUnchanged) {
   a = std::move(alias);
   EXPECT_EQ(a.rows(), 4);
 }
+
+TYPED_TEST(SpaceTyped, TheEmptySnapshotCarriesNoReferenceCount) {
+  using D = soma::Domain<TypeParam>;
+  const soma::Space<TypeParam> first;
+  EXPECT_EQ(first.snapshot_use_count(), 0L);
+  soma::Space<TypeParam> source(D::all(2, 5, 1), Layout::per_entity());
+  std::vector<soma::Space<TypeParam>> many(64);
+  for (auto& s : many) {
+    soma::Space<TypeParam> taken(std::move(source));
+    s = std::move(taken);
+    source = soma::Space<TypeParam>(D::all(2, 5, 1), Layout::per_entity());
+  }
+  EXPECT_EQ(first.snapshot_use_count(), 0L);
+  soma::Space<TypeParam> moved_from(D::all(2, 5, 1), Layout::per_entity());
+  const soma::Space<TypeParam> kept(std::move(moved_from));
+  EXPECT_EQ(moved_from.snapshot_use_count(), 0L);
+  EXPECT_EQ(kept.snapshot_use_count(), 1L) << "real snapshots are still counted";
+  EXPECT_EQ(first.storage_id(), moved_from.storage_id());
+}

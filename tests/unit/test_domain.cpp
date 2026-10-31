@@ -350,3 +350,30 @@ TEST(Domain, CheckedConversionToLOThrowsPastTheLimit) {
   EXPECT_THROW((void)soma::detail::to_lo(std::numeric_limits<std::size_t>::max(), "x"),
                std::length_error);
 }
+
+// Every default construction and every move leaves a Domain pointing at the one
+// empty snapshot. If that pointer were an ordinary shared_ptr copy, each of them
+// would bump one shared atomic refcount, which contends badly across threads.
+// The snapshot has no control block, so its count stays 0 however many empties
+// exist, and copying a pointer to it adds nothing.
+TEST(Domain, TheEmptySnapshotCarriesNoReferenceCount) {
+  const soma::Domain<HostMem> first;
+  EXPECT_EQ(first.snapshot_use_count(), 0L);
+  std::vector<soma::Domain<HostMem>> many(64);
+  soma::Domain<HostMem> source = soma::Domain<HostMem>::all(2, 5, 1);
+  for (auto& d : many) {
+    soma::Domain<HostMem> taken(std::move(source));
+    source = std::move(taken);
+    d = soma::Domain<HostMem>(std::move(source));
+    source = soma::Domain<HostMem>::all(2, 5, 1);
+  }
+  EXPECT_EQ(first.snapshot_use_count(), 0L);
+  soma::Domain<HostMem> last(std::move(source));
+  EXPECT_TRUE(source.shares_storage_with(first)) << "moved-from state is the empty snapshot";
+  soma::Domain<HostMem> moved_from = soma::Domain<HostMem>::all(2, 5, 1);
+  const soma::Domain<HostMem> kept(std::move(moved_from));
+  EXPECT_EQ(moved_from.snapshot_use_count(), 0L);
+  EXPECT_EQ(first.snapshot_use_count(), 0L);
+  EXPECT_EQ(kept.snapshot_use_count(), 1L) << "real snapshots are still counted";
+  EXPECT_EQ(first.storage_id(), moved_from.storage_id());
+}

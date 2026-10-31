@@ -411,6 +411,9 @@ class Domain {
   // True when both handles share one snapshot.
   bool shares_storage_with(const Domain& o) const noexcept { return data_ == o.data_; }
   const void* storage_id() const noexcept { return data_.get(); }
+  // Number of handles that share this snapshot; 0 for the empty snapshot, which
+  // has no reference count.
+  long snapshot_use_count() const noexcept { return data_.use_count(); }
 
   // Domains are immutable, so the same memory space shares the snapshot.
   template <class Dst>
@@ -482,8 +485,12 @@ class Domain {
 
   static const std::shared_ptr<const Data>& empty_data() {
     // Never destroyed: a static-storage Domain moved from during shutdown still
-    // needs it. The empty Data holds no Views, so nothing is lost by leaking it.
-    static const auto* const empty = new std::shared_ptr<const Data>(std::make_shared<const Data>());
+    // needs it. It has no control block (an aliasing pointer to an empty owner),
+    // so default construction and moves do not touch a shared refcount, which
+    // contends across threads. The empty Data holds no Views, so nothing is lost
+    // by leaking it.
+    static const auto* const empty =
+        new std::shared_ptr<const Data>(std::make_shared<const Data>());
     return *empty;
   }
 
