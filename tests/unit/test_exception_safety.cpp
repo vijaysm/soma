@@ -7,7 +7,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <execinfo.h>
 #include <memory>
 #include <new>
 #include <string>
@@ -24,6 +23,16 @@
 #include "soma/fields/layout.hpp"
 #include "soma/fields/registry.hpp"
 #include "soma/fields/space.hpp"
+
+#if defined(__has_include)
+#if __has_include(<execinfo.h>)
+#include <execinfo.h>
+#define SOMA_TEST_HAVE_BACKTRACE 1
+#endif
+#endif
+#ifndef SOMA_TEST_HAVE_BACKTRACE
+#define SOMA_TEST_HAVE_BACKTRACE 0
+#endif
 
 namespace soma_test {
 
@@ -42,21 +51,29 @@ constexpr long sweep_limit = 20000;
 
 namespace soma_test {
 
+#if SOMA_TEST_HAVE_BACKTRACE
 // Kokkos allocates while it releases a View, inside a noexcept destructor, where
 // no caller could recover from a failure. Such an allocation is not failed; the
-// next one is.
+// next one is. backtrace_symbols prints mangled names, and the release is the
+// member `deallocate` of a Kokkos memory space, for example
+// `_ZNK6Kokkos9HostSpace10deallocateEPKcPvmm` (Kokkos::HostSpace::deallocate).
 bool inside_kokkos_deallocate() {
   void* frames[32];
   const int depth = backtrace(frames, 32);
   char** symbols = backtrace_symbols(frames, depth);
   bool found = false;
   for (int i = 0; symbols != nullptr && i < depth && !found; ++i) {
-    found = std::strstr(symbols[i], "Kokkos") != nullptr &&
-            std::strstr(symbols[i], "deallocate") != nullptr;
+    found = std::strstr(symbols[i], "_ZNK6Kokkos") != nullptr &&
+            std::strstr(symbols[i], "10deallocate") != nullptr;
   }
   std::free(symbols);
   return found;
 }
+constexpr bool can_skip_kokkos_deallocation = true;
+#else
+bool inside_kokkos_deallocate() { return false; }
+constexpr bool can_skip_kokkos_deallocation = false;
+#endif
 
 }  // namespace soma_test
 
@@ -409,6 +426,9 @@ TEST(ExceptionSafety, AStaleSelectionIsRejectedBeforeAnyCommit) {
 // no family lookup for a pending entity, and a retry that gives the result of a
 // commit that was never interrupted.
 TEST(ExceptionSafety, AFailedCommitLeavesTheFieldAsItWas) {
+  if (!soma_test::can_skip_kokkos_deallocation) {
+    GTEST_SKIP() << "needs execinfo.h to tell Kokkos' noexcept releases from other allocations";
+  }
   const auto make = [] { return fixture(2, {1, 2}, {{10, 5.0}, {7, 3.0}}); };
   auto reference = make();
   reference->reg.commit(reference->id);
@@ -442,6 +462,9 @@ TEST(ExceptionSafety, AFailedCommitLeavesTheFieldAsItWas) {
 }
 
 TEST(ExceptionSafety, ARetryAfterAFailedCommitMatchesAnUninterruptedCommit) {
+  if (!soma_test::can_skip_kokkos_deallocation) {
+    GTEST_SKIP() << "needs execinfo.h to tell Kokkos' noexcept releases from other allocations";
+  }
   const auto make = [] { return fixture(2, {1, 2}, {{10, 5.0}, {7, 3.0}}); };
   auto reference = make();
   reference->reg.commit(reference->id);
