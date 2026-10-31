@@ -276,9 +276,9 @@ FamilyDimData<MemSpace> build_dim_index(const std::vector<MemberBlock>& members)
     r.runs = m.domain.runs;
     r.row_base = m.row_base;
     r.stride = m.stride;
-    r.a_off = static_cast<LO>(pa.size());
-    r.b_off = static_cast<LO>(pb.size());
-    r.o_off = static_cast<LO>(po.size());
+    r.a_off = to_lo(pa.size(), "family pool offset");
+    r.b_off = to_lo(pb.size(), "family pool offset");
+    r.o_off = to_lo(po.size(), "family pool offset");
     if (m.domain.kind == DomainKind::list) {
       for (LO i = 0; i < m.domain.size; ++i) pa.push_back(m.domain.a(i));
     } else if (m.domain.kind == DomainKind::intervals) {
@@ -327,7 +327,7 @@ FamilyDimData<MemSpace> build_dim_index(const std::vector<MemberBlock>& members)
       tbm.push_back(r.mrow0);
       tbs.push_back(r.slot);
     }
-    d.table_size = static_cast<LO>(runs.size());
+    d.table_size = to_lo(runs.size(), "family run table size");
   } else {
     d.kind = DimIndexKind::multi_owner;
     owner.assign(static_cast<std::size_t>(d.count), no_member);

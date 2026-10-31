@@ -2,8 +2,10 @@
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -331,4 +333,20 @@ TYPED_TEST(DomainTyped, CopiesStayCheapAndShareTheSnapshot) {
   c = a;
   EXPECT_TRUE(c.shares_storage_with(a));
   EXPECT_EQ(a.size(), 9);
+}
+
+TEST(Domain, CheckedConversionToLOThrowsPastTheLimit) {
+  constexpr auto lo_max = static_cast<std::size_t>(std::numeric_limits<LO>::max());
+  EXPECT_EQ(soma::detail::to_lo(0, "x"), 0);
+  EXPECT_EQ(soma::detail::to_lo(lo_max, "x"), std::numeric_limits<LO>::max());
+  try {
+    (void)soma::detail::to_lo(lo_max + 1, "pool offset");
+    FAIL() << "expected std::length_error";
+  } catch (const std::length_error& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("pool offset"), std::string::npos) << msg;
+    EXPECT_NE(msg.find(std::to_string(std::numeric_limits<LO>::max())), std::string::npos) << msg;
+  }
+  EXPECT_THROW((void)soma::detail::to_lo(std::numeric_limits<std::size_t>::max(), "x"),
+               std::length_error);
 }

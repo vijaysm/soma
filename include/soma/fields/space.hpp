@@ -312,6 +312,8 @@ class Space {
       check_rows(layout, prefix[m + 1]);
       uniform = uniform && n == prefix[1];
     }
+    // Every prefix entry passed check_rows, so the total and the first node
+    // count fit LO.
     blk.rows = static_cast<LO>(prefix.back());
     if (uniform && !members.empty()) {
       blk.stride = static_cast<LO>(prefix[1]);

@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <span>
 #include <stdexcept>
@@ -165,6 +166,17 @@ struct DomainBlockInfo {
 };
 
 namespace detail {
+
+// Size or offset to LO, for counts that come from containers or Views and have
+// no bound that the type system knows. Throws std::length_error naming `what`.
+inline LO to_lo(std::size_t n, const char* what) {
+  constexpr auto limit = static_cast<std::size_t>(std::numeric_limits<LO>::max());
+  if (n > limit) {
+    throw std::length_error(std::string(what) + " " + std::to_string(n) +
+                            " exceeds the largest local ordinal " + std::to_string(limit));
+  }
+  return static_cast<LO>(n);
+}
 
 struct HashPair {
   std::uint64_t sum = 0;
@@ -483,7 +495,7 @@ class Domain {
   // and fingerprints it.
   static Domain single(int dim, LO count, std::uint64_t epoch, std::vector<Interval> runs,
                        const GidView& gids) {
-    if (gids.extent(0) != 0 && static_cast<LO>(gids.extent(0)) != count) {
+    if (gids.extent(0) != 0 && detail::to_lo(gids.extent(0), "number of global ids") != count) {
       throw std::invalid_argument("Domain: " + std::to_string(gids.extent(0)) +
                                   " global ids for " + std::to_string(count) + " entities");
     }
