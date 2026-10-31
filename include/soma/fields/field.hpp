@@ -43,6 +43,7 @@ struct FieldInfo {
   Layout layout{};
   LO rows = 0;
   std::vector<int> dims;  // dimensions the domain has members on
+  std::uint64_t revision = 0;  // advances each time a commit replaces the domain
 };
 
 // Typed handle on one field. It aliases the registry's storage, so it stays
@@ -57,14 +58,17 @@ class Field {
 
   Field() = default;
   Field(FieldId id, Space<MemSpace> space, ViewType data, std::vector<T> default_value,
-        std::vector<T> global_value)
-      : id_(id),
+        std::vector<T> global_value, std::uint64_t revision = 0)
+      : revision_(revision),
+        id_(id),
         space_(std::move(space)),
         data_(std::move(data)),
         default_(std::move(default_value)),
         global_(std::move(global_value)) {}
 
   FieldId id() const noexcept { return id_; }
+  // Handles are snapshots: after a commit replaces the domain, fetch the field again.
+  std::uint64_t revision() const noexcept { return revision_; }
   const Space<MemSpace>& space() const noexcept { return space_; }
   const Domain<MemSpace>& domain() const noexcept { return space_.domain(); }
   ViewType view() const noexcept { return data_; }
@@ -88,6 +92,7 @@ class Field {
   }
 
  private:
+  std::uint64_t revision_ = 0;
   FieldId id_ = invalid_field;
   Space<MemSpace> space_;
   ViewType data_;
