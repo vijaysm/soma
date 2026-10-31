@@ -323,7 +323,8 @@ TYPED_TEST(SpaceTyped, PolygonArityBeyondIntIsRejected) {
   } else {
     soma::ElementInfo<TypeParam> info;
     info.topology[2] = soma_test::topology_view<TypeParam>({Topology::polygon});
-    info.conn_offsets[2] = soma_test::offsets_view<TypeParam>({0, (soma::Offset{1} << 32) + 5});
+    const std::int64_t wide = (std::int64_t{1} << 32) + 5;
+    info.conn_offsets[2] = soma_test::offsets_view<TypeParam>({0, static_cast<soma::Offset>(wide)});
     EXPECT_THROW(soma::Space<TypeParam>(D::all(2, 1, 1),
                                         Layout::element_nodes(NodeFamily::lagrange_equispaced, 1),
                                         info),
