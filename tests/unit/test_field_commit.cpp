@@ -419,7 +419,7 @@ TYPED_TEST(CommitMirrorTyped, MirrorCommitsPendingWritesFirst) {
   EXPECT_DOUBLE_EQ(h(2, 0), 8.0);
 }
 
-TYPED_TEST(CommitMirrorTyped, MirrorCommitsEveryFieldEvenWhenOnlySomeAreSelected) {
+TYPED_TEST(CommitMirrorTyped, MirrorCommitsOnlyTheSelectedFields) {
   Reg reg;
   reg.set_entities(2, 30);
   const auto a = reg.add<double>("a", subset(reg, 2, 30, {3}), 1);
@@ -430,7 +430,47 @@ TYPED_TEST(CommitMirrorTyped, MirrorCommitsEveryFieldEvenWhenOnlySomeAreSelected
   reg.mirror_into<TypeParam>(dst, {"a"}, {true, true, true, true}, false);
   EXPECT_EQ(dst.template get<double>("a").rows(), 2);
   EXPECT_FALSE(dst.contains("b"));
-  EXPECT_EQ(reg.pending_count(b.id()), 0u);
+  EXPECT_EQ(reg.pending_count(a.id()), 0u);
+  EXPECT_EQ(reg.pending_count(b.id()), 1u) << "an unselected field keeps its buffer";
+  EXPECT_EQ(reg.get<double>(b.id()).rows(), 1);
+}
+
+// Two members of one family both buffer entity 3; the second commit can never
+// succeed. A mirror that does not select them must not be affected.
+TYPED_TEST(CommitMirrorTyped, AFailingCommitOfAnUnselectedFieldDoesNotBreakAMirror) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto a = reg.add<double>("T", subset(reg, 2, 30, {1}), 1);
+  const auto b = reg.add<double>("T", subset(reg, 2, 30, {10}), 1);
+  const auto other = reg.add<double>("other", subset(reg, 2, 30, {5}), 1);
+  put<double>(reg, a.id(), 3, {1.0});
+  put<double>(reg, b.id(), 3, {2.0});
+  put<double>(reg, other.id(), 6, {3.0});
+  soma::FieldRegistry<TypeParam> dst;
+  EXPECT_NO_THROW(reg.mirror_into<TypeParam>(dst, {"other"}, {true, true, true, true}, false));
+  EXPECT_EQ(dst.template get<double>("other").rows(), 2);
+  EXPECT_FALSE(dst.contains("T"));
+  EXPECT_EQ(reg.pending_count(a.id()), 1u);
+  EXPECT_EQ(reg.pending_count(b.id()), 1u);
+
+  soma::FieldRegistry<TypeParam> all;
+  EXPECT_THROW(reg.mirror_into<TypeParam>(all, {"*"}, {true, true, true, true}, false),
+               soma::FieldOverlap);
+}
+
+TYPED_TEST(CommitMirrorTyped, AFieldSwitchedOffByDimensionIsNotCommitted) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  reg.set_entities(3, 30);
+  const auto f2 = reg.add<double>("f2", subset(reg, 2, 30, {3}), 1);
+  const auto f3 = reg.add<double>("f3", subset(reg, 3, 30, {3}), 1);
+  put<double>(reg, f2.id(), 6, {1.0});
+  put<double>(reg, f3.id(), 6, {1.0});
+  soma::FieldRegistry<TypeParam> dst;
+  reg.mirror_into<TypeParam>(dst, {"*"}, {true, true, false, true}, false);
+  EXPECT_FALSE(dst.contains("f2"));
+  EXPECT_EQ(reg.pending_count(f2.id()), 1u);
+  EXPECT_EQ(reg.pending_count(f3.id()), 0u);
 }
 
 // A new member may not take an entity that a sibling is waiting to commit:

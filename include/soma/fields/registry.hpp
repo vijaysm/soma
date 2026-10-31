@@ -382,15 +382,16 @@ class FieldRegistry {
 
   // Copies the selected fields into the empty registry `dst`, keeping their
   // ids. The entity counts and global ids (set_entities) belong to whoever owns
-  // those arrays, so the caller sets them on `dst`. names: {"*"} = all. A field is skipped when any dimension it has
-  // members on is switched off in `dims`. Domains and spaces are mirrored once
-  // and shared by every field that shares them. Pending writes are committed
-  // first (stale fields that are not selected are left alone), so the mirror and
-  // the source agree. A selected stale field throws StaleField. Note that
-  // this const member commits on the source: the registry keeps its storage
-  // mutable for that reason. alias = true reuses storage
-  // when Dst can access it (create_mirror_view_and_copy); alias = false always
-  // allocates (create_mirror + deep_copy).
+  // those arrays, so the caller sets them on `dst`. names: {"*"} = all. A field
+  // is skipped when any dimension it has members on is switched off in `dims`.
+  // Domains and spaces are mirrored once and shared by every field that shares
+  // them. Pending writes of the selected fields are committed first, so the
+  // mirror and the source agree; fields that are not selected are left alone,
+  // stale or with pending writes. A selected stale field throws StaleField.
+  // Note that this const member commits on the source: the registry keeps its
+  // storage mutable for that reason. alias = true reuses storage when Dst can
+  // access it (create_mirror_view_and_copy); alias = false always allocates
+  // (create_mirror + deep_copy).
   template <class Dst>
   void mirror_into(FieldRegistry<Dst>& dst, const std::vector<std::string>& names,
                    const std::array<bool, 4>& dims, bool alias) const {
@@ -407,7 +408,7 @@ class FieldRegistry {
       if (e.alive && selected(e, all, names, dims)) require_current(e);
     }
     for (Entry& e : entries_) {
-      if (e.alive && e.space.domain().epoch() == epoch_) commit_entry(e);
+      if (e.alive && selected(e, all, names, dims)) commit_entry(e);
     }
     dst.epoch_ = epoch_;
     for (const Family& f : families_) dst.families_.push_back(typename FieldRegistry<Dst>::Family{f.key});
