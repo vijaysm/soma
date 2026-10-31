@@ -16,7 +16,8 @@ endfunction()
 # fallback is first used. On a reconfigure the seeded cache already satisfies
 # find_package(OpenMP), so a plain variable would flip back to OFF.
 macro(soma_seed_apple_openmp)
-  if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+  if(APPLE AND CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang"
+     AND NOT CMAKE_DISABLE_FIND_PACKAGE_OpenMP)
     find_package(OpenMP COMPONENTS CXX QUIET)
     if(NOT OpenMP_CXX_FOUND)
       set(_soma_omp_prefixes /opt/homebrew/opt/libomp /usr/local/opt/libomp)
