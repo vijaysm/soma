@@ -225,9 +225,11 @@ class FieldRegistry {
                          options.global_value.value_or(std::vector<T>{}));
     Entry entry{std::move(info), space, std::any(f), true};
 
-    // Everything that can throw has happened by now: make room first, then
-    // change the registry with operations that cannot fail.
-    grow_for_one(entries_);
+    // Everything that can throw has happened by now. Make room for the family
+    // first; entries_.push_back is then the only step left that can throw, and
+    // it does so before changing anything because Entry moves without throwing.
+    // The pushes after it cannot fail.
+    static_assert(std::is_nothrow_move_constructible_v<Entry>);
     if (created) {
       grow_for_one(families_);
     } else {
