@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -63,4 +64,25 @@ TEST(Comm, BcastDeliversRootBuffer) {
   for (const std::byte x : b) {
     EXPECT_EQ(x, std::byte{0x5A});
   }
+}
+
+TEST(Comm, AllreduceUint64) {
+  const Comm c = Comm::world();
+  const std::uint64_t high = std::uint64_t{1} << 63;
+  const auto contribution = [&](int r) {
+    const auto u = static_cast<std::uint64_t>(r);
+    return r % 2 == 0 ? high + u : u;
+  };
+  std::uint64_t expected_sum = 0;
+  std::uint64_t expected_min = contribution(0);
+  std::uint64_t expected_max = contribution(0);
+  for (int r = 0; r < c.size(); ++r) {
+    expected_sum += contribution(r);
+    expected_min = std::min(expected_min, contribution(r));
+    expected_max = std::max(expected_max, contribution(r));
+  }
+  const std::uint64_t mine = contribution(c.rank());
+  EXPECT_EQ(c.allreduce(mine, Op::sum), expected_sum);
+  EXPECT_EQ(c.allreduce(mine, Op::min), expected_min);
+  EXPECT_EQ(c.allreduce(mine, Op::max), expected_max);
 }
