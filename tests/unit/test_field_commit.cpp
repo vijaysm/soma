@@ -2,6 +2,7 @@
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
 #include <cstdint>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -391,6 +392,97 @@ TEST(FieldCommit, DiscardPendingDropsBufferedWritesOnly) {
   reg.commit(f.id());
   EXPECT_EQ(reg.get<double>(f.id()).domain().members(0), (std::vector<LO>{3, 8, 12}));
   EXPECT_THROW(reg.discard_pending(99), std::out_of_range);
+}
+
+TEST(FieldCommit, AHandleHeldAcrossACommitIsNoLongerCurrent) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  auto stale = reg.add<double>("q", subset(reg, 2, 30, {3, 8}), 1);
+  EXPECT_TRUE(reg.is_current(stale));
+  put<double>(reg, stale.id(), 5, {1.0});
+  EXPECT_TRUE(reg.is_current(stale)) << "buffering does not replace the storage";
+  reg.commit(stale.id());
+  EXPECT_FALSE(reg.is_current(stale));
+  const auto fresh = reg.get<double>(stale.id());
+  EXPECT_TRUE(reg.is_current(fresh));
+  EXPECT_FALSE(reg.is_current(stale));
+}
+
+TEST(FieldCommit, AHandleOnAFieldWithoutRowsGoesStaleAtCommitToo) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto empty = reg.add<double>("q", subset(reg, 2, 30, {}), 1);
+  ASSERT_EQ(empty.rows(), 0);
+  EXPECT_TRUE(reg.is_current(empty));
+  put<double>(reg, empty.id(), 5, {1.0});
+  reg.commit(empty.id());
+  EXPECT_FALSE(reg.is_current(empty));
+  EXPECT_TRUE(reg.is_current(reg.get<double>(empty.id())));
+}
+
+TEST(FieldCommit, ACommitWithNothingPendingKeepsHandlesCurrent) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto f = reg.add<double>("q", subset(reg, 2, 30, {3, 8}), 1);
+  reg.commit(f.id());
+  reg.commit_all();
+  EXPECT_TRUE(reg.is_current(f));
+}
+
+TEST(FieldCommit, WritesThroughAStaleHandleAreLostAndIsCurrentSaysSo) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  auto stale = reg.add<double>("q", subset(reg, 2, 30, {3, 8}), 1);
+  put<double>(reg, stale.id(), 5, {1.0});
+  reg.commit(stale.id());
+  ASSERT_FALSE(reg.is_current(stale));
+  stale.view()(0, 0) = 99.0;
+  EXPECT_DOUBLE_EQ(reg.get<double>(stale.id()).view()(0, 0), 0.0);
+}
+
+TEST(FieldCommit, IsCurrentIsFalseAfterRemoveAndForUnknownFields) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto f = reg.add<double>("q", subset(reg, 2, 30, {3}), 1);
+  const auto g = reg.add<double>("g", subset(reg, 2, 30, {4}), 1);
+  reg.remove(f.id());
+  EXPECT_FALSE(reg.is_current(f));
+  EXPECT_TRUE(reg.is_current(g));
+  EXPECT_FALSE(reg.is_current(soma::Field<double, HostMem>()));
+  EXPECT_FALSE(reg.current_revision(f.id()).has_value());
+  EXPECT_FALSE(reg.current_revision(99).has_value());
+}
+
+TEST(FieldCommit, ACurrentHandleOfAnotherRegistryIsNotCurrentHere) {
+  Reg a;
+  Reg b;
+  a.set_entities(2, 30);
+  b.set_entities(2, 30);
+  const auto fa = a.add<double>("q", subset(a, 2, 30, {3}), 1);
+  const auto fb = b.add<double>("q", subset(b, 2, 30, {3}), 1);
+  ASSERT_EQ(fa.id(), fb.id());
+  EXPECT_TRUE(a.is_current(fa));
+  EXPECT_FALSE(a.is_current(fb));
+}
+
+TEST(FieldCommit, CurrentRevisionFollowsCommits) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto f = reg.add<double>("q", subset(reg, 2, 30, {3}), 1);
+  EXPECT_EQ(reg.current_revision(f.id()), std::optional<std::uint64_t>(0));
+  put<double>(reg, f.id(), 5, {1.0});
+  reg.commit(f.id());
+  EXPECT_EQ(reg.current_revision(f.id()), std::optional<std::uint64_t>(1));
+  EXPECT_EQ(reg.current_revision(f.id()), reg.get<double>(f.id()).revision());
+}
+
+TEST(FieldCommit, IsCurrentDoesNotJudgeTheMeshEpoch) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto f = reg.add<double>("q", subset(reg, 2, 30, {3}), 1);
+  reg.set_epoch(reg.epoch() + 1);
+  EXPECT_TRUE(reg.is_current(f));
+  EXPECT_THROW(reg.get<double>(f.id()), soma::StaleField);
 }
 
 template <class M>

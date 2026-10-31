@@ -89,10 +89,14 @@ class Field {
   }
 
   FieldId id() const noexcept { return id_; }
-  // Handles are snapshots: after a commit replaces the domain, fetch the field again.
+  // Handles are snapshots: after a commit replaces the domain, fetch the field
+  // again (FieldRegistry::is_current).
   std::uint64_t revision() const noexcept { return revision_; }
   const Space<MemSpace>& space() const noexcept { return space_; }
   const Domain<MemSpace>& domain() const noexcept { return space_.domain(); }
+  // The View of this handle's storage. After a commit replaces the field the
+  // registry holds new storage; writes through a stale handle's view are lost.
+  // FieldRegistry::is_current(field) tells.
   ViewType view() const noexcept { return data_; }
   LO rows() const noexcept { return static_cast<LO>(data_.extent(0)); }
   int ncomp() const noexcept { return static_cast<int>(data_.extent(1)); }

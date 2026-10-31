@@ -220,6 +220,27 @@ class FieldRegistry {
 
   const FieldInfo& info(FieldId id) const { return entry(id).info; }
 
+  // True when `f` still refers to the storage this registry holds for its id.
+  // A commit that merges pending writes replaces the storage, so a handle kept
+  // across it is stale: it stays readable, but writes through it go to storage
+  // the registry no longer uses. Fetch the field again with get(). False for a
+  // removed field, an unknown id, a default-constructed field, and a handle
+  // from another registry. The mesh epoch is not judged here (get() does that).
+  template <class T>
+  bool is_current(const Field<T, MemSpace>& f) const noexcept {
+    if (f.id() >= entries_.size()) return false;
+    const auto* held = std::any_cast<Field<T, MemSpace>>(&entries_[f.id()].field);
+    return held != nullptr && held->view().data() == f.view().data();
+  }
+
+  // Revision of the field's current storage (the value Field::revision() has
+  // after a fresh get()); empty for a removed or unknown id. A handle whose
+  // revision() differs is stale.
+  std::optional<std::uint64_t> current_revision(FieldId id) const noexcept {
+    if (id >= entries_.size() || !entries_[id].alive) return std::nullopt;
+    return entries_[id].info.revision;
+  }
+
   std::vector<FieldInfo> list() const {
     std::vector<FieldInfo> out;
     for (const Entry& e : entries_) {
@@ -306,7 +327,10 @@ class FieldRegistry {
   // ---- sparse growth: pending writes and commit --------------------------
 
   // Host write of one entity's values (ncomp of them) into a per_entity field
-  // with one block. A member entity is written straight into the data. A
+  // with one block. Writes of an existing member land in the storage that `id`
+  // names now: a Field handle taken before a commit points at replaced storage,
+  // so check is_current() on handles that are kept across commits. A member
+  // entity is written straight into the data. A
   // non-member of a subset field is recorded in a sorted host buffer and joins
   // the domain at the next commit, which every mirror also performs first. A
   // field over a full domain has no non-members.
@@ -360,7 +384,9 @@ class FieldRegistry {
   std::size_t pending_count(FieldId id) const { return entry(id).pending_count; }
 
   // Merges the pending writes of one field into a new domain and data. The
-  // field keeps its id and its mesh epoch; its revision advances. Idempotent
+  // field keeps its id and its mesh epoch; its revision advances. Field handles
+  // taken earlier then refer to the old storage and report is_current() ==
+  // false; fetch the field again with get(). Idempotent
   // and cheap when nothing is pending. If the grown domain would overlap
   // another member of the family, FieldOverlap is thrown and the field keeps
   // its previous domain, data, and pending buffer.
