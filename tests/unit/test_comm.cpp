@@ -86,3 +86,10 @@ TEST(Comm, AllreduceUint64) {
   EXPECT_EQ(c.allreduce(mine, Op::min), expected_min);
   EXPECT_EQ(c.allreduce(mine, Op::max), expected_max);
 }
+
+TEST(Comm, AllreduceInt32MinMax) {
+  const Comm c = Comm::world();
+  const std::int32_t r = c.rank();
+  EXPECT_EQ(c.allreduce(-r, Op::min), -(c.size() - 1));
+  EXPECT_EQ(c.allreduce(-r, Op::max), 0);
+}
