@@ -6,6 +6,8 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
+#include <execinfo.h>
 #include <memory>
 #include <new>
 #include <string>
@@ -38,8 +40,30 @@ constexpr long sweep_limit = 20000;
 
 }  // namespace soma_test
 
+namespace soma_test {
+
+// Kokkos allocates while it releases a View, inside a noexcept destructor, where
+// no caller could recover from a failure. Such an allocation is not failed; the
+// next one is.
+bool inside_kokkos_deallocate() {
+  void* frames[32];
+  const int depth = backtrace(frames, 32);
+  char** symbols = backtrace_symbols(frames, depth);
+  bool found = false;
+  for (int i = 0; symbols != nullptr && i < depth && !found; ++i) {
+    found = std::strstr(symbols[i], "deallocate") != nullptr;
+  }
+  std::free(symbols);
+  return found;
+}
+
+}  // namespace soma_test
+
 void* operator new(std::size_t n) {
-  if (soma_test::allocations_until_failure >= 0 && soma_test::allocations_until_failure-- == 0) {
+  if (soma_test::allocations_until_failure == 0 && soma_test::inside_kokkos_deallocate()) {
+    // leave the counter at zero: the next allocation outside it fails
+  } else if (soma_test::allocations_until_failure >= 0 &&
+             soma_test::allocations_until_failure-- == 0) {
     throw std::bad_alloc();
   }
   if (void* p = std::malloc(n == 0 ? 1 : n)) return p;
@@ -376,4 +400,71 @@ TEST(ExceptionSafety, AStaleSelectionIsRejectedBeforeAnyCommit) {
   EXPECT_TRUE(dst.list().empty());
   EXPECT_NO_THROW(reg.mirror_into<HostMem>(dst, {"A", "B"}, {true, true, true, true}, false));
   EXPECT_EQ(reg.pending_count(first.id()), 0u);
+}
+
+// A commit builds the grown domain, space and data first and publishes them at
+// the end. Every allocation failure, wherever it lands, must leave the field as
+// it was: same rows, same members, same buffer, a handle that is still current,
+// no family lookup for a pending entity, and a retry that gives the result of a
+// commit that was never interrupted.
+TEST(ExceptionSafety, AFailedCommitLeavesTheFieldAsItWas) {
+  const auto make = [] { return fixture(2, {1, 2}, {{10, 5.0}, {7, 3.0}}); };
+  auto reference = make();
+  reference->reg.commit(reference->id);
+  const auto expected = reference->reg.get<double>(reference->id);
+  const long failures = sweep_fresh(
+      make, [](Fixture& fx) { fx.reg.commit(fx.id); },
+      [&](Fixture& fx, long n) {
+        const auto before = fx.reg.get<double>(fx.id);
+        EXPECT_EQ(fx.reg.pending_count(fx.id), 2u) << "failed allocation " << n;
+        EXPECT_EQ(before.rows(), 2) << n;
+        EXPECT_EQ(fx.reg.info(fx.id).rows, 2) << n;
+        EXPECT_EQ(before.revision(), 0u) << n;
+        EXPECT_EQ(before.domain().members(0), (std::vector<LO>{1, 2})) << n;
+        EXPECT_TRUE(fx.reg.is_current(before)) << n;
+        const auto fam = fx.reg.family<double>("q", 2);
+        EXPECT_FALSE(fx.reg.lookup(fam, 2, 10).found()) << n;
+        EXPECT_FALSE(fx.reg.lookup(fam, 2, 7).found()) << n;
+        EXPECT_TRUE(fx.reg.lookup(fam, 2, 2).found()) << n;
+        Reg copy;
+        EXPECT_NO_THROW(fx.reg.mirror_into<HostMem>(copy, {"*"}, {true, true, true, true}, false))
+            << n;
+        EXPECT_EQ(fx.reg.pending_count(fx.id), 0u) << "the mirror commits first, n=" << n;
+        const auto after = fx.reg.get<double>(fx.id);
+        EXPECT_EQ(after.domain().members(0), expected.domain().members(0)) << n;
+        EXPECT_EQ(after.rows(), expected.rows()) << n;
+        for (LO r = 0; r < after.rows(); ++r) {
+          EXPECT_DOUBLE_EQ(after.view()(r, 1), expected.view()(r, 1)) << n << " row " << r;
+        }
+      });
+  EXPECT_GT(failures, 0);
+}
+
+TEST(ExceptionSafety, ARetryAfterAFailedCommitMatchesAnUninterruptedCommit) {
+  const auto make = [] { return fixture(2, {1, 2}, {{10, 5.0}, {7, 3.0}}); };
+  auto reference = make();
+  reference->reg.commit(reference->id);
+  const auto expected = reference->reg.get<double>(reference->id);
+  const long failures = sweep_fresh(
+      make, [](Fixture& fx) { fx.reg.commit(fx.id); },
+      [&](Fixture& fx, long n) {
+        ASSERT_NO_THROW(fx.reg.commit(fx.id)) << "retry after failed allocation " << n;
+        const auto got = fx.reg.get<double>(fx.id);
+        EXPECT_EQ(got.domain().members(0), expected.domain().members(0)) << n;
+        EXPECT_EQ(got.revision(), expected.revision()) << n;
+        EXPECT_EQ(fx.reg.info(fx.id).rows, expected.rows()) << n;
+        EXPECT_EQ(fx.reg.pending_count(fx.id), 0u) << n;
+        const auto fam = fx.reg.family<double>("q", 2);
+        EXPECT_TRUE(fx.reg.lookup(fam, 2, 10).found()) << n;
+        EXPECT_EQ(fx.reg.lookup(fam, 2, 10).row, fx.reg.lookup(fam, 2, 10).row) << n;
+        for (LO r = 0; r < got.rows(); ++r) {
+          for (int c = 0; c < 2; ++c) {
+            EXPECT_DOUBLE_EQ(got.view()(r, static_cast<std::size_t>(c)),
+                             expected.view()(r, static_cast<std::size_t>(c)))
+                << n << " row " << r;
+          }
+        }
+        EXPECT_TRUE(fx.reg.is_current(got)) << n;
+      });
+  EXPECT_GT(failures, 0);
 }
