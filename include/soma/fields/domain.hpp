@@ -475,7 +475,10 @@ class Domain {
     std::uint64_t epoch = 0;
   };
 
-  explicit Domain(std::shared_ptr<const Data> d) : data_(std::move(d)) {}
+  // Builds the empty snapshot while construction may still throw: the noexcept
+  // moves hand it to the moved-from object and must never have to allocate it.
+  // Any Domain that exists implies a constructor ran, so the snapshot exists.
+  explicit Domain(std::shared_ptr<const Data> d) : data_((void(empty_data()), std::move(d))) {}
 
   static const std::shared_ptr<const Data>& empty_data() {
     // Never destroyed: a static-storage Domain moved from during shutdown still

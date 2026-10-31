@@ -148,8 +148,11 @@ class Space {
 
   // `info` is read only for element_nodes layouts. shared_nodes and quadrature
   // layouts are accepted by Layout but cannot back a Space yet.
+  // The empty snapshot is built here, where throwing is allowed, so that the
+  // noexcept moves never have to allocate it.
   Space(const Domain<MemSpace>& domain, const Layout& layout,
-        const ElementInfo<MemSpace>& info = {}) {
+        const ElementInfo<MemSpace>& info = {})
+      : data_(empty_data()) {
     if (layout.kind == Layout::Kind::shared_nodes || layout.kind == Layout::Kind::quadrature) {
       throw std::invalid_argument("Space: layout " + describe(layout) +
                                   " is not supported yet");
