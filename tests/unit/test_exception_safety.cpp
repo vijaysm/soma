@@ -446,6 +446,9 @@ TEST(ExceptionSafety, ARetryAfterAFailedCommitMatchesAnUninterruptedCommit) {
   auto reference = make();
   reference->reg.commit(reference->id);
   const auto expected = reference->reg.get<double>(reference->id);
+  const auto reference_family = reference->reg.family<double>("q", 2);
+  const auto expected_hit = reference->reg.lookup(reference_family, 2, 10);
+  ASSERT_TRUE(expected_hit.found());
   const long failures = sweep_fresh(
       make, [](Fixture& fx) { fx.reg.commit(fx.id); },
       [&](Fixture& fx, long n) {
@@ -456,8 +459,10 @@ TEST(ExceptionSafety, ARetryAfterAFailedCommitMatchesAnUninterruptedCommit) {
         EXPECT_EQ(fx.reg.info(fx.id).rows, expected.rows()) << n;
         EXPECT_EQ(fx.reg.pending_count(fx.id), 0u) << n;
         const auto fam = fx.reg.family<double>("q", 2);
-        EXPECT_TRUE(fx.reg.lookup(fam, 2, 10).found()) << n;
-        EXPECT_EQ(fx.reg.lookup(fam, 2, 10).row, fx.reg.lookup(fam, 2, 10).row) << n;
+        const auto hit = fx.reg.lookup(fam, 2, 10);
+        EXPECT_TRUE(hit.found()) << n;
+        EXPECT_EQ(hit.slot, expected_hit.slot) << n;
+        EXPECT_EQ(hit.row, expected_hit.row) << n;
         for (LO r = 0; r < got.rows(); ++r) {
           for (int c = 0; c < 2; ++c) {
             EXPECT_DOUBLE_EQ(got.view()(r, static_cast<std::size_t>(c)),
