@@ -116,3 +116,13 @@ TEST(Comm, BcastFromNonZeroRoot) {
   EXPECT_EQ(b[1], root + 20);
   EXPECT_EQ(b[2], root + 30);
 }
+
+TEST(Comm, SelfReductionsIgnoreOtherRanks) {
+  const Comm c = Comm::world();
+  const Comm s = Comm::self();
+  const auto mine = static_cast<std::int64_t>(c.rank()) + 5;
+  EXPECT_EQ(s.allreduce(mine, Op::sum), mine);
+  EXPECT_EQ(s.allreduce(mine, Op::max), mine);
+  EXPECT_EQ(s.allreduce(mine, Op::prod), mine);
+  EXPECT_EQ(s.exscan<std::int64_t>(mine), 0);
+}
