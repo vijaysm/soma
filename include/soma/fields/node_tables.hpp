@@ -78,6 +78,12 @@ struct NodeTableView {
   KOKKOS_INLINE_FUNCTION Real operator()(int node, int d) const { return x(node, d); }
 };
 
+// Process-wide cache of node tables and ordering permutations, one per key and
+// memory space, built on first use. The views it returns are unmanaged: they
+// borrow from the cache and are valid until clear() or Kokkos::finalize (a
+// finalize hook empties the cache), whichever comes first. Do not keep them
+// across either, and capture them in kernels only while the cache is alive.
+// Lookups are serialized by a mutex; the views themselves are read-only.
 template <class MemSpace>
 class NodeTables {
  public:
@@ -85,7 +91,6 @@ class NodeTables {
   using Permutation = Kokkos::View<const int*, Kokkos::LayoutLeft, MemSpace,
                                    Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
 
-  // The returned views stay valid until clear() or Kokkos::finalize.
   static Table get(const NodeTableKey& key) {
     State& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
