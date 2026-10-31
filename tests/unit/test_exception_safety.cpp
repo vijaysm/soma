@@ -6,8 +6,10 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <new>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -174,4 +176,111 @@ TEST(ExceptionSafety, AFailedMirrorKeepsTheEntityCountsOfTheDestination) {
         [&](long n) { EXPECT_TRUE(dst.has_entities(2)) << n; });
   EXPECT_TRUE(dst.has_entities(2));
   EXPECT_EQ(dst.get<double>("a").rows(), 2);
+}
+
+namespace {
+
+struct Fixture {
+  Reg reg;
+  soma::FieldId id = soma::invalid_field;
+};
+
+// Like sweep, but every attempt starts from a fresh fixture, so the checks after
+// a failure may change it (commit, mirror).
+template <class Make, class Op, class Check>
+long sweep_fresh(Make&& make, Op&& op, Check&& after_failure) {
+  for (long n = 0; n < soma_test::sweep_limit; ++n) {
+    auto fx = make();
+    bool failed = false;
+    {
+      const soma_test::FailNth arm(n);
+      try {
+        op(*fx);
+      } catch (const std::bad_alloc&) {
+        failed = true;
+      }
+    }
+    if (!failed) return n;
+    after_failure(*fx, n);
+    if (::testing::Test::HasFatalFailure()) return n;
+  }
+  ADD_FAILURE() << "the call still failed after " << soma_test::sweep_limit << " allocations";
+  return soma_test::sweep_limit;
+}
+
+std::unique_ptr<Fixture> fixture(int ncomp, std::vector<LO> lids,
+                                 const std::vector<std::pair<LO, double>>& pending) {
+  auto fx = std::make_unique<Fixture>();
+  fx->reg.set_entities(2, 30);
+  fx->id = fx->reg.add<double>("q", subset(fx->reg, 30, std::move(lids)), ncomp).id();
+  for (const auto& [lid, x] : pending) {
+    fx->reg.set_pending<double>(fx->id, lid,
+                                std::vector<double>(static_cast<std::size_t>(ncomp), x));
+  }
+  return fx;
+}
+
+}  // namespace
+
+TEST(ExceptionSafety, AFailedWriteOfANewPendingEntityBuffersNothing) {
+  const std::vector<double> v{4.0, 5.0, 6.0};
+  const long failures = sweep_fresh(
+      [] { return fixture(3, {1, 2}, {{10, 1.0}}); },
+      [&](Fixture& fx) { fx.reg.set_pending<double>(fx.id, 20, v); },
+      [&](Fixture& fx, long n) {
+        EXPECT_EQ(fx.reg.pending_count(fx.id), 1u) << "failed allocation " << n;
+        EXPECT_NO_THROW(fx.reg.commit(fx.id)) << n;
+        const auto g = fx.reg.get<double>(fx.id);
+        EXPECT_EQ(g.domain().members(0), (std::vector<LO>{1, 2, 10})) << n;
+        EXPECT_DOUBLE_EQ(g.view()(2, 2), 1.0) << n;
+      });
+  EXPECT_GT(failures, 0);
+  auto fx = fixture(3, {1, 2}, {{10, 1.0}});
+  fx->reg.set_pending<double>(fx->id, 20, v);
+  EXPECT_EQ(fx->reg.pending_count(fx->id), 2u);
+  fx->reg.commit(fx->id);
+  const auto g = fx->reg.get<double>(fx->id);
+  EXPECT_EQ(g.domain().members(0), (std::vector<LO>{1, 2, 10, 20}));
+  EXPECT_DOUBLE_EQ(g.view()(3, 2), 6.0);
+}
+
+TEST(ExceptionSafety, AFailedFirstWriteLeavesACommittableField) {
+  const std::vector<double> v{4.0, 5.0};
+  const long failures = sweep_fresh(
+      [] { return fixture(2, {1, 2}, {}); },
+      [&](Fixture& fx) { fx.reg.set_pending<double>(fx.id, 20, v); },
+      [&](Fixture& fx, long n) {
+        EXPECT_EQ(fx.reg.pending_count(fx.id), 0u) << "failed allocation " << n;
+        EXPECT_NO_THROW(fx.reg.commit(fx.id)) << n;
+        EXPECT_EQ(fx.reg.get<double>(fx.id).domain().members(0), (std::vector<LO>{1, 2})) << n;
+        fx.reg.set_pending<double>(fx.id, 11, std::vector<double>{7.0, 8.0});
+        EXPECT_EQ(fx.reg.pending_count(fx.id), 1u) << n;
+        Reg dst;
+        EXPECT_NO_THROW(fx.reg.mirror_into<HostMem>(dst, {"*"}, {true, true, true, true}, false))
+            << n;
+        const auto g = dst.get<double>(fx.id);
+        EXPECT_EQ(g.domain().members(0), (std::vector<LO>{1, 2, 11})) << n;
+        EXPECT_DOUBLE_EQ(g.view()(2, 1), 8.0) << n;
+      });
+  EXPECT_GT(failures, 0);
+}
+
+TEST(ExceptionSafety, AFailedReplacementOfAPendingValueKeepsTheOldValue) {
+  const std::vector<double> v{7.0, 8.0, 9.0};
+  const long failures = sweep_fresh(
+      [] { return fixture(3, {1, 2}, {{20, 1.0}}); },
+      [&](Fixture& fx) { fx.reg.set_pending<double>(fx.id, 20, v); },
+      [&](Fixture& fx, long n) {
+        EXPECT_EQ(fx.reg.pending_count(fx.id), 1u) << "failed allocation " << n;
+        fx.reg.commit(fx.id);
+        const auto g = fx.reg.get<double>(fx.id);
+        ASSERT_EQ(g.rows(), 3) << n;
+        EXPECT_DOUBLE_EQ(g.view()(2, 0), 1.0) << "the old value survives, n=" << n;
+        EXPECT_DOUBLE_EQ(g.view()(2, 2), 1.0) << n;
+      });
+  EXPECT_GT(failures, 0);
+  auto fx = fixture(3, {1, 2}, {{20, 1.0}});
+  fx->reg.set_pending<double>(fx->id, 20, v);
+  fx->reg.commit(fx->id);
+  EXPECT_DOUBLE_EQ(fx->reg.get<double>(fx->id).view()(2, 2), 9.0);
 }

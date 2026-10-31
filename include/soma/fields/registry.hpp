@@ -429,11 +429,25 @@ class FieldRegistry {
       return;
     }
     using Buffer = std::map<LO, std::vector<T>>;
-    if (!e.pending.has_value()) e.pending = Buffer{};
-    auto& buf = std::any_cast<Buffer&>(e.pending);
-    if (buf.find(lid) == buf.end()) check_free(e, lid);
-    buf[lid].assign(values.begin(), values.end());
-    e.pending_count = buf.size();
+    const Buffer* held = e.pending.has_value() ? std::any_cast<Buffer>(&e.pending) : nullptr;
+    if (held == nullptr || held->find(lid) == held->end()) check_free(e, lid);
+    // Everything that allocates happens before the buffer is touched, so a
+    // throw leaves the old buffer and its count as they were.
+    std::vector<T> value(values.begin(), values.end());
+    if (held == nullptr) {
+      Buffer fresh;
+      fresh.emplace(lid, std::move(value));
+      e.pending = std::move(fresh);
+    } else {
+      auto& buf = std::any_cast<Buffer&>(e.pending);
+      const auto it = buf.lower_bound(lid);
+      if (it != buf.end() && it->first == lid) {
+        it->second = std::move(value);
+      } else {
+        buf.emplace_hint(it, lid, std::move(value));
+      }
+    }
+    e.pending_count = std::any_cast<Buffer&>(e.pending).size();
   }
 
   // Drops the buffered writes of one field. Data already written to member
