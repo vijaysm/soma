@@ -915,6 +915,10 @@ class FieldRegistry {
     if (ent.set) gids = ent.gids;
     const auto domain = Domain<MemSpace>::from_list(bi.dim, bi.count, old_domain.epoch(), lids, gids);
     const Space<MemSpace> space(domain, Layout::per_entity());
+    // The checks in add() and set_pending() keep members and buffers disjoint, so
+    // this cannot fire through the public API today. It stays a thrown
+    // FieldOverlap rather than an assert so that a broken family invariant
+    // cannot corrupt a release build silently.
     check_disjoint(e.info.name, e.info.type, ncomp, space, e.info.id);
 
     const auto old_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, old_field.view());
