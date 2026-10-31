@@ -25,6 +25,24 @@ using soma::LO;
 using HostMem = Kokkos::HostSpace;
 using DevMem = Kokkos::DefaultExecutionSpace::memory_space;
 
+namespace soma_test {
+
+inline int fences_seen = 0;
+
+inline void count_fence(const char*, std::uint32_t, std::uint64_t*) { ++fences_seen; }
+
+// Number of Kokkos fences issued while `op` runs.
+template <class Op>
+int fences_during(Op&& op) {
+  Kokkos::Tools::Experimental::set_begin_fence_callback(&count_fence);
+  fences_seen = 0;
+  op();
+  Kokkos::Tools::Experimental::set_begin_fence_callback(nullptr);
+  return fences_seen;
+}
+
+}  // namespace soma_test
+
 namespace {
 
 using Reg = soma::FieldRegistry<HostMem>;
@@ -483,6 +501,87 @@ TEST(FieldCommit, IsCurrentDoesNotJudgeTheMeshEpoch) {
   reg.set_epoch(reg.epoch() + 1);
   EXPECT_TRUE(reg.is_current(f));
   EXPECT_THROW(reg.get<double>(f.id()), soma::StaleField);
+}
+
+template <class M>
+class MemberWriteTyped : public ::testing::Test {};
+using Spaces = ::testing::Types<HostMem, DevMem>;
+TYPED_TEST_SUITE(MemberWriteTyped, Spaces);
+
+TYPED_TEST(MemberWriteTyped, EveryComponentOfAMemberRowIsWrittenAndNothingElse) {
+  using R = soma::FieldRegistry<TypeParam>;
+  using D = soma::Domain<TypeParam>;
+  for (int ncomp = 1; ncomp <= 3; ++ncomp) {
+    R reg;
+    reg.set_entities(2, 30);
+    const std::vector<LO> lids{3, 8, 20};
+    soma::FieldOptions<double> opt;
+    opt.default_value = std::vector<double>(static_cast<std::size_t>(ncomp), -1.0);
+    const auto f = reg.template add<double>(
+        "q", soma::Space<TypeParam>(D::from_list(2, 30, reg.epoch(), lids), Layout::per_entity()),
+        ncomp, opt);
+    std::vector<double> v(static_cast<std::size_t>(ncomp));
+    for (int c = 0; c < ncomp; ++c) v[static_cast<std::size_t>(c)] = 10.0 * (c + 1) + 0.5;
+    reg.template set_pending<double>(f.id(), 8, v);
+    EXPECT_EQ(reg.pending_count(f.id()), 0u);
+    const auto h = Kokkos::create_mirror_view_and_copy(HostMem{}, f.view());
+    for (int c = 0; c < ncomp; ++c) {
+      const auto cc = static_cast<std::size_t>(c);
+      EXPECT_DOUBLE_EQ(h(0, cc), -1.0) << ncomp << " comp " << c;
+      EXPECT_DOUBLE_EQ(h(1, cc), v[cc]) << ncomp << " comp " << c;
+      EXPECT_DOUBLE_EQ(h(2, cc), -1.0) << ncomp << " comp " << c;
+    }
+  }
+}
+
+TYPED_TEST(MemberWriteTyped, IntegerAndFloatFieldsKeepTheirValues) {
+  using R = soma::FieldRegistry<TypeParam>;
+  using D = soma::Domain<TypeParam>;
+  R reg;
+  reg.set_entities(2, 30);
+  const auto make = [&](const std::vector<LO>& l) {
+    return soma::Space<TypeParam>(D::from_list(2, 30, reg.epoch(), l), Layout::per_entity());
+  };
+  const auto i = reg.template add<std::int32_t>("i", make({1, 2}), 2);
+  const auto fl = reg.template add<float>("f", make({1, 2}), 3);
+  reg.template set_pending<std::int32_t>(i.id(), 2, std::vector<std::int32_t>{-7, 9});
+  reg.template set_pending<float>(fl.id(), 1, std::vector<float>{0.25F, 0.5F, 0.75F});
+  const auto hi = Kokkos::create_mirror_view_and_copy(HostMem{}, i.view());
+  const auto hf = Kokkos::create_mirror_view_and_copy(HostMem{}, fl.view());
+  EXPECT_EQ(hi(1, 0), -7);
+  EXPECT_EQ(hi(1, 1), 9);
+  EXPECT_EQ(hi(0, 0), 0);
+  EXPECT_FLOAT_EQ(hf(0, 2), 0.75F);
+  EXPECT_FLOAT_EQ(hf(1, 2), 0.0F);
+}
+
+// A write to a host-accessible field is plain assignment: it must not fence the
+// execution space (a fence per component is what made writes cost tens of
+// microseconds with threads).
+TEST(FieldCommit, AHostWriteToAMemberRowIssuesNoFence) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto f = reg.add<double>("q", subset(reg, 2, 30, {3, 8}), 3);
+  const std::vector<double> v{1.0, 2.0, 3.0};
+  const int fences = soma_test::fences_during([&] { reg.set_pending<double>(f.id(), 8, v); });
+  EXPECT_EQ(fences, 0);
+  EXPECT_DOUBLE_EQ(f.view()(1, 2), 3.0);
+}
+
+TYPED_TEST(MemberWriteTyped, TheStagedPathWritesTheSameRow) {
+  for (std::size_t ncomp = 1; ncomp <= 3; ++ncomp) {
+    soma::View2<double, TypeParam> data("soma::test::rows", 4, ncomp);
+    Kokkos::deep_copy(data, -1.0);
+    std::vector<double> v(ncomp);
+    for (std::size_t c = 0; c < ncomp; ++c) v[c] = 5.0 + static_cast<double>(c);
+    soma::detail::write_row_staged<double, TypeParam>(data, 2, v);
+    const auto h = Kokkos::create_mirror_view_and_copy(HostMem{}, data);
+    for (std::size_t r = 0; r < 4; ++r) {
+      for (std::size_t c = 0; c < ncomp; ++c) {
+        EXPECT_DOUBLE_EQ(h(r, c), r == 2 ? v[c] : -1.0) << ncomp << " " << r << " " << c;
+      }
+    }
+  }
 }
 
 template <class M>

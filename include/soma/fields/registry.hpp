@@ -57,6 +57,49 @@
 
 namespace soma {
 
+namespace detail {
+
+template <class T, class MemSpace>
+struct RowScatter {
+  View2<T, MemSpace> data;
+  View1<const T, MemSpace> values;
+  std::size_t row;
+  KOKKOS_INLINE_FUNCTION void operator()(const std::size_t c) const { data(row, c) = values(c); }
+};
+
+// Writes one row of a field. A host-accessible View is assigned directly: a
+// per-component deep_copy fences the execution space every time, which costs
+// tens of microseconds with threads.
+template <class T, class MemSpace>
+void write_row_direct(const View2<T, MemSpace>& data, std::size_t row, std::span<const T> values) {
+  for (std::size_t c = 0; c < values.size(); ++c) data(row, c) = values[c];
+}
+
+// Any other space: stage the values in one host View, move them with one
+// deep_copy, and scatter them into the row with one kernel.
+template <class T, class MemSpace>
+void write_row_staged(const View2<T, MemSpace>& data, std::size_t row, std::span<const T> values) {
+  View1<T, Kokkos::HostSpace> host(Kokkos::view_alloc("soma::field::row", Kokkos::WithoutInitializing),
+                                   values.size());
+  for (std::size_t c = 0; c < values.size(); ++c) host(c) = values[c];
+  const View1<T, MemSpace> staged = Kokkos::create_mirror_view_and_copy(MemSpace{}, host);
+  Kokkos::parallel_for("soma::field::write_row",
+                       Kokkos::RangePolicy<typename MemSpace::execution_space, std::size_t>(0, values.size()),
+                       RowScatter<T, MemSpace>{data, staged, row});
+  Kokkos::fence("soma::field::write_row");
+}
+
+template <class T, class MemSpace>
+void write_row(const View2<T, MemSpace>& data, std::size_t row, std::span<const T> values) {
+  if constexpr (Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible) {
+    write_row_direct<T, MemSpace>(data, row, values);
+  } else {
+    write_row_staged<T, MemSpace>(data, row, values);
+  }
+}
+
+}  // namespace detail
+
 template <class MemSpace>
 class FieldRegistry {
  public:
@@ -373,9 +416,7 @@ class FieldRegistry {
     const auto field = std::any_cast<const Field<T, MemSpace>&>(e.field);
     const LO row = e.space.domain().host_block(0).row(lid);
     if (row != invalid_lo) {
-      for (std::size_t c = 0; c < values.size(); ++c) {
-        Kokkos::deep_copy(Kokkos::subview(field.view(), static_cast<std::size_t>(row), c), values[c]);
-      }
+      detail::write_row<T, MemSpace>(field.view(), static_cast<std::size_t>(row), values);
       return;
     }
     using Buffer = std::map<LO, std::vector<T>>;
