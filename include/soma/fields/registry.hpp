@@ -131,21 +131,39 @@ class FieldRegistry {
         static_cast<std::size_t>(space.rows()), static_cast<std::size_t>(ncomp));
     fill(data, options.default_value);
 
+    const FamilyId existing = find_family(name, type, ncomp, space.layout());
     FieldInfo info;
     info.id = static_cast<FieldId>(entries_.size());
-    info.family = family_for(name, type, ncomp, space.layout());
-    families_[info.family].members.push_back(info.id);
-    ++families_[info.family].version;
-    info.name = std::move(name);
+    info.family = existing != invalid_family ? existing : static_cast<FamilyId>(families_.size());
+    info.name = name;
     info.type = type;
     info.ncomp = ncomp;
     info.layout = space.layout();
     info.rows = space.rows();
     for (int b = 0; b < space.domain().num_blocks(); ++b) info.dims.push_back(space.domain().info(b).dim);
+    std::optional<Family> created;
+    if (existing == invalid_family) {
+      created.emplace(FamilyKey{name, type, ncomp, space.layout()});
+      created->members.reserve(1);
+    }
 
     Field<T, MemSpace> f(info.id, space, data, options.default_value.value_or(std::vector<T>{}),
                          options.global_value.value_or(std::vector<T>{}));
-    entries_.push_back(Entry{std::move(info), space, std::any(f), true});
+    Entry entry{std::move(info), space, std::any(f), true};
+
+    // Everything that can throw has happened by now: make room first, then
+    // change the registry with operations that cannot fail.
+    grow_for_one(entries_);
+    if (created) {
+      grow_for_one(families_);
+    } else {
+      grow_for_one(families_[existing].members);
+    }
+    entries_.push_back(std::move(entry));
+    if (created) families_.push_back(std::move(*created));
+    Family& fam = families_[entries_.back().info.family];
+    fam.members.push_back(f.id());
+    ++fam.version;
     return f;
   }
 
@@ -558,11 +576,11 @@ class FieldRegistry {
     return invalid_family;
   }
 
-  FamilyId family_for(const std::string& name, DataType type, int ncomp, const Layout& layout) {
-    const FamilyId found = find_family(name, type, ncomp, layout);
-    if (found != invalid_family) return found;
-    families_.push_back(Family{FamilyKey{name, type, ncomp, layout}});
-    return static_cast<FamilyId>(families_.size() - 1);
+  // Reserves room for one more element when the vector is full, so that the
+  // push_back that follows cannot throw. Doubles, to keep growth amortized.
+  template <class V>
+  static void grow_for_one(V& v) {
+    if (v.size() == v.capacity()) v.reserve(v.empty() ? 4 : 2 * v.size());
   }
 
   std::string describe_members(const Space<MemSpace>& sp, int b) const {
