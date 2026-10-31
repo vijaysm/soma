@@ -421,15 +421,15 @@ class FieldRegistry {
   // ---- sparse growth: pending writes and commit --------------------------
 
   // Host write of one entity's values (ncomp of them) into a per_entity field
-  // with one block. Writes of an existing member land in the storage that `id`
-  // names now: a Field handle taken before a commit points at replaced storage,
-  // so check is_current() on handles that are kept across commits. A member
-  // entity is written straight into the data. A
-  // non-member of a subset field is recorded in a sorted host buffer and joins
-  // the domain at the next commit, which every mirror of the field performs
-  // first. A field over a full domain has no non-members. Throws FieldOverlap
-  // when the entity is a member of another field of the same family: such a
-  // write could never be committed.
+  // with one block. A member entity is written straight into the data, in the
+  // storage that `id` names now: a Field handle taken before a commit points at
+  // replaced storage, so check is_current() on handles kept across commits.
+  // A non-member of a subset field is recorded in a sorted host buffer and
+  // joins the domain at the next commit, which every mirror of the field
+  // performs first. A field over a full domain has no non-members.
+  // Throws FieldOverlap when the entity is a member of another field of the
+  // same family, or has a pending write in one: such a write could never be
+  // committed. A throw buffers nothing.
   template <class T>
   void set_pending(FieldId id, LO lid, std::span<const T> values) {
     Entry& e = entry_mut(id);
@@ -490,10 +490,10 @@ class FieldRegistry {
   // Merges the pending writes of one field into a new domain and data. The
   // field keeps its id and its mesh epoch; its revision advances. Field handles
   // taken earlier then refer to the old storage and report is_current() ==
-  // false; fetch the field again with get(). Idempotent
-  // and cheap when nothing is pending. If the grown domain would overlap
-  // another member of the family, FieldOverlap is thrown and the field keeps
-  // its previous domain, data, and pending buffer.
+  // false; fetch the field again with get(). Idempotent and cheap when nothing
+  // is pending. If the grown domain would overlap another member of the family,
+  // FieldOverlap is thrown and the field keeps its previous domain, data, and
+  // pending buffer.
   void commit(FieldId id) { commit_entry(entry_mut(id)); }
 
   // Throws StaleField if any live field is stale, like commit on that field.
@@ -518,6 +518,11 @@ class FieldRegistry {
   // them. Pending writes of the selected fields are committed first, so the
   // mirror and the source agree; fields that are not selected are left alone,
   // stale or with pending writes. A selected stale field throws StaleField.
+  // The selected fields are committed one after the other before anything is
+  // copied, and a commit is not undone: if a later selected field makes the
+  // call throw (for example by running out of memory), the earlier selected
+  // fields stay committed on the source, and `dst` is unchanged and can be used
+  // again. A stale selected field is found first and throws before any commit.
   // Note that this const member commits on the source: the registry keeps its
   // storage mutable for that reason. alias = false always allocates and copies
   // (create_mirror + deep_copy). alias = true reuses storage when Dst can access

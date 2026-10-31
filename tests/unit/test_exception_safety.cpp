@@ -355,3 +355,25 @@ TEST(ExceptionSafety, AFailedMirrorIntoTheHostSpaceLeavesTheDestinationEmpty) {
     expect_failed_mirrors_leave_the_destination_empty<Kokkos::HostSpace>(alias);
   }
 }
+
+// A stale selection is rejected before any commit runs, so nothing is committed
+// on the source and nothing is copied.
+TEST(ExceptionSafety, AStaleSelectionIsRejectedBeforeAnyCommit) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto first = reg.add<double>("A", subset(reg, 30, {1}), 1);
+  const auto second = reg.add<double>("B", subset(reg, 30, {2}), 1);
+  reg.set_pending<double>(first.id(), 5, std::vector<double>{1.0});
+  reg.set_pending<double>(second.id(), 6, std::vector<double>{2.0});
+  reg.set_epoch(reg.epoch() + 1);
+  reg.add<double>("C", subset(reg, 30, {3}), 1);
+  reg.set_epoch(reg.epoch() - 1);
+  Reg dst;
+  EXPECT_THROW(reg.mirror_into<HostMem>(dst, {"A", "B", "C"}, {true, true, true, true}, false),
+               soma::StaleField);
+  EXPECT_EQ(reg.pending_count(first.id()), 1u);
+  EXPECT_EQ(reg.pending_count(second.id()), 1u);
+  EXPECT_TRUE(dst.list().empty());
+  EXPECT_NO_THROW(reg.mirror_into<HostMem>(dst, {"A", "B"}, {true, true, true, true}, false));
+  EXPECT_EQ(reg.pending_count(first.id()), 0u);
+}
