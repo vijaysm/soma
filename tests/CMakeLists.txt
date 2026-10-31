@@ -1,0 +1,46 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2022-2026, Vijay Mahadevan.
+
+include(GoogleTest)
+
+find_package(GTest QUIET)
+if(NOT GTest_FOUND)
+  if(SOMA_FETCH_GTEST)
+    include("${PROJECT_SOURCE_DIR}/cmake/CPM.cmake")
+    CPMAddPackage(NAME googletest GITHUB_REPOSITORY google/googletest
+      GIT_TAG v1.17.0 VERSION 1.17.0
+      OPTIONS "INSTALL_GTEST OFF" "BUILD_GMOCK OFF")
+    if(NOT TARGET GTest::gtest)
+      add_library(GTest::gtest ALIAS gtest)
+    endif()
+  else()
+    message(FATAL_ERROR
+      "SOMA_ENABLE_TESTS=ON requires GoogleTest. Install it (e.g. brew install googletest) "
+      "or configure with -DSOMA_FETCH_GTEST=ON to download it.")
+  endif()
+endif()
+
+add_library(soma_test_main OBJECT soma_test_main.cpp)
+target_link_libraries(soma_test_main PUBLIC soma GTest::gtest PRIVATE soma_warnings)
+
+# soma_add_test(<name> SOURCES ... [RANKS 1 2 4] [LIBS ...])
+# Without MPI (or without RANKS) tests are discovered individually. With MPI
+# and RANKS, the binary is registered once per rank count.
+function(soma_add_test name)
+  cmake_parse_arguments(T "" "" "SOURCES;RANKS;LIBS" ${ARGN})
+  add_executable(${name} ${T_SOURCES})
+  target_link_libraries(${name} PRIVATE soma_test_main soma GTest::gtest soma_warnings ${T_LIBS})
+  target_compile_definitions(${name} PRIVATE
+    SOMA_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/data"
+    SOMA_LARGE_DATA_DIR="${SOMA_LARGE_DATA_DIR}")
+  if(SOMA_ENABLE_MPI AND T_RANKS)
+    foreach(np IN LISTS T_RANKS)
+      add_test(NAME ${name}.np${np}
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
+                ${MPIEXEC_PREFLAGS} $<TARGET_FILE:${name}> ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(${name}.np${np} PROPERTIES TIMEOUT 300 PROCESSORS ${np})
+    endforeach()
+  else()
+    gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST)
+  endif()
+endfunction()
