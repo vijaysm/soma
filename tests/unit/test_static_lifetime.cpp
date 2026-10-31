@@ -25,7 +25,7 @@ namespace soma_test {
 // Kokkos::finalize). Their destructors run at program exit and create and move
 // from an empty Domain or Space, which needs the shared empty snapshot.
 struct DomainHolder {
-  int unused = 0;
+  soma::LO unused = 0;
   ~DomainHolder() {
     soma::Domain<HostMem> a;
     const soma::Domain<HostMem> b(std::move(a));
@@ -34,11 +34,11 @@ struct DomainHolder {
 };
 
 struct SpaceHolder {
-  int unused = 0;
+  soma::LO unused = 0;
   ~SpaceHolder() {
     soma::Space<HostMem> a;
     const soma::Space<HostMem> b(std::move(a));
-    unused = static_cast<int>(b.rows());
+    unused = b.rows();
   }
 };
 
