@@ -27,9 +27,14 @@
 // The registry needs only entity counts (and optionally global ids) per
 // dimension, supplied through set_entities(); it never includes the mesh.
 //
-// Thread safety: none, const members included. Lazy family-index builds and the
-// automatic commit in mirror_into write to mutable members, so a const registry
-// is not safe for concurrent use. Take family handles before spawning threads.
+// Thread safety: none for mutation, and const members are not read-only. Lazy
+// family-index builds (family_handle(), lookup(), value(), family_members())
+// and the commit that mirror_into performs write to mutable members, so two
+// threads may not call into one registry unless it is only read after every
+// index has been built: take family_handle() for each family (or do one
+// lookup per family and dimension) before spawning threads, make no write,
+// add, remove, commit, mirror_into or set_epoch call meanwhile, and let the
+// threads use the handles' views or the Field Views rather than the registry.
 
 #include <algorithm>
 #include <any>
