@@ -46,14 +46,19 @@ struct SpaceHolder {
 
 // The holders are constructed first; the empty snapshots are first built after
 // them, so a function-local static snapshot would be destroyed before the
-// holders' destructors run.
-TEST(StaticLifetime, EmptyDomainAndSpaceAreUsableDuringShutdown) {
-  static soma_test::DomainHolder domain_holder;
-  static soma_test::SpaceHolder space_holder;
-  const soma::Domain<HostMem> late_domain;
-  const soma::Space<HostMem> late_space;
-  EXPECT_TRUE(late_domain.empty());
-  EXPECT_EQ(late_space.rows(), 0);
-  EXPECT_EQ(domain_holder.unused, 0);
-  EXPECT_EQ(space_holder.unused, 0);
+// holders' destructors run. The two types get one test each (ctest runs every
+// test in its own process): an empty Space holds a copy of the empty Domain
+// snapshot, which would keep that one alive in a process that used both.
+TEST(StaticLifetime, EmptyDomainIsUsableDuringShutdown) {
+  static soma_test::DomainHolder holder;
+  const soma::Domain<HostMem> late;
+  EXPECT_TRUE(late.empty());
+  EXPECT_EQ(holder.unused, 0);
+}
+
+TEST(StaticLifetime, EmptySpaceIsUsableDuringShutdown) {
+  static soma_test::SpaceHolder holder;
+  const soma::Space<HostMem> late;
+  EXPECT_EQ(late.rows(), 0);
+  EXPECT_EQ(holder.unused, 0);
 }
