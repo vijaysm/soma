@@ -782,9 +782,24 @@ class FieldRegistry {
   }
 
   // Throws FieldOverlap when another live member of e's family already holds
-  // entity `lid` (one lookup in the family index of that dimension).
+  // entity `lid`, as a member row (one lookup in the family index of that
+  // dimension) or as a pending write (one map lookup per sibling).
   void check_free(const Entry& e, LO lid) const {
     const int dim = e.space.domain().info(0).dim;
+    for (const FieldId other : families_[e.info.family].members) {
+      if (other == e.info.id) continue;
+      const Entry& o = entries_[other];
+      if (o.pending_count == 0 || o.space.domain().info(0).dim != dim) continue;
+      dispatch_data_type(o.info.type, [&]<class T>() {
+        const auto& buf = std::any_cast<const std::map<LO, std::vector<T>>&>(o.pending);
+        if (buf.find(lid) == buf.end()) return;
+        throw FieldOverlap("field '" + e.info.name + "' (" + type_text(e.info.type, e.info.ncomp) +
+                           ") cannot take entity " + entity_text(dim, lid) + " in dim " +
+                           std::to_string(dim) + ": existing '" + o.info.name + "' (" +
+                           type_text(o.info.type, o.info.ncomp) +
+                           ") has a pending write for it");
+      });
+    }
     const detail::FamilyDimData<MemSpace>& idx = dim_index(e.info.family, dim);
     const FamilyHit hit = idx.host_view().lookup(lid);
     if (!hit.found()) return;

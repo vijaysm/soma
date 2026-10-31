@@ -172,9 +172,9 @@ TEST(FieldCommit, DefaultsApplyToNonMembersAndMembersCreatedByCommit) {
   EXPECT_DOUBLE_EQ(g.value_or_default(2, 9), -1.0);
 }
 
-// Both fields buffer entity 3 while it is free; the first commit takes it, so
-// the second commit would overlap.
-TEST(FieldCommit, CommitThatWouldOverlapKeepsEverythingAndThrows) {
+// The second field cannot buffer entity 3 while the first waits to commit it, so
+// no commit ever finds an overlap; what the second field buffered earlier stays.
+TEST(FieldCommit, ARejectedBufferWriteKeepsTheEarlierOnesAndEveryCommitSucceeds) {
   Reg reg;
   reg.set_entities(2, 30);
   auto a = reg.add<double>("T", subset(reg, 2, 30, {1, 2}), 1);
@@ -182,20 +182,17 @@ TEST(FieldCommit, CommitThatWouldOverlapKeepsEverythingAndThrows) {
   b.view()(0, 0) = 10.5;
   put<double>(reg, a.id(), 3, {3.25});
   put<double>(reg, b.id(), 20, {20.5});
-  put<double>(reg, b.id(), 3, {3.5});
+  EXPECT_THROW(put<double>(reg, b.id(), 3, {3.5}), soma::FieldOverlap);
+  EXPECT_EQ(reg.pending_count(b.id()), 1u);
   reg.commit(a.id());
-  EXPECT_THROW(reg.commit(b.id()), soma::FieldOverlap);
-  EXPECT_EQ(reg.pending_count(b.id()), 2u);
+  EXPECT_NO_THROW(reg.commit(b.id()));
   const auto kept = reg.get<double>(b.id());
-  EXPECT_EQ(kept.domain().members(0), (std::vector<LO>{10, 11}));
-  EXPECT_EQ(kept.view().data(), b.view().data());
+  EXPECT_EQ(kept.domain().members(0), (std::vector<LO>{10, 11, 20}));
   EXPECT_DOUBLE_EQ(kept.view()(0, 0), 10.5);
-  EXPECT_EQ(kept.revision(), 0u);
+  EXPECT_DOUBLE_EQ(kept.view()(2, 0), 20.5);
   const auto fam = reg.family<double>("T", 1);
-  EXPECT_FALSE(reg.lookup(fam, 2, 20).found());
-  EXPECT_EQ(reg.family_members(fam, 2).size(), 2u);
-  reg.discard_pending(b.id());
-  EXPECT_NO_THROW(reg.commit_all());
+  EXPECT_EQ(reg.lookup(fam, 2, 3).slot, 0);
+  EXPECT_EQ(reg.lookup(fam, 2, 20).slot, 1);
 }
 
 TEST(FieldCommit, OverlapIsReRunForTheAffectedMemberOnly) {
@@ -350,6 +347,86 @@ TEST(FieldCommit, WriteToAnEntityOfAnotherMemberIsRejectedAtWriteTime) {
   EXPECT_EQ(reg.get<double>(b.id()).domain().members(0), (std::vector<LO>{10, 11, 20}));
 }
 
+// Both members buffer the same non-member entity: whichever commits second
+// would overlap, and its buffer would block every later mirror.
+TEST(FieldCommit, TwoMembersCannotBufferTheSameNonMemberEntity) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto a = reg.add<double>("T", subset(reg, 2, 30, {1, 2}), 1);
+  const auto b = reg.add<double>("T", subset(reg, 2, 30, {20, 21}), 1);
+  put<double>(reg, a.id(), 10, {1.0});
+  try {
+    put<double>(reg, b.id(), 10, {2.0});
+    FAIL() << "expected FieldOverlap";
+  } catch (const soma::FieldOverlap& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("pending write"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("lid 10"), std::string::npos) << msg;
+    EXPECT_NE(msg.find("'T'"), std::string::npos) << msg;
+  }
+  EXPECT_EQ(reg.pending_count(b.id()), 0u);
+  EXPECT_EQ(reg.pending_count(a.id()), 1u);
+  EXPECT_NO_THROW(reg.commit_all());
+  soma::FieldRegistry<HostMem> dst;
+  EXPECT_NO_THROW(reg.mirror_into<HostMem>(dst, {"*"}, {true, true, true, true}, false));
+  EXPECT_EQ(reg.get<double>(a.id()).domain().members(0), (std::vector<LO>{1, 2, 10}));
+  EXPECT_EQ(reg.get<double>(b.id()).domain().members(0), (std::vector<LO>{20, 21}));
+}
+
+TEST(FieldCommit, RewritingAnEntityPendingInTheSameFieldIsFine) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto a = reg.add<double>("T", subset(reg, 2, 30, {1, 2}), 1);
+  reg.add<double>("T", subset(reg, 2, 30, {20, 21}), 1);
+  put<double>(reg, a.id(), 10, {1.0});
+  EXPECT_NO_THROW(put<double>(reg, a.id(), 10, {2.0}));
+  EXPECT_EQ(reg.pending_count(a.id()), 1u);
+  reg.commit(a.id());
+  EXPECT_DOUBLE_EQ(reg.get<double>(a.id()).view()(2, 0), 2.0);
+}
+
+TEST(FieldCommit, ABufferedEntityIsFreeAgainOnceTheOtherFieldDiscardsIt) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto a = reg.add<double>("T", subset(reg, 2, 30, {1, 2}), 1);
+  const auto b = reg.add<double>("T", subset(reg, 2, 30, {20, 21}), 1);
+  put<double>(reg, a.id(), 10, {1.0});
+  EXPECT_THROW(put<double>(reg, b.id(), 10, {2.0}), soma::FieldOverlap);
+  reg.discard_pending(a.id());
+  EXPECT_NO_THROW(put<double>(reg, b.id(), 10, {2.0}));
+  EXPECT_THROW(put<double>(reg, a.id(), 10, {1.0}), soma::FieldOverlap);
+  reg.commit(b.id());
+  EXPECT_THROW(put<double>(reg, a.id(), 10, {1.0}), soma::FieldOverlap) << "now a member of b";
+}
+
+TEST(FieldCommit, PendingEntitiesOfAnotherDimensionOrFamilyDoNotConflict) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  reg.set_entities(3, 30);
+  const auto a = reg.add<double>("T", subset(reg, 2, 30, {1, 2}), 1);
+  const auto other_dim = reg.add<double>("T", subset(reg, 3, 30, {20}), 1);
+  const auto other_name = reg.add<double>("U", subset(reg, 2, 30, {20}), 1);
+  const auto other_type = reg.add<float>("T", subset(reg, 2, 30, {20}), 1);
+  put<double>(reg, a.id(), 10, {1.0});
+  EXPECT_NO_THROW(put<double>(reg, other_dim.id(), 10, {1.0}));
+  EXPECT_NO_THROW(put<double>(reg, other_name.id(), 10, {1.0}));
+  EXPECT_NO_THROW(reg.set_pending<float>(other_type.id(), 10, std::vector<float>{1.0F}));
+  EXPECT_NO_THROW(reg.commit_all());
+}
+
+TEST(FieldCommit, ThreeMembersOfOneFamilyAreAllCheckedAgainstEachOther) {
+  Reg reg;
+  reg.set_entities(2, 30);
+  const auto a = reg.add<double>("T", subset(reg, 2, 30, {1}), 1);
+  const auto b = reg.add<double>("T", subset(reg, 2, 30, {5}), 1);
+  const auto c = reg.add<double>("T", subset(reg, 2, 30, {9}), 1);
+  put<double>(reg, b.id(), 10, {1.0});
+  EXPECT_THROW(put<double>(reg, a.id(), 10, {1.0}), soma::FieldOverlap);
+  EXPECT_THROW(put<double>(reg, c.id(), 10, {1.0}), soma::FieldOverlap);
+  EXPECT_NO_THROW(put<double>(reg, c.id(), 11, {1.0}));
+  EXPECT_NO_THROW(reg.commit_all());
+}
+
 TEST(FieldCommit, ARejectedWriteDoesNotPoisonMirrorOrClone) {
   Reg reg;
   reg.set_entities(2, 30);
@@ -361,24 +438,6 @@ TEST(FieldCommit, ARejectedWriteDoesNotPoisonMirrorOrClone) {
   EXPECT_EQ(dst.get<double>(b.id()).rows(), 2);
   EXPECT_NO_THROW(reg.commit_all());
   (void)a;
-}
-
-TEST(FieldCommit, ABufferThatLostTheRaceBlocksMirrorsUntilItIsDiscarded) {
-  Reg reg;
-  reg.set_entities(2, 30);
-  const auto a = reg.add<double>("T", subset(reg, 2, 30, {1}), 1);
-  const auto b = reg.add<double>("T", subset(reg, 2, 30, {10}), 1);
-  put<double>(reg, a.id(), 3, {1.0});
-  put<double>(reg, b.id(), 3, {2.0});
-  soma::FieldRegistry<HostMem> dst;
-  EXPECT_THROW(reg.mirror_into<HostMem>(dst, {"*"}, {true, true, true, true}, false),
-               soma::FieldOverlap);
-  EXPECT_EQ(reg.get<double>(a.id()).rows(), 2) << "the first field was committed before the throw";
-  EXPECT_EQ(reg.pending_count(b.id()), 1u);
-  reg.discard_pending(b.id());
-  soma::FieldRegistry<HostMem> again;
-  EXPECT_NO_THROW(reg.mirror_into<HostMem>(again, {"*"}, {true, true, true, true}, false));
-  EXPECT_EQ(again.get<double>(b.id()).rows(), 1);
 }
 
 TEST(FieldCommit, WritesToAnEntityOfAFamilyMemberOnAnotherDimensionAreFine) {
@@ -626,27 +685,25 @@ TYPED_TEST(CommitMirrorTyped, MirrorCommitsOnlyTheSelectedFields) {
   EXPECT_EQ(reg.get<double>(b.id()).rows(), 1);
 }
 
-// Two members of one family both buffer entity 3; the second commit can never
-// succeed. A mirror that does not select them must not be affected.
+// A field that went stale with a write pending cannot be committed. A mirror
+// that does not select it must not be affected, and one that does must throw.
 TYPED_TEST(CommitMirrorTyped, AFailingCommitOfAnUnselectedFieldDoesNotBreakAMirror) {
   Reg reg;
   reg.set_entities(2, 30);
-  const auto a = reg.add<double>("T", subset(reg, 2, 30, {1}), 1);
-  const auto b = reg.add<double>("T", subset(reg, 2, 30, {10}), 1);
-  const auto other = reg.add<double>("other", subset(reg, 2, 30, {5}), 1);
-  put<double>(reg, a.id(), 3, {1.0});
-  put<double>(reg, b.id(), 3, {2.0});
-  put<double>(reg, other.id(), 6, {3.0});
+  const auto old = reg.add<double>("old", subset(reg, 2, 30, {1}), 1);
+  put<double>(reg, old.id(), 3, {1.0});
+  reg.set_epoch(reg.epoch() + 1);
+  const auto fresh = reg.add<double>("fresh", subset(reg, 2, 30, {5}), 1);
+  put<double>(reg, fresh.id(), 6, {3.0});
   soma::FieldRegistry<TypeParam> dst;
-  EXPECT_NO_THROW(reg.mirror_into<TypeParam>(dst, {"other"}, {true, true, true, true}, false));
-  EXPECT_EQ(dst.template get<double>("other").rows(), 2);
-  EXPECT_FALSE(dst.contains("T"));
-  EXPECT_EQ(reg.pending_count(a.id()), 1u);
-  EXPECT_EQ(reg.pending_count(b.id()), 1u);
+  EXPECT_NO_THROW(reg.mirror_into<TypeParam>(dst, {"fresh"}, {true, true, true, true}, false));
+  EXPECT_EQ(dst.template get<double>("fresh").rows(), 2);
+  EXPECT_FALSE(dst.contains("old"));
+  EXPECT_EQ(reg.pending_count(old.id()), 1u);
 
   soma::FieldRegistry<TypeParam> all;
   EXPECT_THROW(reg.mirror_into<TypeParam>(all, {"*"}, {true, true, true, true}, false),
-               soma::FieldOverlap);
+               soma::StaleField);
 }
 
 TYPED_TEST(CommitMirrorTyped, AFieldSwitchedOffByDimensionIsNotCommitted) {
