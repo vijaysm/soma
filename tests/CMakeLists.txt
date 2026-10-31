@@ -53,6 +53,7 @@ soma_add_test(test_data_type SOURCES unit/test_data_type.cpp)
 soma_add_test(test_layout SOURCES unit/test_layout.cpp)
 soma_add_test(test_domain SOURCES unit/test_domain.cpp)
 soma_add_test(test_space SOURCES unit/test_space.cpp)
+soma_add_test(test_field_registry SOURCES unit/test_field_registry.cpp)
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   find_package(MOAB REQUIRED)
