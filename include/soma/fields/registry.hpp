@@ -321,13 +321,13 @@ class FieldRegistry {
   // across it is stale: it stays readable, but writes through it go to storage
   // the registry no longer uses. Fetch the field again with get(). False for a
   // removed field, an unknown id, a default-constructed field, and a handle
-  // from another registry. The mesh epoch is not judged here (get() does that).
+  // from another registry (a mirror counts as another registry, aliasing or
+  // not). The mesh epoch is not judged here (get() does that).
   template <class T>
   bool is_current(const Field<T, MemSpace>& f) const noexcept {
     if (f.id() >= entries_.size()) return false;
     const Entry& e = entries_[f.id()];
-    return e.alive && f.owner() == serial_ && f.revision() == e.info.revision &&
-           e.info.type == data_type_of<T>();
+    return e.alive && f.owner() == serial_ && f.revision() == e.info.revision;
   }
 
   // Revision of the field's current storage (the value Field::revision() has
