@@ -10,7 +10,9 @@ commit `c4a45fd`), authored by the same team:
 | `tests/reference/test_canonical_moab.cpp` | `src/moabx_subentity_topology_tests.cpp` | ported to GoogleTest |
 | `cmake/CPM.cmake` | `cmake/CPM.cmake` | verbatim, v0.43.2 (MIT, CPM.cmake project) |
 | `cmake/SomaAppleOpenMP.cmake` | `CMakeLists.txt` OpenMP block, `cmake/moabxConfig.cmake.in` (c6e82ba) | adapted |
-| `tests/packaging/*` | `tests/packaging/*` | adapted |
+| `tests/packaging/{CMakeLists.txt,main.cpp}` | `tests/packaging/*` | adapted |
+| `tests/packaging/run_packaging_test.cmake` | `tests/packaging/run_packaging_test.cmake` | rewritten from the described logic, no text carried over |
+| `cmake/somaConfig.cmake.in` | `cmake/moabxConfig.cmake.in` | libomp replay adapted |
 | `data/*.h5m`, `*.vtk`, `*.msh` | `data/` | verbatim |
 | `porting/moabx-c4a45fd/*` | various | staging copies, deleted once ported (the sub-entity topology files are already gone) |
 
