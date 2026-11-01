@@ -2,6 +2,7 @@
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <numeric>
 #include <stdexcept>
@@ -54,6 +55,35 @@ soma::HostMesh scrambled_grid(Ordering ordering) {
   }
   b.add_elements(Topology::quad, eg, conn);
   return std::move(b).build(ordering);
+}
+
+// A 64 x 64 grid of quads in the plane z = 0.3. With `jitter`, a third of the
+// vertices sit one ulp above it.
+soma::HostMesh plane_at_z(bool jitter) {
+  constexpr int m = 64;
+  const auto vgid = [](int i, int j) { return static_cast<GO>(1 + i + (m + 1) * j); };
+  soma::MeshBuilder b(2);
+  std::vector<GO> vg;
+  std::vector<Real> xyz;
+  for (int j = 0; j <= m; ++j) {
+    for (int i = 0; i <= m; ++i) {
+      vg.push_back(vgid(i, j));
+      const bool up = jitter && (i * 7 + j * 13) % 3 == 0;
+      const Real z = up ? std::nextafter(0.3, 1.0) : 0.3;
+      xyz.insert(xyz.end(), {static_cast<Real>(i), static_cast<Real>(j), z});
+    }
+  }
+  b.add_vertices(vg, xyz);
+  std::vector<GO> eg;
+  std::vector<GO> conn;
+  for (int j = 0; j < m; ++j) {
+    for (int i = 0; i < m; ++i) {
+      eg.push_back(1 + i + m * j);
+      conn.insert(conn.end(), {vgid(i, j), vgid(i + 1, j), vgid(i + 1, j + 1), vgid(i, j + 1)});
+    }
+  }
+  b.add_elements(Topology::quad, eg, conn);
+  return std::move(b).build(Ordering::type_major_sfc);
 }
 
 // The same quantisation as the library (floor(t * (2^32 - 1)) on each axis of
@@ -122,6 +152,29 @@ TEST(MeshOrdering, AGradedColumnFollowsTheCurve) {
   ASSERT_EQ(column.size(), static_cast<std::size_t>(count));
   for (std::size_t i = 1; i < column.size(); ++i) {
     EXPECT_LT(column[i - 1], column[i]) << "column vertex " << i;
+  }
+}
+
+// The plane z = 0.3 gets the 2D curve of x and y.
+TEST(MeshOrdering, AnExactlyPlanarMeshOffTheOriginFollowsTheTwoAxisCurve) {
+  const auto mesh = plane_at_z(false);
+  std::vector<std::tuple<std::uint64_t, GO>> keys;
+  for (LO v = 0; v < mesh.count(0); ++v) {
+    keys.emplace_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), 64, 64),
+                      mesh.gid(0)(v));
+  }
+  EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end()));
+}
+
+// One ulp of noise in z is far below one cell of x or y and changes nothing.
+TEST(MeshOrdering, OneUlpOfNoiseOffThePlaneLeavesTheOrderUnchanged) {
+  const auto exact = plane_at_z(false);
+  const auto noisy = plane_at_z(true);
+  for (const int d : {0, 2}) {
+    ASSERT_EQ(exact.count(d), noisy.count(d));
+    for (LO i = 0; i < exact.count(d); ++i) {
+      ASSERT_EQ(exact.gid(d)(i), noisy.gid(d)(i)) << "dimension " << d << ", entity " << i;
+    }
   }
 }
 

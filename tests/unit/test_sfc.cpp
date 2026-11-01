@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <utility>
@@ -209,6 +210,27 @@ TEST(HilbertKey, QuantizesTheBoundingBox) {
   EXPECT_EQ(k, soma_test::hilbert_reference_2d(std::uint64_t{1} << 32, cell[0], cell[1]));
   const Real pt[3] = {2.0, 2.0, 2.0};
   EXPECT_EQ(soma::sfc::hilbert_key(soma::sfc::KeyBox::make(pt, pt), 2.0, 3.0, 4.0), 0u);
+}
+
+// An axis no wider than one cell of the widest axis cannot change a key and is
+// dropped; the cell is that of the curve over every axis with extent.
+TEST(HilbertKey, AnAxisNoWiderThanOneCellOfTheWidestIsDropped) {
+  const Real lo[3] = {0.0, 0.0, 0.3};
+  const Real hi[3] = {64.0, 64.0, std::nextafter(0.3, 1.0)};
+  const auto flat = soma::sfc::KeyBox::make(lo, hi);
+  EXPECT_EQ(flat.n, 2);
+  EXPECT_EQ(flat.axis[0], 0);
+  EXPECT_EQ(flat.axis[1], 1);
+  const Real cell = std::ldexp(64.0, -soma::sfc::bits_per_axis(3));
+  const Real at_one_cell[3] = {64.0, 64.0, cell};
+  const Real zero[3] = {0.0, 0.0, 0.0};
+  EXPECT_EQ(soma::sfc::KeyBox::make(zero, at_one_cell).n, 2);
+  const Real at_two_cells[3] = {64.0, 64.0, 2 * cell};
+  EXPECT_EQ(soma::sfc::KeyBox::make(zero, at_two_cells).n, 3);
+  const Real thin_x[3] = {std::ldexp(1.0, -soma::sfc::bits_per_axis(2)), 1.0, 0.0};
+  const auto y_only = soma::sfc::KeyBox::make(zero, thin_x);
+  EXPECT_EQ(y_only.n, 1);
+  EXPECT_EQ(y_only.axis[0], 1);
 }
 
 namespace soma_test {

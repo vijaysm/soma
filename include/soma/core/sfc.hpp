@@ -11,6 +11,7 @@
 // coding in place, and the bits are then interleaved. Everything is a
 // constexpr-friendly, allocation-free function that works in device code.
 
+#include <cmath>
 #include <cstdint>
 
 #include <Kokkos_Core.hpp>
@@ -66,7 +67,10 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int n
 
 // Maps a point of a bounding box to a cell of a grid with bits_per_axis(n)
 // bits per axis. Only the n axes on which the box has extent take part, so a
-// planar mesh gets a 2D curve and a single point gets key 0.
+// planar mesh gets a 2D curve and a single point gets key 0. An axis whose
+// extent is at most one cell of the widest axis, on the curve over every axis
+// with extent, is dropped too: it could change no key, yet would stretch its
+// noise over the whole grid.
 struct KeyBox {
   int n = 0;
   int axis[3] = {0, 0, 0};
@@ -75,12 +79,24 @@ struct KeyBox {
 
   // lo and hi are the box corners.
   static KeyBox make(const Real* lo, const Real* hi) {
-    KeyBox b;
+    Real extent[3] = {0, 0, 0};
+    Real widest = 0;
+    int with_extent = 0;
     for (int d = 0; d < 3; ++d) {
       if (hi[d] > lo[d]) {
+        extent[d] = hi[d] - lo[d];
+        widest = extent[d] > widest ? extent[d] : widest;
+        ++with_extent;
+      }
+    }
+    KeyBox b;
+    if (with_extent == 0) return b;
+    const Real cell = std::ldexp(widest, -bits_per_axis(with_extent));
+    for (int d = 0; d < 3; ++d) {
+      if (extent[d] > cell) {
         b.axis[b.n] = d;
         b.lo[b.n] = lo[d];
-        b.inv_extent[b.n] = Real{1} / (hi[d] - lo[d]);
+        b.inv_extent[b.n] = Real{1} / extent[d];
         ++b.n;
       }
     }
