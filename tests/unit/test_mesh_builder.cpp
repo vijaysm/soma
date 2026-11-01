@@ -2,6 +2,7 @@
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -10,6 +11,7 @@
 
 #include "mesh_fixture.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/fields/domain.hpp"
 
 using soma::GO;
 using soma::LO;
@@ -270,4 +272,20 @@ TEST(MeshBuilder, ARejectedPolygonBlockLeavesTheBuilderUsable) {
   const auto mesh = std::move(b).build();
   EXPECT_EQ(mesh.count(2), 1);
   EXPECT_EQ(mesh.gid(2)(0), 2);
+}
+
+TEST(MeshBuilder, CheckedConversionToOffsetThrowsPastTheLimit) {
+  constexpr auto off_max = static_cast<std::size_t>(std::numeric_limits<soma::Offset>::max());
+  EXPECT_EQ(soma::detail::to_offset(0, "x"), 0);
+  EXPECT_EQ(soma::detail::to_offset(off_max, "x"), std::numeric_limits<soma::Offset>::max());
+  try {
+    (void)soma::detail::to_offset(off_max + 1, "connectivity size");
+    FAIL() << "expected std::length_error";
+  } catch (const std::length_error& e) {
+    const std::string msg = e.what();
+    EXPECT_NE(msg.find("connectivity size"), std::string::npos) << msg;
+    EXPECT_NE(msg.find(std::to_string(off_max)), std::string::npos) << msg;
+  }
+  EXPECT_THROW((void)soma::detail::to_offset(std::numeric_limits<std::size_t>::max(), "x"),
+               std::length_error);
 }
