@@ -2,6 +2,7 @@
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <numeric>
@@ -98,6 +99,24 @@ std::uint64_t reference_key(double x, double y, double extent_x, double extent_y
   };
   return soma_test::hilbert_reference_2d(std::uint64_t{1} << 32, cell(x, extent_x),
                                          cell(y, extent_y));
+}
+
+// (reference key of the centroid, gid) of the elements of one segment. The
+// centroid is the vertex sum times 1 / arity, summed in connectivity order, as
+// the builder computes it.
+std::vector<std::tuple<std::uint64_t, GO>> centroid_keys(const soma::HostMesh& mesh,
+                                                         const soma::Segment& seg, double extent) {
+  std::vector<std::tuple<std::uint64_t, GO>> keys;
+  const auto off = mesh.conn_offsets(2);
+  for (LO e = seg.begin; e < seg.end; ++e) {
+    double c[2] = {0, 0};
+    for (soma::Offset k = off(e); k < off(e + 1); ++k) {
+      for (int q = 0; q < 2; ++q) c[q] += mesh.coords()(mesh.conn(2)(k), q);
+    }
+    const double inv = 1.0 / static_cast<double>(off(e + 1) - off(e));
+    keys.emplace_back(reference_key(c[0] * inv, c[1] * inv, extent, extent), mesh.gid(2)(e));
+  }
+  return keys;
 }
 
 }  // namespace
@@ -286,4 +305,50 @@ TEST(MeshOrdering, TypeBlocksStayTogetherUnderTheCurve) {
   EXPECT_EQ(mesh.segments(2)[0].topology, Topology::tri);
   EXPECT_EQ(mesh.segments(2)[0].size(), 3);
   EXPECT_EQ(mesh.segments(2)[1].topology, Topology::quad);
+  for (const soma::Segment& seg : mesh.segments(2)) {
+    const auto keys = centroid_keys(mesh, seg, 2.0);
+    EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end())) << soma::name(seg.topology);
+  }
+}
+
+// Pentagons and hexagons on a 4 x 4 grid with scrambled gids: the pentagons
+// come first, and each block follows the centroid key, then the gid.
+TEST(MeshOrdering, PolygonsFollowTheCentroidKeyWithinEachArity) {
+  const std::vector<std::array<double, 2>> pentagon{
+      {-1, -1}, {1, -1}, {1, 0.5}, {0, 1}, {-1, 0.5}};
+  const std::vector<std::array<double, 2>> hexagon{
+      {-0.5, -1}, {0.5, -1}, {1, 0}, {0.5, 1}, {-0.5, 1}, {-1, 0}};
+  soma::MeshBuilder b(2);
+  std::vector<GO> vg;
+  std::vector<Real> xyz;
+  std::vector<GO> pg;
+  std::vector<soma::Offset> off{0};
+  std::vector<GO> conn;
+  for (int p = 0; p < 16; ++p) {
+    const double cx = 1 + 2 * (p % 4);
+    const double cy = 1 + 2 * (p / 4);
+    const auto& ring = (p + p / 4) % 2 == 0 ? pentagon : hexagon;
+    for (const auto& r : ring) {
+      vg.push_back(static_cast<GO>(vg.size() + 1));
+      xyz.insert(xyz.end(), {cx + r[0], cy + r[1], 0.0});
+      conn.push_back(vg.back());
+    }
+    pg.push_back(1 + (7 * p) % 16);
+    off.push_back(static_cast<soma::Offset>(conn.size()));
+  }
+  b.add_vertices(vg, xyz);
+  b.add_polygons(pg, off, conn);
+  const auto mesh = std::move(b).build(Ordering::type_major_sfc);
+  const auto segs = mesh.segments(2);
+  ASSERT_EQ(segs.size(), 2u);
+  EXPECT_EQ(segs[0].arity, 5);
+  EXPECT_EQ(segs[0].size(), 8);
+  EXPECT_EQ(segs[1].arity, 6);
+  EXPECT_EQ(segs[1].size(), 8);
+  for (const soma::Segment& seg : segs) {
+    const auto keys = centroid_keys(mesh, seg, 8.0);
+    EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end())) << "arity " << seg.arity;
+    const GO* g = mesh.gid(2).data();
+    EXPECT_FALSE(std::is_sorted(g + seg.begin, g + seg.end)) << "arity " << seg.arity;
+  }
 }
