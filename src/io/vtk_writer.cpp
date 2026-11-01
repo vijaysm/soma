@@ -176,11 +176,21 @@ Array resolve(const HostMesh& mesh, const VtkField& want) {
   if (hits.empty()) throw std::invalid_argument("write_vtk: no " + what);
   if (hits.size() > 1) {
     std::string list;
+    bool dims_differ = false;
+    bool types_differ = false;
     for (const FieldInfo* h : hits) {
-      list += (list.empty() ? "" : "; ") + type_text(*h) + " on dimension " + dims_text(*h);
+      list += (list.empty() ? "" : "; ") + type_text(*h) + " " + describe(h->layout) +
+              " on dimension " + dims_text(*h);
+      dims_differ = dims_differ || h->dims != hits.front()->dims;
+      types_differ = types_differ || type_text(*h) != type_text(*hits.front());
     }
-    throw std::invalid_argument("write_vtk: " + what + " is ambiguous (" + list +
-                                "); select it with a dimension, or rename one");
+    const char* advice =
+        !want.dim && dims_differ ? "select it with a dimension, or rename one"
+        : types_differ ? "the candidates differ by value type, which a selection cannot "
+                         "express; rename one"
+                       : "the candidates differ by layout or domain, which a selection cannot "
+                         "express yet; rename one";
+    throw std::invalid_argument("write_vtk: " + what + " is ambiguous (" + list + "); " + advice);
   }
   const FieldInfo& info = *hits.front();
   const DomainKind kind = domain_kind(mesh, info);

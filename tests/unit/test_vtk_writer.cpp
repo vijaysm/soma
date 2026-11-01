@@ -895,7 +895,33 @@ TEST_F(VtkFiles, TwoTypesUnderOneNameAndDimensionAreAmbiguous) {
   expect_invalid(mesh, {"x"}, "ambiguous");
   const std::vector<VtkField> by_dim{{"x", 0}};
   expect_invalid_selection(mesh, by_dim,
-                           {"field 'x' on dimension 0 is ambiguous", "f64x1", "f32x1"});
+                           {"field 'x' on dimension 0 is ambiguous", "f64x1", "f32x1",
+                            "differ by value type"});
+}
+
+TEST_F(VtkFiles, FieldsThatDifferOnlyByLayoutAreReportedAsSuch) {
+  auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  mesh.fields().add_tag<double>("u", 2, 1);
+  const auto cells = soma::Domain<HostMem>::all(mesh, 2);
+  const auto nodal = soma::Layout::element_nodes(soma::NodeFamily::lagrange_equispaced, 2);
+  mesh.fields().add<double>("u", soma::make_space(mesh, cells, nodal), 1);
+  const std::vector<std::string> by_name{"u"};
+  const std::vector<VtkField> by_dim{{"u", 2}};
+  for (int k = 0; k < 2; ++k) {
+    try {
+      if (k == 0) soma::write_vtk(mesh, file(), by_name);
+      if (k == 1) soma::write_vtk(mesh, file(), by_dim);
+      ADD_FAILURE() << "expected std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+      const std::string m = e.what();
+      EXPECT_NE(m.find("field 'u'"), std::string::npos) << m;
+      EXPECT_NE(m.find("differ by layout or domain"), std::string::npos) << m;
+      EXPECT_NE(m.find("per_entity"), std::string::npos) << m;
+      EXPECT_NE(m.find("element_nodes"), std::string::npos) << m;
+      EXPECT_EQ(m.find("select it with a dimension"), std::string::npos) << m;
+    }
+    EXPECT_FALSE(fs::exists(file()));
+  }
 }
 
 TEST_F(VtkFiles, KnifeElementsHaveNoVtkType) {
