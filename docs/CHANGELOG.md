@@ -46,6 +46,33 @@ All notable changes to SOMA are recorded here. The format follows
 - Constexpr, device-callable canonical side tables for edges and faces of every fixed-arity
   topology, with vertex order that encodes orientation.
 - Variable-arity topologies (polygon, polyhedron) have no table. The tables return 0 sides.
+- `AdjacencyRequest` names graphs by `(from, to)` pair or bridge `(dim, via)`, 32 slots in a
+  `uint32_t`; a request from a dimension to itself is rejected. `(d, 0)` is the connectivity:
+  always present, never stored.
+- The mesh holds only the graphs it was asked for. `Mesh::adjacency`, `bridge` and
+  `adjacencies()` read them on the host and throw `MissingAdjacency` for one it does not hold;
+  `MeshView::adj`, `adj_codes` and `bridge` read them in kernels (under `SOMA_DEBUG` a missing
+  graph aborts).
+- Downward codes are `(offset << 1) | reversed` of the stored sub-entity against the parent's
+  canonical side, the semantics of MOAB `CN::SideNumber`. Upward codes are the local side
+  index in the parent, so a row longer than 256 throws `std::length_error`. Bridges have none.
+  Downward rows follow the side order; upward and bridge rows are sorted.
+- `build_adjacencies(mesh, request[, exec])` derives the edges and faces a request touches and
+  builds every graph it depends on, keeping only the requested ones. Results are equal bit for
+  bit on Serial, OpenMP and Threads at any thread count. A failure leaves the mesh unchanged;
+  a repeated request does nothing.
+- Edges and faces come from the lowest-creator rule over a sorted vertex-to-element transpose:
+  no hash table, no global sort. They are numbered by (topology, arity), then by (creator
+  element, side), so segments are contiguous and follow the element order. Polygon edges
+  follow the vertex cycle.
+- Explicit edges and faces in the input are adopted: the derived entity with the same vertex
+  set keeps the explicit gid and vertex order, and new ones are numbered from the largest
+  explicit gid + 1. An explicit entity that is no side of an element, that repeats another's
+  vertices, or whose vertices are no cycle throws `std::invalid_argument` naming the gid.
+  Deriving on a mesh with vertices but no elements throws.
+- Deriving a dimension bumps the mesh epoch (every field goes stale) only when it renumbers
+  explicit entities or a live field is defined on it; `FieldRegistry::uses_dimension` tells.
+- CSR scans sum in 64 bits and throw `std::length_error` when a total does not fit `Offset`.
 
 ### Node tables
 
@@ -140,6 +167,11 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `Domain::all`, `Domain::segments` (with `SegmentFilter` on topology, arity and ownership)
   and `Domain::from_list` take a mesh, and `make_space` builds spaces from the mesh topology.
 
+- `TransferOptions::adjacencies` selects the graphs a mirror holds: copied from the source
+  (`AdjSource::copy`) or built on the destination (`AdjSource::rebuild`, the default). A graph
+  needs both of its dimensions in `dims`. `clone()` copies every held graph. A memory space
+  without a default execution space compiles, and asking it to rebuild throws.
+
 ### Testing
 
 - GoogleTest harness with a shared `main` that creates the runtime scope first and agrees on
@@ -161,6 +193,21 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `soma::testing::box_mesh` builds structured hex, quad and triangle boxes with closed-form
   counts, gids, coordinates and orientation, so tests do not depend on a file or a mesher.
   A length whose product with its cell count is not finite is rejected, naming the axis.
+- Topology tests check closed forms on boxes (vertex valence; 7208 edges, 6656 faces and 1024
+  boundary faces on 8 x 16 x 16; stencil sizes 26 and 6 at an interior vertex), an independent
+  set-based check on boxes, mixed elements and polygons, and bitwise equality across execution
+  spaces. A serial golden derivation ported from moabX agrees incidence by incidence.
+- With `SOMA_ENABLE_MOAB_REFERENCE=ON`, every bundled `.h5m` mesh is checked against MOAB
+  `get_adjacencies(create_if_missing)`: sub-entities, downward sense and offset
+  (`CN::SideNumber`), upward graphs, bridges and ring neighbourhoods match exactly.
+
+### Benchmarks
+
+- `bench/bench_adjacency` times derivation and adjacency queries for SOMA on host threads
+  against MOAB, the only baseline, with a discarded warmup, median and MAD, environment
+  disclosure, JSON lines, and a checksum comparison that fails the run on a mismatch.
+  `bench/run_adjacency.sh` repeats it at threads = 1, 2, 4, ..., N. Results are in
+  `docs/benchmarks.md`.
 
 ### Packaging
 
