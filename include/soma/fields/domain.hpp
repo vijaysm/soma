@@ -33,6 +33,10 @@
 
 namespace soma {
 
+template <class MemSpace>
+class Mesh;
+struct SegmentFilter;
+
 enum class DomainKind : std::uint8_t { full, intervals, list };
 
 constexpr const char* name(DomainKind k) noexcept {
@@ -324,6 +328,12 @@ class Domain {
     }
     return single(dim, count, epoch, detail::runs_of(sorted_lids), gids);
   }
+
+  // Mesh-aware factories. Declared here, defined in soma/fields/domain_mesh.hpp,
+  // which is the only field header that includes the mesh: include it to use them.
+  static Domain all(const Mesh<MemSpace>& mesh, int dim);
+  static Domain segments(const Mesh<MemSpace>& mesh, int dim, const SegmentFilter& filter);
+  static Domain from_list(const Mesh<MemSpace>& mesh, int dim, std::span<const LO> sorted_lids);
 
   int num_blocks() const noexcept { return static_cast<int>(data_->blocks.size()); }
   LO size() const noexcept { return data_->size; }
