@@ -213,6 +213,23 @@ TEST(HilbertKey, QuantizesTheBoundingBox) {
   EXPECT_EQ(soma::sfc::hilbert_key(soma::sfc::KeyBox::make(pt, pt), 2.0, 3.0, 4.0), 0u);
 }
 
+// Every kept axis is divided by the widest extent: in a 4 x 1 box the short
+// axis covers a quarter of the grid, not all of it.
+TEST(HilbertKey, EveryAxisIsScaledByTheWidestExtent) {
+  const Real lo[3] = {-1.0, 2.0, 0.0};
+  const Real hi[3] = {3.0, 3.0, 0.0};
+  const auto box = soma::sfc::KeyBox::make(lo, hi);
+  ASSERT_EQ(box.n, 2);
+  EXPECT_EQ(box.extent, 4.0);
+  const std::uint64_t n = std::uint64_t{1} << 32;
+  const std::uint32_t half = 2147483647u;  // floor(0.5 * (2^32 - 1))
+  const std::uint32_t quarter = 1073741823u;  // floor(0.25 * (2^32 - 1))
+  EXPECT_EQ(soma::sfc::hilbert_key(box, 1.0, 3.0, 0.0),
+            soma_test::hilbert_reference_2d(n, half, quarter));
+  EXPECT_EQ(soma::sfc::hilbert_key(box, 3.0, 3.0, 0.0),
+            soma_test::hilbert_reference_2d(n, soma::sfc::max_cell(2), quarter));
+}
+
 // An axis no wider than one cell of the widest axis cannot change a key and is
 // dropped; the cell is that of the curve over every axis with extent.
 TEST(HilbertKey, AnAxisNoWiderThanOneCellOfTheWidestIsDropped) {
