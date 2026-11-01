@@ -1024,3 +1024,26 @@ TEST_F(VtkRead, PolyhedronCellsAreRejectedByName) {
                                       "CELL_TYPES 2\n5\n42\n"),
                   {"line 15", "cell 1: polyhedron cells are not supported"});
 }
+
+namespace soma_test {
+
+// A version 3.0 file of one polygon of `n` vertices over three points.
+std::string polygon_file(std::size_t n) {
+  std::string text =
+      "# vtk DataFile Version 3.0\nt\nASCII\nDATASET UNSTRUCTURED_GRID\n"
+      "POINTS 3 double\n0 0 0 1 0 0 0 1 0\nCELLS 1 " +
+      std::to_string(n + 1) + "\n" + std::to_string(n);
+  for (std::size_t i = 0; i < n; ++i) text += i % 3 == 0 ? " 0" : i % 3 == 1 ? " 1" : " 2";
+  return text + "\nCELL_TYPES 1\n7\n";
+}
+
+}  // namespace soma_test
+
+TEST_F(VtkRead, PolygonsOfMoreThan65535VerticesAreRejected) {
+  expect_rejected(soma_test::polygon_file(65536),
+                  {"line 10", "cell 0 of cell type code 7 has 65536 vertices",
+                   "a polygon has at most 65535"});
+  const auto mesh = read_text(soma_test::polygon_file(65535));
+  ASSERT_EQ(mesh.count(2), 1);
+  EXPECT_EQ(mesh.conn_offsets(2)(1), 65535);
+}

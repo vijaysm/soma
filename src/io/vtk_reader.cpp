@@ -528,6 +528,8 @@ std::optional<Topology> topology_of(int code) {
   }
 }
 
+constexpr std::size_t max_polygon_vertices = std::numeric_limits<std::uint16_t>::max();
+
 void read_cell_types(Lexer& lex, Grid& g) {
   if (!g.have_cells) lex.fail("CELL_TYPES comes before CELLS");
   if (g.have_types) lex.fail("CELL_TYPES appears twice");
@@ -552,6 +554,10 @@ void read_cell_types(Lexer& lex, Grid& g) {
     if (want == 0 ? have < 3 : have != static_cast<std::size_t>(want)) {
       lex.fail("cell " + std::to_string(c) + " of cell type code " + std::to_string(v) + " has " +
                std::to_string(have) + " vertices");
+    }
+    if (want == 0 && have > max_polygon_vertices) {
+      lex.fail("cell " + std::to_string(c) + " of cell type code 7 has " + std::to_string(have) +
+               " vertices; a polygon has at most " + std::to_string(max_polygon_vertices));
     }
     g.codes.push_back(static_cast<int>(v));
   }
