@@ -45,24 +45,25 @@ TEST(MeshBuilder, ElementsAreSortedByTopologyThenGid) {
   EXPECT_EQ(mesh.topology(2)(1), static_cast<std::uint8_t>(Topology::quad));
 }
 
-// The same fixture under the curve. Vertex keys (box 3 x 1, so a 2D curve):
-// 10 and 20 sit on the first cells of the curve, 70 at the far end of x.
+// The same fixture under the curve. The box is 3 x 1, so a 2D curve over a
+// 3 x 3 square; the order is that of hilbert_reference_2d on the cells
+// floor(v / 3 * (2^32 - 1)) of the vertices and of the element centroids.
 TEST(MeshBuilder, SpaceFillingOrderOnTheFixture) {
   const auto mesh = soma_test::two_quads_and_a_triangle(soma::Ordering::type_major_sfc);
-  const std::vector<GO> vertices{10, 20, 40, 50, 60, 70, 30};
+  const std::vector<GO> vertices{10, 20, 50, 40, 60, 30, 70};
   for (LO i = 0; i < 7; ++i) {
     EXPECT_EQ(mesh.gid(0)(i), vertices[static_cast<std::size_t>(i)]) << "vertex " << i;
   }
-  const std::vector<GO> elements{5, 3, 7};
+  const std::vector<GO> elements{5, 7, 3};
   for (LO e = 0; e < 3; ++e) {
     EXPECT_EQ(mesh.gid(2)(e), elements[static_cast<std::size_t>(e)]) << "element " << e;
   }
   const auto off = mesh.conn_offsets(2);
   const auto conn = mesh.conn(2);
-  const std::vector<LO> tri{6, 5, 4};
+  const std::vector<LO> tri{5, 6, 4};
   for (LO k = 0; k < 3; ++k) EXPECT_EQ(conn(off(0) + k), tri[static_cast<std::size_t>(k)]);
-  const std::vector<LO> quad3{1, 6, 4, 3};
-  for (LO k = 0; k < 4; ++k) EXPECT_EQ(conn(off(1) + k), quad3[static_cast<std::size_t>(k)]);
+  const std::vector<LO> quad3{1, 5, 4, 2};
+  for (LO k = 0; k < 4; ++k) EXPECT_EQ(conn(off(2) + k), quad3[static_cast<std::size_t>(k)]);
   for (LO e = 0; e < 3; ++e) {
     for (soma::Offset k = off(e); k < off(e + 1); ++k) {
       EXPECT_LT(conn(k), mesh.count(0));

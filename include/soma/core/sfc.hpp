@@ -69,15 +69,17 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int n
 // bits per axis. Only the n axes on which the box has extent take part, so a
 // planar mesh gets a 2D curve and a single point gets key 0. An axis whose
 // extent is at most one cell of the widest axis, on the curve over every axis
-// with extent, is dropped too: it could change no key, yet would stretch its
-// noise over the whole grid. When an extent overflows, every coordinate is
-// halved first (`scale`), which is exact for values that large.
+// with extent, is dropped too: it could change no key. Every kept axis is
+// divided by the widest extent, so the grid covers a cube and keeps the shape
+// of the mesh: a thin axis is not stretched over the whole grid. When an
+// extent overflows, every coordinate is halved first (`scale`), which is exact
+// for values that large.
 struct KeyBox {
   int n = 0;
   int axis[3] = {0, 0, 0};
   Real scale = 1;
   Real lo[3] = {0, 0, 0};  // scaled
-  Real extent[3] = {0, 0, 0};  // scaled
+  Real extent = 0;  // scaled; the widest axis, shared by every kept axis
 
   // lo and hi are the finite box corners.
   static KeyBox make(const Real* lo, const Real* hi) {
@@ -96,12 +98,12 @@ struct KeyBox {
       }
     }
     if (with_extent == 0) return b;
+    b.extent = widest;
     const Real cell = std::ldexp(widest, -bits_per_axis(with_extent));
     for (int d = 0; d < 3; ++d) {
       if (extent[d] > cell) {
         b.axis[b.n] = d;
         b.lo[b.n] = b.scale * lo[d];
-        b.extent[b.n] = extent[d];
         ++b.n;
       }
     }
@@ -125,7 +127,7 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_key(const KeyBox& box, Real x, Real
   std::uint32_t c[3] = {0, 0, 0};
   const std::uint32_t last = max_cell(box.n);
   for (int i = 0; i < box.n; ++i) {
-    c[i] = quantize(box.scale * p[box.axis[i]], box.lo[i], box.extent[i], last);
+    c[i] = quantize(box.scale * p[box.axis[i]], box.lo[i], box.extent, last);
   }
   return hilbert_index(c, box.n, bits_per_axis(box.n));
 }

@@ -90,8 +90,9 @@ soma::HostMesh plane_at_z(bool jitter) {
 }
 
 // The same quantisation as the library (floor(t * (2^32 - 1)) on each axis of
-// a vertex box that starts at the origin), fed to the independent 2D reference.
-std::uint64_t reference_key(double x, double y, double extent_x, double extent_y) {
+// a vertex box that starts at the origin, t = v / extent with the extent of the
+// widest axis), fed to the independent 2D reference.
+std::uint64_t reference_key(double x, double y, double extent) {
   constexpr std::uint32_t last = 0xFFFFFFFFu;
   const auto cell = [](double v, double extent) {
     const double t = v / extent;
@@ -99,8 +100,8 @@ std::uint64_t reference_key(double x, double y, double extent_x, double extent_y
     if (t >= 1) return last;
     return static_cast<std::uint32_t>(t * static_cast<double>(last));
   };
-  return soma_test::hilbert_reference_2d(std::uint64_t{1} << 32, cell(x, extent_x),
-                                         cell(y, extent_y));
+  return soma_test::hilbert_reference_2d(std::uint64_t{1} << 32, cell(x, extent),
+                                         cell(y, extent));
 }
 
 // (reference key of the centroid, gid) of the elements of one segment. The
@@ -116,7 +117,7 @@ std::vector<std::tuple<std::uint64_t, GO>> centroid_keys(const soma::HostMesh& m
       for (int q = 0; q < 2; ++q) c[q] += mesh.coords()(mesh.conn(2)(k), q);
     }
     const double inv = 1.0 / static_cast<double>(off(e + 1) - off(e));
-    keys.emplace_back(reference_key(c[0] * inv, c[1] * inv, extent, extent), mesh.gid(2)(e));
+    keys.emplace_back(reference_key(c[0] * inv, c[1] * inv, extent), mesh.gid(2)(e));
   }
   return keys;
 }
@@ -127,7 +128,7 @@ TEST(MeshOrdering, VerticesFollowTheHilbertKeyThenGid) {
   const auto mesh = scrambled_grid(Ordering::type_major_sfc);
   std::vector<std::tuple<std::uint64_t, GO>> expected;
   for (LO v = 0; v < mesh.count(0); ++v) {
-    expected.emplace_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), n, n),
+    expected.emplace_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), n),
                           mesh.gid(0)(v));
   }
   EXPECT_TRUE(std::is_sorted(expected.begin(), expected.end()));
@@ -144,7 +145,7 @@ TEST(MeshOrdering, ElementsFollowTheCentroidKeyThenGid) {
       cx += mesh.coords()(mesh.conn(2)(k), 0) / 4;
       cy += mesh.coords()(mesh.conn(2)(k), 1) / 4;
     }
-    keys.emplace_back(reference_key(cx, cy, n, n), mesh.gid(2)(e));
+    keys.emplace_back(reference_key(cx, cy, n), mesh.gid(2)(e));
   }
   EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end()));
   EXPECT_FALSE(std::is_sorted(mesh.gid(2).data(), mesh.gid(2).data() + mesh.count(2)));
@@ -169,7 +170,7 @@ TEST(MeshOrdering, AGradedColumnFollowsTheCurve) {
   std::vector<std::uint64_t> column;
   for (LO v = 0; v < mesh.count(0); ++v) {
     if (mesh.gid(0)(v) > count) continue;
-    column.push_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), 2.0, 1.0));
+    column.push_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), 2.0));
   }
   ASSERT_EQ(column.size(), static_cast<std::size_t>(count));
   for (std::size_t i = 1; i < column.size(); ++i) {
@@ -182,7 +183,7 @@ TEST(MeshOrdering, AnExactlyPlanarMeshOffTheOriginFollowsTheTwoAxisCurve) {
   const auto mesh = plane_at_z(false);
   std::vector<std::tuple<std::uint64_t, GO>> keys;
   for (LO v = 0; v < mesh.count(0); ++v) {
-    keys.emplace_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), 64, 64),
+    keys.emplace_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), 64),
                       mesh.gid(0)(v));
   }
   EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end()));
