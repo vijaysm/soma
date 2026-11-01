@@ -149,7 +149,8 @@ TEST(MeshFields, MirrorRefusesAStaleSelectedFieldAndIgnoresOthers) {
 
 TEST(MeshFields, MirrorCommitsThePendingWritesOfTheSelectedFieldsOnly) {
   auto mesh = soma_test::two_quads_and_a_triangle();
-  const auto members = soma::Domain<HostMem>::from_list(2, 3, mesh.epoch(), std::vector<LO>{0}, mesh.gid(2));
+  const auto members =
+      soma::Domain<HostMem>::from_list(2, 3, mesh.epoch(), std::vector<LO>{0}, mesh.gid(2));
   auto& reg = mesh.fields();
   const auto q = reg.add<double>("q", soma::Space<HostMem>(members, soma::Layout::per_entity()), 1);
   const auto r = reg.add<double>("r", soma::Space<HostMem>(members, soma::Layout::per_entity()), 1);

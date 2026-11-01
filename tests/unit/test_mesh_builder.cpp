@@ -152,8 +152,10 @@ TEST(MeshBuilder, ElementGidsAreUniquePerDimensionAcrossTopologies) {
 TEST(MeshBuilder, ElementGidsAreUniqueAcrossPolygonArities) {
   soma::MeshBuilder b(2);
   b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6}, std::vector<soma::Real>(18, 0.0));
-  b.add_polygons(std::vector<GO>{9}, std::vector<soma::Offset>{0, 5}, std::vector<GO>{1, 2, 3, 4, 5});
-  b.add_polygons(std::vector<GO>{9}, std::vector<soma::Offset>{0, 6}, std::vector<GO>{1, 2, 3, 4, 5, 6});
+  b.add_polygons(std::vector<GO>{9}, std::vector<soma::Offset>{0, 5},
+                 std::vector<GO>{1, 2, 3, 4, 5});
+  b.add_polygons(std::vector<GO>{9}, std::vector<soma::Offset>{0, 6},
+                 std::vector<GO>{1, 2, 3, 4, 5, 6});
   EXPECT_THROW(std::move(b).build(), std::invalid_argument);
 }
 
@@ -184,10 +186,13 @@ TEST(MeshBuilder, TheDefaultOrderingIsTheSpaceFillingCurve) {
   const auto build = [](bool explicit_ordering) {
     soma::MeshBuilder b(2);
     b.add_vertices(std::vector<GO>{50, 10, 70, 30, 20, 60, 40},
-                   std::vector<soma::Real>{1, 1, 0, 0, 0, 0, 3, 0.5, 0, 2, 0, 0, 1, 0, 0, 2, 1, 0, 0, 1, 0});
-    b.add_elements(Topology::quad, std::vector<GO>{7, 3}, std::vector<GO>{10, 20, 50, 40, 20, 30, 60, 50});
+                   std::vector<soma::Real>{1, 1, 0, 0, 0, 0, 3, 0.5, 0, 2, 0, 0, 1, 0, 0, 2, 1, 0,
+                                           0, 1, 0});
+    b.add_elements(Topology::quad, std::vector<GO>{7, 3},
+                   std::vector<GO>{10, 20, 50, 40, 20, 30, 60, 50});
     b.add_elements(Topology::tri, std::vector<GO>{5}, std::vector<GO>{30, 70, 60});
-    return explicit_ordering ? std::move(b).build(soma::Ordering::type_major_sfc) : std::move(b).build();
+    return explicit_ordering ? std::move(b).build(soma::Ordering::type_major_sfc)
+                             : std::move(b).build();
   };
   const auto a = build(true);
   const auto d = build(false);

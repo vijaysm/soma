@@ -37,7 +37,8 @@ inline soma::HostMesh two_quads_and_a_triangle(soma::Ordering ordering = soma::O
   const std::vector<GO> vg{50, 10, 70, 30, 20, 60, 40};
   const std::vector<Real> xyz{1, 1, 0, 0, 0, 0, 3, 0.5, 0, 2, 0, 0, 1, 0, 0, 2, 1, 0, 0, 1, 0};
   b.add_vertices(vg, xyz);
-  b.add_elements(soma::Topology::quad, std::vector<GO>{7, 3}, std::vector<GO>{10, 20, 50, 40, 20, 30, 60, 50});
+  b.add_elements(soma::Topology::quad, std::vector<GO>{7, 3},
+                 std::vector<GO>{10, 20, 50, 40, 20, 30, 60, 50});
   b.add_elements(soma::Topology::tri, std::vector<GO>{5}, std::vector<GO>{30, 70, 60});
   return std::move(b).build(ordering);
 }

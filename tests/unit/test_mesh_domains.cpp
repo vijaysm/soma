@@ -150,15 +150,18 @@ TEST(MeshDomains, DisjointSegmentFieldsShareAFamilyAndOverlapIsRejected) {
   SegmentFilter tris;
   tris.topology = Topology::tri;
   auto& reg = mesh.fields();
-  reg.add<double>("T", soma::make_space(mesh, Dom::segments(mesh, 2, quads), Layout::per_entity()), 1);
-  reg.add<double>("T", soma::make_space(mesh, Dom::segments(mesh, 2, tris), Layout::per_entity()), 1);
+  reg.add<double>("T", soma::make_space(mesh, Dom::segments(mesh, 2, quads), Layout::per_entity()),
+                  1);
+  reg.add<double>("T", soma::make_space(mesh, Dom::segments(mesh, 2, tris), Layout::per_entity()),
+                  1);
   const auto fam = reg.family<double>("T", 1);
   EXPECT_EQ(reg.index_kind(fam, 2), soma::DimIndexKind::multi_owner);
   try {
     reg.add_tag<double>("T", 2, 1);
     FAIL() << "expected FieldOverlap";
   } catch (const soma::FieldOverlap& e) {
-    EXPECT_NE(std::string(e.what()).find("in dim 2 at entity gid 3"), std::string::npos) << e.what();
+    EXPECT_NE(std::string(e.what()).find("in dim 2 at entity gid 3"), std::string::npos)
+        << e.what();
   }
 }
 
@@ -167,5 +170,6 @@ TEST(MeshDomains, BumpedEpochReachesNewDomains) {
   mesh.bump_epoch();
   const auto d = Dom::all(mesh, 0);
   EXPECT_EQ(d.epoch(), 2u);
-  EXPECT_NO_THROW(mesh.fields().add<double>("t", soma::make_space(mesh, d, Layout::per_entity()), 1));
+  EXPECT_NO_THROW(
+      mesh.fields().add<double>("t", soma::make_space(mesh, d, Layout::per_entity()), 1));
 }
