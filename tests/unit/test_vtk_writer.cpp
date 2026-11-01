@@ -1776,6 +1776,29 @@ TEST_F(VtkReaderFiles, ThePointTypeAndFieldDataKeywordsAreChecked) {
                   "expected FieldData, found Other");
 }
 
+TEST_F(VtkReaderFiles, NegativeCountsAreRejected) {
+  using soma_test::replaced;
+  const std::string& t = soma_test::small_file;
+  struct Case {
+    const char* from;
+    const char* to;
+    const char* needle;
+  };
+  const Case cases[] = {
+      {"POINTS 3", "POINTS -3", "the POINTS count is negative (-3)"},
+      {"CELLS 1 4", "CELLS -1 4", "the CELLS count is negative (-1)"},
+      {"CELLS 1 4", "CELLS 1 -4", "the CELLS size is negative (-4)"},
+      {"3 0 1 2", "-3 0 1 2", "the vertex count of cell 0 is negative (-3)"},
+      {"CELL_TYPES 1", "CELL_TYPES -1", "the CELL_TYPES count is negative (-1)"},
+      {"POINT_DATA 3", "POINT_DATA -3", "the POINT_DATA count is negative (-3)"},
+      {"FieldData 1", "FieldData -1", "the FieldData array count is negative (-1)"},
+      {"v 1 3", "v 1 -3", "the tuple count of array v is negative (-3)"},
+  };
+  for (const Case& c : cases) expect_rejected(replaced(t, c.from, c.to), c.needle);
+  expect_rejected(replaced(t, "v 1 3", "v -1 3"), "array v has -1 components");
+  expect_rejected(replaced(t, "v 1 3", "v 0 3"), "array v has 0 components");
+}
+
 template <class M>
 class VtkTyped : public VtkFiles {};
 using Spaces = ::testing::Types<HostMem, DevMem>;

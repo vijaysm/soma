@@ -140,6 +140,14 @@ class VtkTokens {
   T number() {
     return parse_number<T>(next());
   }
+  // A count or a size, which must not be negative.
+  std::size_t count(const std::string& what) {
+    const std::string t = next();
+    if (parse_number<std::int64_t>(t) < 0) {
+      throw std::runtime_error("vtk: " + what + " is negative (" + t + ")");
+    }
+    return parse_number<std::size_t>(t);
+  }
 
  private:
   std::istringstream& in_;
@@ -172,12 +180,16 @@ inline VtkAttributes read_attributes(VtkTokens& tok, std::size_t count) {
   out.count = count;
   tok.expect("FIELD");
   tok.expect("FieldData");
-  const auto narrays = tok.number<std::size_t>();
+  const auto narrays = tok.count("the FieldData array count");
   for (std::size_t a = 0; a < narrays; ++a) {
     VtkArray arr;
     arr.name = tok.next();
     arr.ncomp = tok.number<int>();
-    arr.tuples = tok.number<std::size_t>();
+    if (arr.ncomp < 1) {
+      throw std::runtime_error("vtk: array " + arr.name + " has " + std::to_string(arr.ncomp) +
+                               " components");
+    }
+    arr.tuples = tok.count("the tuple count of array " + arr.name);
     arr.type = tok.next();
     if (arr.tuples != count) {
       throw std::runtime_error("vtk: array " + arr.name + " has " +
@@ -214,7 +226,7 @@ inline VtkFile read_vtk_file(const std::filesystem::path& path) {
   tok.expect("DATASET");
   tok.expect("UNSTRUCTURED_GRID");
   tok.expect("POINTS");
-  f.npoints = tok.number<std::size_t>();
+  f.npoints = tok.count("the POINTS count");
   f.point_type = tok.next();
   if (f.point_type != "double") {
     throw std::runtime_error("vtk: unexpected POINTS type '" + f.point_type + "'");
@@ -222,11 +234,11 @@ inline VtkFile read_vtk_file(const std::filesystem::path& path) {
   for (std::size_t i = 0; i < 3 * f.npoints; ++i) f.points.push_back(tok.number<double>());
 
   tok.expect("CELLS");
-  f.cells_declared = tok.number<std::size_t>();
-  f.cells_size_declared = tok.number<std::size_t>();
+  f.cells_declared = tok.count("the CELLS count");
+  f.cells_size_declared = tok.count("the CELLS size");
   std::size_t used = 0;
   for (std::size_t c = 0; c < f.cells_declared; ++c) {
-    const auto k = tok.number<std::size_t>();
+    const auto k = tok.count("the vertex count of cell " + std::to_string(c));
     std::vector<std::int64_t> cell;
     for (std::size_t i = 0; i < k; ++i) {
       const auto id = tok.number<std::int64_t>();
@@ -245,7 +257,7 @@ inline VtkFile read_vtk_file(const std::filesystem::path& path) {
   }
 
   tok.expect("CELL_TYPES");
-  const auto ntypes = tok.number<std::size_t>();
+  const auto ntypes = tok.count("the CELL_TYPES count");
   if (ntypes != f.cells_declared) {
     throw std::runtime_error("vtk: CELL_TYPES count differs from CELLS");
   }
@@ -264,7 +276,7 @@ inline VtkFile read_vtk_file(const std::filesystem::path& path) {
 
   while (!tok.done()) {
     const std::string section = tok.next();
-    const auto count = tok.number<std::size_t>();
+    const auto count = tok.count("the " + section + " count");
     if (section == "POINT_DATA") {
       if (f.point_data.present) throw std::runtime_error("vtk: POINT_DATA appears twice");
       if (count != f.npoints) {
