@@ -50,6 +50,10 @@ struct Derived {
 
 namespace detail {
 
+// "No entity" in atomic_min reductions over local ids. At namespace scope, not
+// a local, so that every device compiler sees it in the lambdas.
+inline constexpr LO no_entity = Kokkos::Experimental::finite_max_v<LO>;
+
 // The lowest (element, side) around min(S) whose side has the vertex set S, as
 // a slot side_off(c) + t; -1 if none.
 template <class M, class SideOff>
@@ -191,16 +195,15 @@ Derived<typename ExecSpace::memory_space> derive(
       });
 
   // Adoption of the explicit entities of dimension k.
-  constexpr LO none = Kokkos::Experimental::finite_max_v<LO>;
   View1<LO, M> adopted(Kokkos::view_alloc(exec, base + "::adopted"), static_cast<std::size_t>(n));
-  Kokkos::deep_copy(exec, adopted, none);
+  Kokkos::deep_copy(exec, adopted, detail::no_entity);
   const LO nx = mesh.count(k);
   GO max_gid = 0;
   if (nx > 0) {
     Kokkos::View<LO, M> orphan(base + "::orphan");
     Kokkos::View<LO, M> twin(base + "::twin");
-    Kokkos::deep_copy(exec, orphan, none);
-    Kokkos::deep_copy(exec, twin, none);
+    Kokkos::deep_copy(exec, orphan, detail::no_entity);
+    Kokkos::deep_copy(exec, twin, detail::no_entity);
     Kokkos::parallel_for(
         base + "::adopt", Policy(exec, 0, nx), KOKKOS_LAMBDA(const LO x) {
           const Side side = entity_as_side(m, k, x);
@@ -236,12 +239,12 @@ Derived<typename ExecSpace::memory_space> derive(
           Kokkos::HostSpace{}, Kokkos::subview(mesh.gid(k), std::pair<LO, LO>(x, x + 1)));
       return std::to_string(h(0));
     };
-    if (bad[0] != none) {
+    if (bad[0] != detail::no_entity) {
       throw std::invalid_argument("derive: explicit entity gid " + gid_of(bad[0]) +
                                   " of dimension " + std::to_string(k) +
                                   " is no side of any element");
     }
-    if (bad[1] != none) {
+    if (bad[1] != detail::no_entity) {
       throw std::invalid_argument("derive: explicit entity gid " + gid_of(bad[1]) +
                                   " of dimension " + std::to_string(k) +
                                   " repeats the vertices of another");
@@ -259,7 +262,7 @@ Derived<typename ExecSpace::memory_space> derive(
   View1<Offset, M> fresh(base + "::fresh", static_cast<std::size_t>(n));
   Kokkos::parallel_for(
       base + "::mark_new", Policy(exec, 0, n),
-      KOKKOS_LAMBDA(const LO id) { fresh(id) = adopted(id) == none ? 1 : 0; });
+      KOKKOS_LAMBDA(const LO id) { fresh(id) = adopted(id) == detail::no_entity ? 1 : 0; });
   View1<Offset, M> fresh_rank(base + "::fresh_rank", static_cast<std::size_t>(n) + 1);
   (void)soma::topology::detail::exclusive_scan(exec, base + "::scan_new", n, fresh, fresh_rank);
   const auto xoff = mesh.conn_offsets(k);
@@ -268,7 +271,7 @@ Derived<typename ExecSpace::memory_space> derive(
   Kokkos::parallel_for(
       base + "::gids", Policy(exec, 0, n), KOKKOS_LAMBDA(const LO id) {
         const LO x = adopted(id);
-        if (x == none) {
+        if (x == detail::no_entity) {
           gid(id) = max_gid + 1 + static_cast<GO>(fresh_rank(id));
           return;
         }
@@ -279,7 +282,7 @@ Derived<typename ExecSpace::memory_space> derive(
   // Every slot: its entity and its orientation against the stored vertices.
   // Only an adopted entity can fail to match: its order is the input's.
   Kokkos::View<LO, M> crossed(base + "::crossed");
-  Kokkos::deep_copy(exec, crossed, none);
+  Kokkos::deep_copy(exec, crossed, detail::no_entity);
   Kokkos::parallel_for(
       base + "::orient", Policy(exec, 0, ne), KOKKOS_LAMBDA(const LO e) {
         const int ns = side_count(m, D, e, k);
@@ -296,7 +299,7 @@ Derived<typename ExecSpace::memory_space> derive(
   exec.fence(base);
   {
     const LO bad = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, crossed)();
-    if (bad != none) {
+    if (bad != detail::no_entity) {
       const auto h = Kokkos::create_mirror_view_and_copy(
           Kokkos::HostSpace{}, Kokkos::subview(b.gid, std::pair<LO, LO>(bad, bad + 1)));
       throw std::invalid_argument("derive: explicit entity gid " + std::to_string(h(0)) +
