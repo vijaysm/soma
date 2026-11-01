@@ -121,11 +121,70 @@ def polygons():
     return g
 
 
+# VTK writes vtkIdType values as int, so the ids below fit 32 bits.
+def ids():
+    points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (2, 0, 0)]
+    g = grid(points, [(9, [0, 1, 2, 3]), (5, [1, 4, 2])])
+    pd = g.GetPointData()
+    pd.SetGlobalIds(array(vtk.vtkIdTypeArray, "pgid", 1, [10, 20, 30, 40, 2147483647]))
+    pd.SetPedigreeIds(array(vtk.vtkIntArray, "pped", 1,
+                            [-1, 7, 0, 2147483647, -2147483648]))
+    cd = g.GetCellData()
+    cd.SetGlobalIds(array(vtk.vtkIdTypeArray, "cgid", 1, [100, -2147483648]))
+    cd.SetPedigreeIds(array(vtk.vtkStringArray, "cped", 1, ["first cell", ""]))
+    cd.AddArray(array(vtk.vtkDoubleArray, "w", 1, [0.5, 1.5]))
+    return g
+
+
+def strings():
+    points = [(0, 0, 0), (1, 0, 0), (1, 1, 0), (0, 1, 0), (2, 0, 0)]
+    g = grid(points, [(9, [0, 1, 2, 3]), (5, [1, 4, 2])])
+    fd = g.GetFieldData()
+    fd.AddArray(array(vtk.vtkDoubleArray, "TIME", 1, [2.5]))
+    fd.AddArray(array(vtk.vtkStringArray, "label", 1, ["hello world"]))
+    fd.AddArray(array(vtk.vtkStringArray, "tags", 1, ["", "x y"]))
+    pd = g.GetPointData()
+    pd.AddArray(array(vtk.vtkStringArray, "names", 1, ["p0", "", "p 2", "p3", "%"]))
+    pd.AddArray(array(vtk.vtkDoubleArray, "h", 1, [0.5, 1.5, 2.5, 3.5, 4.5]))
+    g.GetCellData().AddArray(array(vtk.vtkIntArray, "ci", 1, [3, 4]))
+    return g
+
+
+def chars():
+    g = grid([(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)], [(10, [0, 1, 2, 3])])
+    pd = g.GetPointData()
+    for cls, name, values in ((vtk.vtkCharArray, "c", [-128, 127, 0, 65]),
+                              (vtk.vtkSignedCharArray, "sc", [-128, 127, 0, 1])):
+        a = cls()
+        a.SetName(name)
+        for v in values:
+            a.InsertNextTuple1(v)
+        pd.AddArray(a)
+    return g
+
+
+def polyhedron():
+    g = grid([(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)], [])
+    faces = [(0, 2, 1), (0, 1, 3), (1, 2, 3), (0, 3, 2)]
+    stream = vtk.vtkIdList()
+    stream.InsertNextId(len(faces))
+    for f in faces:
+        stream.InsertNextId(len(f))
+        for i in f:
+            stream.InsertNextId(i)
+    g.InsertNextCell(vtk.VTK_POLYHEDRON, stream)
+    return g
+
+
 def main():
     out_dir = sys.argv[1] if len(sys.argv) > 1 else os.path.dirname(os.path.abspath(__file__))
     write(tri_quad_2d(), out_dir, "tri_quad_2d")
     write(mixed_3d(), out_dir, "mixed_3d")
     write(polygons(), out_dir, "polygons")
+    write(ids(), out_dir, "ids")
+    write(strings(), out_dir, "strings")
+    write(chars(), out_dir, "chars")
+    write(polyhedron(), out_dir, "polyhedron")
 
 
 main()
