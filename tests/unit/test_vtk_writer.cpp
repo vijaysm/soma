@@ -1430,6 +1430,22 @@ TEST_F(VtkFiles, NoFreeTemporaryNameThrowsAndOverwritesNothing) {
             (soma_test::Names{"link", "out.vtk", "taken", "victim.txt"}));
 }
 
+TEST_F(VtkFiles, ANameWithoutRoomForTheSuffixThrows) {
+  if (::pathconf(dir_.c_str(), _PC_NAME_MAX) != 255) {
+    GTEST_SKIP() << "file names here are not limited to 255 bytes";
+  }
+  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  EXPECT_NO_THROW(soma::write_vtk(mesh, file(std::string(248, 'n'))));
+  const fs::path too_long = file(std::string(249, 'n'));
+  try {
+    soma::write_vtk(mesh, too_long);
+    ADD_FAILURE() << "expected std::runtime_error";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find(too_long.string()), std::string::npos) << e.what();
+  }
+  EXPECT_EQ(soma_test::names_in(dir_), soma_test::Names{std::string(248, 'n')});
+}
+
 TEST_F(VtkFiles, ASymlinkAtThePathIsReplacedNotFollowed) {
   const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
   { std::ofstream(file("real.vtk"), std::ios::binary) << "old\n"; }
