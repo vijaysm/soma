@@ -84,6 +84,9 @@ soma_add_test(test_transpose SOURCES unit/test_transpose.cpp)
 soma_add_test(test_derive SOURCES unit/test_derive.cpp)
 soma_add_test(test_bridge SOURCES unit/test_bridge.cpp)
 soma_add_test(test_build_adjacencies SOURCES unit/test_build_adjacencies.cpp)
+soma_add_test(test_golden_derivation
+  SOURCES golden/test_golden_derivation.cpp golden/serial_derivation.cpp)
+target_include_directories(test_golden_derivation PRIVATE unit golden)
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   find_package(MOAB REQUIRED)
