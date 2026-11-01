@@ -172,7 +172,12 @@ class Mesh {
     return copy_to<Dst>(opts, true);
   }
 
-  Mesh clone() const { return mirror<MemSpace>(TransferOptions::everything()); }
+  Mesh clone() const {
+    TransferOptions o = TransferOptions::everything();
+    o.adjacencies = adjacencies();
+    o.adj_source = TransferOptions::AdjSource::copy;
+    return mirror<MemSpace>(o);
+  }
 
   void swap(Mesh& o) noexcept {
     std::swap(dim_, o.dim_);
@@ -230,6 +235,7 @@ class Mesh {
       throw std::invalid_argument(
           "TransferOptions: element dimensions and coordinates need dims[0] (the vertices)");
     }
+    check_adjacency_dims(o);
     Mesh<Dst> out;
     out.dim_ = dim_;
     out.epoch_ = epoch_;
@@ -246,9 +252,41 @@ class Mesh {
       transfer(t.gid, s.gid, alias);
     }
     if (o.coordinates) transfer(out.coords_, coords_, alias);
+    if (o.adj_source == TransferOptions::AdjSource::copy) {
+      for (int s = 0; s < adjacency_slots; ++s) {
+        if (!o.adjacencies.has_slot(s) || (s < 16 && s % 4 == 0)) continue;  // (d, 0): conn
+        if (!adj_.has(s)) {
+          throw MissingAdjacency("TransferOptions: the source holds no graph in slot " +
+                                 std::to_string(s) + " to copy");
+        }
+        const auto& g = adj_.graphs[static_cast<std::size_t>(s)];
+        Adjacency<Dst> c;
+        transfer(c.offsets, g.offsets, alias);
+        transfer(c.targets, g.targets, alias);
+        transfer(c.codes, g.codes, alias);
+        out.adj_.put(s, std::move(c));
+      }
+    } else if (!o.adjacencies.empty()) {
+      throw std::invalid_argument("TransferOptions: rebuilding adjacencies is not implemented");
+    }
     fields_.template mirror_into<Dst>(out.fields_, o.fields, o.dims, alias);
     out.attach_fields();
     return out;
+  }
+
+  // A graph needs both of its dimensions; (d, 0) graphs are never stored.
+  static void check_adjacency_dims(const TransferOptions& o) {
+    for (int a = 0; a < 4; ++a) {
+      for (int b = 0; b < 4; ++b) {
+        if (a == b) continue;
+        const bool wanted = o.adjacencies.has(a, b) || o.adjacencies.has_bridge(a, b);
+        if (wanted && !(o.dims[static_cast<std::size_t>(a)] && o.dims[static_cast<std::size_t>(b)])) {
+          throw std::invalid_argument("TransferOptions: a graph between dimensions " +
+                                      std::to_string(a) + " and " + std::to_string(b) +
+                                      " needs both in dims");
+        }
+      }
+    }
   }
 
   int dim_ = 0;
