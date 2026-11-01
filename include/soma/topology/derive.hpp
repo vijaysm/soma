@@ -300,6 +300,70 @@ Derived<typename ExecSpace::memory_space> derive(
   return out;
 }
 
+// Downward graph d -> k for 1 <= k < d <= D between entities that already
+// exist: side s of entity e is looked up among the k-entities around its
+// lowest vertex (vertex_to_k is the 0 -> k graph). Rows are in side order;
+// codes are the orientation of the stored k-entity against the side. Throws
+// std::logic_error if a side has no k-entity, as when a face's edges were
+// never derived.
+template <class ExecSpace>
+Adjacency<typename ExecSpace::memory_space> downward(
+    const ExecSpace& exec, const Mesh<typename ExecSpace::memory_space>& mesh, int d, int k,
+    const Adjacency<typename ExecSpace::memory_space>& vertex_to_k) {
+  using M = typename ExecSpace::memory_space;
+  using Policy = Kokkos::RangePolicy<ExecSpace>;
+  const std::string base = "soma::topology::downward" + std::to_string(d) + std::to_string(k);
+  const MeshView<M> m = mesh.view();
+  const LO ne = mesh.count(d);
+  View1<Offset, M> nsides(base + "::nsides", static_cast<std::size_t>(ne));
+  Kokkos::parallel_for(
+      base + "::count_sides", Policy(exec, 0, ne),
+      KOKKOS_LAMBDA(const LO e) { nsides(e) = side_count(m, d, e, k); });
+  Adjacency<M> out;
+  out.offsets = View1<Offset, M>(base + "::offsets", static_cast<std::size_t>(ne) + 1);
+  const Offset nslots =
+      soma::topology::detail::exclusive_scan(exec, base + "::scan", ne, nsides, out.offsets);
+  out.targets = View1<LO, M>(base + "::targets", static_cast<std::size_t>(nslots));
+  out.codes = View1<std::uint8_t, M>(base + "::codes", static_cast<std::size_t>(nslots));
+  const auto off = out.offsets;
+  const auto tgt = out.targets;
+  const auto codes = out.codes;
+  const UView1<Offset, M> up_off = vertex_to_k.offsets;
+  const UView1<LO, M> up_tgt = vertex_to_k.targets;
+  Kokkos::View<int, M> missing(base + "::missing");
+  Kokkos::parallel_for(
+      base + "::lookup", Policy(exec, 0, ne), KOKKOS_LAMBDA(const LO e) {
+        const int ns = side_count(m, d, e, k);
+        for (int s = 0; s < ns; ++s) {
+          const Side side = side_of(m, d, e, k, s);
+          const LO v = min_vertex(side);
+          LO found = invalid_lo;
+          Match mt;
+          for (Offset j = up_off(v); j < up_off(v + 1) && found == invalid_lo; ++j) {
+            const LO y = up_tgt(j);
+            const Side other = entity_as_side(m, k, y);
+            if (other.n != side.n || !same_set(other.v, side.v, side.n)) continue;
+            found = y;
+            mt = connectivity_match(side.v, other.v, side.n);
+          }
+          if (found == invalid_lo) {
+            Kokkos::atomic_store(&missing(), 1);
+            found = 0;
+          }
+          tgt(off(e) + s) = found;
+          codes(off(e) + s) = orientation_code(mt.offset, mt.reversed);
+        }
+      });
+  int hmissing = 0;
+  Kokkos::deep_copy(exec, hmissing, missing);
+  exec.fence(base);
+  if (hmissing != 0) {
+    throw std::logic_error(base + ": a side of a dimension " + std::to_string(d) +
+                           " entity has no dimension " + std::to_string(k) + " entity");
+  }
+  return out;
+}
+
 }  // namespace soma::topology
 
 #endif  // SOMA_TOPOLOGY_DERIVE_HPP_
