@@ -120,15 +120,24 @@ std::string dims_text(const FieldInfo& i) {
   return s;
 }
 
+// Why a name cannot be a legacy array name, or nullptr when it can.
+const char* name_problem(const std::string& n) {
+  if (n.empty()) return "it is empty";
+  if (n.size() > 255) return "it is longer than 255 characters";
+  if (n == "NULL_ARRAY") return "NULL_ARRAY is reserved";
+  for (const char c : n) {
+    const auto u = static_cast<unsigned char>(c);
+    if (u == ' ' || (u >= '\t' && u <= '\r')) return "it holds whitespace";
+    if (u < 0x20 || u == 0x7f) return "it holds a control character";
+    if (c == '%') return "it holds '%'";
+  }
+  return nullptr;
+}
+
 void check_name(const std::string& n) {
-  const bool plain = !n.empty() && std::none_of(n.begin(), n.end(), [](char c) {
-    return static_cast<unsigned char>(c) <= 0x20 || static_cast<unsigned char>(c) == 0x7f ||
-           c == '%';
-  });
-  if (!plain || n.size() > 255 || n == "NULL_ARRAY") {
-    throw std::invalid_argument("write_vtk: field name " + in_quotes(n) +
-                                " cannot be written (it is empty, longer than 255 characters, "
-                                "holds whitespace, control characters or '%', or is NULL_ARRAY)");
+  if (const char* why = name_problem(n)) {
+    throw std::invalid_argument("write_vtk: field name " + in_quotes(n) + " cannot be written: " +
+                                why);
   }
 }
 

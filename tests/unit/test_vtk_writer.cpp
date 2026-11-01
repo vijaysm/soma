@@ -1003,17 +1003,47 @@ TEST_F(VtkFiles, UnknownNamesAreRejected) {
 
 TEST_F(VtkFiles, NamesThatBreakTheFormatAreRejected) {
   auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
-  for (const char* n : {"has space", "tab\t", "pct%20", "NULL_ARRAY"}) {
+  for (const char* n : {"has space", "tab\t", "line\nfeed", "cr\r"}) {
     mesh.fields().add_tag<double>(n, 0, 1);
-    expect_invalid(mesh, {n}, "cannot be written");
+    expect_invalid(mesh, {n}, "it holds whitespace");
   }
-  expect_invalid(mesh, {""}, "cannot be written");
+  expect_invalid(mesh, {""}, "it is empty");
+}
+
+TEST_F(VtkFiles, ControlCharactersInNamesAreRejected) {
+  auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  for (const char* n : {"soh\x01", "del\x7f", "esc\x1b"}) {
+    mesh.fields().add_tag<double>(n, 0, 1);
+    expect_invalid(mesh, {n}, "it holds a control character");
+  }
+  mesh.fields().add_tag<double>("caf\xc3\xa9", 0, 1);
+  const std::vector<std::string> utf8{"caf\xc3\xa9"};
+  EXPECT_NO_THROW(soma::write_vtk(mesh, file(), utf8));
+}
+
+TEST_F(VtkFiles, PercentInNamesIsRejected) {
+  auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  mesh.fields().add_tag<double>("pct%20", 0, 1);
+  expect_invalid(mesh, {"pct%20"}, "it holds '%'");
+}
+
+TEST_F(VtkFiles, NamesLongerThan255CharactersAreRejected) {
+  auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
   const std::string longest(256, 'n');
   mesh.fields().add_tag<double>(longest, 0, 1);
-  expect_invalid(mesh, {longest}, "cannot be written");
+  expect_invalid(mesh, {longest}, "it is longer than 255 characters");
   const std::string longest_ok(255, 'm');
   mesh.fields().add_tag<double>(longest_ok, 0, 1);
   const std::vector<std::string> names{longest_ok};
+  EXPECT_NO_THROW(soma::write_vtk(mesh, file(), names));
+}
+
+TEST_F(VtkFiles, NullArrayIsAReservedName) {
+  auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  mesh.fields().add_tag<double>("NULL_ARRAY", 0, 1);
+  expect_invalid(mesh, {"NULL_ARRAY"}, "NULL_ARRAY is reserved");
+  mesh.fields().add_tag<double>("NULL_ARRAYS", 0, 1);
+  const std::vector<std::string> names{"NULL_ARRAYS"};
   EXPECT_NO_THROW(soma::write_vtk(mesh, file(), names));
 }
 
