@@ -195,3 +195,14 @@ TEST(MeshAdjacency, MovesAndSwapsCarryTheGraphs) {
   EXPECT_TRUE(b.adjacencies().empty());
   EXPECT_EQ(soma_test::to_host(c.adjacency(2, 1)), before);
 }
+
+TEST(MeshAdjacency, DimensionsLeftOutOfAMirrorHaveNoConnectivity) {
+  const soma::HostMesh mesh = soma_test::two_quads_and_a_triangle();
+  soma::TransferOptions o;
+  o.dims = {true, true, false, true};
+  const auto m = mesh.mirror<DevMem>(o);
+  EXPECT_FALSE(m.has_adjacency(2, 0));
+  EXPECT_THROW((void)m.adjacency(2, 0), soma::MissingAdjacency);
+  EXPECT_TRUE(m.has_adjacency(1, 0));  // kept, and empty: offsets {0}
+  EXPECT_EQ(soma_test::to_host(m.adjacency(1, 0)).offsets, std::vector<Offset>{0});
+}

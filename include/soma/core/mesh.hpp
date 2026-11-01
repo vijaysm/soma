@@ -93,12 +93,13 @@ class Mesh {
   View1<const GO, MemSpace> gid(int d) const { return block(d).gid; }
   CoordView<MemSpace> coords() const noexcept { return coords_; }  // writable geometry
 
-  // has_adjacency(d, 0) is true for 1 <= d <= dim(): the connectivity. The
+  // has_adjacency(d, 0) is true for 1 <= d <= dim() when the mesh holds that
+  // dimension (a mirror may leave it out): the connectivity. The
   // lookups throw MissingAdjacency for a graph the mesh does not hold, and
   // std::invalid_argument for a pair that is not one of distinct dimensions.
   bool has_adjacency(int from, int to) const {
     AdjacencyRequest{}.add(from, to);
-    if (to == 0) return from <= dim_;
+    if (to == 0) return from <= dim_ && block(from).conn_offsets.extent(0) > 0;
     return adj_.has(pair_slot(from, to));
   }
   bool has_bridge(int dim, int via) const {
