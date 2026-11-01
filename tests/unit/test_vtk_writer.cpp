@@ -1333,6 +1333,50 @@ TEST_F(VtkFiles, AFailedRenameLeavesNoTemporaryFile) {
   EXPECT_EQ(soma_test::names_in(dir_), soma_test::Names{"occupied"});
 }
 
+namespace soma_test {
+
+mode_t mode_of(const fs::path& p) {
+  struct stat st {};
+  if (::stat(p.c_str(), &st) != 0) throw std::runtime_error("cannot stat " + p.string());
+  return st.st_mode & 0777;
+}
+
+mode_t current_umask() {
+  const mode_t m = ::umask(0);
+  ::umask(m);
+  return m;
+}
+
+// Sets the umask, and restores the earlier one however the scope is left.
+class UmaskFor {
+ public:
+  explicit UmaskFor(mode_t m) : saved_(::umask(m)) {}
+  UmaskFor(const UmaskFor&) = delete;
+  UmaskFor& operator=(const UmaskFor&) = delete;
+  ~UmaskFor() { ::umask(saved_); }
+
+ private:
+  mode_t saved_;
+};
+
+// Sets the mode of a directory, and restores the earlier one however the
+// scope is left.
+class DirectoryModeFor {
+ public:
+  DirectoryModeFor(const fs::path& dir, mode_t m) : dir_(dir), saved_(mode_of(dir)) {
+    if (::chmod(dir_.c_str(), m) != 0) throw std::runtime_error("cannot chmod " + dir_.string());
+  }
+  DirectoryModeFor(const DirectoryModeFor&) = delete;
+  DirectoryModeFor& operator=(const DirectoryModeFor&) = delete;
+  ~DirectoryModeFor() { ::chmod(dir_.c_str(), saved_); }
+
+ private:
+  fs::path dir_;
+  mode_t saved_;
+};
+
+}  // namespace soma_test
+
 // A directory without write permission blocks the temporary file. The owner
 // of the earlier file can still write to it, so a writer that opened the
 // target itself would change it.
@@ -1343,16 +1387,19 @@ TEST_F(VtkFiles, ABlockedTemporaryLeavesTheTargetUntouched) {
   const std::string before = soma_test::slurp(file());
   mesh.fields().add_tag<double>("a", 0, 1);
   const std::vector<std::string> names{"a"};
-  ASSERT_EQ(::chmod(dir_.c_str(), 0500), 0);
-  try {
-    soma::write_vtk(mesh, file(), names);
-    ADD_FAILURE() << "expected std::runtime_error";
-  } catch (const std::runtime_error& e) {
-    const std::string m = e.what();
-    EXPECT_NE(m.find(file().string()), std::string::npos) << m;
-    EXPECT_NE(m.find(std::generic_category().message(EACCES)), std::string::npos) << m;
+  const mode_t dir_mode = soma_test::mode_of(dir_);
+  {
+    const soma_test::DirectoryModeFor read_only(dir_, 0500);
+    try {
+      soma::write_vtk(mesh, file(), names);
+      ADD_FAILURE() << "expected std::runtime_error";
+    } catch (const std::runtime_error& e) {
+      const std::string m = e.what();
+      EXPECT_NE(m.find(file().string()), std::string::npos) << m;
+      EXPECT_NE(m.find(std::generic_category().message(EACCES)), std::string::npos) << m;
+    }
   }
-  ASSERT_EQ(::chmod(dir_.c_str(), 0700), 0);
+  EXPECT_EQ(soma_test::mode_of(dir_), dir_mode);
   EXPECT_EQ(soma_test::slurp(file()), before);
   EXPECT_EQ(soma_test::names_in(dir_), soma_test::Names{"out.vtk"});
 }
@@ -1456,29 +1503,23 @@ TEST_F(VtkFiles, ASymlinkAtThePathIsReplacedNotFollowed) {
   EXPECT_EQ(soma_test::read_vtk_file(file()).npoints, 7u);
 }
 
-namespace soma_test {
-
-mode_t mode_of(const fs::path& p) {
-  struct stat st {};
-  if (::stat(p.c_str(), &st) != 0) throw std::runtime_error("cannot stat " + p.string());
-  return st.st_mode & 0777;
-}
-
-}  // namespace soma_test
-
 TEST_F(VtkFiles, TheUmaskDecidesTheModeOfTheFile) {
   const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
   { std::ofstream(file(), std::ios::binary) << "earlier\n"; }
   ASSERT_EQ(::chmod(file().c_str(), 0600), 0);
-  const mode_t saved = ::umask(027);
-  soma::write_vtk(mesh, file());
-  const mode_t replaced = soma_test::mode_of(file());
-  ::umask(022);
-  soma::write_vtk(mesh, file("fresh.vtk"));
-  const mode_t fresh = soma_test::mode_of(file("fresh.vtk"));
-  ::umask(saved);
-  EXPECT_EQ(replaced, mode_t{0640});
-  EXPECT_EQ(fresh, mode_t{0644});
+  const mode_t before = soma_test::current_umask();
+  {
+    const soma_test::UmaskFor narrow(027);
+    soma::write_vtk(mesh, file());
+  }
+  EXPECT_EQ(soma_test::current_umask(), before);
+  {
+    const soma_test::UmaskFor wide(022);
+    soma::write_vtk(mesh, file("fresh.vtk"));
+  }
+  EXPECT_EQ(soma_test::current_umask(), before);
+  EXPECT_EQ(soma_test::mode_of(file()), mode_t{0640});
+  EXPECT_EQ(soma_test::mode_of(file("fresh.vtk")), mode_t{0644});
 }
 
 namespace soma_test {
