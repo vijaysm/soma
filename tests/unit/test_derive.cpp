@@ -298,3 +298,14 @@ TEST(Derive, RejectsOrphanAndRepeatedExplicitEntities) {
     EXPECT_NE(std::string(e.what()).find("gid 51"), std::string::npos) << e.what();
   }
 }
+
+TEST(Derive, RejectsExplicitFacesWhoseVerticesAreNoCycle) {
+  // the bottom face of the first hex is (1, 2, 5, 4); (1, 5, 2, 4) crosses it
+  const auto bowtie = soma_test::box_with_explicit(2, {100}, {1, 5, 2, 4});
+  try {
+    (void)soma_test::derive_on(bowtie, 2, HostExec{});
+    ADD_FAILURE() << "no exception";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_NE(std::string(e.what()).find("gid 100"), std::string::npos) << e.what();
+  }
+}

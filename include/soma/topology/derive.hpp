@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <Kokkos_Core.hpp>
@@ -276,6 +277,9 @@ Derived<typename ExecSpace::memory_space> derive(
       });
 
   // Every slot: its entity and its orientation against the stored vertices.
+  // Only an adopted entity can fail to match: its order is the input's.
+  Kokkos::View<LO, M> crossed(base + "::crossed");
+  Kokkos::deep_copy(exec, crossed, none);
   Kokkos::parallel_for(
       base + "::orient", Policy(exec, 0, ne), KOKKOS_LAMBDA(const LO e) {
         const int ns = side_count(m, D, e, k);
@@ -284,11 +288,22 @@ Derived<typename ExecSpace::memory_space> derive(
           const LO id = down(creator(i));
           const Side side = side_of(m, D, e, k, s);
           const Match mt = connectivity_match(side.v, &conn(offs(id)), side.n);
+          if (!mt.same) Kokkos::atomic_min(&crossed(), id);
           codes(i) = orientation_code(mt.offset, mt.reversed);
           if (creator(i) != i) down(i) = id;
         }
       });
   exec.fence(base);
+  {
+    const LO bad = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, crossed)();
+    if (bad != none) {
+      const auto h = Kokkos::create_mirror_view_and_copy(
+          Kokkos::HostSpace{}, Kokkos::subview(b.gid, std::pair<LO, LO>(bad, bad + 1)));
+      throw std::invalid_argument("derive: explicit entity gid " + std::to_string(h(0)) +
+                                  " of dimension " + std::to_string(k) +
+                                  " does not list its vertices in cycle order");
+    }
+  }
 
   // Segments: one per kind present.
   SegmentTable& st = b.segments;
