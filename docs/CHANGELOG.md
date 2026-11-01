@@ -54,6 +54,14 @@ All notable changes to SOMA are recorded here. The format follows
   `hierarchical` and `moab_native` orderings, serendipity sets at order 2, permutations between
   orderings, and a cache of device Views.
 
+### Legacy VTK output
+
+- `write_vtk` writes a `HostMesh` as an ASCII legacy VTK unstructured grid (version 3.0) with no
+  dependency: cells of the mesh dimension, and `per_entity` fields over full domains as
+  `FIELD` arrays in `POINT_DATA` and `CELL_DATA`. Subset, stale and uncommitted fields, and
+  `knife` and `polyhedron` elements, are rejected. Output goes through a temporary file and a
+  rename, and is byte-for-byte deterministic.
+
 ### Testing
 
 - GoogleTest harness with a shared `main` that creates the runtime scope first and agrees on
