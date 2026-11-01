@@ -92,9 +92,13 @@ All notable changes to SOMA are recorded here. The format follows
 - `Ordering::type_major_sfc` orders vertices and elements along a Hilbert curve of their
   coordinates and centroids within each topology and arity. It is the default ordering;
   `Ordering::file` keeps gid order. The curve uses 32 bits per axis over one or two axes and
-  21 over three. An axis no wider than one cell of the widest axis is left out, so noise
-  off a plane does not change the order, and boxes whose extent overflows still spread over
-  the grid.
+  21 over three. Every axis is scaled by the widest extent, so the curve follows the shape
+  of the mesh and a thin or noisy axis is not stretched over the whole grid. An axis no
+  wider than one cell of the widest axis is left out, so noise off a plane does not change
+  the order, and boxes whose extent overflows still spread over the grid.
+- `soma::vertex_span_report(mesh, dim)` gives the mean and largest vertex span (max - min
+  vertex local id) of the elements of one dimension, a host-side measure of how well an
+  ordering keeps the vertices of an element close in memory.
 - `Domain::all`, `Domain::segments` (with `SegmentFilter` on topology, arity and ownership)
   and `Domain::from_list` take a mesh, and `make_space` builds spaces from the mesh topology.
 
