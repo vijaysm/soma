@@ -56,16 +56,17 @@ soma::HostMesh scrambled_grid(Ordering ordering) {
   return std::move(b).build(ordering);
 }
 
-// The same quantisation as the library (floor(t * (2^21 - 1)) on each axis of
-// the vertex box), fed to the independent 2D reference.
+// The same quantisation as the library (floor(t * (2^32 - 1)) on each axis of
+// a vertex box that starts at the origin), fed to the independent 2D reference.
 std::uint64_t reference_key(double x, double y, double extent_x, double extent_y) {
+  constexpr std::uint32_t last = 0xFFFFFFFFu;
   const auto cell = [](double v, double extent) {
     const double t = v / extent;
     if (!(t > 0)) return std::uint32_t{0};
-    if (t >= 1) return soma::sfc::max_cell;
-    return static_cast<std::uint32_t>(t * static_cast<double>(soma::sfc::max_cell));
+    if (t >= 1) return last;
+    return static_cast<std::uint32_t>(t * static_cast<double>(last));
   };
-  return soma_test::hilbert_reference_2d(std::uint32_t{1} << soma::sfc::bits_per_axis, cell(x, extent_x),
+  return soma_test::hilbert_reference_2d(std::uint64_t{1} << 32, cell(x, extent_x),
                                          cell(y, extent_y));
 }
 
@@ -95,6 +96,33 @@ TEST(MeshOrdering, ElementsFollowTheCentroidKeyThenGid) {
   }
   EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end()));
   EXPECT_FALSE(std::is_sorted(mesh.gid(2).data(), mesh.gid(2).data() + mesh.count(2)));
+}
+
+// 200 collinear vertices 1e-7 of the extent apart, gids decreasing upwards.
+// Each falls in its own cell, so they follow the curve without falling back to
+// the gid, which would reverse them.
+TEST(MeshOrdering, AGradedColumnFollowsTheCurve) {
+  constexpr int count = 200;
+  soma::MeshBuilder b(2);
+  std::vector<GO> vg;
+  std::vector<Real> xyz;
+  for (int i = 0; i < count; ++i) {
+    vg.push_back(count - i);
+    xyz.insert(xyz.end(), {1.0, 1e-7 * i, 0.0});
+  }
+  vg.insert(vg.end(), {1000, 1001});
+  xyz.insert(xyz.end(), {0.0, 0.0, 0.0, 2.0, 1.0, 0.0});
+  b.add_vertices(vg, xyz);
+  const auto mesh = std::move(b).build(Ordering::type_major_sfc);
+  std::vector<std::uint64_t> column;
+  for (LO v = 0; v < mesh.count(0); ++v) {
+    if (mesh.gid(0)(v) > count) continue;
+    column.push_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), 2.0, 1.0));
+  }
+  ASSERT_EQ(column.size(), static_cast<std::size_t>(count));
+  for (std::size_t i = 1; i < column.size(); ++i) {
+    EXPECT_LT(column[i - 1], column[i]) << "column vertex " << i;
+  }
 }
 
 TEST(MeshOrdering, FileOrderStaysByGid) {

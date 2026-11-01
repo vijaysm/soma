@@ -10,18 +10,18 @@
 namespace soma_test {
 
 // Independent 2D reference: the classic rotate-and-flip conversion of (x, y) to
-// the distance along the curve of an n x n grid, n a power of two. It shares no
-// code with soma::sfc::hilbert_index.
-inline std::uint64_t hilbert_reference_2d(std::uint32_t n, std::uint32_t x, std::uint32_t y) {
+// the distance along the curve of an n x n grid, n a power of two up to 2^32.
+// It shares no code with soma::sfc::hilbert_index.
+inline std::uint64_t hilbert_reference_2d(std::uint64_t n, std::uint32_t x, std::uint32_t y) {
   std::uint64_t d = 0;
-  for (std::uint32_t s = n / 2; s > 0; s /= 2) {
-    const std::uint32_t rx = (x & s) != 0 ? 1U : 0U;
-    const std::uint32_t ry = (y & s) != 0 ? 1U : 0U;
-    d += static_cast<std::uint64_t>(s) * s * ((3U * rx) ^ ry);
+  for (std::uint64_t s = n / 2; s > 0; s /= 2) {
+    const std::uint64_t rx = (x & s) != 0 ? 1U : 0U;
+    const std::uint64_t ry = (y & s) != 0 ? 1U : 0U;
+    d += s * s * ((3U * rx) ^ ry);
     if (ry == 0) {
       if (rx == 1) {
-        x = n - 1 - x;
-        y = n - 1 - y;
+        x = static_cast<std::uint32_t>(n - 1 - x);
+        y = static_cast<std::uint32_t>(n - 1 - y);
       }
       std::swap(x, y);
     }

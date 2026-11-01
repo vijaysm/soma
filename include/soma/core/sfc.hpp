@@ -19,8 +19,14 @@
 
 namespace soma::sfc {
 
-inline constexpr int bits_per_axis = 21;
-inline constexpr std::uint32_t max_cell = (std::uint32_t{1} << bits_per_axis) - 1;
+// Bits per axis of a curve over n axes: the most that fit both a 64-bit key
+// and a 32-bit cell coordinate, so 32 for one or two axes and 21 for three.
+KOKKOS_INLINE_FUNCTION constexpr int bits_per_axis(int n) { return n == 3 ? 21 : 32; }
+
+// The last cell along an axis of a curve over n axes.
+KOKKOS_INLINE_FUNCTION constexpr std::uint32_t max_cell(int n) {
+  return static_cast<std::uint32_t>((std::uint64_t{1} << bits_per_axis(n)) - 1);
+}
 
 // Index along the Hilbert curve of the cell c[0..n), which has `bits` bits per
 // axis (n in 1..3, bits in 1..32, n * bits <= 64; asserted in debug builds).
@@ -58,9 +64,9 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int n
   return key;
 }
 
-// Maps a point of a bounding box to a cell of the 2^21 grid. Only the axes on
-// which the box has extent take part, so a planar mesh gets a 2D curve and a
-// single point gets key 0.
+// Maps a point of a bounding box to a cell of a grid with bits_per_axis(n)
+// bits per axis. Only the n axes on which the box has extent take part, so a
+// planar mesh gets a 2D curve and a single point gets key 0.
 struct KeyBox {
   int n = 0;
   int axis[3] = {0, 0, 0};
@@ -82,22 +88,24 @@ struct KeyBox {
   }
 };
 
-// floor(t * max_cell) for t in [0, 1]; values outside the box (and NaN) clamp.
-KOKKOS_INLINE_FUNCTION std::uint32_t quantize(Real v, Real lo, Real inv_extent) {
+// floor(t * last) for t in [0, 1]; values outside the box (and NaN) clamp.
+KOKKOS_INLINE_FUNCTION std::uint32_t quantize(Real v, Real lo, Real inv_extent,
+                                              std::uint32_t last) {
   const Real t = (v - lo) * inv_extent;
   if (!(t > 0)) return 0;
-  if (t >= 1) return max_cell;
-  return static_cast<std::uint32_t>(t * static_cast<Real>(max_cell));
+  if (t >= 1) return last;
+  return static_cast<std::uint32_t>(t * static_cast<Real>(last));
 }
 
 KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_key(const KeyBox& box, Real x, Real y, Real z) {
   if (box.n == 0) return 0;
   const Real p[3] = {x, y, z};
   std::uint32_t c[3] = {0, 0, 0};
+  const std::uint32_t last = max_cell(box.n);
   for (int i = 0; i < box.n; ++i) {
-    c[i] = quantize(p[box.axis[i]], box.lo[i], box.inv_extent[i]);
+    c[i] = quantize(p[box.axis[i]], box.lo[i], box.inv_extent[i], last);
   }
-  return hilbert_index(c, box.n, bits_per_axis);
+  return hilbert_index(c, box.n, bits_per_axis(box.n));
 }
 
 }  // namespace soma::sfc

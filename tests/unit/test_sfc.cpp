@@ -64,6 +64,30 @@ TEST(Hilbert, TwoDimensionsMatchTheIndependentReference) {
   }
 }
 
+// Two axes use all 32 bits; sampled cells, the corners among them, against
+// the reference on the 2^32 x 2^32 grid.
+TEST(Hilbert, TwoDimensionsMatchTheReferenceAtFullWidth) {
+  ASSERT_EQ(soma::sfc::bits_per_axis(2), 32);
+  const std::uint64_t n = std::uint64_t{1} << 32;
+  const std::uint32_t m = soma::sfc::max_cell(2);
+  EXPECT_EQ(m, 0xFFFFFFFFu);
+  std::vector<std::uint32_t> samples{0U, 1U, 2U, m / 3, m / 2, m / 2 + 1, m - 1, m};
+  std::uint64_t s = 0x2545F4914F6CDD1DULL;
+  for (int i = 0; i < 64; ++i) {
+    s ^= s << 13;
+    s ^= s >> 7;
+    s ^= s << 17;
+    samples.push_back(static_cast<std::uint32_t>(s >> 32));
+  }
+  for (const std::uint32_t x : samples) {
+    for (const std::uint32_t y : samples) {
+      ASSERT_EQ(index_2d(x, y, 32), soma_test::hilbert_reference_2d(n, x, y))
+          << "(" << x << "," << y << ")";
+    }
+  }
+  EXPECT_EQ(index_2d(m, 0, 32), ~std::uint64_t{0});
+}
+
 TEST(Hilbert, KnownValuesOnAnEightByEightGrid) {
   EXPECT_EQ(index_2d(0, 0, 3), 0u);
   EXPECT_EQ(index_2d(7, 0, 3), 63u);
@@ -129,37 +153,44 @@ TEST(Hilbert, OneDimensionIsTheIdentity) {
     const std::uint32_t c[1] = {x};
     EXPECT_EQ(soma::sfc::hilbert_index(c, 1, 6), x);
   }
+  for (const std::uint32_t x : {0U, 1U, 0x80000000U, 0xFFFFFFFFU}) {
+    const std::uint32_t c[1] = {x};
+    EXPECT_EQ(soma::sfc::hilbert_index(c, 1, soma::sfc::bits_per_axis(1)), x);
+  }
 }
 
 TEST(Hilbert, FullWidthKeysUseAllSixtyThreeBits) {
-  const std::uint32_t m = soma::sfc::max_cell;
+  ASSERT_EQ(soma::sfc::bits_per_axis(3), 21);
+  ASSERT_EQ(soma::sfc::bits_per_axis(1), 32);
+  const std::uint32_t m = soma::sfc::max_cell(3);
   std::uint64_t max_key = 0;
   for (const std::uint32_t x : {0U, 1U, m / 2, m - 1, m}) {
     for (const std::uint32_t y : {0U, 1U, m / 2, m - 1, m}) {
       for (const std::uint32_t z : {0U, 1U, m / 2, m - 1, m}) {
-        max_key = std::max(max_key, index_3d(x, y, z, soma::sfc::bits_per_axis));
+        max_key = std::max(max_key, index_3d(x, y, z, soma::sfc::bits_per_axis(3)));
       }
     }
   }
   EXPECT_LT(max_key, std::uint64_t{1} << 63);
   EXPECT_GT(max_key, std::uint64_t{1} << 61);
-  EXPECT_EQ(index_3d(m, 0, 0, soma::sfc::bits_per_axis), (std::uint64_t{1} << 63) - 1);
+  EXPECT_EQ(index_3d(m, 0, 0, soma::sfc::bits_per_axis(3)), (std::uint64_t{1} << 63) - 1);
 }
 
 TEST(HilbertKey, QuantizesTheBoundingBox) {
   const Real lo[3] = {-1.0, 0.0, 5.0};
   const Real hi[3] = {1.0, 4.0, 5.0};
   const auto box = soma::sfc::KeyBox::make(lo, hi);
+  const std::uint32_t last = soma::sfc::max_cell(2);
   EXPECT_EQ(box.n, 2);
   EXPECT_EQ(box.axis[0], 0);
   EXPECT_EQ(box.axis[1], 1);
   EXPECT_EQ(soma::sfc::hilbert_key(box, -1.0, 0.0, 5.0), 0u);
-  EXPECT_EQ(soma::sfc::quantize(-1.0, -1.0, 0.5), 0u);
-  EXPECT_EQ(soma::sfc::quantize(1.0, -1.0, 0.5), soma::sfc::max_cell);
-  EXPECT_EQ(soma::sfc::quantize(5.0, -1.0, 0.5), soma::sfc::max_cell);
-  EXPECT_EQ(soma::sfc::quantize(-7.0, -1.0, 0.5), 0u);
-  EXPECT_GT(soma::sfc::quantize(0.0, -1.0, 0.5), 0u);
-  EXPECT_LT(soma::sfc::quantize(0.0, -1.0, 0.5), soma::sfc::max_cell);
+  EXPECT_EQ(soma::sfc::quantize(-1.0, -1.0, 0.5, last), 0u);
+  EXPECT_EQ(soma::sfc::quantize(1.0, -1.0, 0.5, last), last);
+  EXPECT_EQ(soma::sfc::quantize(5.0, -1.0, 0.5, last), last);
+  EXPECT_EQ(soma::sfc::quantize(-7.0, -1.0, 0.5, last), 0u);
+  EXPECT_GT(soma::sfc::quantize(0.0, -1.0, 0.5, last), 0u);
+  EXPECT_LT(soma::sfc::quantize(0.0, -1.0, 0.5, last), last);
   const auto a = soma::sfc::hilbert_key(box, 0.25, 1.0, 5.0);
   EXPECT_EQ(a, soma::sfc::hilbert_key(box, 0.25, 1.0, 99.0));
   // A box that is flat in y keeps x and z: the curve runs over axes 0 and 2.
@@ -171,8 +202,11 @@ TEST(HilbertKey, QuantizesTheBoundingBox) {
   const auto k = soma::sfc::hilbert_key(xz, 0.75, 5.0, 0.25);
   EXPECT_EQ(k, soma::sfc::hilbert_key(xz, 0.75, -3.0, 0.25));
   EXPECT_NE(k, soma::sfc::hilbert_key(xz, 0.75, 5.0, 0.75));
-  const std::uint32_t cell[2] = {soma::sfc::quantize(0.75, 0.0, 1.0), soma::sfc::quantize(0.25, 0.0, 1.0)};
-  EXPECT_EQ(k, soma::sfc::hilbert_index(cell, 2, soma::sfc::bits_per_axis));
+  const std::uint32_t cell[2] = {soma::sfc::quantize(0.75, 0.0, 1.0, last),
+                                 soma::sfc::quantize(0.25, 0.0, 1.0, last)};
+  EXPECT_EQ(cell[0], 3221225471u);
+  EXPECT_EQ(cell[1], 1073741823u);
+  EXPECT_EQ(k, soma_test::hilbert_reference_2d(std::uint64_t{1} << 32, cell[0], cell[1]));
   const Real pt[3] = {2.0, 2.0, 2.0};
   EXPECT_EQ(soma::sfc::hilbert_key(soma::sfc::KeyBox::make(pt, pt), 2.0, 3.0, 4.0), 0u);
 }
