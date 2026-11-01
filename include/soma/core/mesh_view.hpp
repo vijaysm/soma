@@ -11,6 +11,7 @@
 
 #include "soma/core/topology.hpp"
 #include "soma/core/types.hpp"
+#include "soma/core/view_types.hpp"
 
 namespace soma {
 
@@ -20,18 +21,16 @@ namespace soma {
 template <class MemSpace>
 struct MeshView {
   using Traits = Kokkos::MemoryTraits<Kokkos::Unmanaged | Kokkos::RandomAccess>;
-  template <class T>
-  using U = Kokkos::View<const T*, Kokkos::LayoutLeft, MemSpace, Traits>;
   using CoordsU = Kokkos::View<const Real* [3], Kokkos::LayoutLeft, MemSpace, Traits>;
 
   int dim = 0;
   Kokkos::Array<LO, 4> counts{};
   Kokkos::Array<LO, 4> interior_ends{};
   Kokkos::Array<LO, 4> owned_ends{};
-  Kokkos::Array<U<Offset>, 4> offsets{};
-  Kokkos::Array<U<LO>, 4> conn{};
-  Kokkos::Array<U<std::uint8_t>, 4> topo{};
-  Kokkos::Array<U<GO>, 4> gids{};
+  Kokkos::Array<UView1<Offset, MemSpace>, 4> offsets{};
+  Kokkos::Array<UView1<LO, MemSpace>, 4> conn{};
+  Kokkos::Array<UView1<std::uint8_t, MemSpace>, 4> topo{};
+  Kokkos::Array<UView1<GO, MemSpace>, 4> gids{};
   CoordsU coords{};
 
   KOKKOS_INLINE_FUNCTION LO count(int d) const { return counts[static_cast<std::size_t>(d)]; }
