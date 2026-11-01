@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <new>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -705,37 +706,9 @@ std::vector<std::size_t> rows_by_gid(const HostMesh& mesh, int dim) {
   return row_of;
 }
 
-}  // namespace
-
-HostMesh read_vtk(const fs::path& path) {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) throw std::runtime_error("read_vtk: cannot open " + path.string());
-  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-  if (in.bad()) throw std::runtime_error("read_vtk: cannot read " + path.string());
-  Lexer lex(std::move(text), path);
-  const Grid g = parse(lex);
-
+// The mesh of a parsed file, with its arrays attached as tags.
+HostMesh build(const Grid& g, const std::vector<int>& cell_dim, int dim) {
   const std::size_t ncells = g.codes.size();
-  std::vector<int> cell_dim(ncells);
-  int dim = 0;
-  for (std::size_t c = 0; c < ncells; ++c) {
-    cell_dim[c] = dimension(*topology_of(g.codes[c]));
-    dim = std::max(dim, cell_dim[c]);
-  }
-  if (g.npoints > static_cast<std::size_t>(std::numeric_limits<LO>::max()) ||
-      g.conn.size() > static_cast<std::size_t>(std::numeric_limits<Offset>::max())) {
-    throw std::runtime_error("read_vtk: " + path.string() +
-                             ": the mesh is too large for the LO and Offset types of this build");
-  }
-  if (!g.cell_arrays.empty() &&
-      std::any_of(cell_dim.begin(), cell_dim.end(), [&](int d) { return d != dim; })) {
-    throw std::runtime_error("read_vtk: " + path.string() + ", line " +
-                             std::to_string(g.cell_data_line) +
-                             ": CELL_DATA on cells of several dimensions is not supported; the "
-                             "cells span dimensions up to " +
-                             std::to_string(dim));
-  }
-
   MeshBuilder b(dim);
   {
     std::vector<GO> gids(g.npoints);
@@ -778,6 +751,46 @@ HostMesh read_vtk(const fs::path& path) {
   attach(g.point_arrays, 0);
   attach(g.cell_arrays, dim);
   return mesh;
+}
+
+}  // namespace
+
+HostMesh read_vtk(const fs::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) throw std::runtime_error("read_vtk: cannot open " + path.string());
+  std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+  if (in.bad()) throw std::runtime_error("read_vtk: cannot read " + path.string());
+  Lexer lex(std::move(text), path);
+  const Grid g = parse(lex);
+
+  const std::size_t ncells = g.codes.size();
+  std::vector<int> cell_dim(ncells);
+  int dim = 0;
+  for (std::size_t c = 0; c < ncells; ++c) {
+    cell_dim[c] = dimension(*topology_of(g.codes[c]));
+    dim = std::max(dim, cell_dim[c]);
+  }
+  if (g.npoints > static_cast<std::size_t>(std::numeric_limits<LO>::max()) ||
+      g.conn.size() > static_cast<std::size_t>(std::numeric_limits<Offset>::max())) {
+    throw std::runtime_error("read_vtk: " + path.string() +
+                             ": the mesh is too large for the LO and Offset types of this build");
+  }
+  if (!g.cell_arrays.empty() &&
+      std::any_of(cell_dim.begin(), cell_dim.end(), [&](int d) { return d != dim; })) {
+    throw std::runtime_error("read_vtk: " + path.string() + ", line " +
+                             std::to_string(g.cell_data_line) +
+                             ": CELL_DATA on cells of several dimensions is not supported; the "
+                             "cells span dimensions up to " +
+                             std::to_string(dim));
+  }
+
+  try {
+    return build(g, cell_dim, dim);
+  } catch (const std::bad_alloc&) {
+    throw;
+  } catch (const std::exception& e) {
+    throw std::runtime_error("read_vtk: " + path.string() + ": " + e.what());
+  }
 }
 
 }  // namespace soma
