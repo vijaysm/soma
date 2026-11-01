@@ -378,6 +378,7 @@ struct Grid {
   bool have_points = false;
   std::vector<Real> xyz;
   bool have_cells = false;
+  std::size_t cells_line = 0;
   bool have_types = false;
   std::vector<std::size_t> offsets;  // ncells + 1
   std::vector<std::int64_t> conn;
@@ -444,6 +445,7 @@ ValueType integer_type(Lexer& lex, std::string_view type, const char* of) {
 void read_cells(Lexer& lex, Grid& g) {
   if (g.have_cells) lex.fail("CELLS appears twice");
   g.have_cells = true;
+  g.cells_line = lex.line();
   if (g.major >= 5) {
     const std::size_t noffsets = lex.count("the CELLS offset count", 1);
     const std::size_t nconn = lex.count("the CELLS connectivity size", 1);
@@ -495,10 +497,18 @@ void read_cells(Lexer& lex, Grid& g) {
     }
     lex.skip_metadata_if_present();
   }
-  for (std::size_t k = 0; k < g.conn.size(); ++k) {
-    if (g.conn[k] < 0 || static_cast<std::uint64_t>(g.conn[k]) >= g.npoints) {
-      lex.fail("a cell refers to point " + std::to_string(g.conn[k]) + " of " +
-               std::to_string(g.npoints) + (g.have_points ? "" : " (CELLS before POINTS)"));
+}
+
+// Run once the cell types are known: a polyhedron holds a face stream, not ids.
+void check_point_ids(Lexer& lex, const Grid& g) {
+  for (std::size_t c = 0; c + 1 < g.offsets.size(); ++c) {
+    for (std::size_t k = g.offsets[c]; k < g.offsets[c + 1]; ++k) {
+      if (g.conn[k] < 0 || static_cast<std::uint64_t>(g.conn[k]) >= g.npoints) {
+        lex.fail_at(g.cells_line, "cell " + std::to_string(c) + " refers to point " +
+                                      std::to_string(g.conn[k]) + " of " +
+                                      std::to_string(g.npoints) +
+                                      (g.have_points ? "" : " (CELLS before POINTS)"));
+      }
     }
   }
 }
@@ -544,6 +554,7 @@ void read_cell_types(Lexer& lex, Grid& g) {
     g.codes.push_back(static_cast<int>(v));
   }
   lex.skip_metadata_if_present();
+  check_point_ids(lex, g);
 }
 
 // The attribute arrays of one POINT_DATA or CELL_DATA section.

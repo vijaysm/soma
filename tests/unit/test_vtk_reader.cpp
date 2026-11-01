@@ -893,7 +893,6 @@ TEST_F(VtkRead, OtherMalformedFilesAreRejected) {
   expect_rejected(replaced(replaced(t, "c 1 2 int", "c 1 2 unsigned_char"), "7\n", "256\n"),
                   {"line 19", "'256' in array 'c' of CELL_DATA is out of range"});
   expect_rejected(replaced(t, "7\n", "7.5\n"), {"line 19", "expected an integer"});
-  expect_rejected(replaced(t, "3 1 3 2", "3 1 4 2"), {"refers to point 4 of 4"});
   expect_rejected(replaced(t, "CELL_TYPES 2\n5\n5\n", "CELL_TYPES 2\n5\n9\n"),
                   {"line 15", "cell 1 of cell type code 9 has 3 vertices"});
   expect_rejected(replaced(t, "FIELD FieldData 1", "BOGUS 1"), {"line 17", "'bogus'"});
@@ -994,4 +993,14 @@ TEST_F(VtkRead, OffsetsAndConnectivityMustFitTheirType) {
   const auto mesh = read_text(replaced(replaced(t, "OFFSETS vtktypeint64", "OFFSETS vtktypeint8"),
                                        "CONNECTIVITY vtktypeint64", "CONNECTIVITY vtktypeuint8"));
   EXPECT_EQ(mesh.count(2), 2);
+}
+
+TEST_F(VtkRead, ABadPointIdNamesTheCellAndTheId) {
+  using soma_test::replaced;
+  expect_rejected(replaced(soma_test::base_file, "3 1 3 2", "3 1 4 2"),
+                  {"line 10", "cell 1 refers to point 4 of 4"});
+  expect_rejected(replaced(soma_test::base_file, "3 0 1 2", "3 0 -1 2"),
+                  {"line 10", "cell 0 refers to point -1 of 4"});
+  expect_rejected(replaced(soma_test::base_file_51, "0 1 2 1 3 2", "0 1 2 1 3 9"),
+                  {"line 7", "cell 1 refers to point 9 of 4"});
 }
