@@ -23,9 +23,13 @@ inline constexpr int bits_per_axis = 21;
 inline constexpr std::uint32_t max_cell = (std::uint32_t{1} << bits_per_axis) - 1;
 
 // Index along the Hilbert curve of the cell c[0..n), which has `bits` bits per
-// axis (n in 1..3, bits >= 1, n * bits <= 64). The curve starts at the origin
-// and consecutive indexes are cells that differ by one step along one axis.
+// axis (n in 1..3, bits in 1..32, n * bits <= 64; asserted in debug builds).
+// The curve starts at the origin and consecutive indexes are cells that differ
+// by one step along one axis.
 KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int n, int bits) {
+  KOKKOS_ASSERT(n >= 1 && n <= 3);
+  KOKKOS_ASSERT(bits >= 1 && bits <= 32);
+  KOKKOS_ASSERT(n * bits <= 64);
   std::uint32_t x[3] = {0, 0, 0};
   for (int i = 0; i < n; ++i) x[i] = c[i];
   const std::uint32_t top = std::uint32_t{1} << (bits - 1);
