@@ -83,6 +83,7 @@ soma_add_test(test_adjacency_store SOURCES unit/test_adjacency_store.cpp)
 soma_add_test(test_transpose SOURCES unit/test_transpose.cpp)
 soma_add_test(test_derive SOURCES unit/test_derive.cpp)
 soma_add_test(test_bridge SOURCES unit/test_bridge.cpp)
+soma_add_test(test_build_adjacencies SOURCES unit/test_build_adjacencies.cpp)
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   find_package(MOAB REQUIRED)

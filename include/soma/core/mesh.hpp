@@ -45,6 +45,9 @@ class Mesh;
 
 namespace detail {
 struct TopologyAccess;
+// Defined in soma/topology/build.hpp, which this header includes at its end.
+template <class MemSpace>
+void rebuild_adjacencies(Mesh<MemSpace>& mesh, AdjacencyRequest req);
 
 template <class Dst, class V>
 auto deep_mirror(const V& src) {
@@ -266,11 +269,12 @@ class Mesh {
         transfer(c.codes, g.codes, alias);
         out.adj_.put(s, std::move(c));
       }
-    } else if (!o.adjacencies.empty()) {
-      throw std::invalid_argument("TransferOptions: rebuilding adjacencies is not implemented");
     }
     fields_.template mirror_into<Dst>(out.fields_, o.fields, o.dims, alias);
     out.attach_fields();
+    if (o.adj_source == TransferOptions::AdjSource::rebuild && !o.adjacencies.empty()) {
+      detail::rebuild_adjacencies(out, o.adjacencies);
+    }
     return out;
   }
 
@@ -301,5 +305,9 @@ using HostMesh = Mesh<Kokkos::HostSpace>;
 using DeviceMesh = Mesh<Kokkos::DefaultExecutionSpace::memory_space>;
 
 }  // namespace soma
+
+// Mesh::mirror with AdjSource::rebuild calls build_adjacencies, which needs
+// the complete Mesh; build.hpp includes this header first.
+#include "soma/topology/build.hpp"
 
 #endif  // SOMA_CORE_MESH_HPP_

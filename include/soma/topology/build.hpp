@@ -1,0 +1,218 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2022-2026, Vijay Mahadevan.
+
+#ifndef SOMA_TOPOLOGY_BUILD_HPP_
+#define SOMA_TOPOLOGY_BUILD_HPP_
+
+// build_adjacencies: the one entry point. It derives the sub-entity
+// dimensions a request touches, builds every graph the requested ones depend
+// on, and keeps only the requested ones (plus those already held).
+//
+// Epoch: deriving a dimension that held explicit entities renumbers them, and
+// deriving one that a live field is defined on changes that field's domain;
+// either bumps the mesh epoch (every field goes stale). Filling an empty
+// dimension no field uses keeps the epoch, so fields stay current.
+//
+// Strong guarantee: everything is built on an aliasing working copy and
+// installed at the end with non-throwing moves.
+
+#include <array>
+#include <optional>
+#include <stdexcept>
+#include <string>
+#include <type_traits>
+#include <utility>
+
+#include <Kokkos_Core.hpp>
+
+#include "soma/core/mesh.hpp"
+#include "soma/core/transfer.hpp"
+#include "soma/topology/adjacency.hpp"
+#include "soma/topology/bridge.hpp"
+#include "soma/topology/derive.hpp"
+#include "soma/topology/transpose.hpp"
+
+namespace soma {
+
+namespace detail {
+struct TopologyAccess {
+  template <class M>
+  static EntityBlock<M>& block(Mesh<M>& m, int d) {
+    return m.ents_[static_cast<std::size_t>(d)];
+  }
+  template <class M>
+  static AdjacencyStore<M>& store(Mesh<M>& m) {
+    return m.adj_;
+  }
+  template <class M>
+  static void attach_fields(Mesh<M>& m) {
+    m.attach_fields();
+  }
+};
+}  // namespace detail
+
+namespace topology::detail {
+
+inline bool touches(int slot, int k) {
+  if (slot < 16) return slot / 4 == k || slot % 4 == k;
+  return (slot - 16) / 4 == k || (slot - 16) % 4 == k;
+}
+
+template <class ExecSpace>
+class Builder {
+ public:
+  using M = typename ExecSpace::memory_space;
+
+  Builder(const ExecSpace& exec, Mesh<M>& work) : exec_(exec), work_(work) {}
+
+  void derive_dimension(int k) {
+    Derived<M> r = topology::derive(exec_, work_, k, get(pair_slot(0, work_.dim())));
+    soma::detail::TopologyAccess::block(work_, k) = std::move(r.block);
+    auto& store = soma::detail::TopologyAccess::store(work_);
+    for (int s = 0; s < adjacency_slots; ++s) {
+      if (touches(s, k)) {
+        store.drop(s);
+        temp_[static_cast<std::size_t>(s)].reset();
+      }
+    }
+    temp_[static_cast<std::size_t>(pair_slot(work_.dim(), k))] = std::move(r.down);
+  }
+
+  Adjacency<M> get(int slot) {
+    auto& t = temp_[static_cast<std::size_t>(slot)];
+    if (t) return *t;
+    const auto& store = soma::detail::TopologyAccess::store(work_);
+    if (store.has(slot)) return store.graphs[static_cast<std::size_t>(slot)];
+    t = compute(slot);
+    return *t;
+  }
+
+ private:
+  Adjacency<M> conn(int d) {
+    auto& b = soma::detail::TopologyAccess::block(work_, d);
+    return {b.conn_offsets, b.conn, {}};
+  }
+
+  Adjacency<M> compute(int slot) {
+    if (slot >= 16) {
+      const int dim = (slot - 16) / 4;
+      const int via = (slot - 16) % 4;
+      const Adjacency<M> first = via == 0 ? conn(dim) : get(pair_slot(dim, via));
+      const Adjacency<M> second = dim == 0 ? conn(via) : get(pair_slot(via, dim));
+      return topology::bridge(exec_, work_.count(dim), first.offsets, first.targets, second.offsets,
+                              second.targets,
+                              std::to_string(dim) + "_via_" + std::to_string(via));
+    }
+    const int from = slot / 4;
+    const int to = slot % 4;
+    if (to == 0) return conn(from);
+    if (from == 0) {
+      return topology::transpose(exec_, work_.conn_offsets(to), work_.conn(to), work_.count(0),
+                                 "vertex_to_" + std::to_string(to));
+    }
+    if (from > to) return topology::downward(exec_, work_, from, to, get(pair_slot(0, to)));
+    const Adjacency<M> down = get(pair_slot(to, from));
+    return topology::transpose(exec_, View1<const Offset, M>(down.offsets),
+                               View1<const LO, M>(down.targets), work_.count(from),
+                               std::to_string(from) + "_to_" + std::to_string(to));
+  }
+
+  const ExecSpace& exec_;
+  Mesh<M>& work_;
+  std::array<std::optional<Adjacency<M>>, adjacency_slots> temp_{};
+};
+
+template <class MemSpace>
+struct DefaultExec {
+  using type = std::conditional_t<
+      std::is_same_v<typename Kokkos::DefaultExecutionSpace::memory_space, MemSpace>,
+      Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>;
+  static_assert(std::is_same_v<typename type::memory_space, MemSpace>,
+                "build_adjacencies: no default execution space for this memory space");
+};
+
+}  // namespace topology::detail
+
+// Builds the requested graphs, and the sub-entity dimensions they touch.
+// Throws std::invalid_argument for a dimension above mesh.dim(), and what
+// derive throws for explicit sub-entities it cannot adopt. A second call with
+// the same request does nothing.
+template <class ExecSpace>
+void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRequest req,
+                       const ExecSpace& exec) {
+  using M = typename ExecSpace::memory_space;
+  using Access = soma::detail::TopologyAccess;
+  const int D = mesh.dim();
+  for (int s = 0; s < adjacency_slots; ++s) {
+    if (!req.has_slot(s)) continue;
+    const int a = s < 16 ? s / 4 : (s - 16) / 4;
+    const int b = s < 16 ? s % 4 : (s - 16) % 4;
+    if (a > D || b > D) {
+      throw std::invalid_argument("build_adjacencies: the mesh has dimension " +
+                                  std::to_string(D) + "; a graph between " + std::to_string(a) +
+                                  " and " + std::to_string(b) + " is not defined");
+    }
+  }
+  const AdjacencyRequest held = mesh.adjacencies();
+  std::array<bool, 4> derive_k{};
+  bool bump = false;
+  for (int k = 1; k < D; ++k) {
+    if (Access::block(mesh, k).derived) continue;
+    for (int s = 0; s < adjacency_slots; ++s) {
+      if (req.has_slot(s) && !held.has_slot(s) && topology::detail::touches(s, k)) {
+        derive_k[static_cast<std::size_t>(k)] = true;
+      }
+    }
+    if (derive_k[static_cast<std::size_t>(k)] &&
+        (mesh.count(k) > 0 || mesh.fields().uses_dimension(k))) {
+      bump = true;
+    }
+  }
+
+  TransferOptions alias;
+  alias.adjacencies = held;
+  alias.adj_source = TransferOptions::AdjSource::copy;
+  Mesh<M> work = mesh.template mirror_view<M>(alias);
+  topology::detail::Builder<ExecSpace> builder(exec, work);
+  for (int k = 1; k < D; ++k) {
+    if (derive_k[static_cast<std::size_t>(k)]) builder.derive_dimension(k);
+  }
+  std::array<Adjacency<M>, adjacency_slots> made{};
+  for (int s = 0; s < adjacency_slots; ++s) {
+    const bool conn = s < 16 && s % 4 == 0;
+    if (req.has_slot(s) && !conn) made[static_cast<std::size_t>(s)] = builder.get(s);
+  }
+
+  // Install; nothing below throws.
+  auto& store = Access::store(mesh);
+  for (int k = 1; k < D; ++k) {
+    if (!derive_k[static_cast<std::size_t>(k)]) continue;
+    Access::block(mesh, k) = std::move(Access::block(work, k));
+    for (int s = 0; s < adjacency_slots; ++s) {
+      if (topology::detail::touches(s, k)) store.drop(s);
+    }
+  }
+  for (int s = 0; s < adjacency_slots; ++s) {
+    const bool conn = s < 16 && s % 4 == 0;
+    if (req.has_slot(s) && !conn) store.put(s, std::move(made[static_cast<std::size_t>(s)]));
+  }
+  Access::attach_fields(mesh);
+  if (bump) mesh.bump_epoch();
+}
+
+template <class MemSpace>
+void build_adjacencies(Mesh<MemSpace>& mesh, AdjacencyRequest req) {
+  using Exec = typename topology::detail::DefaultExec<MemSpace>::type;
+  build_adjacencies(mesh, req, Exec{});
+}
+
+namespace detail {
+template <class MemSpace>
+void rebuild_adjacencies(Mesh<MemSpace>& mesh, AdjacencyRequest req) {
+  build_adjacencies(mesh, req);
+}
+}  // namespace detail
+
+}  // namespace soma
+
+#endif  // SOMA_TOPOLOGY_BUILD_HPP_
