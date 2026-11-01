@@ -577,6 +577,24 @@ TEST_F(VtkFiles, GoldenTextOfASmallMeshInVersion51) {
             "-9223372036854775806\n");
 }
 
+TEST_F(VtkFiles, TheDefaultLayoutIsVersion51) {
+  auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  mesh.fields().add_tag<std::int64_t>("i", 0, 1);
+  const std::vector<std::string> names{"i"};
+  const std::vector<VtkField> fields{{"i", 0}};
+  for (int k = 0; k < 3; ++k) {
+    if (k == 0) soma::write_vtk(mesh, file());
+    if (k == 1) soma::write_vtk(mesh, file(), names);
+    if (k == 2) soma::write_vtk(mesh, file(), fields);
+    const auto f = soma_test::read_vtk_file(file());
+    EXPECT_EQ(f.version_line, "# vtk DataFile Version 5.1") << k;
+    EXPECT_EQ(f.cells_declared, 4u) << k;
+    EXPECT_EQ(f.cells_size_declared, 11u) << k;
+    if (k > 0) EXPECT_EQ(f.point_data.find("i")->type, "vtktypeint64") << k;
+  }
+  EXPECT_EQ(soma::VtkWriteOptions{}.version, soma::VtkLegacyVersion::v5_1);
+}
+
 TEST_F(VtkFiles, MeshWithoutCellsHasOneOffsetInVersion51) {
   soma::MeshBuilder b(2);
   const std::vector<GO> g{4, 2};
