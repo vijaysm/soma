@@ -118,6 +118,7 @@ class Lexer {
     const std::string_view t = next(what);
     std::int64_t v = 0;
     const auto r = std::from_chars(t.data(), t.data() + t.size(), v);
+    if (r.ec == std::errc::result_out_of_range) fail(what + " is out of range: " + in_quotes(t));
     if (r.ec != std::errc{} || r.ptr != t.data() + t.size()) {
       fail(what + " is not an integer: " + in_quotes(t));
     }

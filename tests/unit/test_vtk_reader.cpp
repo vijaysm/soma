@@ -939,3 +939,11 @@ TEST_F(VtkRead, ANulEscapeInANameIsRejected) {
   expect_rejected(soma_test::replaced(soma_test::base_file, "c 1 2 int", "a%00b 1 2 int"),
                   {"line 18", "the array name 'a%00b' holds the escape %00"});
 }
+
+TEST_F(VtkRead, CountsBeyondInt64AreOutOfRange) {
+  using soma_test::replaced;
+  expect_rejected(replaced(soma_test::base_file, "POINTS 4", "POINTS 9223372036854775808"),
+                  {"line 5", "the POINTS count is out of range: '9223372036854775808'"});
+  expect_rejected(replaced(soma_test::base_file, "CELLS 2 8", "CELLS 2 99999999999999999999"),
+                  {"line 10", "the CELLS size is out of range: '99999999999999999999'"});
+}
