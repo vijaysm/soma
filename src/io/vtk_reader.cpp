@@ -203,7 +203,9 @@ std::optional<ValueType> value_type(std::string_view vtk) {
   }
   if (t == "unsigned_long" || t == "vtktypeuint64") return ValueType{DataType::u64, 0, U64::max()};
   if (t == "unsigned_char") return ValueType{DataType::u8, 0, U8::max()};
-  if (t == "char" || t == "signed_char") return ValueType{DataType::i8, I8::min(), u(I8::max())};
+  // VTK writes a char array, signed where char is, as 0..255: 128 is -128.
+  if (t == "char") return ValueType{DataType::i8, I8::min(), U8::max()};
+  if (t == "signed_char") return ValueType{DataType::i8, I8::min(), u(I8::max())};
   return std::nullopt;
 }
 

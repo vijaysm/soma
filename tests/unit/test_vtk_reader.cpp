@@ -947,3 +947,30 @@ TEST_F(VtkRead, CountsBeyondInt64AreOutOfRange) {
   expect_rejected(replaced(soma_test::base_file, "CELLS 2 8", "CELLS 2 99999999999999999999"),
                   {"line 10", "the CELLS size is out of range: '99999999999999999999'"});
 }
+
+TEST_F(VtkRead, ParaViewCharArrays) {
+  for (const char* name : {"chars_51.vtk", "chars_42.vtk"}) {
+    SCOPED_TRACE(name);
+    const auto mesh = soma::read_vtk(soma_test::reference(name));
+    ASSERT_EQ(mesh.dim(), 3);
+    soma_test::expect_field<std::int8_t>(mesh, "c", 0, 1, {-128, 127, 0, 65});
+    soma_test::expect_field<std::int8_t>(mesh, "sc", 0, 1, {-128, 127, 0, 1});
+    EXPECT_EQ(mesh.fields().list().size(), 2u);
+  }
+}
+
+TEST_F(VtkRead, CharValuesWrapAndSignedCharValuesDoNot) {
+  using soma_test::replaced;
+  const std::string t = replaced(soma_test::base_file, "c 1 2 int", "c 1 2 char");
+  soma_test::expect_field<std::int8_t>(read_text(replaced(t, "7\n8\n", "255\n-128\n")), "c", 2,
+                                       1, {-1, -128});
+  soma_test::expect_field<std::int8_t>(read_text(replaced(t, "7\n", "128\n")), "c", 2, 1,
+                                       {-128, 8});
+  expect_rejected(replaced(t, "7\n", "256\n"), {"line 19", "'256' in array 'c'", "out of range"});
+  expect_rejected(replaced(t, "7\n", "-129\n"), {"line 19", "'-129' in array 'c'", "out of range"});
+  const std::string sc = replaced(soma_test::base_file, "c 1 2 int", "c 1 2 signed_char");
+  expect_rejected(replaced(sc, "7\n", "128\n"), {"line 19", "'128' in array 'c'", "out of range"});
+  expect_rejected(replaced(sc, "7\n", "-129\n"), {"line 19", "'-129'", "out of range"});
+  soma_test::expect_field<std::int8_t>(read_text(replaced(sc, "7\n", "-128\n")), "c", 2, 1,
+                                       {-128, 8});
+}
