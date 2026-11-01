@@ -8,10 +8,11 @@
 // 3.0, 4.x and 5.1, as written by write_vtk or by VTK itself. No dependency.
 //
 // Cells: the version 5.1 layout (CELLS ncells+1 size, then OFFSETS and
-// CONNECTIVITY of any integer type) and the older one (CELLS ncells size with
-// a vertex count per cell). Cell types 3 (edge), 5 (tri), 7 (polygon), 9
-// (quad), 10 (tet), 12 (hex), 13 (wedge) and 14 (pyramid), with their vertices
-// taken in file order, as write_vtk writes them; any other code throws.
+// CONNECTIVITY of any integer type, vtktypeint32 and the like included) and
+// the older one (CELLS ncells size with a vertex count per cell). Cell types 3
+// (edge), 5 (tri), 7 (polygon), 9 (quad), 10 (tet), 12 (hex), 13 (wedge) and
+// 14 (pyramid), with their vertices taken in file order, as write_vtk writes
+// them; any other code throws.
 //
 // The mesh is built with Ordering::file, its dimension being the largest cell
 // dimension. Points get gids 1..npoints in file order; cells get gids 1..n in

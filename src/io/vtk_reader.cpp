@@ -400,7 +400,13 @@ std::int64_t read_id(Lexer& lex, const std::string& of) {
   return parse_integer<std::int64_t>(lex, lex.next("a value of " + of), any, of);
 }
 
+// Offsets and connectivity may also be declared with VTK's fixed-width names.
 void check_integer_type(Lexer& lex, std::string_view type, const char* of) {
+  static constexpr std::string_view fixed[] = {
+      "vtktypeint8",  "vtktypeint16",  "vtktypeint32",  "vtktypeint64",
+      "vtktypeuint8", "vtktypeuint16", "vtktypeuint32", "vtktypeuint64"};
+  const std::string name = lower(type);
+  if (std::find(std::begin(fixed), std::end(fixed), name) != std::end(fixed)) return;
   const auto t = value_type(type);
   if (!t || !is_integer(t->type)) {
     lex.fail(std::string(of) + " has the value type " + in_quotes(type) +
