@@ -36,6 +36,8 @@ class MeshBuilder {
   // The key uses one box, that of the vertices, for every dimension. Element
   // gids are identities within a dimension: two elements of one dimension may
   // not share a gid, whatever their topology. Ordering::tiled throws.
+  // Every entity built today is interior. Once shared and ghost entities are
+  // built, ownership will come first in the key, ahead of the topology.
   HostMesh build(Ordering ordering = default_ordering) &&;
 
  private:
