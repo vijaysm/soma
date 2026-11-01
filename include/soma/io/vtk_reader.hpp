@@ -8,16 +8,21 @@
 // 3.0, 4.x and 5.1, as written by write_vtk or by VTK itself. No dependency.
 //
 // Cells: the version 5.1 layout (CELLS ncells+1 size, then OFFSETS and
-// CONNECTIVITY of any integer type, vtktypeint32 and the like included) and
-// the older one (CELLS ncells size with a vertex count per cell). Cell types 3
-// (edge), 5 (tri), 7 (polygon), 9 (quad), 10 (tet), 12 (hex), 13 (wedge) and
-// 14 (pyramid), with their vertices taken in file order, as write_vtk writes
-// them; any other code throws.
+// CONNECTIVITY of any integer type, vtktypeint32 and the like included, each
+// value in the range of that type) and the older one (CELLS ncells size with a
+// vertex count per cell). Cell types 3 (edge), 5 (tri), 7 (polygon, 3 to 65535
+// vertices), 9 (quad), 10 (tet), 12 (hex), 13 (wedge) and 14 (pyramid), with
+// their vertices taken in file order, as write_vtk writes them; polyhedra (42)
+// and any other code throw. Wedges follow the VTK 9.7 convention, as write_vtk
+// does: a wedge in a file written by VTK 9.6 or older comes in with inverted
+// orientation. Degenerate cells (a vertex repeated) and duplicate cells are
+// read as they are, as VTK reads them.
 //
 // The mesh is built with Ordering::file, its dimension being the largest cell
 // dimension. Points get gids 1..npoints in file order; cells get gids 1..n in
 // file order within each dimension. POINTS may be float or double; every
-// coordinate must be finite. A file without cells throws.
+// coordinate must be finite. A file without cells throws, although write_vtk
+// can write one (a mesh needs a cell dimension).
 //
 // POINT_DATA and CELL_DATA arrays become committed per_entity tags on
 // dimension 0 and on the cell dimension, read from FIELD arrays, SCALARS (with
@@ -27,18 +32,32 @@
 // to have one dimension. Value types map as double -> f64, float -> f32,
 // int, short -> i32, unsigned_int, unsigned_short -> u32, long, vtktypeint64,
 // vtkIdType -> i64, unsigned_long, vtktypeuint64 -> u64, unsigned_char -> u8,
-// char, signed_char -> i8; any other type (bit, string, ...) throws. Integers
-// must fit their declared type. Reals may be nan, inf or -inf. Array names
-// have VTK's %XX escapes decoded. Two arrays of one name in one section throw.
+// char, signed_char -> i8. Integers must fit their declared type, but char
+// takes -128 to 255 and wraps 128..255 to -128..-1, as VTK writes a char array
+// where char is signed. Reals may be nan, inf or -inf.
+//
+// GLOBAL_IDS, and PEDIGREE_IDS of an integer type, become i64 tags named after
+// their array, whatever that type (int, vtkIdType, ...); ids of a real type
+// throw. String and variant arrays are skipped: PEDIGREE_IDS of those types and
+// such arrays in any FIELD block, POINT_DATA and CELL_DATA included, so a file
+// that carries labels reads without them. Any other type (bit, ...) throws.
+//
+// Array names have VTK's %XX escapes decoded; %00 throws. Two arrays of one
+// name in one section throw. A section (dataset field data, POINT_DATA or
+// CELL_DATA) holds at most 1024 arrays, skipped ones included; more throw. An
+// array named METADATA is taken for a METADATA block, as VTK takes it.
 //
 // Skipped: dataset-level FIELD data, LOOKUP_TABLE and COLOR_SCALARS blocks,
 // and METADATA blocks (COMPONENT_NAMES, INFORMATION) up to their blank line.
 // Keywords and type names are matched without regard to case.
 //
 // Everything else throws std::runtime_error naming the file, the line and the
-// offending token: BINARY files, other datasets, unknown sections or cell
-// types, counts that are negative or disagree, values that are missing, out of
-// range or malformed, and a file that ends early.
+// offending token (cut to 64 characters): BINARY files, other datasets,
+// unknown sections or cell types, counts that are negative, beyond int64 or
+// disagree, values that are missing, out of range or malformed ("+-5", say),
+// a cell that refers to a point the file lacks, and a file that ends early.
+// Should the mesh builder or the field registry still refuse the mesh, their
+// message is rethrown as std::runtime_error naming the file.
 
 #include <filesystem>
 

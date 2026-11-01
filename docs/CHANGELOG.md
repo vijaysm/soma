@@ -97,6 +97,21 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   scalars and `METADATA` blocks are skipped. BINARY files, other datasets, unknown cell types,
   `CELL_DATA` over cells of several dimensions, files without cells, non-finite coordinates and
   malformed or inconsistent sections throw `std::runtime_error` naming the file and line.
+- `GLOBAL_IDS`, and `PEDIGREE_IDS` of an integer type, become `i64` tags keeping the array name;
+  ids of a real type throw. String and variant arrays (string `PEDIGREE_IDS`, and string or
+  variant arrays in any `FIELD` block) are skipped, so files carrying labels read without them.
+- `char` arrays take values from -128 to 255 and wrap 128..255 to negative `i8`, as VTK writes a
+  `char` array where `char` is signed; `signed_char` keeps -128..127. Integer values of `OFFSETS`
+  and `CONNECTIVITY` must fit their declared type.
+- Polyhedra (cell type 42) throw "polyhedron cells are not supported"; point ids are checked once
+  the cell types are known, and a bad id names the cell and the id. Polygons have 3 to 65535
+  vertices. A section holds at most 1024 arrays. `%00` in names, a sign after a sign (`+-5`) and
+  counts beyond `int64` throw; quoted tokens in messages are cut to 64 characters. Errors from the
+  mesh builder or the field registry are rethrown as `std::runtime_error` naming the file.
+- Not checked, as in VTK: degenerate and duplicate cells are read as they are, and an array named
+  `METADATA` is taken for a `METADATA` block. Wedges in files written by VTK 9.6 or older come in
+  with inverted orientation, since the reader follows the VTK 9.7 vertex order. Files without
+  cells, which `write_vtk` can write, are rejected: a mesh needs a cell dimension.
 - `data/vtk_reference/` holds files written by ParaView 6.1.0-RC1 (VTK 9.6) in versions 5.1 and
   4.2, and the script that wrote them; the reader tests check them value by value.
 
