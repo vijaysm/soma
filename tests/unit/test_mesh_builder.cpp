@@ -165,12 +165,20 @@ TEST(MeshBuilder, TheSameGidInDifferentDimensionsIsFine) {
   EXPECT_EQ(mesh.count(2), 1);
 }
 
-TEST(MeshBuilder, TheDefaultOrderingIsNamedAndImplemented) {
-  EXPECT_EQ(soma::default_ordering, soma::Ordering::file);
-  soma::MeshBuilder b(2);
-  b.add_vertices(std::vector<GO>{1, 2, 3}, std::vector<soma::Real>(9, 0.0));
-  b.add_elements(Topology::tri, std::vector<GO>{1}, std::vector<GO>{1, 2, 3});
-  EXPECT_EQ(std::move(b).build().count(2), 1);
+TEST(MeshBuilder, TheDefaultOrderingIsTheSpaceFillingCurve) {
+  EXPECT_EQ(soma::default_ordering, soma::Ordering::type_major_sfc);
+  const auto build = [](bool explicit_ordering) {
+    soma::MeshBuilder b(2);
+    b.add_vertices(std::vector<GO>{50, 10, 70, 30, 20, 60, 40},
+                   std::vector<soma::Real>{1, 1, 0, 0, 0, 0, 3, 0.5, 0, 2, 0, 0, 1, 0, 0, 2, 1, 0, 0, 1, 0});
+    b.add_elements(Topology::quad, std::vector<GO>{7, 3}, std::vector<GO>{10, 20, 50, 40, 20, 30, 60, 50});
+    b.add_elements(Topology::tri, std::vector<GO>{5}, std::vector<GO>{30, 70, 60});
+    return explicit_ordering ? std::move(b).build(soma::Ordering::type_major_sfc) : std::move(b).build();
+  };
+  const auto a = build(true);
+  const auto d = build(false);
+  for (LO v = 0; v < 7; ++v) EXPECT_EQ(a.gid(0)(v), d.gid(0)(v));
+  for (LO e = 0; e < 3; ++e) EXPECT_EQ(a.gid(2)(e), d.gid(2)(e));
 }
 
 TEST(MeshBuilder, PolygonsOfDifferentArityFormSeparateSegments) {
