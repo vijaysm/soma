@@ -125,12 +125,13 @@ TEST(BoxMeshOrdering, FileOrderVertexSpanIsTheClosedForm) {
 
 // The file-order span is the closed form checked above: it grows with the
 // vertices per row, so file order is good when i is the short axis and poor
-// when it is the long one. The curve does not depend on the axis lengths. On
-// compact boxes the two agree to within 17 per cent (observed) and the bound
-// below is 50 per cent; on elongated boxes the curve wins when i is long
-// (64 x 16 quads: 0.66 of the file span) and loses when it is short
-// (4 x 4 x 32 hexes: 6 times), so nothing is asserted there. The largest span
-// under the curve was several times the file-order one in every shape probed.
+// when it is the long one. The curve follows the shape of the box in space.
+// On these boxes (sides 0.1 x 0.3 x 0.7) the curve stays within 24 per cent
+// of file order (observed) and the bound below is 30 per cent. On elongated
+// boxes it is 1.03 times file order on 64 x 16 quads and 2.6 times on
+// 4 x 4 x 32 hexes, so nothing is asserted there; the case where the curve
+// must win is the long strip below. The largest span under the curve was
+// several times the file-order one in every shape probed.
 TEST(BoxMeshOrdering, TheCurveKeepsTheMeanVertexSpanNearFileOrderOnCompactBoxes) {
   const std::vector<BoxSpec> compact{
       spec_of(8, 8, 1, Topology::quad, Ordering::file),
@@ -146,6 +147,25 @@ TEST(BoxMeshOrdering, TheCurveKeepsTheMeanVertexSpanNearFileOrderOnCompactBoxes)
     const auto by_curve = soma::testing::box_mesh(spec);
     const double file_mean = soma::vertex_span_report(by_file, by_file.dim()).mean;
     const double curve_mean = soma::vertex_span_report(by_curve, by_curve.dim()).mean;
-    EXPECT_LE(curve_mean, 1.5 * file_mean);
+    EXPECT_LE(curve_mean, 1.3 * file_mean);
+  }
+}
+
+// A strip with cells of unit size, long in i: file order puts a row of
+// vertices between the two sides of each element, the curve walks along the
+// strip. The smallest span of a quad is 3 and, across 4 rows, 6 by columns.
+TEST(BoxMeshOrdering, TheCurveWalksAlongALongStrip) {
+  for (const int ny : {1, 4}) {
+    BoxSpec spec = spec_of(4096 / ny, ny, 1, Topology::quad, Ordering::file);
+    spec.lx = spec.nx;
+    spec.ly = ny;
+    SCOPED_TRACE(describe(spec));
+    const auto by_file = soma::testing::box_mesh(spec);
+    spec.ordering = Ordering::type_major_sfc;
+    const auto by_curve = soma::testing::box_mesh(spec);
+    const double file_mean = soma::vertex_span_report(by_file, by_file.dim()).mean;
+    const double curve_mean = soma::vertex_span_report(by_curve, by_curve.dim()).mean;
+    EXPECT_DOUBLE_EQ(file_mean, spec.nx + 2.0);
+    EXPECT_LE(curve_mean, ny == 1 ? 3.5 : 12.0);
   }
 }

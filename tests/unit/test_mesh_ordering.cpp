@@ -60,9 +60,9 @@ soma::HostMesh scrambled_grid(Ordering ordering) {
   return std::move(b).build(ordering);
 }
 
-// A 64 x 64 grid of quads in the plane z = 0.3. With `jitter`, a third of the
-// vertices sit one ulp above it.
-soma::HostMesh plane_at_z(bool jitter) {
+// A 64 x 64 grid of quads in the plane z = 0.3, with a third of the vertices
+// lifted to z = `lifted`.
+soma::HostMesh plane_at_z(Real lifted) {
   constexpr int m = 64;
   const auto vgid = [](int i, int j) { return static_cast<GO>(1 + i + (m + 1) * j); };
   soma::MeshBuilder b(2);
@@ -71,8 +71,7 @@ soma::HostMesh plane_at_z(bool jitter) {
   for (int j = 0; j <= m; ++j) {
     for (int i = 0; i <= m; ++i) {
       vg.push_back(vgid(i, j));
-      const bool up = jitter && (i * 7 + j * 13) % 3 == 0;
-      const Real z = up ? std::nextafter(0.3, 1.0) : 0.3;
+      const Real z = (i * 7 + j * 13) % 3 == 0 ? lifted : 0.3;
       xyz.insert(xyz.end(), {static_cast<Real>(i), static_cast<Real>(j), z});
     }
   }
@@ -180,7 +179,7 @@ TEST(MeshOrdering, AGradedColumnFollowsTheCurve) {
 
 // The plane z = 0.3 gets the 2D curve of x and y.
 TEST(MeshOrdering, AnExactlyPlanarMeshOffTheOriginFollowsTheTwoAxisCurve) {
-  const auto mesh = plane_at_z(false);
+  const auto mesh = plane_at_z(0.3);
   std::vector<std::tuple<std::uint64_t, GO>> keys;
   for (LO v = 0; v < mesh.count(0); ++v) {
     keys.emplace_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), 64),
@@ -191,14 +190,24 @@ TEST(MeshOrdering, AnExactlyPlanarMeshOffTheOriginFollowsTheTwoAxisCurve) {
 
 // One ulp of noise in z is far below one cell of x or y and changes nothing.
 TEST(MeshOrdering, OneUlpOfNoiseOffThePlaneLeavesTheOrderUnchanged) {
-  const auto exact = plane_at_z(false);
-  const auto noisy = plane_at_z(true);
+  const auto exact = plane_at_z(0.3);
+  const auto noisy = plane_at_z(std::nextafter(0.3, 1.0));
   for (const int d : {0, 2}) {
     ASSERT_EQ(exact.count(d), noisy.count(d));
     for (LO i = 0; i < exact.count(d); ++i) {
       ASSERT_EQ(exact.gid(d)(i), noisy.gid(d)(i)) << "dimension " << d << ", entity " << i;
     }
   }
+}
+
+// Noise of 1e-4 in z is a few cells of the 3D curve, so z takes part, but on
+// the scale of x and y: the mean span stays close to that of the exact plane
+// (observed 88.7 against 78.8) instead of following the noise (585 when z is
+// stretched over the whole grid).
+TEST(MeshOrdering, NoiseJustAboveOneCellKeepsTheSpanOfThePlane) {
+  const double exact = soma::vertex_span_report(plane_at_z(0.3), 2).mean;
+  const double noisy = soma::vertex_span_report(plane_at_z(0.3 + 1e-4), 2).mean;
+  EXPECT_LE(noisy, 1.15 * exact);
 }
 
 // The box spans more than the largest Real; the vertices still sort along x.
