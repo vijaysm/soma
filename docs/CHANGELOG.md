@@ -75,6 +75,23 @@ All notable changes to SOMA are recorded here. The format follows
   with inverted orientation.
 - Needs floating-point `std::to_chars` (libstdc++ 11+, libc++ 14+, macOS 13.3+).
 
+### Mesh
+
+- `soma::Mesh<MemSpace>` is the move-only owner of one rank's mesh: per-dimension counts,
+  CSR connectivity, topology, global ids and segment tables, plus coordinates, an epoch and a
+  field registry. Copies are spelled `clone()`, `mirror<Space>()` and `mirror_view<Space>()`;
+  accessors reject a dimension outside [0, 3], and `view()` is deleted on temporaries.
+- `soma::MeshView` is the device-copyable kernel handle of unmanaged Views.
+- `soma::TransferOptions` selects the dimensions, coordinates and fields a mirror copies.
+  Keeping elements or coordinates without the vertices is rejected.
+- `soma::MeshBuilder` assembles a mesh from vertex and element blocks given by global ids,
+  validates connectivity, polygon offsets, arity and dimensions, and orders every dimension.
+- `Ordering::type_major_sfc` orders vertices and elements along a Hilbert curve of their
+  coordinates and centroids within each topology and arity. It is the default ordering;
+  `Ordering::file` keeps gid order.
+- `Domain::all`, `Domain::segments` (with `SegmentFilter` on topology, arity and ownership)
+  and `Domain::from_list` take a mesh, and `make_space` builds spaces from the mesh topology.
+
 ### Testing
 
 - GoogleTest harness with a shared `main` that creates the runtime scope first and agrees on
