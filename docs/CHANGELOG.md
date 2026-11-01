@@ -54,11 +54,18 @@ All notable changes to SOMA are recorded here. The format follows
   `hierarchical` and `moab_native` orderings, serendipity sets at order 2, permutations between
   orderings, and a cache of device Views.
 
-### Legacy VTK output
+### VTK files
 
-- `write_vtk` writes a `HostMesh` as an ASCII legacy VTK unstructured grid (version 3.0),
-  POSIX only and with no other dependency: cells of the mesh dimension, and `per_entity` fields over full domains as
-  `FIELD` arrays in `POINT_DATA` and `CELL_DATA`. Subset, stale and uncommitted fields, and
+SOMA never links VTK; it writes and reads legacy VTK files itself.
+
+- `write_vtk` writes a `HostMesh` as an ASCII legacy VTK unstructured grid, POSIX only and with
+  no other dependency, in one of two layouts chosen by `VtkWriteOptions::version`:
+  `VtkLegacyVersion::v5_1` (the default), the VTK 9 layout with `OFFSETS`/`CONNECTIVITY
+  vtktypeint64` and the `vtktypeint64`/`vtktypeuint64` array names, or `VtkLegacyVersion::v3_0`
+  with a vertex count per cell and `long`/`unsigned_long`. The default was 3.0 before; pass
+  `{VtkLegacyVersion::v3_0}` for the old bytes, which are unchanged. Both contain cells of the
+  mesh dimension, and `per_entity` fields over full domains as `FIELD` arrays in `POINT_DATA`
+  and `CELL_DATA`. Subset, stale and uncommitted fields, and
   `knife` and `polyhedron` elements, are rejected. Output goes through a temporary file and a
   rename, and is byte-for-byte deterministic.
 - The temporary file has a unique name next to the target and is created exclusively, so an
@@ -68,14 +75,26 @@ All notable changes to SOMA are recorded here. The format follows
   name of 249 to 255 bytes fails where names are limited to 255 bytes.
 - NaN, infinite and subnormal values, in fields or coordinates, throw `std::invalid_argument`
   before any file is touched; VTK readers stop at them.
-- More than `INT32_MAX` points, or a `CELLS` section of more than `INT32_MAX` integers, throws
-  `std::length_error`: version 3.0 readers read those counts as `int`.
+- In version 3.0 only, more than `INT32_MAX` points, or a `CELLS` section of more than
+  `INT32_MAX` integers, throws `std::length_error`: those readers read the counts as `int`.
+  Version 5.1 has no such limit.
 - A mesh whose Views do not match its counts (a mirror without coordinates or vertices), or
   whose connectivity offsets do not start at 0, throws `std::invalid_argument` instead of
   reading past the end of a View or writing an inconsistent `CELLS` section.
 - Wedges follow the VTK 9.7 vertex order. Older readers (ParaView 6.1 and earlier) show them
   with inverted orientation.
 - Needs floating-point `std::to_chars` (libstdc++ 11+, libc++ 14+, macOS 13.3+).
+- `read_vtk` reads ASCII legacy unstructured grids of versions 2.0, 3.0, 4.x and 5.1 (both cell
+  layouts) into a `HostMesh` built in file order: point gids 1..n and cell gids 1..n per
+  dimension in file order, the mesh dimension being the largest cell dimension. `FIELD`,
+  `SCALARS`, `VECTORS`, `NORMALS`, `TENSORS`, `TENSORS6` and `TEXTURE_COORDINATES` arrays of
+  `POINT_DATA` and `CELL_DATA` become committed `per_entity` tags, placed by gid; `char` maps to
+  `i8`, `short` to `i32` and `unsigned_short` to `u32`. Dataset field data, lookup tables, color
+  scalars and `METADATA` blocks are skipped. BINARY files, other datasets, unknown cell types,
+  `CELL_DATA` over cells of several dimensions, files without cells, non-finite coordinates and
+  malformed or inconsistent sections throw `std::runtime_error` naming the file and line.
+- `data/vtk_reference/` holds files written by ParaView 6.1.0-RC1 (VTK 9.6) in versions 5.1 and
+  4.2, and the script that wrote them; the reader tests check them value by value.
 
 ### Mesh
 
