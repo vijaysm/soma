@@ -178,6 +178,18 @@ TEST(MeshOrdering, OneUlpOfNoiseOffThePlaneLeavesTheOrderUnchanged) {
   }
 }
 
+// The box spans more than the largest Real; the vertices still sort along x.
+TEST(MeshOrdering, CoordinatesNearTheLimitOfRealStillOrderAlongTheAxis) {
+  soma::MeshBuilder b(1);
+  b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5},
+                 std::vector<Real>{1e308, 0, 0, -1e308, 0, 0, 0, 0, 0, 5e307, 0, 0, -5e307, 0, 0});
+  const auto mesh = std::move(b).build(Ordering::type_major_sfc);
+  const std::vector<GO> by_x{2, 5, 3, 4, 1};
+  for (LO v = 0; v < mesh.count(0); ++v) {
+    EXPECT_EQ(mesh.gid(0)(v), by_x[static_cast<std::size_t>(v)]) << "vertex " << v;
+  }
+}
+
 TEST(MeshOrdering, FileOrderStaysByGid) {
   const auto mesh = scrambled_grid(Ordering::file);
   EXPECT_TRUE(std::is_sorted(mesh.gid(0).data(), mesh.gid(0).data() + mesh.count(0)));

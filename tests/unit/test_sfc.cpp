@@ -186,12 +186,12 @@ TEST(HilbertKey, QuantizesTheBoundingBox) {
   EXPECT_EQ(box.axis[0], 0);
   EXPECT_EQ(box.axis[1], 1);
   EXPECT_EQ(soma::sfc::hilbert_key(box, -1.0, 0.0, 5.0), 0u);
-  EXPECT_EQ(soma::sfc::quantize(-1.0, -1.0, 0.5, last), 0u);
-  EXPECT_EQ(soma::sfc::quantize(1.0, -1.0, 0.5, last), last);
-  EXPECT_EQ(soma::sfc::quantize(5.0, -1.0, 0.5, last), last);
-  EXPECT_EQ(soma::sfc::quantize(-7.0, -1.0, 0.5, last), 0u);
-  EXPECT_GT(soma::sfc::quantize(0.0, -1.0, 0.5, last), 0u);
-  EXPECT_LT(soma::sfc::quantize(0.0, -1.0, 0.5, last), last);
+  EXPECT_EQ(soma::sfc::quantize(-1.0, -1.0, 2.0, last), 0u);
+  EXPECT_EQ(soma::sfc::quantize(1.0, -1.0, 2.0, last), last);
+  EXPECT_EQ(soma::sfc::quantize(5.0, -1.0, 2.0, last), last);
+  EXPECT_EQ(soma::sfc::quantize(-7.0, -1.0, 2.0, last), 0u);
+  EXPECT_GT(soma::sfc::quantize(0.0, -1.0, 2.0, last), 0u);
+  EXPECT_LT(soma::sfc::quantize(0.0, -1.0, 2.0, last), last);
   const auto a = soma::sfc::hilbert_key(box, 0.25, 1.0, 5.0);
   EXPECT_EQ(a, soma::sfc::hilbert_key(box, 0.25, 1.0, 99.0));
   // A box that is flat in y keeps x and z: the curve runs over axes 0 and 2.
@@ -231,6 +231,30 @@ TEST(HilbertKey, AnAxisNoWiderThanOneCellOfTheWidestIsDropped) {
   const auto y_only = soma::sfc::KeyBox::make(zero, thin_x);
   EXPECT_EQ(y_only.n, 1);
   EXPECT_EQ(y_only.axis[0], 1);
+}
+
+// The extent of a box from -1e308 to 1e308 overflows; the axis must still
+// spread over the grid. A box a few subnormals wide must too.
+TEST(HilbertKey, ExtentsBeyondTheRangeOfRealStillSpreadOverTheGrid) {
+  const Real lo[3] = {-1e308, -1e308, 0.0};
+  const Real hi[3] = {1e308, 1e308, 0.0};
+  const auto box = soma::sfc::KeyBox::make(lo, hi);
+  ASSERT_EQ(box.n, 2);
+  const std::uint64_t n = std::uint64_t{1} << 32;
+  const std::uint32_t last = soma::sfc::max_cell(2);
+  const std::uint32_t mid = last / 2;
+  const auto key = [&](Real x, Real y) { return soma::sfc::hilbert_key(box, x, y, 0.0); };
+  EXPECT_EQ(key(-1e308, 0.0), soma_test::hilbert_reference_2d(n, 0, mid));
+  EXPECT_EQ(key(0.0, 0.0), soma_test::hilbert_reference_2d(n, mid, mid));
+  EXPECT_EQ(key(1e308, 0.0), soma_test::hilbert_reference_2d(n, last, mid));
+  EXPECT_EQ(key(0.0, 1e308), soma_test::hilbert_reference_2d(n, mid, last));
+  const Real tiny_lo[3] = {0.0, 0.0, 0.0};
+  const Real tiny_hi[3] = {4e-323, 0.0, 0.0};
+  const auto tiny = soma::sfc::KeyBox::make(tiny_lo, tiny_hi);
+  ASSERT_EQ(tiny.n, 1);
+  EXPECT_EQ(soma::sfc::hilbert_key(tiny, 0.0, 0.0, 0.0), 0u);
+  EXPECT_EQ(soma::sfc::hilbert_key(tiny, 2e-323, 0.0, 0.0), last / 2);
+  EXPECT_EQ(soma::sfc::hilbert_key(tiny, 4e-323, 0.0, 0.0), last);
 }
 
 namespace soma_test {

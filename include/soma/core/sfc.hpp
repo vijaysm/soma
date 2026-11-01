@@ -70,33 +70,38 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int n
 // planar mesh gets a 2D curve and a single point gets key 0. An axis whose
 // extent is at most one cell of the widest axis, on the curve over every axis
 // with extent, is dropped too: it could change no key, yet would stretch its
-// noise over the whole grid.
+// noise over the whole grid. When an extent overflows, every coordinate is
+// halved first (`scale`), which is exact for values that large.
 struct KeyBox {
   int n = 0;
   int axis[3] = {0, 0, 0};
-  Real lo[3] = {0, 0, 0};
-  Real inv_extent[3] = {0, 0, 0};
+  Real scale = 1;
+  Real lo[3] = {0, 0, 0};  // scaled
+  Real extent[3] = {0, 0, 0};  // scaled
 
-  // lo and hi are the box corners.
+  // lo and hi are the finite box corners.
   static KeyBox make(const Real* lo, const Real* hi) {
+    KeyBox b;
+    for (int d = 0; d < 3; ++d) {
+      if (hi[d] > lo[d] && !std::isfinite(hi[d] - lo[d])) b.scale = Real{0.5};
+    }
     Real extent[3] = {0, 0, 0};
     Real widest = 0;
     int with_extent = 0;
     for (int d = 0; d < 3; ++d) {
       if (hi[d] > lo[d]) {
-        extent[d] = hi[d] - lo[d];
+        extent[d] = b.scale * hi[d] - b.scale * lo[d];
         widest = extent[d] > widest ? extent[d] : widest;
         ++with_extent;
       }
     }
-    KeyBox b;
     if (with_extent == 0) return b;
     const Real cell = std::ldexp(widest, -bits_per_axis(with_extent));
     for (int d = 0; d < 3; ++d) {
       if (extent[d] > cell) {
         b.axis[b.n] = d;
-        b.lo[b.n] = lo[d];
-        b.inv_extent[b.n] = Real{1} / extent[d];
+        b.lo[b.n] = b.scale * lo[d];
+        b.extent[b.n] = extent[d];
         ++b.n;
       }
     }
@@ -104,10 +109,11 @@ struct KeyBox {
   }
 };
 
-// floor(t * last) for t in [0, 1]; values outside the box (and NaN) clamp.
-KOKKOS_INLINE_FUNCTION std::uint32_t quantize(Real v, Real lo, Real inv_extent,
-                                              std::uint32_t last) {
-  const Real t = (v - lo) * inv_extent;
+// floor(t * last) for t = (v - lo) / extent in [0, 1]; values outside the box
+// (and NaN) clamp. Dividing, rather than multiplying by 1 / extent, keeps
+// subnormal extents, whose reciprocal overflows, usable.
+KOKKOS_INLINE_FUNCTION std::uint32_t quantize(Real v, Real lo, Real extent, std::uint32_t last) {
+  const Real t = (v - lo) / extent;
   if (!(t > 0)) return 0;
   if (t >= 1) return last;
   return static_cast<std::uint32_t>(t * static_cast<Real>(last));
@@ -119,7 +125,7 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_key(const KeyBox& box, Real x, Real
   std::uint32_t c[3] = {0, 0, 0};
   const std::uint32_t last = max_cell(box.n);
   for (int i = 0; i < box.n; ++i) {
-    c[i] = quantize(p[box.axis[i]], box.lo[i], box.inv_extent[i], last);
+    c[i] = quantize(box.scale * p[box.axis[i]], box.lo[i], box.extent[i], last);
   }
   return hilbert_index(c, box.n, bits_per_axis(box.n));
 }
