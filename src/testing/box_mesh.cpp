@@ -30,10 +30,17 @@ void check_cells(const char* axis, int n) {
   }
 }
 
-void check_length(const char* axis, Real length) {
+// Coordinates are length * i / n, so length * n must stay finite too.
+void check_length(const char* axis, Real length, int n) {
   if (!(length > 0) || !std::isfinite(length)) {
     throw std::invalid_argument(std::string("box_mesh: ") + axis +
-                                " must be positive and finite (got " + std::to_string(length) + ")");
+                                " must be positive and finite (got " + std::to_string(length) +
+                                ")");
+  }
+  if (!std::isfinite(length * static_cast<Real>(n))) {
+    throw std::invalid_argument(std::string("box_mesh: ") + axis + " times the cell count " +
+                                std::to_string(n) + " is not finite (got " +
+                                std::to_string(length) + ")");
   }
 }
 
@@ -58,9 +65,9 @@ BoxCounts box_counts(const BoxSpec& spec) {
     throw std::invalid_argument(std::string("box_mesh: nz must be 1 for ") + name(t) +
                                 " elements (got " + std::to_string(spec.nz) + ")");
   }
-  check_length("lx", spec.lx);
-  check_length("ly", spec.ly);
-  if (solid) check_length("lz", spec.lz);
+  check_length("lx", spec.lx, spec.nx);
+  check_length("ly", spec.ly, spec.ny);
+  if (solid) check_length("lz", spec.lz, spec.nz);
 
   const auto lo_max = static_cast<std::int64_t>(std::numeric_limits<LO>::max());
   const auto offset_max = static_cast<std::int64_t>(std::numeric_limits<Offset>::max());

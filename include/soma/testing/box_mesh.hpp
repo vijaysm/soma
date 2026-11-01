@@ -43,8 +43,9 @@ struct BoxCounts {
 
 // Throws std::invalid_argument for an unsupported element, a cell count below
 // 1, nz != 1 for a planar element, or a length that is not positive and
-// finite (lz is only read for hex); std::overflow_error when a count does not
-// fit its type. Allocates nothing.
+// finite or whose product with its cell count is not finite (lz is only read
+// for hex); std::overflow_error when a count does not fit its type. Allocates
+// nothing.
 BoxCounts box_counts(const BoxSpec& spec);
 
 // Same exceptions as box_counts, then the builder's. The mesh is built with

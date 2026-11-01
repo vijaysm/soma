@@ -480,6 +480,20 @@ TEST(BoxMesh, LengthsMustBePositiveAndFinite) {
   }
 }
 
+// Coordinates are length * i / n, so length * n must be finite.
+TEST(BoxMesh, LengthsWhoseProductWithTheCellCountOverflowsAreRejectedByAxis) {
+  soma_test::expect_throws_naming<std::invalid_argument>(
+      soma_test::make_spec(4, 1, 1, Topology::hex, 1e308), "lx");
+  soma_test::expect_throws_naming<std::invalid_argument>(
+      soma_test::make_spec(1, 4, 1, Topology::quad, 1, 1e308), "ly");
+  soma_test::expect_throws_naming<std::invalid_argument>(
+      soma_test::make_spec(1, 1, 4, Topology::hex, 1, 1, 1e308), "lz");
+  EXPECT_THROW((void)soma::testing::box_counts(soma_test::make_spec(4, 1, 1, Topology::hex, 1e308)),
+               std::invalid_argument);
+  const auto mesh = soma::testing::box_mesh(soma_test::make_spec(4, 1, 1, Topology::hex, 1e307));
+  for (LO v = 0; v < 5; ++v) EXPECT_EQ(mesh.coords()(v, 0), 1e307 * v / 4) << "vertex " << v;
+}
+
 TEST(BoxMesh, PlanarElementsRequireOneCellInZAndIgnoreLz) {
   const double nan = std::numeric_limits<double>::quiet_NaN();
   for (const Topology t : {Topology::quad, Topology::tri}) {
