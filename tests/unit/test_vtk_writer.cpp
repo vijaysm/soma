@@ -340,6 +340,10 @@ void fill_rows(WriteView<T, M> v, T base) {
 }
 
 #ifdef SOMA_TEST_CHILD_PROCESS
+// Exit codes of the helper process.
+constexpr int bad_usage = 20;
+constexpr int hard_limit_too_low = 22;
+
 // Runs the helper process and returns its wait status (-1 if it cannot start).
 int run_limit_child(const fs::path& existing, const fs::path& fresh, const std::string& limit) {
   const std::string program = SOMA_VTK_LIMIT_CHILD;
@@ -1425,6 +1429,9 @@ TEST_F(VtkFiles, AWriteThatFailsHalfwayLeavesNoPartialFile) {
   put_earlier();
   int status = soma_test::run_limit_child(file(), fresh, "1048576");
   ASSERT_TRUE(WIFEXITED(status)) << "status " << status;
+  if (WEXITSTATUS(status) == soma_test::hard_limit_too_low) {
+    GTEST_SKIP() << "the hard file size limit of this process is below 1 MiB";
+  }
   EXPECT_EQ(WEXITSTATUS(status), 10) << "without a limit the helper's writes must succeed";
   const auto written = soma_test::read_vtk_file(file());
   EXPECT_EQ(written.npoints, 7u);
@@ -1439,6 +1446,15 @@ TEST_F(VtkFiles, AWriteThatFailsHalfwayLeavesNoPartialFile) {
   EXPECT_EQ(WEXITSTATUS(status), 0) << "both writes must throw std::runtime_error naming the path";
   EXPECT_EQ(soma_test::slurp(file()), earlier);
   EXPECT_EQ(soma_test::names_in(dir_), soma_test::Names{"out.vtk"});
+}
+
+TEST_F(VtkFiles, TheLimitHelperRejectsAMalformedLimit) {
+  for (const char* bad : {"", "12x", "-5", "+5", " 5", "abc", "99999999999999999999999"}) {
+    const int status = soma_test::run_limit_child(file(), file("fresh.vtk"), bad);
+    ASSERT_TRUE(WIFEXITED(status)) << "status " << status << " for '" << bad << "'";
+    EXPECT_EQ(WEXITSTATUS(status), soma_test::bad_usage) << "for '" << bad << "'";
+  }
+  EXPECT_EQ(soma_test::names_in(dir_), soma_test::Names{});
 }
 #endif
 
