@@ -93,6 +93,9 @@ if(SOMA_ENABLE_MOAB_REFERENCE)
     LIBS ${SOMA_MOAB_TARGET})
   soma_add_test(test_node_tables_moab SOURCES reference/test_node_tables_moab.cpp
     LIBS ${SOMA_MOAB_TARGET})
+  soma_add_test(test_adjacency_moab SOURCES reference/test_adjacency_moab.cpp
+    LIBS ${SOMA_MOAB_TARGET})
+  target_include_directories(test_adjacency_moab PRIVATE unit)
 endif()
 
 add_test(NAME policy.mpi_seam
