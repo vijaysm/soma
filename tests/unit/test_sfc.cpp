@@ -259,6 +259,10 @@ TEST(HilbertKey, ExtentsBeyondTheRangeOfRealStillSpreadOverTheGrid) {
 
 namespace soma_test {
 
+using KeyView = Kokkos::View<std::uint64_t*>;
+using UnmanagedKeyView = Kokkos::View<std::uint64_t*, KeyView::memory_space,
+                                      Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
+
 KOKKOS_INLINE_FUNCTION std::uint64_t key_of_cell(int k) {
   const std::uint32_t c[3] = {static_cast<std::uint32_t>(k % 8),
                               static_cast<std::uint32_t>((k / 8) % 8),
@@ -267,9 +271,10 @@ KOKKOS_INLINE_FUNCTION std::uint64_t key_of_cell(int k) {
 }
 
 Kokkos::View<std::uint64_t*, Kokkos::HostSpace> keys_from_default_space() {
-  Kokkos::View<std::uint64_t*> keys("soma::test::hilbert_keys", 512);
+  const KeyView keys("soma::test::hilbert_keys", 512);
+  const UnmanagedKeyView out(keys.data(), keys.extent(0));
   Kokkos::parallel_for(
-      "soma::test::hilbert_keys", 512, KOKKOS_LAMBDA(const int k) { keys(k) = key_of_cell(k); });
+      "soma::test::hilbert_keys", 512, KOKKOS_LAMBDA(const int k) { out(k) = key_of_cell(k); });
   return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, keys);
 }
 
@@ -278,9 +283,10 @@ KOKKOS_INLINE_FUNCTION std::uint64_t box_key_of(int k, soma::sfc::KeyBox box) {
 }
 
 Kokkos::View<std::uint64_t*, Kokkos::HostSpace> box_keys_from_default_space(soma::sfc::KeyBox box) {
-  Kokkos::View<std::uint64_t*> keys("soma::test::box_keys", 105);
+  const KeyView keys("soma::test::box_keys", 105);
+  const UnmanagedKeyView out(keys.data(), keys.extent(0));
   Kokkos::parallel_for(
-      "soma::test::box_keys", 105, KOKKOS_LAMBDA(const int k) { keys(k) = box_key_of(k, box); });
+      "soma::test::box_keys", 105, KOKKOS_LAMBDA(const int k) { out(k) = box_key_of(k, box); });
   return Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, keys);
 }
 
