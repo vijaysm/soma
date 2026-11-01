@@ -86,9 +86,13 @@ All notable changes to SOMA are recorded here. The format follows
   Keeping elements or coordinates without the vertices is rejected.
 - `soma::MeshBuilder` assembles a mesh from vertex and element blocks given by global ids,
   validates connectivity, polygon offsets, arity and dimensions, and orders every dimension.
+  A NaN or infinite vertex coordinate is rejected, naming the vertex gid, under every ordering.
 - `Ordering::type_major_sfc` orders vertices and elements along a Hilbert curve of their
   coordinates and centroids within each topology and arity. It is the default ordering;
-  `Ordering::file` keeps gid order.
+  `Ordering::file` keeps gid order. The curve uses 32 bits per axis over one or two axes and
+  21 over three. An axis no wider than one cell of the widest axis is left out, so noise
+  off a plane does not change the order, and boxes whose extent overflows still spread over
+  the grid.
 - `Domain::all`, `Domain::segments` (with `SegmentFilter` on topology, arity and ownership)
   and `Domain::from_list` take a mesh, and `make_space` builds spaces from the mesh topology.
 
@@ -112,6 +116,7 @@ All notable changes to SOMA are recorded here. The format follows
 - Every test has an injected-fault record in `docs/negative_controls.md`.
 - `soma::testing::box_mesh` builds structured hex, quad and triangle boxes with closed-form
   counts, gids, coordinates and orientation, so tests do not depend on a file or a mesher.
+  A length whose product with its cell count is not finite is rejected, naming the axis.
 
 ### Packaging
 
