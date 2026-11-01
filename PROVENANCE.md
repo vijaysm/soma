@@ -24,6 +24,10 @@ The crystal router (design §7.2) is a clean-room implementation of the algorith
 (Nek5000, BSD-3, UChicago Argonne), as described by Tufo & Fischer. No MOAB source (LGPL-3) is
 copied into SOMA.
 
+The legacy VTK files in `data/vtk_reference/` were written by ParaView 6.1.0-RC1's VTK 9.6
+writer (`vtkUnstructuredGridWriter`, ASCII, file versions 5.1 and 4.2) from
+`data/vtk_reference/make_reference.py`, run with ParaView's `pvpython`.
+
 Large meshes are not stored in this repository. Point `-DSOMA_LARGE_DATA_DIR` at a directory
 containing `outCS_ne1024.h5m`, `oRRS18to6v3.170111.p512.h5m`, and
 `xylar_oEC60to30wLI_scrip.h5m` (available in the moabX `data/` directory).
