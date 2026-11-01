@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "soma/core/sfc.hpp"
+#include "soma/fields/domain.hpp"
 
 namespace soma {
 
@@ -38,8 +39,12 @@ void MeshBuilder::add_elements(Topology t, std::span<const GO> gids,
   if (nv == 0 || vertex_gids.size() != gids.size() * static_cast<std::size_t>(nv)) {
     throw std::invalid_argument("add_elements: connectivity size does not match the topology");
   }
+  (void)detail::to_offset(vertex_gids.size(), "add_elements: connectivity size");
   Block b{t, {gids.begin(), gids.end()}, {}, {vertex_gids.begin(), vertex_gids.end()}};
-  for (std::size_t i = 0; i <= gids.size(); ++i) b.offsets.push_back(static_cast<Offset>(i) * nv);
+  const auto stride = static_cast<std::size_t>(nv);
+  for (std::size_t i = 0; i <= gids.size(); ++i) {
+    b.offsets.push_back(static_cast<Offset>(i * stride));
+  }
   blocks_[static_cast<std::size_t>(dimension(t))].push_back(std::move(b));
 }
 
@@ -132,7 +137,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
   std::vector<std::pair<GO, LO>> local_of(nv);
   mesh.coords_ = CoordView<Kokkos::HostSpace>("soma::mesh::coords", nv);
   auto& v = mesh.ents_[0];
-  v.count = static_cast<LO>(nv);
+  v.count = detail::to_lo(nv, "number of vertices");
   v.gid = View1<GO, Kokkos::HostSpace>("soma::mesh::gid0", nv);
   for (std::size_t i = 0; i < nv; ++i) {
     const std::size_t src = vorder[i];
@@ -207,7 +212,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       return std::tuple(x.t, x.arity, x.key, x.gid) < std::tuple(y.t, y.arity, y.key, y.gid);
     });
     auto& e = mesh.ents_[d];
-    e.count = static_cast<LO>(recs.size());
+    e.count = detail::to_lo(recs.size(), "number of elements");
     e.conn_offsets = View1<Offset, Kokkos::HostSpace>("soma::mesh::offsets", recs.size() + 1);
     e.topology = View1<std::uint8_t, Kokkos::HostSpace>("soma::mesh::topology", recs.size());
     e.gid = View1<GO, Kokkos::HostSpace>("soma::mesh::gid", recs.size());
@@ -221,7 +226,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       for (Offset k = blk.offsets[recs[r].index]; k < blk.offsets[recs[r].index + 1]; ++k) {
         conn.push_back(find_vertex(blk.vertex_gids[static_cast<std::size_t>(k)]));
       }
-      e.conn_offsets(r + 1) = static_cast<Offset>(conn.size());
+      e.conn_offsets(r + 1) = detail::to_offset(conn.size(), "connectivity size");
       e.topology(r) = static_cast<std::uint8_t>(recs[r].t);
       e.gid(r) = recs[r].gid;
       top[r] = recs[r].t;
