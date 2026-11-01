@@ -244,3 +244,16 @@ TEST(BuildAdjacencies, MirrorRebuildsOrCopiesTheGraphs) {
   const auto d = host.mirror<DevMem>(copy);
   EXPECT_EQ(soma_test::all_graphs(d), soma_test::all_graphs(host));
 }
+
+TEST(BuildAdjacencies, DerivingWithoutElementsIsRejected) {
+  auto host = soma_test::hex_box();
+  soma::build_adjacencies(host, AdjacencyRequest{}.add(2, 3));
+  soma::TransferOptions o;
+  o.dims = {true, true, true, false};
+  o.adjacencies = AdjacencyRequest{}.add(0, 1);
+  EXPECT_THROW((void)host.mirror<DevMem>(o), std::invalid_argument);
+  o.adjacencies = AdjacencyRequest{}.add(0, 2);  // faces are there: nothing to derive
+  const auto m = host.mirror<DevMem>(o);
+  EXPECT_EQ(m.count(2), host.count(2));
+  EXPECT_TRUE(m.has_adjacency(0, 2));
+}

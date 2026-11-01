@@ -134,7 +134,8 @@ struct DefaultExec {
 }  // namespace topology::detail
 
 // Builds the requested graphs, and the sub-entity dimensions they touch.
-// Throws std::invalid_argument for a dimension above mesh.dim(), and what
+// Throws std::invalid_argument for a dimension above mesh.dim(), for a
+// derivation on a mesh with vertices but no elements of mesh.dim(), and what
 // derive throws for explicit sub-entities it cannot adopt. A second call with
 // the same request does nothing.
 template <class ExecSpace>
@@ -167,6 +168,14 @@ void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRe
         (mesh.count(k) > 0 || mesh.fields().uses_dimension(k))) {
       bump = true;
     }
+  }
+
+  const bool deriving = derive_k[1] || derive_k[2];
+  if (deriving && mesh.count(D) == 0 && mesh.count(0) > 0) {
+    // As in a mirror that left the elements out: what would be derived is empty.
+    throw std::invalid_argument("build_adjacencies: the request needs edges or faces, but there "
+                                "are no elements of dimension " + std::to_string(D) +
+                                " to derive them from");
   }
 
   TransferOptions alias;
