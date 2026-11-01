@@ -14,7 +14,10 @@ commit `c4a45fd`), authored by the same team:
 | `tests/packaging/run_packaging_test.cmake` | `tests/packaging/run_packaging_test.cmake` | rewritten from the described logic, no text carried over |
 | `cmake/somaConfig.cmake.in` | `cmake/moabxConfig.cmake.in` | libomp replay adapted |
 | `data/*.h5m`, `*.vtk`, `*.msh` | `data/` | verbatim |
-| `porting/moabx-c4a45fd/*` | various | staging copies, deleted once ported (the sub-entity topology files are already gone) |
+| `tests/golden/serial_derivation.{hpp,cpp}` | staged as `porting/moabx-c4a45fd/subentity_derivation.{hpp,cpp}` (`moabx/mesh/subentity_derivation.hpp`) | ported: `std::unordered_map` for `phmap`, SOMA types and canonical tables |
+| `tests/reference/test_adjacency_moab.cpp` (ring neighbourhoods) | staged as `porting/moabx-c4a45fd/native_reference.hpp` (`moabx/mesh/native_reference.hpp`) | vertex and element rings rewritten as a test; edge rings dropped |
+| `bench/harness.hpp` | staged as `porting/moabx-c4a45fd/harness.hpp` | ported onto `soma::Comm`, untimed setup added |
+| `porting/moabx-c4a45fd/*` | various | staging copies, deleted once ported (the sub-entity topology, derivation, MOAB reference and harness files are gone) |
 
 `porting/` holds reference copies only: they are never compiled or installed, and each file is
 deleted in the commit that finishes its port. Text from MOAB-derived (LGPL) files must not be
