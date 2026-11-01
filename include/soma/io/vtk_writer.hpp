@@ -36,8 +36,11 @@
 // file is not promised to survive a power loss. I/O failures throw
 // std::runtime_error naming the path and the cause. A mesh with more than
 // INT32_MAX points, or a CELLS section of more than INT32_MAX integers, throws
-// std::length_error: version 3.0 readers read those as int.
+// std::length_error: version 3.0 readers read those as int. A mesh whose Views
+// do not match its counts (a mirror that left out the coordinates or the
+// vertices, say) throws std::invalid_argument before any file is touched.
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <optional>
@@ -67,6 +70,11 @@ namespace detail {
 // and the CELLS size (cells plus vertex references) each fit the 32-bit int
 // that a version 3.0 reader uses for them.
 void check_vtk_int32(std::int64_t npoints, std::int64_t largest_id, std::int64_t cells_size);
+
+// Throws std::invalid_argument naming `what` unless a View of `rows` x `cols`
+// has the extents the mesh needs.
+void check_vtk_extent(const std::string& what, std::size_t rows, std::size_t cols,
+                      std::size_t want_rows, std::size_t want_cols);
 
 }  // namespace detail
 

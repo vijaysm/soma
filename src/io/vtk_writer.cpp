@@ -247,12 +247,71 @@ Array resolve(const HostMesh& mesh, const VtkField& want) {
   return Array{info, dim};
 }
 
+// A mirror that left out the coordinates or a dimension holds Views that do
+// not match its counts; reading them would run past their ends.
+void check_mesh_extents(const HostMesh& mesh, int dim) {
+  const auto nv = static_cast<std::size_t>(mesh.count(0));
+  const auto xyz = mesh.coords();
+  detail::check_vtk_extent("the coordinates", xyz.extent(0), xyz.extent(1), nv, 3);
+  const auto nc = static_cast<std::size_t>(mesh.count(dim));
+  if (nc == 0) return;
+  const std::string of = " of dimension " + std::to_string(dim);
+  const auto entries = [](std::size_t k) { return std::to_string(k) + " entries"; };
+  const auto offsets = mesh.conn_offsets(dim);
+  const auto conn = mesh.conn(dim);
+  if (offsets.extent(0) != nc + 1) {
+    throw std::invalid_argument("write_vtk: the connectivity offsets" + of + " have " +
+                                entries(offsets.extent(0)) + " for " + std::to_string(nc) +
+                                " cells");
+  }
+  if (mesh.topology(dim).extent(0) != nc || mesh.gid(dim).extent(0) != nc) {
+    throw std::invalid_argument("write_vtk: the cell types or global ids" + of + " do not have " +
+                                entries(nc));
+  }
+  for (std::size_t e = 0; e < nc; ++e) {
+    if (offsets(e) < 0 || offsets(e + 1) < offsets(e)) {
+      throw std::invalid_argument("write_vtk: the connectivity offsets" + of +
+                                  " decrease at cell row " + std::to_string(e));
+    }
+  }
+  const auto used = static_cast<std::size_t>(offsets(nc));
+  if (conn.extent(0) < used) {
+    throw std::invalid_argument("write_vtk: the connectivity" + of + " has " +
+                                entries(conn.extent(0)) + "; its offsets need " +
+                                std::to_string(used));
+  }
+  for (std::size_t e = 0; e < nc; ++e) {
+    for (auto k = static_cast<std::size_t>(offsets(e)); k < static_cast<std::size_t>(offsets(e + 1));
+         ++k) {
+      if (conn(k) < 0 || static_cast<std::size_t>(conn(k)) >= nv) {
+        throw std::invalid_argument("write_vtk: the connectivity of cell row " +
+                                    std::to_string(e) + " refers to vertex " +
+                                    std::to_string(conn(k)) + " of " + std::to_string(nv));
+      }
+    }
+  }
+}
+
+void check_field_extents(const HostMesh& mesh, const Array& a) {
+  dispatch_data_type(a.info.type, [&]<class T>() {
+    const auto f = mesh.fields().template get<T>(a.info.id);
+    const auto v = f.view();
+    const std::string what = "field " + in_quotes(a.info.name);
+    const auto ncomp = static_cast<std::size_t>(a.info.ncomp);
+    detail::check_vtk_extent(what, v.extent(0), v.extent(1),
+                             static_cast<std::size_t>(mesh.count(a.dim)), ncomp);
+    detail::check_vtk_extent(what, v.extent(0), v.extent(1),
+                             static_cast<std::size_t>(f.space().rows()), ncomp);
+  });
+}
+
 Contents collect_contents(const HostMesh& mesh, std::span<const VtkField> fields) {
   Contents contents;
   contents.dim = mesh.dim();
   if (contents.dim < 1) {
     throw std::invalid_argument("write_vtk: the mesh has no elements (default or moved-from)");
   }
+  check_mesh_extents(mesh, contents.dim);
   const auto topology = mesh.topology(contents.dim);
   const auto gid = mesh.gid(contents.dim);
   const auto n = static_cast<std::size_t>(mesh.count(contents.dim));
@@ -276,6 +335,7 @@ Contents collect_contents(const HostMesh& mesh, std::span<const VtkField> fields
                                   " is selected twice");
     }
     seen.push_back(a.info.id);
+    check_field_extents(mesh, a);
     (a.dim == 0 ? contents.point_arrays : contents.cell_arrays).push_back(std::move(a));
   }
   return contents;
@@ -407,7 +467,8 @@ void emit(Sink& out, const HostMesh& mesh, const Contents& contents) {
   out.text("CELLS ");
   out.integer(nc);
   out.put(' ');
-  out.integer(static_cast<std::int64_t>(nce) + static_cast<std::int64_t>(offsets(nce)));
+  out.integer(nce == 0 ? std::int64_t{0}
+                      : static_cast<std::int64_t>(nce) + static_cast<std::int64_t>(offsets(nce)));
   out.end_line();
   for (std::size_t e = 0; e < nce; ++e) {
     const auto first = static_cast<std::size_t>(offsets(e));
@@ -519,6 +580,16 @@ void detail::check_vtk_int32(std::int64_t npoints, std::int64_t largest_id,
   check(npoints, "the number of points");
   check(largest_id, "the largest connectivity id");
   check(cells_size, "the CELLS size (cells plus vertex references)");
+}
+
+void detail::check_vtk_extent(const std::string& what, std::size_t rows, std::size_t cols,
+                              std::size_t want_rows, std::size_t want_cols) {
+  if (rows != want_rows || cols != want_cols) {
+    throw std::invalid_argument("write_vtk: the extents of " + what + " are " +
+                                std::to_string(rows) + " x " + std::to_string(cols) +
+                                " where the mesh needs " +
+                                std::to_string(want_rows) + " x " + std::to_string(want_cols));
+  }
 }
 
 void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const std::string> fields) {

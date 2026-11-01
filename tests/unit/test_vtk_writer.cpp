@@ -13,6 +13,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <optional>
 #include <span>
 #include <sstream>
 #include <stdexcept>
@@ -1142,6 +1143,99 @@ TEST_F(VtkFiles, StaleFieldsAreNotWrittenSilently) {
 TEST_F(VtkFiles, AMeshWithoutElementsIsRejected) {
   const soma::HostMesh empty;
   expect_invalid(empty, {}, "the mesh has no elements");
+}
+
+namespace soma_test {
+
+// A mirror that leaves data out, or nothing if the mesh refuses to make one.
+std::optional<soma::HostMesh> partial_mirror(const soma::HostMesh& mesh,
+                                             const soma::TransferOptions& opts) {
+  try {
+    return mesh.mirror<HostMem>(opts);
+  } catch (const std::exception&) {
+    return std::nullopt;
+  }
+}
+
+}  // namespace soma_test
+
+TEST_F(VtkFiles, AMirrorWithoutCoordinatesIsRejected) {
+  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  soma::TransferOptions opts;
+  opts.coordinates = false;
+  const auto part = soma_test::partial_mirror(mesh, opts);
+  if (!part) GTEST_SKIP() << "the mesh refuses a mirror without coordinates";
+  ASSERT_EQ(part->count(0), 7);
+  expect_invalid(*part, {}, "the extents of the coordinates are 0 x 3 where the mesh needs 7 x 3");
+}
+
+TEST_F(VtkFiles, ConnectivityToMissingVerticesIsRejected) {
+  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  soma::TransferOptions opts;
+  opts.dims = {false, true, true, true};
+  opts.coordinates = false;
+  const auto part = soma_test::partial_mirror(mesh, opts);
+  if (!part) GTEST_SKIP() << "the mesh refuses a mirror without vertices";
+  ASSERT_EQ(part->count(0), 0);
+  expect_invalid(*part, {}, "the connectivity of cell row 0 refers to vertex");
+}
+
+TEST_F(VtkFiles, AMirrorWithoutVerticesButWithCoordinatesIsRejected) {
+  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  soma::TransferOptions opts;
+  opts.dims = {false, true, true, true};
+  const auto part = soma_test::partial_mirror(mesh, opts);
+  if (!part) GTEST_SKIP() << "the mesh refuses a mirror without vertices";
+  expect_invalid(*part, {}, "the extents of the coordinates are 7 x 3 where the mesh needs 0 x 3");
+}
+
+TEST_F(VtkFiles, AMirrorWithoutItsCellDimensionWritesPointsOnly) {
+  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  soma::TransferOptions opts;
+  opts.dims = {true, true, false, true};
+  const auto part = soma_test::partial_mirror(mesh, opts);
+  if (!part) GTEST_SKIP() << "the mesh refuses a mirror without its cells";
+  ASSERT_EQ(part->count(2), 0);
+  soma::write_vtk(*part, file());
+  const auto f = soma_test::read_vtk_file(file());
+  EXPECT_EQ(f.npoints, 7u);
+  EXPECT_EQ(f.cells_declared, 0u);
+  EXPECT_EQ(f.cells_size_declared, 0u);
+}
+
+TEST_F(VtkFiles, OffsetsThatOverrunOrDecreaseAreRejected) {
+  for (int k = 0; k < 2; ++k) {
+    const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+    const auto offsets = mesh.conn_offsets(2);
+    ASSERT_EQ(offsets.extent(0), 4u);
+    // The mesh offers no way to damage itself, so write through its View.
+    auto* raw = const_cast<soma::Offset*>(offsets.data());
+    if (k == 0) {
+      raw[3] = 100;
+      expect_invalid(mesh, {}, "the connectivity of dimension 2 has 11 entries; its offsets need 100");
+    } else {
+      raw[2] = 1;
+      expect_invalid(mesh, {}, "the connectivity offsets of dimension 2 decrease at cell row 1");
+    }
+  }
+}
+
+TEST(VtkLimits, ExtentsMustMatchTheMesh) {
+  EXPECT_NO_THROW(soma::detail::check_vtk_extent("field 'f'", 7, 2, 7, 2));
+  const auto expect_mismatch = [](std::size_t rows, std::size_t cols, const std::string& sizes) {
+    try {
+      soma::detail::check_vtk_extent("field 'f'", rows, cols, 7, 2);
+      ADD_FAILURE() << "expected std::invalid_argument";
+    } catch (const std::invalid_argument& e) {
+      EXPECT_NE(std::string(e.what()).find("the extents of field 'f' are " + sizes + " where the mesh needs 7 x 2"),
+                std::string::npos)
+          << e.what();
+    }
+  };
+  expect_mismatch(6, 2, "6 x 2");
+  expect_mismatch(8, 2, "8 x 2");
+  expect_mismatch(7, 1, "7 x 1");
+  expect_mismatch(7, 3, "7 x 3");
 }
 
 TEST_F(VtkFiles, AnUnwritablePathThrowsAndNamesIt) {
