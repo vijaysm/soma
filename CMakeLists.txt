@@ -103,6 +103,10 @@ if(SOMA_ENABLE_MPI)
   target_link_libraries(soma PUBLIC MPI::MPI_CXX)
 endif()
 
+if(SOMA_ENABLE_MOAB_REFERENCE)
+  include(SomaMoab)
+endif()
+
 if(SOMA_ENABLE_TESTS)
   enable_testing()
   add_subdirectory(tests)

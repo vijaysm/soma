@@ -89,16 +89,6 @@ soma_add_test(test_golden_derivation
 target_include_directories(test_golden_derivation PRIVATE unit golden)
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
-  find_package(MOAB REQUIRED)
-  # MOAB's MOAB_LIBRARIES string breaks on CMake >= 4 ("-framework Accelerate"
-  # is split); always link the imported target.
-  if(TARGET MOAB::MOAB)
-    set(SOMA_MOAB_TARGET MOAB::MOAB)
-  elseif(TARGET MOAB)
-    set(SOMA_MOAB_TARGET MOAB)
-  else()
-    message(FATAL_ERROR "SOMA_ENABLE_MOAB_REFERENCE=ON but MOAB exports no imported target.")
-  endif()
   soma_add_test(test_canonical_moab SOURCES reference/test_canonical_moab.cpp
     LIBS ${SOMA_MOAB_TARGET})
   soma_add_test(test_node_tables_moab SOURCES reference/test_node_tables_moab.cpp
