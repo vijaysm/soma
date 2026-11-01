@@ -146,7 +146,8 @@ Model mixed_cells() {
     tv.push_back(g);
   }
   m.element(Topology::tet, 30, tv);
-  const std::array<Xyz, 6> prism{{{5, 0, 0}, {6, 0, 0}, {5, 1, 0}, {5, 0, 1}, {6, 0, 1}, {5, 1, 1}}};
+  const std::array<Xyz, 6> prism{
+      {{5, 0, 0}, {6, 0, 0}, {5, 1, 0}, {5, 0, 1}, {6, 0, 1}, {5, 1, 1}}};
   std::vector<GO> pv;
   for (std::size_t i = 0; i < prism.size(); ++i) {
     const GO g = 51 + static_cast<GO>(i);
@@ -226,7 +227,8 @@ std::vector<Xyz> mesh_cell_points(const soma::HostMesh& mesh, std::size_t cell) 
   const auto conn = mesh.conn(d);
   const auto xyz = mesh.coords();
   std::vector<Xyz> out;
-  for (auto k = static_cast<std::size_t>(off(cell)); k < static_cast<std::size_t>(off(cell + 1)); ++k) {
+  for (auto k = static_cast<std::size_t>(off(cell)); k < static_cast<std::size_t>(off(cell + 1));
+       ++k) {
     const auto v = static_cast<std::size_t>(conn(k));
     out.push_back({xyz(v, 0), xyz(v, 1), xyz(v, 2)});
   }
@@ -583,8 +585,10 @@ TEST_F(VtkFiles, EdgesAreTypeThreeAndTheirDataIsCellData) {
   m.element(Topology::edge, 2, {2, 3});
   m.element(Topology::edge, 3, {3, 4});
   auto mesh = std::move(m).build(Ordering::file);
-  soma_test::fill_tag<std::int32_t>(mesh, "seg", 1, 1, [](GO g, int) { return static_cast<std::int32_t>(g); });
-  soma_test::fill_tag<double>(mesh, "node", 0, 1, [](GO g, int c) { return soma_test::awkward(g, c); });
+  soma_test::fill_tag<std::int32_t>(mesh, "seg", 1, 1,
+                                    [](GO g, int) { return static_cast<std::int32_t>(g); });
+  soma_test::fill_tag<double>(mesh, "node", 0, 1,
+                              [](GO g, int c) { return soma_test::awkward(g, c); });
   const std::vector<std::string> names{"seg", "node"};
   soma::write_vtk(mesh, file(), names);
   const auto f = soma_test::read_vtk_file(file());
@@ -651,8 +655,8 @@ inline void expect_positive_in_vtk_and_canonical_order(Topology t, const std::ve
   ASSERT_EQ(f.cells.size(), 1u);
   const double written =
       soma_test::enclosed_volume(soma_test::file_cell_points(f, 0), soma_test::vtk_faces(t));
-  const double canonical =
-      soma_test::enclosed_volume(soma_test::mesh_cell_points(mesh, 0), soma_test::canonical_faces(t));
+  const double canonical = soma_test::enclosed_volume(soma_test::mesh_cell_points(mesh, 0),
+                                                      soma_test::canonical_faces(t));
   EXPECT_NEAR(canonical, volume, 1e-12) << soma::name(t) << " (library order)";
   EXPECT_NEAR(written, volume, 1e-12) << soma::name(t) << " (written order, VTK faces)";
 }
@@ -673,14 +677,14 @@ TEST_F(VtkFiles, HexOrientationIsPositiveInVtkAndCanonicalOrder) {
 
 TEST_F(VtkFiles, PrismOrientationIsPositiveInVtkAndCanonicalOrder) {
   soma_test::expect_positive_in_vtk_and_canonical_order(
-      Topology::prism, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {0, 1, 1}}, {1, 2, 3},
-      3.0, file().string());
+      Topology::prism, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {0, 1, 1}},
+      {1, 2, 3}, 3.0, file().string());
 }
 
 TEST_F(VtkFiles, PyramidOrientationIsPositiveInVtkAndCanonicalOrder) {
   soma_test::expect_positive_in_vtk_and_canonical_order(
-      Topology::pyramid, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0.5, 0.5, 1}}, {1, 2, 3}, 2.0,
-      file().string());
+      Topology::pyramid, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0.5, 0.5, 1}}, {1, 2, 3},
+      2.0, file().string());
 }
 
 TEST_F(VtkFiles, PointsAndConnectivityRoundTripExactly) {
@@ -703,22 +707,29 @@ TEST_F(VtkFiles, ScrambledOrderingWritesLocalIdsNotGlobalIds) {
   Model m(2);
   for (int k = 0; k < nv; ++k) {
     const GO g = 1 + (static_cast<GO>(k) * 37) % nv;
-    m.vertex(g, {static_cast<double>(k % (n + 1)) / 3.0, static_cast<double>(k / (n + 1)) / 7.0, 0});
+    m.vertex(g,
+             {static_cast<double>(k % (n + 1)) / 3.0, static_cast<double>(k / (n + 1)) / 7.0, 0});
   }
-  const auto vertex_gid = [&](int i, int j) { return 1 + (static_cast<GO>(j * (n + 1) + i) * 37) % nv; };
+  const auto vertex_gid = [&](int i, int j) {
+    return 1 + (static_cast<GO>(j * (n + 1) + i) * 37) % nv;
+  };
   for (int e = 0; e < n * n; ++e) {
     const int i = e % n;
     const int j = e / n;
-    m.element(Topology::quad, 1 + (static_cast<GO>(e) * 5) % (n * n),
-              {vertex_gid(i, j), vertex_gid(i + 1, j), vertex_gid(i + 1, j + 1), vertex_gid(i, j + 1)});
+    m.element(
+        Topology::quad, 1 + (static_cast<GO>(e) * 5) % (n * n),
+        {vertex_gid(i, j), vertex_gid(i + 1, j), vertex_gid(i + 1, j + 1), vertex_gid(i, j + 1)});
   }
   auto mesh = Model(m).build(Ordering::type_major_sfc);
   const auto vg = mesh.gid(0);
   bool sorted = true;
-  for (std::size_t i = 1; i < static_cast<std::size_t>(mesh.count(0)); ++i) sorted &= vg(i - 1) < vg(i);
+  for (std::size_t i = 1; i < static_cast<std::size_t>(mesh.count(0)); ++i) {
+    sorted &= vg(i - 1) < vg(i);
+  }
   ASSERT_FALSE(sorted) << "the curve ordering must differ from the gid ordering";
 
-  const auto expected = soma_test::fill_tag<double>(mesh, "t", 0, 1, [](GO g, int c) { return soma_test::awkward(g, c); });
+  const auto expected = soma_test::fill_tag<double>(
+      mesh, "t", 0, 1, [](GO g, int c) { return soma_test::awkward(g, c); });
   const std::vector<std::string> names{"t"};
   soma::write_vtk(mesh, file(), names);
   const auto f = soma_test::read_vtk_file(file());
@@ -746,7 +757,8 @@ TEST_F(VtkFiles, FieldsKeepTheirValuesTypesAndPlacement) {
                    : g * 1000003;
   });
   const auto material = soma_test::fill_tag<std::int32_t>(mesh, "material", 3, 1, [](GO g, int) {
-    return g == 12 ? std::numeric_limits<std::int32_t>::min() : static_cast<std::int32_t>(g * 7 - 100);
+    return g == 12 ? std::numeric_limits<std::int32_t>::min()
+                   : static_cast<std::int32_t>(g * 7 - 100);
   });
   const auto flux = soma_test::fill_tag<double>(mesh, "flux", 3, 3, d);
   const auto stress = soma_test::fill_tag<float>(mesh, "stress", 3, 5, s);
@@ -793,12 +805,15 @@ TEST_F(VtkFiles, FieldsKeepTheirValuesTypesAndPlacement) {
   EXPECT_EQ(f.point_data.find("material"), nullptr);
   EXPECT_EQ(f.cell_data.find("temperature"), nullptr);
 
-  soma_test::expect_same_bits(f.point_data.find("temperature")->values<double>(), temperature, "temperature");
-  soma_test::expect_same_bits(f.point_data.find("velocity")->values<double>(), velocity, "velocity");
+  soma_test::expect_same_bits(f.point_data.find("temperature")->values<double>(), temperature,
+                              "temperature");
+  soma_test::expect_same_bits(f.point_data.find("velocity")->values<double>(), velocity,
+                              "velocity");
   soma_test::expect_same_bits(f.point_data.find("uv")->values<float>(), uv, "uv");
   soma_test::expect_same_bits(f.point_data.find("pid")->values<std::int64_t>(), pid, "pid");
   soma_test::expect_same_bits(f.point_data.find("flags")->values<std::uint32_t>(), flags, "flags");
-  soma_test::expect_same_bits(f.cell_data.find("material")->values<std::int32_t>(), material, "material");
+  soma_test::expect_same_bits(f.cell_data.find("material")->values<std::int32_t>(), material,
+                              "material");
   soma_test::expect_same_bits(f.cell_data.find("flux")->values<double>(), flux, "flux");
   soma_test::expect_same_bits(f.cell_data.find("stress")->values<float>(), stress, "stress");
   soma_test::expect_same_bits(f.cell_data.find("count")->values<std::uint64_t>(), count, "count");
@@ -1049,12 +1064,13 @@ TEST_F(VtkFiles, SubsetFieldsAreRejected) {
   const auto as_list = Dom::from_list(mesh, 0, scattered);
   ASSERT_EQ(as_intervals.info(0).kind, soma::DomainKind::intervals);
   ASSERT_EQ(as_list.info(0).kind, soma::DomainKind::list);
-  mesh.fields().add<double>("run", soma::make_space(mesh, as_intervals, soma::Layout::per_entity()), 1);
+  mesh.fields().add<double>("run", soma::make_space(mesh, as_intervals, soma::Layout::per_entity()),
+                            1);
   mesh.fields().add<double>("pick", soma::make_space(mesh, as_list, soma::Layout::per_entity()), 1);
   soma::FieldOptions<double> with_default;
   with_default.default_value = std::vector<double>{-1.0};
-  mesh.fields().add<double>("padded", soma::make_space(mesh, as_list, soma::Layout::per_entity()), 1,
-                            with_default);
+  mesh.fields().add<double>("padded", soma::make_space(mesh, as_list, soma::Layout::per_entity()),
+                            1, with_default);
   expect_invalid(mesh, {"run"}, "intervals");
   expect_invalid(mesh, {"pick"}, "list");
   expect_invalid(mesh, {"padded"}, "list");
@@ -1258,7 +1274,8 @@ TEST_F(VtkFiles, OffsetsThatOverrunOrDecreaseAreRejected) {
     auto* raw = const_cast<soma::Offset*>(offsets.data());
     if (k == 0) {
       raw[3] = 100;
-      expect_invalid(mesh, {}, "the connectivity of dimension 2 has 11 entries; its offsets need 100");
+      expect_invalid(mesh, {},
+                     "the connectivity of dimension 2 has 11 entries; its offsets need 100");
     } else {
       raw[2] = 1;
       expect_invalid(mesh, {}, "the connectivity offsets of dimension 2 decrease at cell row 1");
@@ -1273,7 +1290,8 @@ TEST(VtkLimits, ExtentsMustMatchTheMesh) {
       soma::detail::check_vtk_extent("field 'f'", rows, cols, 7, 2);
       ADD_FAILURE() << "expected std::invalid_argument";
     } catch (const std::invalid_argument& e) {
-      EXPECT_NE(std::string(e.what()).find("the extents of field 'f' are " + sizes + " where the mesh needs 7 x 2"),
+      EXPECT_NE(std::string(e.what()).find("the extents of field 'f' are " + sizes +
+                                           " where the mesh needs 7 x 2"),
                 std::string::npos)
           << e.what();
     }
@@ -1536,8 +1554,8 @@ TEST_F(VtkFiles, OutputBytesAreFixed) {
   soma_test::fill_tag<float>(mesh, "uv", 0, 2, s);
   soma_test::fill_tag<std::int64_t>(mesh, "pid", 0, 1, [](GO g, int) { return g * 1000003; });
   soma_test::fill_tag<double>(mesh, "flux", 3, 3, d);
-  soma_test::fill_tag<std::int32_t>(mesh, "material", 3, 1,
-                                    [](GO g, int) { return static_cast<std::int32_t>(g * 7 - 100); });
+  soma_test::fill_tag<std::int32_t>(
+      mesh, "material", 3, 1, [](GO g, int) { return static_cast<std::int32_t>(g * 7 - 100); });
   const std::vector<std::string> names{"flux", "temperature", "material", "pid", "uv"};
   soma::write_vtk(mesh, file(), names);
   const std::string text = soma_test::slurp(file());

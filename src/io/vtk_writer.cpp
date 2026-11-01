@@ -286,8 +286,8 @@ void check_mesh_extents(const HostMesh& mesh, int dim) {
                                 std::to_string(used));
   }
   for (std::size_t e = 0; e < nc; ++e) {
-    for (auto k = static_cast<std::size_t>(offsets(e)); k < static_cast<std::size_t>(offsets(e + 1));
-         ++k) {
+    for (auto k = static_cast<std::size_t>(offsets(e));
+         k < static_cast<std::size_t>(offsets(e + 1)); ++k) {
       if (conn(k) < 0 || static_cast<std::size_t>(conn(k)) >= nv) {
         throw std::invalid_argument("write_vtk: the connectivity of cell row " +
                                     std::to_string(e) + " refers to vertex " +
