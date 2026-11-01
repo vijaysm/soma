@@ -598,6 +598,35 @@ void read_cell_types(Lexer& lex, Grid& g) {
   check_point_ids(lex, g);
 }
 
+// GLOBAL_IDS or PEDIGREE_IDS name type: one value per entity, kept as i64
+// whatever its integer type.
+Array read_ids(Lexer& lex, const std::string& name, std::string_view type, std::size_t rows,
+               const std::string& of) {
+  const ValueType vt = value_type_or_fail(lex, type, of);
+  if (!is_integer(vt.type)) {
+    lex.fail(of + " has the value type " + in_quotes(type) + "; ids need an integer type");
+  }
+  Array a = read_values(lex, name, vt, 1, rows, of);
+  std::vector<std::int64_t> ids;
+  std::visit(
+      [&]<class T>(const std::vector<T>& v) {
+        ids.reserve(v.size());
+        for (const T x : v) {
+          if constexpr (std::is_same_v<T, std::uint64_t>) {
+            if (x > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())) {
+              lex.fail_at(a.line, "the id " + std::to_string(x) + " in " + of +
+                                      " is out of range for i64");
+            }
+          }
+          ids.push_back(static_cast<std::int64_t>(x));
+        }
+      },
+      a.values);
+  a.type = DataType::i64;
+  a.values = std::move(ids);
+  return a;
+}
+
 // The attribute arrays of one POINT_DATA or CELL_DATA section.
 std::vector<Array> read_attributes(Lexer& lex, std::size_t rows, const char* section) {
   std::vector<Array> out;
@@ -638,6 +667,16 @@ std::vector<Array> read_attributes(Lexer& lex, std::size_t rows, const char* sec
         lex.next("the LOOKUP_TABLE name of " + of);
       }
       out.push_back(read_values(lex, name, vt, ncomp, rows, of));
+    } else if (key == "global_ids" || key == "pedigree_ids") {
+      const std::string name = decode_name(lex, lex.next(upper(key) + " name"));
+      const std::string of = upper(key) + " " + in_quotes(name) + " of " + section;
+      const std::string_view type = lex.next("the value type of " + of);
+      if (key == "pedigree_ids" && is_skipped_type(type)) {
+        lex.skip_lines(rows, 1, "a value of " + of);
+        lex.skip_metadata_if_present();
+      } else {
+        out.push_back(read_ids(lex, name, type, rows, of));
+      }
     } else {
       lex.fail_at(key_line,
                   "the section " + in_quotes(key) + " in " + section + " is not supported");

@@ -1079,3 +1079,48 @@ TEST_F(VtkRead, StringAndVariantArraysAreSkippedWhereverTheyAre) {
                   {"line 20", "the file ends where a value of array 'label' of CELL_DATA was "
                               "expected"});
 }
+
+TEST_F(VtkRead, ParaViewGlobalAndPedigreeIds) {
+  for (const char* name : {"ids_51.vtk", "ids_42.vtk"}) {
+    SCOPED_TRACE(name);
+    const auto mesh = soma::read_vtk(soma_test::reference(name));
+    ASSERT_EQ(mesh.dim(), 2);
+    soma_test::expect_field<std::int64_t>(mesh, "pgid", 0, 1, {10, 20, 30, 40, 2147483647});
+    soma_test::expect_field<std::int64_t>(mesh, "pped", 0, 1,
+                                          {-1, 7, 0, 2147483647, -2147483647 - 1});
+    soma_test::expect_field<std::int64_t>(mesh, "cgid", 2, 1, {100, -2147483647 - 1});
+    soma_test::expect_field<double>(mesh, "w", 2, 1, {0.5, 1.5});
+    EXPECT_EQ(mesh.fields().list().size(), 4u);
+    EXPECT_FALSE(mesh.fields().contains("cped"));
+  }
+}
+
+TEST_F(VtkRead, IdsOfEveryIntegerTypeBecomeI64) {
+  using soma_test::replaced;
+  const std::string& t = soma_test::base_file;
+  const auto ids = [&](const std::string& section) {
+    return replaced(t, "FIELD FieldData 1\n", section + "FIELD FieldData 1\n");
+  };
+  using U64 = std::numeric_limits<std::uint64_t>;
+  soma_test::expect_field<std::int64_t>(read_text(ids("GLOBAL_IDS g unsigned_char\n255 0\n")),
+                                        "g", 2, 1, {255, 0});
+  soma_test::expect_field<std::int64_t>(read_text(ids("GLOBAL_IDS g char\n128 -1\n")), "g", 2, 1,
+                                        {-128, -1});
+  soma_test::expect_field<std::int64_t>(
+      read_text(ids("PEDIGREE_IDS p vtktypeuint64\n9223372036854775807 3\n")), "p", 2, 1,
+      {std::numeric_limits<std::int64_t>::max(), 3});
+  expect_rejected(ids("GLOBAL_IDS g unsigned_long\n" + std::to_string(U64::max()) + " 3\n"),
+                  {"line 17", "the id 18446744073709551615 in GLOBAL_IDS 'g' of CELL_DATA",
+                   "out of range for i64"});
+  expect_rejected(ids("GLOBAL_IDS g double\n1 2\n"),
+                  {"line 17", "GLOBAL_IDS 'g' of CELL_DATA has the value type 'double'",
+                   "ids need an integer type"});
+  expect_rejected(ids("PEDIGREE_IDS p float\n1 2\n"),
+                  {"line 17", "PEDIGREE_IDS 'p' of CELL_DATA has the value type 'float'"});
+  expect_rejected(ids("GLOBAL_IDS g string\na\nb\n"),
+                  {"line 17", "the value type 'string' of GLOBAL_IDS 'g' of CELL_DATA"});
+  expect_rejected(ids("GLOBAL_IDS c int\n1 2\n"), {"array name 'c' appears twice in CELL_DATA"});
+  const auto skipped = read_text(ids("PEDIGREE_IDS p variant\n6 1\n6 2\n"));
+  EXPECT_FALSE(skipped.fields().contains("p"));
+  soma_test::expect_field<std::int32_t>(skipped, "c", 2, 1, {7, 8});
+}
