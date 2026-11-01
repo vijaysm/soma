@@ -834,7 +834,9 @@ TEST_F(VtkRead, TooFewValuesAreRejected) {
                   {"line 10", "expected a number in POINTS, found 'CELLS'"});
   expect_rejected(soma_test::replaced(t, "3 1 3 2\n", "3 1 3\n"),
                   {"line 13", "expected an integer in CELLS, found 'CELL_TYPES'"});
-  expect_rejected(soma_test::replaced(t, "c 1 2 int", "c 2 2 int"), {"array 'c' of CELL_DATA"});
+  expect_rejected(soma_test::replaced(t, "c 1 2 int", "c 2 2 int"),
+                  {"line 18", "the size of array 'c' of CELL_DATA needs more values than the "
+                              "rest of the file holds"});
 }
 
 TEST_F(VtkRead, NegativeCountsAreRejected) {
