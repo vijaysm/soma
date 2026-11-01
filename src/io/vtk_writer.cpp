@@ -270,6 +270,7 @@ void check_mesh_extents(const HostMesh& mesh, int dim) {
                                 entries(offsets.extent(0)) + " for " + std::to_string(nc) +
                                 " cells");
   }
+  // Defensive: a mirror carries the cell types and global ids with the connectivity.
   if (mesh.topology(dim).extent(0) != nc || mesh.gid(dim).extent(0) != nc) {
     throw std::invalid_argument("write_vtk: the cell types or global ids" + of + " do not have " +
                                 entries(nc));
@@ -302,6 +303,7 @@ void check_mesh_extents(const HostMesh& mesh, int dim) {
   }
 }
 
+// Defensive: the registry sizes every field to its space and mesh.
 void check_field_extents(const HostMesh& mesh, const Array& a) {
   dispatch_data_type(a.info.type, [&]<class T>() {
     const auto f = mesh.fields().template get<T>(a.info.id);
@@ -376,6 +378,7 @@ void check_reals(const V& v, std::size_t rows, std::size_t ncomp, const std::str
   }
 }
 
+// Defensive: no mesh small enough to build reaches these limits.
 void check_ids(const HostMesh& mesh, const Contents& contents) {
   const auto nc = static_cast<std::size_t>(mesh.count(contents.dim));
   std::int64_t largest = -1;
