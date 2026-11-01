@@ -125,7 +125,7 @@ class Mesh {
     return graph(bridge_slot(dim, via));
   }
   // The graphs held, as a request.
-  AdjacencyRequest adjacencies() const noexcept { return AdjacencyRequest::from_bits(adj_.present); }
+  AdjacencyRequest adjacencies() const { return AdjacencyRequest::from_bits(adj_.present); }
 
   FieldRegistry<MemSpace>& fields() noexcept { return fields_; }
   const FieldRegistry<MemSpace>& fields() const noexcept { return fields_; }
