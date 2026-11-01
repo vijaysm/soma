@@ -1594,9 +1594,7 @@ TEST_F(VtkFiles, WritingTwiceGivesIdenticalBytes) {
   EXPECT_EQ(soma_test::names_in(dir_), (soma_test::Names{"a.vtk", "b.vtk"}));
 }
 
-// The bytes of a fixed mesh and field set do not depend on the platform, the run,
-// or the number of threads: the same fingerprint is expected under every
-// OMP_NUM_THREADS.
+// The bytes of a fixed mesh and field set do not depend on the platform or the run.
 TEST_F(VtkFiles, OutputBytesAreFixed) {
   Model m = soma_test::mixed_cells();
   auto mesh = Model(m).build(Ordering::file);
