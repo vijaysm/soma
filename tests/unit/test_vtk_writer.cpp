@@ -795,6 +795,18 @@ TEST_F(VtkFiles, ComponentsOfOneTupleShareALine) {
   EXPECT_EQ(lines[b + 3], "20.5 21.5 22.5");
 }
 
+// One tuple fills several write buffers, so the output is drained mid-line.
+TEST_F(VtkFiles, AWideTupleIsWrittenWhole) {
+  auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  const auto expected = soma_test::fill_tag<double>(
+      mesh, "wide", 2, 20000, [](GO g, int c) { return soma_test::awkward(g, c); });
+  const std::vector<std::string> names{"wide"};
+  soma::write_vtk(mesh, file(), names);
+  const auto f = soma_test::read_vtk_file(file());
+  ASSERT_NE(f.cell_data.find("wide"), nullptr);
+  soma_test::expect_same_bits(f.cell_data.find("wide")->values<double>(), expected, "wide");
+}
+
 TEST_F(VtkFiles, FiniteExtremesSurviveTheText) {
   using DL = std::numeric_limits<double>;
   using FL = std::numeric_limits<float>;

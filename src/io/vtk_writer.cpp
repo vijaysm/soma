@@ -46,7 +46,10 @@ class Sink {
     buf_.append(s);
     drain();
   }
-  void put(char c) { buf_.push_back(c); }
+  void put(char c) {
+    buf_.push_back(c);
+    drain();
+  }
   void end_line() {
     buf_.push_back('\n');
     drain();
@@ -57,6 +60,7 @@ class Sink {
     char tmp[24];
     const auto r = std::to_chars(tmp, tmp + sizeof tmp, v);
     buf_.append(tmp, r.ptr);
+    drain();
   }
 
   // The shortest text that reads back as the same value.
@@ -65,6 +69,7 @@ class Sink {
     char tmp[40];
     const auto r = std::to_chars(tmp, tmp + sizeof tmp, v);
     buf_.append(tmp, r.ptr);
+    drain();
   }
 
   void finish() { flush(); }
