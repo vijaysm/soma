@@ -129,7 +129,7 @@ const char* value_type_name(DataType t, VtkLegacyVersion version) {
     case DataType::u8: return "unsigned_char";
     case DataType::u32: return "unsigned_int";
     case DataType::u64: return v51 ? "vtktypeuint64" : "unsigned_long";
-    case DataType::i8: break;  // rejected by choice; widening to i32 writes it
+    case DataType::i8: return v51 ? "signed_char" : nullptr;  // 3.0: rejected by choice
   }
   return nullptr;
 }
@@ -188,7 +188,7 @@ DomainKind domain_kind(const HostMesh& mesh, const FieldInfo& info) {
   return kind;
 }
 
-Array resolve(const HostMesh& mesh, const VtkField& want) {
+Array resolve(const HostMesh& mesh, const VtkField& want, VtkLegacyVersion version) {
   check_name(want.name);
   const std::vector<FieldInfo> all = mesh.fields().list();
   std::vector<const FieldInfo*> hits;
@@ -235,10 +235,11 @@ Array resolve(const HostMesh& mesh, const VtkField& want) {
     throw std::invalid_argument("write_vtk: field " + in_quotes(info.name) + " has layout " +
                                 describe(info.layout) + "; only per_entity can be written");
   }
-  if (value_type_name(info.type, VtkLegacyVersion::v5_1) == nullptr) {
+  if (value_type_name(info.type, version) == nullptr) {
     throw std::invalid_argument("write_vtk: field " + in_quotes(info.name) +
                                 " has value type " + name(info.type) +
-                                ", which the writer does not write; widen it to i32");
+                                ", which version 3.0 does not write; widen it to i32 or write "
+                                "version 5.1");
   }
   const std::size_t pending = mesh.fields().pending_count(info.id);
   if (pending != 0) {
@@ -318,7 +319,8 @@ void check_field_extents(const HostMesh& mesh, const Array& a) {
   });
 }
 
-Contents collect_contents(const HostMesh& mesh, std::span<const VtkField> fields) {
+Contents collect_contents(const HostMesh& mesh, std::span<const VtkField> fields,
+                          VtkLegacyVersion version) {
   Contents contents;
   contents.dim = mesh.dim();
   if (contents.dim < 1) {
@@ -342,7 +344,7 @@ Contents collect_contents(const HostMesh& mesh, std::span<const VtkField> fields
 
   std::vector<FieldId> seen;
   for (const VtkField& want : fields) {
-    Array a = resolve(mesh, want);
+    Array a = resolve(mesh, want, version);
     if (std::find(seen.begin(), seen.end(), a.info.id) != seen.end()) {
       throw std::invalid_argument("write_vtk: field " + in_quotes(a.info.name) +
                                   " is selected twice");
@@ -597,7 +599,7 @@ void detail::write_vtk_with_temporary_names(const HostMesh& mesh, const fs::path
                                             std::span<const VtkField> fields,
                                             const std::function<std::string(int)>& candidate,
                                             const VtkWriteOptions& options) {
-  const Contents contents = collect_contents(mesh, fields);
+  const Contents contents = collect_contents(mesh, fields, options.version);
   check_ids(mesh, contents, options.version);
   check_values(mesh, contents);
 

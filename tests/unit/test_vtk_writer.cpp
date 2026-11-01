@@ -399,10 +399,11 @@ class VtkFiles : public ::testing::Test {
   // Expects std::invalid_argument with every needle in its message, and no file.
   template <class Selection>
   void expect_invalid_selection(const soma::HostMesh& mesh, const Selection& selection,
-                                const std::vector<std::string>& needles) const {
+                                const std::vector<std::string>& needles,
+                                const soma::VtkWriteOptions& options = {}) const {
     const fs::path p = file("rejected.vtk");
     try {
-      soma::write_vtk(mesh, p, selection);
+      soma::write_vtk(mesh, p, selection, options);
       ADD_FAILURE() << "expected std::invalid_argument containing '" << needles.front() << "'";
     } catch (const std::invalid_argument& e) {
       for (const std::string& needle : needles) {
@@ -416,9 +417,10 @@ class VtkFiles : public ::testing::Test {
 
   // The message must also name the last selected field.
   void expect_invalid_all(const soma::HostMesh& mesh, const std::vector<std::string>& names,
-                          std::vector<std::string> needles) const {
+                          std::vector<std::string> needles,
+                          const soma::VtkWriteOptions& options = {}) const {
     if (!names.empty()) needles.push_back("'" + names.back() + "'");
-    expect_invalid_selection(mesh, names, needles);
+    expect_invalid_selection(mesh, names, needles, options);
   }
 
   void expect_invalid(const soma::HostMesh& mesh, const std::vector<std::string>& names,
@@ -1286,10 +1288,31 @@ TEST_F(VtkFiles, OtherDimensionsAreRejected) {
   expect_invalid(mesh, {"solid_tag"}, "dimension 3");
 }
 
-TEST_F(VtkFiles, ValueTypesWithoutALegacyNameAreRejected) {
+TEST_F(VtkFiles, I8FieldsAreRejectedInVersion30) {
   auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
   mesh.fields().add_tag<std::int8_t>("small", 0, 1);
-  expect_invalid_all(mesh, {"small"}, {"value type i8", "widen it to i32"});
+  expect_invalid_all(mesh, {"small"},
+                     {"value type i8", "version 3.0 does not write", "widen it to i32"},
+                     soma_test::v3_0);
+}
+
+TEST_F(VtkFiles, I8FieldsAreSignedCharInVersion51) {
+  auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  const auto small = soma_test::fill_tag<std::int8_t>(mesh, "small", 0, 2, [](GO g, int c) {
+    return static_cast<std::int8_t>(c == 0 ? -138 + g : 137 - g);  // gids from 10
+  });
+  ASSERT_EQ(std::count(small.begin(), small.end(), std::int8_t{-128}), 1);
+  ASSERT_EQ(std::count(small.begin(), small.end(), std::int8_t{127}), 1);
+  soma::write_vtk(mesh, file(), std::vector<std::string>{"small"});
+  const auto f = soma_test::read_vtk_file(file());
+  EXPECT_EQ(f.version, "5.1");
+  const soma_test::VtkArray* a = f.point_data.find("small");
+  ASSERT_NE(a, nullptr);
+  EXPECT_EQ(a->type, "signed_char");
+  EXPECT_EQ(a->ncomp, 2);
+  soma_test::expect_same_bits(a->values<std::int8_t>(), small, "small");
+  EXPECT_NE(f.text.find("small 2 " + std::to_string(f.npoints) + " signed_char\n"),
+            std::string::npos);
 }
 
 TEST_F(VtkFiles, UnknownNamesAreRejected) {

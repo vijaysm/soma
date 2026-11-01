@@ -173,6 +173,8 @@ inline void check_value(const std::string& type, const std::string& token,
     parse_number<std::int64_t>(token);
   } else if (type == "unsigned_char") {
     parse_number<std::uint8_t>(token);
+  } else if (type == "signed_char" && v51) {
+    parse_number<std::int8_t>(token);
   } else if (type == "unsigned_int") {
     parse_number<std::uint32_t>(token);
   } else if (type == "unsigned_long" || type == "vtktypeuint64") {

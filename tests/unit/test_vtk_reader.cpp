@@ -1212,3 +1212,15 @@ TEST_F(VtkRead, DegenerateAndDuplicateCellsAreRead) {
   soma_test::expect_cells(mesh, 2,
                           {WantCell{Topology::tri, {0, 0, 1}}, WantCell{Topology::tri, {0, 0, 1}}});
 }
+
+TEST_F(VtkRead, I8FieldsRoundTripInVersion51) {
+  auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  soma_test::fill<std::int8_t>(mesh, "small", 2, 3, [](std::size_t r, int c) {
+    return static_cast<std::int8_t>(r == 0 ? (c == 0 ? -128 : 127) : -static_cast<int>(r) * 7 + c);
+  });
+  soma::write_vtk(mesh, file("first.vtk"), soma_test::Names{"small"});
+  const auto back = soma::read_vtk(file("first.vtk"));
+  soma_test::expect_same_mesh(mesh, back, {"small"});
+  soma::write_vtk(back, file("second.vtk"), soma_test::Names{"small"});
+  EXPECT_EQ(soma_test::slurp(file("first.vtk")), soma_test::slurp(file("second.vtk")));
+}
