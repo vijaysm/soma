@@ -280,7 +280,7 @@ Derived<typename ExecSpace::memory_space> derive(
       });
 
   // Every slot: its entity and its orientation against the stored vertices.
-  // Only an adopted entity can fail to match: its order is the input's.
+  // A side fails to match when an explicit entity or an element is tangled.
   Kokkos::View<LO, M> crossed(base + "::crossed");
   Kokkos::deep_copy(exec, crossed, detail::no_entity);
   Kokkos::parallel_for(
@@ -302,9 +302,10 @@ Derived<typename ExecSpace::memory_space> derive(
     if (bad != detail::no_entity) {
       const auto h = Kokkos::create_mirror_view_and_copy(
           Kokkos::HostSpace{}, Kokkos::subview(b.gid, std::pair<LO, LO>(bad, bad + 1)));
-      throw std::invalid_argument("derive: explicit entity gid " + std::to_string(h(0)) +
-                                  " of dimension " + std::to_string(k) +
-                                  " does not list its vertices in cycle order");
+      throw std::invalid_argument("derive: entity gid " + std::to_string(h(0)) + " of dimension " +
+                                  std::to_string(k) +
+                                  " and an element side list its vertices in different cycles "
+                                  "(an explicit entity or an element is tangled)");
     }
   }
 
