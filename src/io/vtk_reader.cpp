@@ -242,7 +242,6 @@ ValueType value_type_or_fail(Lexer& lex, std::string_view vtk, const std::string
 
 bool is_integer(DataType t) { return t != DataType::f32 && t != DataType::f64; }
 
-// The value of a real token: nan, inf and -inf are accepted, as VTK writes them.
 // The token without a leading '+', which from_chars does not take; empty when a
 // second sign follows it.
 std::string_view without_plus(std::string_view t) {
@@ -252,6 +251,7 @@ std::string_view without_plus(std::string_view t) {
   return t;
 }
 
+// The value of a real token: nan, inf and -inf are accepted, as VTK writes them.
 template <class F>
 F parse_real(Lexer& lex, std::string_view t, const std::string& of) {
   const std::string_view s = without_plus(t);
