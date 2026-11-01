@@ -4,6 +4,7 @@
 #include "soma/core/mesh_builder.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <numeric>
@@ -24,6 +25,12 @@ MeshBuilder::MeshBuilder(int dim) : dim_(dim) {
 void MeshBuilder::add_vertices(std::span<const GO> gids, std::span<const Real> xyz) {
   if (xyz.size() != 3 * gids.size()) {
     throw std::invalid_argument("add_vertices: xyz must hold 3 values per vertex");
+  }
+  for (std::size_t i = 0; i < xyz.size(); ++i) {
+    if (!std::isfinite(xyz[i])) {
+      throw std::invalid_argument("add_vertices: vertex gid " + std::to_string(gids[i / 3]) +
+                                  " has a non-finite coordinate");
+    }
   }
   const std::size_t old = vertex_gids_.size();
   vertex_gids_.insert(vertex_gids_.end(), gids.begin(), gids.end());

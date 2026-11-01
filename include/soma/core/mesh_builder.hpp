@@ -22,6 +22,8 @@ class MeshBuilder {
  public:
   explicit MeshBuilder(int dim);
 
+  // Throws std::invalid_argument, naming the gid, for a NaN or infinite
+  // coordinate, whatever the ordering; nothing is added then.
   void add_vertices(std::span<const GO> gids, std::span<const Real> xyz);
   void add_elements(Topology t, std::span<const GO> gids, std::span<const GO> vertex_gids);
   void add_polygons(std::span<const GO> gids, std::span<const Offset> offsets,

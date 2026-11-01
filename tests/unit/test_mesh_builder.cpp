@@ -108,6 +108,52 @@ TEST(MeshBuilder, VertexCoordinatesMustHoldThreeValuesPerVertex) {
   EXPECT_DOUBLE_EQ(mesh.coords()(0, 2), 3.0);
 }
 
+namespace {
+
+// The message of the exception add_vertices throws for vertices 11, 12, 13
+// whose coordinate `slot` is `bad`, or "" when it accepts them.
+std::string non_finite_error(std::size_t slot, soma::Real bad) {
+  soma::MeshBuilder b(2);
+  std::vector<soma::Real> xyz{0, 0, 0, 1, 0, 0, 0, 1, 0};
+  xyz[slot] = bad;
+  try {
+    b.add_vertices(std::vector<GO>{11, 12, 13}, xyz);
+  } catch (const std::invalid_argument& e) {
+    return e.what();
+  }
+  return "";
+}
+
+}  // namespace
+
+TEST(MeshBuilder, NonFiniteCoordinatesAreRejectedByVertexGid) {
+  const soma::Real nan = std::numeric_limits<soma::Real>::quiet_NaN();
+  const soma::Real inf = std::numeric_limits<soma::Real>::infinity();
+  const struct {
+    std::size_t slot;
+    soma::Real value;
+    const char* gid;
+  } cases[] = {{0, nan, "11"}, {7, nan, "13"}, {2, inf, "11"}, {4, -inf, "12"}, {8, inf, "13"}};
+  for (const auto& c : cases) {
+    const std::string what = non_finite_error(c.slot, c.value);
+    EXPECT_NE(what.find(std::string("vertex gid ") + c.gid), std::string::npos)
+        << "slot " << c.slot << ": '" << what << "'";
+  }
+  EXPECT_EQ(non_finite_error(0, 1e308), "");
+}
+
+// The check runs for every ordering, and a rejected block leaves nothing behind.
+TEST(MeshBuilder, ARejectedVertexBlockLeavesTheBuilderUsable) {
+  soma::MeshBuilder b(2);
+  const soma::Real nan = std::numeric_limits<soma::Real>::quiet_NaN();
+  EXPECT_THROW(b.add_vertices(std::vector<GO>{1, 2}, std::vector<soma::Real>{0, 0, 0, 1, nan, 0}),
+               std::invalid_argument);
+  b.add_vertices(std::vector<GO>{1}, std::vector<soma::Real>{4, 5, 6});
+  const auto mesh = std::move(b).build(soma::Ordering::file);
+  ASSERT_EQ(mesh.count(0), 1);
+  EXPECT_EQ(mesh.coords()(0, 0), 4.0);
+}
+
 TEST(MeshBuilder, DuplicateVertexGidThrows) {
   soma::MeshBuilder b(2);
   const std::vector<GO> vg{1, 2, 1};
