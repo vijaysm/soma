@@ -1166,3 +1166,49 @@ TEST_F(VtkRead, ASectionHoldsAtMost1024Arrays) {
                                       "FIELD FieldData 1\n"),
                   {"line 21", "the array name 'c' appears twice in CELL_DATA"});
 }
+
+TEST_F(VtkRead, CountsBeyondTheRestOfTheFileAreRejected) {
+  using soma_test::replaced;
+  const std::string& t = soma_test::base_file;
+  expect_rejected(replaced(t, "POINTS 4", "POINTS 1000000000000"),
+                  {"line 5", "the POINTS count (1000000000000) needs more values than the rest of "
+                             "the file holds"});
+  expect_rejected(replaced(t, "c 1 2 int", "c 1000000000 2 int"),
+                  {"line 18", "the size of array 'c' of CELL_DATA needs more values"});
+  expect_rejected(replaced(t, "FieldData 1\nc 1 2 int", "FieldData 1\nc 1000000000 2 string"),
+                  {"line 18", "a value of array 'c' of CELL_DATA needs more lines"});
+}
+
+TEST_F(VtkRead, CrLfLineEndsAreRead) {
+  std::string text;
+  for (const char c : soma_test::base_file) {
+    if (c == '\n') text += '\r';
+    text += c;
+  }
+  const auto mesh = read_text(text);
+  soma_test::expect_cells(mesh, 2,
+                          {WantCell{Topology::tri, {0, 1, 2}}, WantCell{Topology::tri, {1, 3, 2}}});
+  soma_test::expect_field<std::int32_t>(mesh, "c", 2, 1, {7, 8});
+  expect_rejected(soma_test::replaced(text, "7\r\n", "7.5\r\n"),
+                  {"line 19", "expected an integer in array 'c' of CELL_DATA, found '7.5'"});
+}
+
+TEST_F(VtkRead, ShortAndUnsignedShortValuesMustFit) {
+  using soma_test::replaced;
+  const std::string s = replaced(soma_test::base_file, "c 1 2 int", "c 1 2 short");
+  expect_rejected(replaced(s, "7\n", "32768\n"),
+                  {"line 19", "'32768' in array 'c'", "out of range"});
+  expect_rejected(replaced(s, "7\n", "-32769\n"), {"line 19", "'-32769'", "out of range"});
+  const std::string us = replaced(soma_test::base_file, "c 1 2 int", "c 1 2 unsigned_short");
+  expect_rejected(replaced(us, "7\n", "65536\n"), {"line 19", "'65536'", "out of range"});
+  expect_rejected(replaced(us, "7\n", "-1\n"), {"line 19", "'-1'", "out of range"});
+}
+
+TEST_F(VtkRead, DegenerateAndDuplicateCellsAreRead) {
+  const std::string text = soma_test::replaced(soma_test::base_file,
+                                               "CELLS 2 8\n3 0 1 2\n3 1 3 2\n",
+                                               "CELLS 2 8\n3 0 0 1\n3 0 0 1\n");
+  const auto mesh = read_text(text);
+  soma_test::expect_cells(mesh, 2,
+                          {WantCell{Topology::tri, {0, 0, 1}}, WantCell{Topology::tri, {0, 0, 1}}});
+}
