@@ -11,8 +11,6 @@
 #include <cstdint>
 #include <optional>
 #include <span>
-#include <stdexcept>
-#include <string>
 #include <vector>
 
 #include "soma/core/mesh.hpp"

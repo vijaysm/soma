@@ -4,6 +4,7 @@
 #ifndef SOMA_CORE_MESH_VIEW_HPP_
 #define SOMA_CORE_MESH_VIEW_HPP_
 
+#include <cstddef>
 #include <cstdint>
 
 #include <Kokkos_Core.hpp>
