@@ -47,6 +47,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <span>
 #include <string>
@@ -69,6 +70,15 @@ void write_vtk(const HostMesh& mesh, const std::filesystem::path& path,
                std::span<const VtkField> fields);
 
 namespace detail {
+
+// The number of temporary file names write_vtk tries before it gives up.
+inline constexpr int vtk_temporary_attempts = 100;
+
+// write_vtk, with the temporary file names taken from `candidate` (called with
+// the attempt number, from 0) instead of drawn at random. For tests.
+void write_vtk_with_temporary_names(const HostMesh& mesh, const std::filesystem::path& path,
+                                    std::span<const VtkField> fields,
+                                    const std::function<std::string(int)>& candidate);
 
 // Throws std::length_error unless the point count, the largest connectivity id
 // and the CELLS size (cells plus vertex references) each fit the 32-bit int

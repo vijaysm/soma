@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <random>
 #include <stdexcept>
@@ -499,22 +500,18 @@ void emit(Sink& out, const HostMesh& mesh, const Contents& contents) {
   out.finish();
 }
 
-// A new file next to `path`, named `path` + "." + six random characters and
-// created exclusively (O_EXCL, O_NOFOLLOW), so that it never opens an existing
-// file or follows a symlink. Unlike mkstemp, which forces mode 0600, it is
-// created with 0666 so that the umask decides the mode of the result.
+// A new file next to `path`, created exclusively (O_EXCL, O_NOFOLLOW) under
+// the first name from `candidate` that is free, so that it never opens an
+// existing file or follows a symlink. Unlike mkstemp, which forces mode 0600,
+// it is created with 0666 so that the umask decides the mode of the result.
 class Temporary {
  public:
-  explicit Temporary(const fs::path& path) : path_(path) {
-    static constexpr char letters[] =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-    std::random_device random;
-    for (int attempt = 0; attempt < 100; ++attempt) {
-      std::string candidate = path.string() + ".";
-      for (int k = 0; k < 6; ++k) candidate += letters[random() % (sizeof letters - 1)];
-      fd_ = ::open(candidate.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0666);
+  Temporary(const fs::path& path, const std::function<std::string(int)>& candidate) : path_(path) {
+    for (int attempt = 0; attempt < detail::vtk_temporary_attempts; ++attempt) {
+      std::string name = candidate(attempt);
+      fd_ = ::open(name.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0666);
       if (fd_ >= 0) {
-        name_ = std::move(candidate);
+        name_ = std::move(name);
         return;
       }
       const int e = errno;
@@ -561,11 +558,25 @@ class Temporary {
 }  // namespace
 
 void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const VtkField> fields) {
+  static constexpr char letters[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  std::random_device random;
+  const auto random_name = [&](int) {
+    std::string name = path.string() + ".";
+    for (int k = 0; k < 6; ++k) name += letters[random() % (sizeof letters - 1)];
+    return name;
+  };
+  detail::write_vtk_with_temporary_names(mesh, path, fields, random_name);
+}
+
+void detail::write_vtk_with_temporary_names(const HostMesh& mesh, const fs::path& path,
+                                            std::span<const VtkField> fields,
+                                            const std::function<std::string(int)>& candidate) {
   const Contents contents = collect_contents(mesh, fields);
   check_ids(mesh, contents);
   check_values(mesh, contents);
 
-  Temporary file(path);
+  Temporary file(path, candidate);
   Sink out(file.fd(), path);
   emit(out, mesh, contents);
   file.close();
