@@ -127,7 +127,7 @@ const char* value_type_name(DataType t) {
     case DataType::u8: return "unsigned_char";
     case DataType::u32: return "unsigned_int";
     case DataType::u64: return "unsigned_long";
-    case DataType::i8: break;
+    case DataType::i8: break;  // rejected by choice; widening to i32 writes it
   }
   return nullptr;
 }
@@ -236,7 +236,7 @@ Array resolve(const HostMesh& mesh, const VtkField& want) {
   if (value_type_name(info.type) == nullptr) {
     throw std::invalid_argument("write_vtk: field " + in_quotes(info.name) +
                                 " has value type " + name(info.type) +
-                                ", which has no portable legacy VTK name");
+                                ", which the writer does not write; widen it to i32");
   }
   const std::size_t pending = mesh.fields().pending_count(info.id);
   if (pending != 0) {

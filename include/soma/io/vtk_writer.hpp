@@ -11,15 +11,17 @@
 // the vertices by local id. Vertex order is the canonical order of the element,
 // which VTK uses unchanged (see the orientation test for the evidence). The
 // wedge convention changed in VTK 9.7 (older versions expect the triangles in
-// the reverse sense); the writer follows the current one. knife and polyhedron
-// have no legacy cell type and throw.
+// the reverse sense); the writer follows the current one, so readers older than
+// VTK 9.7 (ParaView 6.1 and earlier, for one) show these wedges with inverted
+// orientation. knife and polyhedron have no legacy cell type and throw.
 //
 // Fields: a per_entity field over a full domain on dimension 0 goes to
 // POINT_DATA, on mesh.dim() to CELL_DATA. Each array is written as FIELD data,
 // whatever its component count: `name ncomp ntuples type`, one tuple per line.
 // Arrays follow the order of the selection. Value types f64, f32, i32, i64, u8,
 // u32 and u64 map to double, float, int, long, unsigned_char, unsigned_int and
-// unsigned_long; i8 has no portable legacy name and is rejected. Doubles and
+// unsigned_long (64-bit on LP64 platforms). i8 is rejected by choice, not for
+// want of a name: widen it to i32 to write it. Doubles and
 // floats are written in the shortest form that reads back bitwise equal. A
 // NaN, an infinity or a subnormal value, in a field or in the coordinates,
 // throws std::invalid_argument: legacy VTK readers cannot read them.
@@ -39,6 +41,8 @@
 // std::length_error: version 3.0 readers read those as int. A mesh whose Views
 // do not match its counts (a mirror that left out the coordinates or the
 // vertices, say) throws std::invalid_argument before any file is touched.
+//
+// Needs floating-point std::to_chars (libstdc++ 11+, libc++ 14+, macOS 13.3+).
 
 #include <cstddef>
 #include <cstdint>

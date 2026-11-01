@@ -1109,7 +1109,7 @@ TEST_F(VtkFiles, OtherDimensionsAreRejected) {
 TEST_F(VtkFiles, ValueTypesWithoutALegacyNameAreRejected) {
   auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
   mesh.fields().add_tag<std::int8_t>("small", 0, 1);
-  expect_invalid(mesh, {"small"}, "i8");
+  expect_invalid_all(mesh, {"small"}, {"value type i8", "widen it to i32"});
 }
 
 TEST_F(VtkFiles, UnknownNamesAreRejected) {
