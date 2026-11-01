@@ -922,3 +922,20 @@ TEST_F(VtkRead, LongTokensAreCutInMessages) {
     EXPECT_EQ(std::string(e.what()).find(std::string(65, 'w')), std::string::npos) << e.what();
   }
 }
+
+TEST_F(VtkRead, ASignAfterASignIsRejected) {
+  using soma_test::replaced;
+  const std::string& t = soma_test::base_file;
+  expect_rejected(replaced(t, "7\n", "+-7\n"),
+                  {"line 19", "expected an integer in array 'c' of CELL_DATA, found '+-7'"});
+  expect_rejected(replaced(t, "7\n", "++7\n"), {"line 19", "found '++7'"});
+  expect_rejected(replaced(t, "1 0 0\n", "+-1 0 0\n"),
+                  {"line 7", "expected a number in POINTS, found '+-1'"});
+  const auto mesh = read_text(replaced(replaced(t, "7\n", "+7\n"), "1 0 0\n", "+1 0 0\n"));
+  soma_test::expect_field<std::int32_t>(mesh, "c", 2, 1, {7, 8});
+}
+
+TEST_F(VtkRead, ANulEscapeInANameIsRejected) {
+  expect_rejected(soma_test::replaced(soma_test::base_file, "c 1 2 int", "a%00b 1 2 int"),
+                  {"line 18", "the array name 'a%00b' holds the escape %00"});
+}

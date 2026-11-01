@@ -215,10 +215,18 @@ ValueType value_type_or_fail(Lexer& lex, std::string_view vtk, const std::string
 bool is_integer(DataType t) { return t != DataType::f32 && t != DataType::f64; }
 
 // The value of a real token: nan, inf and -inf are accepted, as VTK writes them.
+// The token without a leading '+', which from_chars does not take; empty when a
+// second sign follows it.
+std::string_view without_plus(std::string_view t) {
+  if (t.empty() || t.front() != '+') return t;
+  t.remove_prefix(1);
+  if (!t.empty() && (t.front() == '-' || t.front() == '+')) return {};
+  return t;
+}
+
 template <class F>
 F parse_real(Lexer& lex, std::string_view t, const std::string& of) {
-  std::string_view s = t;
-  if (!s.empty() && s.front() == '+') s.remove_prefix(1);
+  const std::string_view s = without_plus(t);
   F v{};
   const auto r = std::from_chars(s.data(), s.data() + s.size(), v);
   if (r.ec == std::errc::result_out_of_range) {
@@ -233,8 +241,7 @@ F parse_real(Lexer& lex, std::string_view t, const std::string& of) {
 
 template <class T>
 T parse_integer(Lexer& lex, std::string_view t, const ValueType& vt, const std::string& of) {
-  std::string_view s = t;
-  if (!s.empty() && s.front() == '+') s.remove_prefix(1);
+  const std::string_view s = without_plus(t);
   bool ok = false;
   T out{};
   if (!s.empty() && s.front() == '-') {
@@ -315,6 +322,7 @@ std::string decode_name(Lexer& lex, std::string_view s) {
     if (r.ec != std::errc{} || r.ptr != s.data() + i + 3) {
       lex.fail("the array name " + in_quotes(s) + " holds a malformed % escape");
     }
+    if (v == 0) lex.fail("the array name " + in_quotes(s) + " holds the escape %00");
     out.push_back(static_cast<char>(v));
     i += 2;
   }
