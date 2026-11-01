@@ -20,6 +20,11 @@ struct MeshTestAccess {
   static void set_segments(Mesh<M>& mesh, int dim, SegmentTable table) {
     mesh.ents_[static_cast<std::size_t>(dim)].segments = std::move(table);
   }
+  // Installs a graph directly, as if build_adjacencies had made it.
+  template <class M>
+  static void put_adjacency(Mesh<M>& mesh, int slot, Adjacency<M> graph) {
+    mesh.adj_.put(slot, std::move(graph));
+  }
 };
 
 }  // namespace soma

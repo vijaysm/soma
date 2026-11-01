@@ -12,6 +12,7 @@
 #include "soma/core/topology.hpp"
 #include "soma/core/types.hpp"
 #include "soma/core/view_types.hpp"
+#include "soma/topology/adjacency.hpp"
 
 namespace soma {
 
@@ -32,6 +33,10 @@ struct MeshView {
   Kokkos::Array<UView1<std::uint8_t, MemSpace>, 4> topo{};
   Kokkos::Array<UView1<GO, MemSpace>, 4> gids{};
   CoordsU coords{};
+  // Indexed by pair_slot and bridge_slot; empty where the mesh holds no graph.
+  Kokkos::Array<UView1<Offset, MemSpace>, adjacency_slots> adj_offsets{};
+  Kokkos::Array<UView1<LO, MemSpace>, adjacency_slots> adj_targets{};
+  Kokkos::Array<UView1<std::uint8_t, MemSpace>, adjacency_slots> adj_code_values{};
 
   KOKKOS_INLINE_FUNCTION LO count(int d) const { return counts[static_cast<std::size_t>(d)]; }
   KOKKOS_INLINE_FUNCTION Topology topology(int d, LO e) const {
@@ -45,6 +50,26 @@ struct MeshView {
     const auto i = static_cast<std::size_t>(d);
     return d == 0 ? e : conn[i](offsets[i](e) + k);
   }
+  // (d, 0) for d >= 1 is the connectivity. Any other graph must be held by the
+  // mesh; under SOMA_DEBUG a missing one aborts.
+  KOKKOS_INLINE_FUNCTION Row<const LO> adj(int from, int to, LO e) const {
+    if (to == 0 && from > 0) {
+      const auto i = static_cast<std::size_t>(from);
+      return {conn[i].data() + offsets[i](e), static_cast<LO>(offsets[i](e + 1) - offsets[i](e))};
+    }
+    return row(pair_slot(from, to), e);
+  }
+  // Empty for (d, 0).
+  KOKKOS_INLINE_FUNCTION Row<const std::uint8_t> adj_codes(int from, int to, LO e) const {
+    if (to == 0 && from > 0) return {};
+    const auto s = static_cast<std::size_t>(pair_slot(from, to));
+    check_slot(s);
+    const Offset b = adj_offsets[s](e);
+    return {adj_code_values[s].data() + b, static_cast<LO>(adj_offsets[s](e + 1) - b)};
+  }
+  KOKKOS_INLINE_FUNCTION Row<const LO> bridge(int d, int via, LO e) const {
+    return row(bridge_slot(d, via), e);
+  }
   KOKKOS_INLINE_FUNCTION Real x(LO v, int k) const { return coords(v, k); }
   KOKKOS_INLINE_FUNCTION GO gid(int d, LO e) const { return gids[static_cast<std::size_t>(d)](e); }
   KOKKOS_INLINE_FUNCTION bool owned(int d, LO e) const {
@@ -52,6 +77,19 @@ struct MeshView {
   }
   KOKKOS_INLINE_FUNCTION bool interior(int d, LO e) const {
     return e < interior_ends[static_cast<std::size_t>(d)];
+  }
+
+ private:
+  KOKKOS_INLINE_FUNCTION void check_slot([[maybe_unused]] std::size_t s) const {
+#if SOMA_DEBUG
+    if (adj_offsets[s].extent(0) == 0) Kokkos::abort("soma::MeshView: adjacency not built");
+#endif
+  }
+  KOKKOS_INLINE_FUNCTION Row<const LO> row(int slot, LO e) const {
+    const auto s = static_cast<std::size_t>(slot);
+    check_slot(s);
+    const Offset b = adj_offsets[s](e);
+    return {adj_targets[s].data() + b, static_cast<LO>(adj_offsets[s](e + 1) - b)};
   }
 };
 

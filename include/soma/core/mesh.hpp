@@ -19,6 +19,7 @@
 #include "soma/core/types.hpp"
 #include "soma/core/view_types.hpp"
 #include "soma/fields/registry.hpp"
+#include "soma/topology/adjacency.hpp"
 
 namespace soma {
 
@@ -36,9 +37,15 @@ struct EntityBlock {
   View1<std::uint8_t, MemSpace> topology;
   View1<GO, MemSpace> gid;
   SegmentTable segments;
+  bool derived = false;  // complete: built from the elements, explicit input adopted
 };
 
+template <class MemSpace>
+class Mesh;
+
 namespace detail {
+struct TopologyAccess;
+
 template <class Dst, class V>
 auto deep_mirror(const V& src) {
   auto out = Kokkos::create_mirror(Kokkos::view_alloc(Dst{}, Kokkos::WithoutInitializing), src);
@@ -83,6 +90,39 @@ class Mesh {
   View1<const GO, MemSpace> gid(int d) const { return block(d).gid; }
   CoordView<MemSpace> coords() const noexcept { return coords_; }  // writable geometry
 
+  // has_adjacency(d, 0) is true for 1 <= d <= dim(): the connectivity. The
+  // lookups throw MissingAdjacency for a graph the mesh does not hold, and
+  // std::invalid_argument for a pair that is not one of distinct dimensions.
+  bool has_adjacency(int from, int to) const {
+    AdjacencyRequest{}.add(from, to);
+    if (to == 0) return from <= dim_;
+    return adj_.has(pair_slot(from, to));
+  }
+  bool has_bridge(int dim, int via) const {
+    AdjacencyRequest{}.add_bridge(dim, via);
+    return adj_.has(bridge_slot(dim, via));
+  }
+  AdjacencyGraph<MemSpace> adjacency(int from, int to) const {
+    if (to == 0 && has_adjacency(from, to)) {
+      const auto& b = block(from);
+      return {b.conn_offsets, b.conn, {}};
+    }
+    if (!has_adjacency(from, to)) {
+      throw MissingAdjacency("Mesh: no (" + std::to_string(from) + ", " + std::to_string(to) +
+                             ") adjacency; request it from build_adjacencies");
+    }
+    return graph(pair_slot(from, to));
+  }
+  AdjacencyGraph<MemSpace> bridge(int dim, int via) const {
+    if (!has_bridge(dim, via)) {
+      throw MissingAdjacency("Mesh: no bridge (" + std::to_string(dim) + " via " +
+                             std::to_string(via) + "); request it from build_adjacencies");
+    }
+    return graph(bridge_slot(dim, via));
+  }
+  // The graphs held, as a request.
+  AdjacencyRequest adjacencies() const noexcept { return AdjacencyRequest::from_bits(adj_.present); }
+
   FieldRegistry<MemSpace>& fields() noexcept { return fields_; }
   const FieldRegistry<MemSpace>& fields() const noexcept { return fields_; }
 
@@ -109,6 +149,11 @@ class Mesh {
       v.gids[d] = ents_[d].gid;
     }
     v.coords = coords_;
+    for (std::size_t s = 0; s < adj_.graphs.size(); ++s) {
+      v.adj_offsets[s] = adj_.graphs[s].offsets;
+      v.adj_targets[s] = adj_.graphs[s].targets;
+      v.adj_code_values[s] = adj_.graphs[s].codes;
+    }
     return v;
   }
   MeshView<MemSpace> view() const&& = delete;
@@ -134,6 +179,7 @@ class Mesh {
     for (std::size_t d = 0; d < 4; ++d) std::swap(ents_[d], o.ents_[d]);
     std::swap(coords_, o.coords_);
     std::swap(epoch_, o.epoch_);
+    adj_.swap(o.adj_);
     fields_.swap(o.fields_);
   }
 
@@ -142,6 +188,12 @@ class Mesh {
   friend class Mesh;
   friend class MeshBuilder;
   friend struct MeshTestAccess;
+  friend struct detail::TopologyAccess;
+
+  AdjacencyGraph<MemSpace> graph(int slot) const {
+    const auto& g = adj_.graphs[static_cast<std::size_t>(slot)];
+    return {g.offsets, g.targets, g.codes};
+  }
 
   const EntityBlock<MemSpace>& block(int d) const {
     if (d < 0 || d > 3) {
@@ -187,6 +239,7 @@ class Mesh {
       auto& t = out.ents_[d];
       t.count = s.count;
       t.segments = s.segments;
+      t.derived = s.derived;
       transfer(t.conn_offsets, s.conn_offsets, alias);
       transfer(t.conn, s.conn, alias);
       transfer(t.topology, s.topology, alias);
@@ -202,6 +255,7 @@ class Mesh {
   std::array<EntityBlock<MemSpace>, 4> ents_{};
   CoordView<MemSpace> coords_;
   std::uint64_t epoch_ = 1;
+  AdjacencyStore<MemSpace> adj_;
   FieldRegistry<MemSpace> fields_;
 };
 
