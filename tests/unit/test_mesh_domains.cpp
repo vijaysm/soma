@@ -73,6 +73,56 @@ TEST(MeshDomains, SegmentFilterOnOwnership) {
   EXPECT_EQ(Dom::segments(mesh, 2, ghost).size(), 0);
 }
 
+// Elements 0 (tri), 1 (quad) and 2 (quad) are interior, shared and ghost.
+TEST(MeshDomains, OwnedSegmentsIncludeSharedAndExcludeGhosts) {
+  const auto mesh = soma_test::mesh_with_shared_and_ghost_elements();
+  SegmentFilter owned;
+  owned.ownership = SegmentFilter::Own::owned;
+  const auto d = Dom::segments(mesh, 2, owned);
+  EXPECT_EQ(d.size(), 2);
+  EXPECT_EQ(d.row(2, 0), 0);
+  EXPECT_EQ(d.row(2, 1), 1);
+  EXPECT_EQ(d.row(2, 2), soma::invalid_lo);
+  EXPECT_EQ(d, Dom::from_list(mesh, 2, std::vector<LO>{0, 1}));
+}
+
+TEST(MeshDomains, InteriorSegmentsExcludeSharedAndGhosts) {
+  const auto mesh = soma_test::mesh_with_shared_and_ghost_elements();
+  SegmentFilter interior;
+  interior.ownership = SegmentFilter::Own::interior;
+  const auto d = Dom::segments(mesh, 2, interior);
+  EXPECT_EQ(d.size(), 1);
+  EXPECT_EQ(d.row(2, 0), 0);
+  EXPECT_EQ(d.row(2, 1), soma::invalid_lo);
+  EXPECT_EQ(d.row(2, 2), soma::invalid_lo);
+}
+
+TEST(MeshDomains, GhostSegmentsHoldOnlyGhosts) {
+  const auto mesh = soma_test::mesh_with_shared_and_ghost_elements();
+  SegmentFilter ghost;
+  ghost.ownership = SegmentFilter::Own::ghost;
+  const auto d = Dom::segments(mesh, 2, ghost);
+  EXPECT_EQ(d.size(), 1);
+  EXPECT_EQ(d.row(2, 2), 0);
+  EXPECT_EQ(d.row(2, 0), soma::invalid_lo);
+  EXPECT_EQ(d.row(2, 1), soma::invalid_lo);
+}
+
+TEST(MeshDomains, ArityFilterCombinesWithOwnership) {
+  const auto mesh = soma_test::mesh_with_shared_and_ghost_elements();
+  SegmentFilter four;
+  four.arity = 4;
+  EXPECT_EQ(Dom::segments(mesh, 2, four), Dom::from_list(mesh, 2, std::vector<LO>{1, 2}));
+  four.ownership = SegmentFilter::Own::owned;
+  EXPECT_EQ(Dom::segments(mesh, 2, four), Dom::from_list(mesh, 2, std::vector<LO>{1}));
+  SegmentFilter three;
+  three.arity = 3;
+  EXPECT_EQ(Dom::segments(mesh, 2, three), Dom::from_list(mesh, 2, std::vector<LO>{0}));
+  SegmentFilter five;
+  five.arity = 5;
+  EXPECT_EQ(Dom::segments(mesh, 2, five).size(), 0);
+}
+
 TEST(MeshDomains, FromListValidatesAgainstTheMesh) {
   const auto mesh = soma_test::two_quads_and_a_triangle();
   const auto d = Dom::from_list(mesh, 2, std::vector<LO>{0, 2});
