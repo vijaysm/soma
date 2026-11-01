@@ -104,7 +104,7 @@ std::uint64_t reference_key(double x, double y, double extent) {
 }
 
 // (reference key of the centroid, gid) of the elements of one segment. The
-// centroid is the vertex sum times 1 / arity, summed in connectivity order, as
+// centroid is the sum of each vertex times 1 / arity, in connectivity order, as
 // the builder computes it.
 std::vector<std::tuple<std::uint64_t, GO>> centroid_keys(const soma::HostMesh& mesh,
                                                          const soma::Segment& seg, double extent) {
@@ -112,11 +112,11 @@ std::vector<std::tuple<std::uint64_t, GO>> centroid_keys(const soma::HostMesh& m
   const auto off = mesh.conn_offsets(2);
   for (LO e = seg.begin; e < seg.end; ++e) {
     double c[2] = {0, 0};
-    for (soma::Offset k = off(e); k < off(e + 1); ++k) {
-      for (int q = 0; q < 2; ++q) c[q] += mesh.coords()(mesh.conn(2)(k), q);
-    }
     const double inv = 1.0 / static_cast<double>(off(e + 1) - off(e));
-    keys.emplace_back(reference_key(c[0] * inv, c[1] * inv, extent), mesh.gid(2)(e));
+    for (soma::Offset k = off(e); k < off(e + 1); ++k) {
+      for (int q = 0; q < 2; ++q) c[q] += mesh.coords()(mesh.conn(2)(k), q) * inv;
+    }
+    keys.emplace_back(reference_key(c[0], c[1], extent), mesh.gid(2)(e));
   }
   return keys;
 }

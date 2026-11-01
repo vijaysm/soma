@@ -195,6 +195,8 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
         Real c[3] = {0, 0, 0};
         const Offset first = blk.offsets[i];
         const Offset last = blk.offsets[i + 1];
+        const auto arity = static_cast<std::uint16_t>(last - first);
+        const Real inv = arity > 0 ? Real{1} / static_cast<Real>(arity) : Real{0};
         for (Offset k = first; k < last; ++k) {
           const GO g = blk.vertex_gids[static_cast<std::size_t>(k)];
           const LO l = find_vertex(g);
@@ -205,12 +207,10 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
           }
           local[b][static_cast<std::size_t>(k)] = l;
           const auto src = static_cast<std::size_t>(l);
-          for (std::size_t q = 0; q < 3; ++q) c[q] += mesh.coords_(src, q);
+          // Summing x / arity, not x, keeps centroids near the largest Real finite.
+          for (std::size_t q = 0; q < 3; ++q) c[q] += mesh.coords_(src, q) * inv;
         }
-        const auto arity = static_cast<std::uint16_t>(last - first);
-        const Real inv = arity > 0 ? Real{1} / static_cast<Real>(arity) : Real{0};
-        recs.push_back(Rec{blk.topology, arity, blk.gids[i],
-                           keys(c[0] * inv, c[1] * inv, c[2] * inv), b, i});
+        recs.push_back(Rec{blk.topology, arity, blk.gids[i], keys(c[0], c[1], c[2]), b, i});
       }
     }
     {
