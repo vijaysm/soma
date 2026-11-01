@@ -68,6 +68,7 @@ soma_add_test(test_mesh_semantics SOURCES unit/test_mesh_semantics.cpp)
 soma_add_test(test_mesh_fields SOURCES unit/test_mesh_fields.cpp)
 soma_add_test(test_mesh_domains SOURCES unit/test_mesh_domains.cpp)
 soma_add_test(test_box_mesh SOURCES unit/test_box_mesh.cpp)
+soma_add_test(test_box_mesh_ordering SOURCES unit/test_box_mesh_ordering.cpp)
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   find_package(MOAB REQUIRED)
