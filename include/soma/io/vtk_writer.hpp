@@ -6,12 +6,12 @@
 
 // Legacy VTK output (ASCII, DATASET UNSTRUCTURED_GRID), in either of two
 // layouts that current VTK readers accept:
-//   VtkLegacyVersion::v3_0 (the default): `# vtk DataFile Version 3.0`; CELLS
-//     holds ncells and the size of the cell list, one `count ids...` line per
-//     cell; i64 and u64 arrays are `long` and `unsigned_long`.
-//   VtkLegacyVersion::v5_1, the VTK 9 layout: `# vtk DataFile Version 5.1`;
-//     CELLS holds ncells + 1 and the connectivity size, followed by `OFFSETS
-//     vtktypeint64` (ncells + 1 offsets from 0) and `CONNECTIVITY
+//   VtkLegacyVersion::v3_0: `# vtk DataFile Version 3.0`; CELLS holds ncells
+//     and the size of the cell list, one `count ids...` line per cell; i64 and
+//     u64 arrays are `long` and `unsigned_long`.
+//   VtkLegacyVersion::v5_1 (the default), the VTK 9 layout: `# vtk DataFile
+//     Version 5.1`; CELLS holds ncells + 1 and the connectivity size, followed
+//     by `OFFSETS vtktypeint64` (ncells + 1 offsets from 0) and `CONNECTIVITY
 //     vtktypeint64`; i64 and u64 arrays are `vtktypeint64` and `vtktypeuint64`.
 // POSIX only (open, write, rename); no other dependency.
 //
@@ -28,11 +28,11 @@
 // whatever its component count: `name ncomp ntuples type`, one tuple per line.
 // Arrays follow the order of the selection. Value types f64, f32, i32, u8 and
 // u32 map to double, float, int, unsigned_char and unsigned_int; i64 and u64 as
-// above (`long` and `unsigned_long` are 64-bit on LP64 platforms). i8 is rejected by choice, not for
-// want of a name: widen it to i32 to write it. Doubles and
-// floats are written in the shortest form that reads back bitwise equal. A
-// NaN, an infinity or a subnormal value, in a field or in the coordinates,
-// throws std::invalid_argument: legacy VTK readers cannot read them.
+// above (`long` and `unsigned_long` are 64-bit on LP64 platforms). i8 is
+// rejected by choice, not for want of a name: widen it to i32 to write it.
+// Doubles and floats are written in the shortest form that reads back bitwise
+// equal. A NaN, an infinity or a subnormal value, in a field or in the
+// coordinates, throws std::invalid_argument: legacy VTK readers cannot read them.
 //
 // Anything else a field can be (another dimension, a subset domain, a layout
 // that is not per_entity, pending writes, a name that is unknown, ambiguous, or
@@ -77,7 +77,7 @@ struct VtkField {
 enum class VtkLegacyVersion { v3_0, v5_1 };
 
 struct VtkWriteOptions {
-  VtkLegacyVersion version = VtkLegacyVersion::v3_0;
+  VtkLegacyVersion version = VtkLegacyVersion::v5_1;
 };
 
 void write_vtk(const HostMesh& mesh, const std::filesystem::path& path,
