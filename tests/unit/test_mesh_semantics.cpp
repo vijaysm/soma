@@ -184,3 +184,18 @@ TEST(MeshSemantics, ATransferThatDropsVerticesKeepsNothingThatNeedsThem) {
   EXPECT_EQ(m.count(2), 0);
   EXPECT_NO_THROW((void)b.clone());
 }
+
+TEST(MeshSemantics, AccessorsRejectADimensionOutsideZeroToThree) {
+  const auto m = soma_test::two_quads_and_a_triangle();
+  for (const int d : {-1, 4}) {
+    EXPECT_THROW((void)m.count(d), std::out_of_range) << d;
+    EXPECT_THROW((void)m.segment_table(d), std::out_of_range) << d;
+    EXPECT_THROW((void)m.segments(d), std::out_of_range) << d;
+    EXPECT_THROW((void)m.conn_offsets(d), std::out_of_range) << d;
+    EXPECT_THROW((void)m.conn(d), std::out_of_range) << d;
+    EXPECT_THROW((void)m.topology(d), std::out_of_range) << d;
+    EXPECT_THROW((void)m.gid(d), std::out_of_range) << d;
+  }
+  EXPECT_EQ(m.count(3), 0);
+  EXPECT_EQ(m.gid(0).extent(0), 7u);
+}

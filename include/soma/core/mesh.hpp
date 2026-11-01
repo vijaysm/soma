@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 
 #include <Kokkos_Core.hpp>
@@ -69,22 +70,15 @@ class Mesh {
   ~Mesh() = default;
 
   int dim() const noexcept { return dim_; }
-  LO count(int d) const noexcept { return ents_[static_cast<std::size_t>(d)].count; }
-  const SegmentTable& segment_table(int d) const noexcept {
-    return ents_[static_cast<std::size_t>(d)].segments;
-  }
-  std::span<const Segment> segments(int d) const noexcept {
-    return ents_[static_cast<std::size_t>(d)].segments.segments;
-  }
+  // Per-dimension accessors throw std::out_of_range for d outside [0, 3].
+  LO count(int d) const { return block(d).count; }
+  const SegmentTable& segment_table(int d) const { return block(d).segments; }
+  std::span<const Segment> segments(int d) const { return block(d).segments.segments; }
 
-  View1<const Offset, MemSpace> conn_offsets(int d) const {
-    return ents_[static_cast<std::size_t>(d)].conn_offsets;
-  }
-  View1<const LO, MemSpace> conn(int d) const { return ents_[static_cast<std::size_t>(d)].conn; }
-  View1<const std::uint8_t, MemSpace> topology(int d) const {
-    return ents_[static_cast<std::size_t>(d)].topology;
-  }
-  View1<const GO, MemSpace> gid(int d) const { return ents_[static_cast<std::size_t>(d)].gid; }
+  View1<const Offset, MemSpace> conn_offsets(int d) const { return block(d).conn_offsets; }
+  View1<const LO, MemSpace> conn(int d) const { return block(d).conn; }
+  View1<const std::uint8_t, MemSpace> topology(int d) const { return block(d).topology; }
+  View1<const GO, MemSpace> gid(int d) const { return block(d).gid; }
   CoordView<MemSpace> coords() const noexcept { return coords_; }  // writable geometry
 
   FieldRegistry<MemSpace>& fields() noexcept { return fields_; }
@@ -145,6 +139,13 @@ class Mesh {
   friend class Mesh;
   friend class MeshBuilder;
   friend struct MeshTestAccess;
+
+  const EntityBlock<MemSpace>& block(int d) const {
+    if (d < 0 || d > 3) {
+      throw std::out_of_range("Mesh: dimension " + std::to_string(d) + " is not in [0, 3]");
+    }
+    return ents_[static_cast<std::size_t>(d)];
+  }
 
   // Assigns into a destination of known type, so the aliasing and deep
   // branches may produce different View types without a deduction conflict.
