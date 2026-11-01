@@ -361,13 +361,21 @@ int run_limit_child(const fs::path& existing, const fs::path& fresh, const std::
 }
 #endif
 
+// $TMPDIR when it names a directory, /tmp otherwise.
+fs::path scratch_root() {
+  const char* t = std::getenv("TMPDIR");
+  std::error_code ec;
+  if (t != nullptr && *t != '\0' && fs::is_directory(t, ec)) return t;
+  return "/tmp";
+}
+
 class VtkFiles : public ::testing::Test {
  protected:
   void SetUp() override {
     const auto* info = ::testing::UnitTest::GetInstance()->current_test_info();
     std::string tag = std::string(info->test_suite_name()) + "_" + info->name();
     std::replace(tag.begin(), tag.end(), '/', '_');
-    std::string pattern = (fs::path(::testing::TempDir()) / ("soma_vtk_" + tag + "_XXXXXX")).string();
+    std::string pattern = (scratch_root() / ("soma_vtk_" + tag + "_XXXXXX")).string();
     if (mkdtemp(pattern.data()) == nullptr) {
       throw std::runtime_error("cannot create a directory from " + pattern);
     }
@@ -421,6 +429,28 @@ class VtkFiles : public ::testing::Test {
 using soma_test::Model;
 using soma_test::VtkFiles;
 using soma_test::Xyz;
+
+TEST_F(VtkFiles, ScratchFilesGoToTmpWithoutAUsableTmpdir) {
+  const char* was = std::getenv("TMPDIR");
+  const std::optional<std::string> saved = was ? std::optional<std::string>(was) : std::nullopt;
+  ::setenv("TMPDIR", file("missing").c_str(), 1);
+  const fs::path missing = soma_test::scratch_root();
+  ::setenv("TMPDIR", "", 1);
+  const fs::path empty = soma_test::scratch_root();
+  ::unsetenv("TMPDIR");
+  const fs::path unset = soma_test::scratch_root();
+  ::setenv("TMPDIR", dir_.c_str(), 1);
+  const fs::path usable = soma_test::scratch_root();
+  if (saved) {
+    ::setenv("TMPDIR", saved->c_str(), 1);
+  } else {
+    ::unsetenv("TMPDIR");
+  }
+  EXPECT_EQ(missing, fs::path("/tmp"));
+  EXPECT_EQ(empty, fs::path("/tmp"));
+  EXPECT_EQ(unset, fs::path("/tmp"));
+  EXPECT_EQ(usable, dir_);
+}
 
 TEST_F(VtkFiles, GoldenTextOfASmallMesh) {
   auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
