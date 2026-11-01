@@ -540,6 +540,7 @@ void read_cell_types(Lexer& lex, Grid& g) {
   g.codes.reserve(n);
   for (std::size_t c = 0; c < n; ++c) {
     const std::int64_t v = read_id(lex, "CELL_TYPES");
+    if (v == 42) lex.fail("cell " + std::to_string(c) + ": polyhedron cells are not supported");
     const auto t = v >= 0 && v <= 255 ? topology_of(static_cast<int>(v)) : std::nullopt;
     if (!t) {
       lex.fail("cell " + std::to_string(c) + " has the cell type code " + std::to_string(v) +

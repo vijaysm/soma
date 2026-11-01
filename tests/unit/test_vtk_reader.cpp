@@ -1004,3 +1004,23 @@ TEST_F(VtkRead, ABadPointIdNamesTheCellAndTheId) {
   expect_rejected(replaced(soma_test::base_file_51, "0 1 2 1 3 2", "0 1 2 1 3 9"),
                   {"line 7", "cell 1 refers to point 9 of 4"});
 }
+
+TEST_F(VtkRead, PolyhedronCellsAreRejectedByName) {
+  for (const char* name : {"polyhedron_51.vtk", "polyhedron_42.vtk"}) {
+    SCOPED_TRACE(name);
+    const fs::path p = soma_test::reference(name);
+    try {
+      soma::read_vtk(p);
+      ADD_FAILURE() << "a polyhedron was read";
+    } catch (const std::runtime_error& e) {
+      const std::string what = e.what();
+      EXPECT_NE(what.find(p.string()), std::string::npos) << what;
+      EXPECT_NE(what.find("cell 0: polyhedron cells are not supported"), std::string::npos)
+          << what;
+      EXPECT_EQ(what.find("refers to point"), std::string::npos) << what;
+    }
+  }
+  expect_rejected(soma_test::replaced(soma_test::base_file, "CELL_TYPES 2\n5\n5\n",
+                                      "CELL_TYPES 2\n5\n42\n"),
+                  {"line 15", "cell 1: polyhedron cells are not supported"});
+}
