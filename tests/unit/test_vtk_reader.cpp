@@ -232,8 +232,9 @@ soma::HostMesh mesh_2d() {
   fill<std::uint64_t>(mesh, "big", 2, 1, [](std::size_t r, int) {
     return std::numeric_limits<std::uint64_t>::max() - r;
   });
-  fill<std::uint8_t>(mesh, "col", 2, 4,
-                     [](std::size_t r, int c) { return static_cast<std::uint8_t>(250 + r + c); });
+  fill<std::uint8_t>(mesh, "col", 2, 4, [](std::size_t r, int c) {
+    return static_cast<std::uint8_t>(250 + r + static_cast<std::size_t>(c));
+  });
   return mesh;
 }
 
@@ -263,8 +264,9 @@ soma::HostMesh mesh_3d(Ordering ordering) {
   fill<std::int64_t>(mesh, "cid", 3, 1, [](std::size_t r, int) {
     return r == 2 ? std::numeric_limits<std::int64_t>::max() : static_cast<std::int64_t>(r) - 5;
   });
-  fill<std::uint64_t>(mesh, "pid", 0, 2,
-                      [](std::size_t r, int c) { return (std::uint64_t{1} << 63) + r * 2 + c; });
+  fill<std::uint64_t>(mesh, "pid", 0, 2, [](std::size_t r, int c) {
+    return (std::uint64_t{1} << 63) + r * 2 + static_cast<std::uint64_t>(c);
+  });
   return mesh;
 }
 
