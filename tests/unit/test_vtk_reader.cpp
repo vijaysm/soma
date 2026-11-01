@@ -911,3 +911,14 @@ TEST_F(VtkRead, OtherMalformedFilesAreRejected) {
     EXPECT_NE(std::string(e.what()).find("cannot open"), std::string::npos) << e.what();
   }
 }
+
+TEST_F(VtkRead, LongTokensAreCutInMessages) {
+  const std::string text = soma_test::replaced(soma_test::base_file, "FIELD FieldData 1",
+                                               std::string(200, 'w') + " 1");
+  expect_rejected(text, {"line 17", "'" + std::string(64, 'w') + "...'"});
+  try {
+    read_text(text);
+  } catch (const std::runtime_error& e) {
+    EXPECT_EQ(std::string(e.what()).find(std::string(65, 'w')), std::string::npos) << e.what();
+  }
+}

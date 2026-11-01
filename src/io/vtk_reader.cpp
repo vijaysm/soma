@@ -51,7 +51,12 @@ bool is_space(char c) {
   return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\v' || c == '\f';
 }
 
-std::string in_quotes(std::string_view s) { return "'" + std::string(s) + "'"; }
+// A token quoted in a message, cut to its first 64 characters.
+std::string in_quotes(std::string_view s) {
+  constexpr std::size_t most = 64;
+  if (s.size() <= most) return "'" + std::string(s) + "'";
+  return "'" + std::string(s.substr(0, most)) + "...'";
+}
 
 // Whitespace-separated tokens with the line each one starts on.
 class Lexer {
