@@ -38,7 +38,24 @@ double coordinate_sum_over_elements(soma::MeshView<M> v) {
   return total;
 }
 
+// A view of a temporary mesh would dangle as soon as the statement ends.
+template <class M>
+bool view_needs_a_live_mesh() {
+  using Mesh = soma::Mesh<M>;
+  static_assert(requires(const Mesh& m) { m.view(); });
+  static_assert(requires(Mesh& m) { m.view(); });
+  static_assert(!requires(Mesh&& m) { std::move(m).view(); });
+  static_assert(!requires(const Mesh&& m) { std::move(m).view(); });
+  static_assert(!requires { Mesh().view(); });
+  return true;
+}
+
 }  // namespace soma_test
+
+TEST(MeshSemantics, TemporaryMeshesCannotHandOutAView) {
+  EXPECT_TRUE(soma_test::view_needs_a_live_mesh<HostMem>());
+  EXPECT_TRUE(soma_test::view_needs_a_live_mesh<DevMem>());
+}
 
 TEST(MeshSemantics, MoveEmptiesTheSource) {
   auto a = soma_test::two_quads_and_a_triangle();

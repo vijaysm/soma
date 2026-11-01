@@ -98,7 +98,8 @@ class Mesh {
     fields_.set_epoch(epoch_);
   }
 
-  MeshView<MemSpace> view() const {
+  // A view of a temporary mesh would dangle, so that overload is deleted.
+  MeshView<MemSpace> view() const& {
     MeshView<MemSpace> v;
     v.dim = dim_;
     for (std::size_t d = 0; d < 4; ++d) {
@@ -113,6 +114,7 @@ class Mesh {
     v.coords = coords_;
     return v;
   }
+  MeshView<MemSpace> view() const&& = delete;
 
   // Always allocates in Dst, even when Dst == MemSpace.
   template <class Dst>
