@@ -4,11 +4,13 @@
 #include <algorithm>
 #include <cstdint>
 #include <numeric>
+#include <stdexcept>
 #include <tuple>
 #include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <Kokkos_Core.hpp>
 
 #include "hilbert_reference.hpp"
 #include "mesh_fixture.hpp"
@@ -141,6 +143,36 @@ TEST(MeshOrdering, VertexSpanOfASingleQuad) {
   EXPECT_EQ(r.max, 4);
   EXPECT_NEAR(r.mean, (4.0 + 4.0 + 4.0) / 3.0, 1e-12);
   EXPECT_EQ(soma::vertex_span_report(mesh, 3).elements, 0);
+}
+
+TEST(MeshOrdering, VertexSpanRejectsADimensionOutsideOneToThree) {
+  const auto mesh = soma_test::two_quads_and_a_triangle();
+  EXPECT_THROW(soma::vertex_span_report(mesh, 0), std::out_of_range);
+  EXPECT_THROW(soma::vertex_span_report(mesh, 4), std::out_of_range);
+  EXPECT_THROW(soma::vertex_span_report(mesh, -1), std::out_of_range);
+}
+
+// An element without vertices has span 0 and its connectivity is not read: the
+// empty View has no storage, so a read would fault.
+TEST(MeshOrdering, VertexSpanOfAnElementWithoutVerticesIsZero) {
+  using Offsets = Kokkos::View<soma::Offset*, Kokkos::HostSpace>;
+  using Conn = Kokkos::View<LO*, Kokkos::HostSpace>;
+  const Offsets empty_offsets("offsets", 2);
+  const auto r = soma::detail::vertex_span(1, empty_offsets, Conn{});
+  EXPECT_EQ(r.elements, 1);
+  EXPECT_EQ(r.max, 0);
+  EXPECT_EQ(r.mean, 0.0);
+  const Offsets offsets("offsets", 3);
+  offsets(1) = 3;
+  offsets(2) = 3;
+  const Conn conn("conn", 3);
+  conn(0) = 4;
+  conn(1) = 9;
+  conn(2) = 6;
+  const auto s = soma::detail::vertex_span(2, offsets, conn);
+  EXPECT_EQ(s.elements, 2);
+  EXPECT_EQ(s.max, 5);
+  EXPECT_DOUBLE_EQ(s.mean, 2.5);
 }
 
 TEST(MeshOrdering, TypeBlocksStayTogetherUnderTheCurve) {
