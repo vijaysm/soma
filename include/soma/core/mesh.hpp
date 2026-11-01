@@ -117,7 +117,8 @@ class Mesh {
     return copy_to<Dst>(opts, false);
   }
 
-  // Aliases storage when Dst can access MemSpace; allocates and copies otherwise.
+  // Aliases storage when Dst is the same memory space; allocates and copies
+  // otherwise, even when Dst can access MemSpace.
   // The result shares data with *this by design: name it as such.
   template <class Dst>
   Mesh<Dst> mirror_view(const TransferOptions& opts = {}) const {
