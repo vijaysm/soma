@@ -185,8 +185,12 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       std::size_t index;
     };
     std::vector<Rec> recs;
+    std::vector<std::vector<LO>> local(blocks_[d].size());  // per connectivity entry
+    std::size_t entries = 0;
     for (std::size_t b = 0; b < blocks_[d].size(); ++b) {
       const Block& blk = blocks_[d][b];
+      local[b].resize(blk.vertex_gids.size());
+      entries += blk.vertex_gids.size();
       for (std::size_t i = 0; i < blk.gids.size(); ++i) {
         Real c[3] = {0, 0, 0};
         const Offset first = blk.offsets[i];
@@ -199,6 +203,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
                                         name(blk.topology) + " element " +
                                         std::to_string(blk.gids[i]));
           }
+          local[b][static_cast<std::size_t>(k)] = l;
           const auto src = static_cast<std::size_t>(l);
           for (std::size_t q = 0; q < 3; ++q) c[q] += mesh.coords_(src, q);
         }
@@ -236,14 +241,16 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     e.topology = View1<std::uint8_t, Kokkos::HostSpace>("soma::mesh::topology", recs.size());
     e.gid = View1<GO, Kokkos::HostSpace>("soma::mesh::gid", recs.size());
     std::vector<LO> conn;
+    conn.reserve(entries);
     std::vector<Ownership> own(recs.size(), Ownership::interior);
     std::vector<Topology> top(recs.size());
     std::vector<std::uint16_t> ar(recs.size());
     e.conn_offsets(0) = 0;
     for (std::size_t r = 0; r < recs.size(); ++r) {
       const Block& blk = blocks_[d][recs[r].block];
+      const std::vector<LO>& ids = local[recs[r].block];
       for (Offset k = blk.offsets[recs[r].index]; k < blk.offsets[recs[r].index + 1]; ++k) {
-        conn.push_back(find_vertex(blk.vertex_gids[static_cast<std::size_t>(k)]));
+        conn.push_back(ids[static_cast<std::size_t>(k)]);
       }
       e.conn_offsets(r + 1) = detail::to_offset(conn.size(), "connectivity size");
       e.topology(r) = static_cast<std::uint8_t>(recs[r].t);
