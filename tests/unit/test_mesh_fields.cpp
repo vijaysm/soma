@@ -98,6 +98,27 @@ TEST(MeshFields, MirrorOmitsFieldsOfDroppedDimensions) {
   EXPECT_FALSE(m.fields().contains("c"));
 }
 
+// In the same memory space mirror_view shares the field data with the source,
+// so a write through either is seen by both; mirror copies it.
+TEST(MeshFields, MirrorViewSharesFieldDataInTheSameSpace) {
+  auto mesh = soma_test::two_quads_and_a_triangle();
+  auto t = mesh.fields().add_tag<double>("temperature", 0, 1);
+  t.view()(2, 0) = 1.5;
+  soma::TransferOptions opt;
+  opt.fields = {"temperature"};
+  const auto alias = mesh.mirror_view<HostMem>(opt);
+  const auto a = alias.fields().get<double>("temperature");
+  EXPECT_EQ(a.view().data(), t.view().data());
+  a.view()(2, 0) = 7.0;
+  EXPECT_DOUBLE_EQ(t.view()(2, 0), 7.0);
+  const auto deep = mesh.mirror<HostMem>(opt);
+  const auto c = deep.fields().get<double>("temperature");
+  EXPECT_NE(c.view().data(), t.view().data());
+  EXPECT_DOUBLE_EQ(c.view()(2, 0), 7.0);
+  c.view()(2, 0) = -1.0;
+  EXPECT_DOUBLE_EQ(t.view()(2, 0), 7.0);
+}
+
 TEST(MeshFields, CloneKeepsFieldsDeepAndEpoch) {
   auto mesh = soma_test::two_quads_and_a_triangle();
   auto t = mesh.fields().add_tag<double>("temperature", 0, 1);
