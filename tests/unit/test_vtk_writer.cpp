@@ -1272,6 +1272,18 @@ TEST_F(VtkFiles, OffsetsThatOverrunOrDecreaseAreRejected) {
   }
 }
 
+TEST_F(VtkFiles, OffsetsThatDoNotStartAtZeroAreRejected) {
+  for (const soma::Offset first : {soma::Offset{1}, soma::Offset{-1}}) {
+    const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+    // The mesh offers no way to damage itself, so write through its View.
+    auto* raw = const_cast<soma::Offset*>(mesh.conn_offsets(2).data());
+    raw[0] = first;
+    expect_invalid(mesh, {},
+                   "the connectivity offsets of dimension 2 start at " + std::to_string(first) +
+                       ", not 0");
+  }
+}
+
 TEST(VtkLimits, ExtentsMustMatchTheMesh) {
   EXPECT_NO_THROW(soma::detail::check_vtk_extent("field 'f'", 7, 2, 7, 2));
   const auto expect_mismatch = [](std::size_t rows, std::size_t cols, const std::string& sizes) {

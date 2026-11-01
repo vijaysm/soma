@@ -274,8 +274,12 @@ void check_mesh_extents(const HostMesh& mesh, int dim) {
     throw std::invalid_argument("write_vtk: the cell types or global ids" + of + " do not have " +
                                 entries(nc));
   }
+  if (offsets(0) != 0) {
+    throw std::invalid_argument("write_vtk: the connectivity offsets" + of + " start at " +
+                                std::to_string(offsets(0)) + ", not 0");
+  }
   for (std::size_t e = 0; e < nc; ++e) {
-    if (offsets(e) < 0 || offsets(e + 1) < offsets(e)) {
+    if (offsets(e + 1) < offsets(e)) {
       throw std::invalid_argument("write_vtk: the connectivity offsets" + of +
                                   " decrease at cell row " + std::to_string(e));
     }
