@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
-// Moves of Domain, Space and Field are noexcept, so they must not allocate:
-// the empty snapshot a move leaves behind has to exist by the time any object
-// does. A throw out of a noexcept move is a terminate, which the harness
+// Moves of Domain, Space, Field, the registry and the mesh are noexcept, so
+// they must not allocate: the empty snapshot a move leaves behind has to exist
+// by the time any object does. A throw out of a noexcept move is a terminate, which the harness
 // reports as a crash. Each test runs in its own process under ctest, so nothing
 // before the armed region has built an empty snapshot; the objects are made
 // through the non-default constructors for the same reason. Only move
@@ -17,6 +17,8 @@
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
 
+#include "mesh_fixture.hpp"
+#include "soma/core/mesh.hpp"
 #include "soma/core/types.hpp"
 #include "soma/fields/domain.hpp"
 #include "soma/fields/field.hpp"
@@ -101,4 +103,20 @@ TEST(MoveNoexcept, MovingARegistryDoesNotAllocate) {
   }
   EXPECT_EQ(b->list().size(), 1u);
   b->~FieldRegistry();
+}
+
+TEST(MoveNoexcept, MovingAMeshDoesNotAllocate) {
+  soma::HostMesh a = soma_test::two_quads_and_a_triangle();
+  a.fields().add_tag<double>("q", 2, 1);
+  soma::HostMesh* b = nullptr;
+  alignas(soma::HostMesh) unsigned char storage[sizeof(soma::HostMesh)];
+  {
+    const soma_test::ArmedScope armed;
+    b = new (storage) soma::HostMesh(std::move(a));
+  }
+  EXPECT_EQ(b->count(2), 3);
+  EXPECT_EQ(b->fields().list().size(), 1u);
+  EXPECT_EQ(a.count(2), 0);  // NOLINT(bugprone-use-after-move)
+  EXPECT_TRUE(a.fields().has_entities(2));
+  b->~Mesh();
 }
