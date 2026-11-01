@@ -73,7 +73,8 @@ def tri_quad_2d():
     cd.AddArray(array(vtk.vtkIntArray, "material", 1, [10, -20, 30, -2147483648]))
     cd.AddArray(array(vtk.vtkLongLongArray, "gid64", 1,
                       [2**40 + 1, -(2**40) - 2, 9223372036854775807, -9223372036854775808]))
-    cd.AddArray(array(vtk.vtkFloatArray, "cf", 3, [0.25 * c + k for c in range(4) for k in range(3)]))
+    cd.AddArray(array(vtk.vtkFloatArray, "cf", 3,
+                      [0.25 * c + k for c in range(4) for k in range(3)]))
     time = array(vtk.vtkDoubleArray, "TIME", 1, [1.5])
     g.GetFieldData().AddArray(time)
     return g
@@ -90,7 +91,8 @@ def mixed_3d():
     g = grid(points, cells)
     pd = g.GetPointData()
     pd.AddArray(array(vtk.vtkDoubleArray, "pd", 1, [0.125 * i for i in range(19)]))
-    pd.AddArray(array(vtk.vtkFloatArray, "pv", 3, [i + k / 4.0 for i in range(19) for k in range(3)]))
+    pd.AddArray(array(vtk.vtkFloatArray, "pv", 3,
+                      [i + k / 4.0 for i in range(19) for k in range(3)]))
     pd.SetActiveScalars("pd")
     pd.SetActiveVectors("pv")
     cd = g.GetCellData()
@@ -107,7 +109,8 @@ def polygons():
     points = [(0, 0, 0), (2, 0, 0), (3, 1, 0), (1, 2, 0), (-1, 1, 0),
               (3, 1, 0), (5, 0, 0), (6, 1, 0), (6, 2, 0), (4, 3, 0), (3, 2, 0),
               (0, 3, 0), (1, 3, 0)]
-    cells = [(7, [5, 6, 7, 8, 9, 10]), (7, [0, 1, 2, 3, 4]), (5, [4, 3, 11]), (7, [3, 10, 9, 12, 11])]
+    cells = [(7, [5, 6, 7, 8, 9, 10]), (7, [0, 1, 2, 3, 4]), (5, [4, 3, 11]),
+             (7, [3, 10, 9, 12, 11])]
     g = grid(points, cells)
     pd = g.GetPointData()
     pd.AddArray(array(vtk.vtkDoubleArray, "h", 1, [0.5 * i - 1 for i in range(13)]))
