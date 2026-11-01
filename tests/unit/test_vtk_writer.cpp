@@ -1171,6 +1171,101 @@ TEST_F(VtkFiles, OutputBytesAreFixed) {
   EXPECT_EQ(soma_test::fnv1a(text), 6740742393939861679ull);
 }
 
+namespace soma_test {
+
+// One triangle and a point array, in the subset the strict reader accepts.
+const std::string small_file =
+    "# vtk DataFile Version 3.0\n"
+    "t\n"
+    "ASCII\n"
+    "DATASET UNSTRUCTURED_GRID\n"
+    "POINTS 3 double\n"
+    "0 0 0\n"
+    "1 0 0\n"
+    "0 1 0\n"
+    "CELLS 1 4\n"
+    "3 0 1 2\n"
+    "CELL_TYPES 1\n"
+    "5\n"
+    "POINT_DATA 3\n"
+    "FIELD FieldData 1\n"
+    "v 1 3 double\n"
+    "1\n"
+    "2\n"
+    "3\n";
+
+std::string replaced(std::string text, const std::string& from, const std::string& to) {
+  const std::size_t at = text.find(from);
+  if (at == std::string::npos) throw std::logic_error("no '" + from + "' in the text");
+  return text.replace(at, from.size(), to);
+}
+
+}  // namespace soma_test
+
+class VtkReaderFiles : public VtkFiles {
+ protected:
+  void expect_rejected(const std::string& text, const std::string& needle) const {
+    { std::ofstream(file("crafted.vtk"), std::ios::binary | std::ios::trunc) << text; }
+    try {
+      soma_test::read_vtk_file(file("crafted.vtk"));
+      ADD_FAILURE() << "the reader accepted:\n" << text;
+    } catch (const std::runtime_error& e) {
+      EXPECT_NE(std::string(e.what()).find(needle), std::string::npos) << e.what();
+    }
+  }
+};
+
+TEST_F(VtkReaderFiles, TheSmallFileIsAccepted) {
+  { std::ofstream(file("crafted.vtk"), std::ios::binary) << soma_test::small_file; }
+  const auto f = soma_test::read_vtk_file(file("crafted.vtk"));
+  EXPECT_EQ(f.npoints, 3u);
+  EXPECT_EQ(f.cell_types, (std::vector<int>{5}));
+  EXPECT_EQ(f.point_data.find("v")->values<double>(), (std::vector<double>{1, 2, 3}));
+}
+
+TEST_F(VtkReaderFiles, NonFiniteAndSubnormalTokensAreRejected) {
+  using soma_test::replaced;
+  const std::string& t = soma_test::small_file;
+  for (const char* bad : {"nan", "-nan", "NaN", "inf", "-inf", "infinity", "4.9e-324", "1e-310"}) {
+    expect_rejected(replaced(t, "\n2\n", std::string("\n") + bad + "\n"), bad);
+    expect_rejected(replaced(t, "1 0 0\n", std::string("1 ") + bad + " 0\n"), bad);
+  }
+  const std::string as_float = replaced(t, "v 1 3 double", "v 1 3 float");
+  for (const char* bad : {"nan", "inf", "1e-45", "1e-40"}) {
+    expect_rejected(replaced(as_float, "\n2\n", std::string("\n") + bad + "\n"), bad);
+  }
+  expect_rejected(replaced(t, "\n2\n", "\n1e999\n"), "1e999");
+}
+
+TEST_F(VtkReaderFiles, IdsOutsideThePointsAreRejected) {
+  using soma_test::replaced;
+  expect_rejected(replaced(soma_test::small_file, "3 0 1 2", "3 0 1 3"), "refers to point 3");
+  expect_rejected(replaced(soma_test::small_file, "3 0 1 2", "3 0 -1 2"), "refers to point -1");
+}
+
+TEST_F(VtkReaderFiles, AVertexCountThatDoesNotFitTheTypeIsRejected) {
+  using soma_test::replaced;
+  const std::string& t = soma_test::small_file;
+  for (const char* type : {"3", "9", "10", "12", "13", "14"}) {
+    expect_rejected(replaced(t, "CELL_TYPES 1\n5\n", std::string("CELL_TYPES 1\n") + type + "\n"),
+                    "has 3 vertices");
+  }
+  const std::string two = replaced(replaced(t, "CELLS 1 4\n3 0 1 2", "CELLS 1 3\n2 0 1"),
+                                   "CELL_TYPES 1\n5\n", "CELL_TYPES 1\n7\n");
+  expect_rejected(two, "has 2 vertices");
+  expect_rejected(replaced(t, "CELL_TYPES 1\n5\n", "CELL_TYPES 1\n6\n"), "unknown cell type 6");
+}
+
+TEST_F(VtkReaderFiles, TheVersionAndFormatLinesAreChecked) {
+  using soma_test::replaced;
+  const std::string& t = soma_test::small_file;
+  expect_rejected(replaced(t, "Version 3.0", "Version 5.1"), "version line");
+  expect_rejected(replaced(t, "# vtk", "# VTK"), "version line");
+  expect_rejected(replaced(t, "ASCII", "BINARY"), "format");
+  expect_rejected(replaced(t, "ASCII", "ascii"), "format");
+  expect_rejected(replaced(t, "ASCII", "ASCII "), "format");
+}
+
 template <class M>
 class VtkTyped : public VtkFiles {};
 using Spaces = ::testing::Types<HostMem, DevMem>;
