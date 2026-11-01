@@ -5,10 +5,11 @@
 // a write fails part-way through, and tries to write a mesh twice:
 //   vtk_limit_child <existing-file> <new-file> <limit-bytes>
 // The exit code is 0 when both writes threw std::runtime_error naming their
-// path, and otherwise says which expectation failed; any other exception ends
+// path and the cause, and otherwise says which expectation failed; any other exception ends
 // the process abnormally. The limit is a property of
 // this process alone; the test that starts it keeps no global state.
 
+#include <cerrno>
 #include <csignal>
 #include <cstdlib>
 #include <exception>
@@ -16,6 +17,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <vector>
 
 #include <sys/resource.h>
@@ -43,6 +45,10 @@ int attempt(const soma::HostMesh& mesh, const std::filesystem::path& path,
   } catch (const std::runtime_error& e) {
     if (std::string(e.what()).find(path.string()) == std::string::npos) {
       note = std::string("the message does not name the path: ") + e.what();
+      return wrong_error;
+    }
+    if (std::string(e.what()).find(std::generic_category().message(EFBIG)) == std::string::npos) {
+      note = std::string("the message does not give the cause: ") + e.what();
       return wrong_error;
     }
     return failed_as_expected;

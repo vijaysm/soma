@@ -9,15 +9,16 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
-#include <fstream>
-#include <ostream>
+#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <system_error>
 #include <type_traits>
 #include <vector>
+
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "soma/core/topology.hpp"
 #include "soma/fields/data_type.hpp"
@@ -28,9 +29,17 @@ namespace {
 
 namespace fs = std::filesystem;
 
+std::string cannot_write(const fs::path& path, const std::string& why) {
+  return "write_vtk: cannot write " + path.string() + ": " + why;
+}
+
+// The text of an errno value; unlike strerror, safe to call from any thread.
+std::string error_text(int e) { return std::system_category().message(e); }
+
+// Buffered writes to a file descriptor; a failed write throws naming `path`.
 class Sink {
  public:
-  explicit Sink(std::ostream& os) : os_(os) { buf_.reserve(flush_at + 512); }
+  Sink(int fd, const fs::path& path) : fd_(fd), path_(path) { buf_.reserve(flush_at + 512); }
 
   void text(std::string_view s) {
     buf_.append(s);
@@ -57,10 +66,7 @@ class Sink {
     buf_.append(tmp, r.ptr);
   }
 
-  void finish() {
-    flush();
-    os_.flush();
-  }
+  void finish() { flush(); }
 
  private:
   static constexpr std::size_t flush_at = std::size_t{1} << 16;
@@ -69,11 +75,23 @@ class Sink {
     if (buf_.size() >= flush_at) flush();
   }
   void flush() {
-    os_.write(buf_.data(), static_cast<std::streamsize>(buf_.size()));
+    const char* p = buf_.data();
+    std::size_t left = buf_.size();
+    while (left > 0) {
+      const ssize_t n = ::write(fd_, p, left);
+      if (n < 0 && errno == EINTR) continue;
+      if (n <= 0) {
+        const int e = n < 0 ? errno : EIO;
+        throw std::runtime_error(cannot_write(path_, "the write failed: " + error_text(e)));
+      }
+      p += n;
+      left -= static_cast<std::size_t>(n);
+    }
     buf_.clear();
   }
 
-  std::ostream& os_;
+  int fd_;
+  const fs::path& path_;
   std::string buf_;
 };
 
@@ -400,9 +418,64 @@ void emit(Sink& out, const HostMesh& mesh, const Contents& contents) {
   out.finish();
 }
 
-std::string cannot_write(const fs::path& path, const std::string& why) {
-  return "write_vtk: cannot write " + path.string() + ": " + why;
-}
+// A new file next to `path`, named `path` + "." + six random characters and
+// created exclusively (O_EXCL, O_NOFOLLOW), so that it never opens an existing
+// file or follows a symlink. Unlike mkstemp, which forces mode 0600, it is
+// created with 0666 so that the umask decides the mode of the result.
+class Temporary {
+ public:
+  explicit Temporary(const fs::path& path) : path_(path) {
+    static constexpr char letters[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    std::random_device random;
+    for (int attempt = 0; attempt < 100; ++attempt) {
+      std::string candidate = path.string() + ".";
+      for (int k = 0; k < 6; ++k) candidate += letters[random() % (sizeof letters - 1)];
+      fd_ = ::open(candidate.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0666);
+      if (fd_ >= 0) {
+        name_ = std::move(candidate);
+        return;
+      }
+      const int e = errno;
+      if (e != EEXIST && e != EINTR) {
+        throw std::runtime_error(
+            cannot_write(path, "cannot create a temporary file: " + error_text(e)));
+      }
+    }
+    throw std::runtime_error(cannot_write(path, "no unused temporary file name was found"));
+  }
+  Temporary(const Temporary&) = delete;
+  Temporary& operator=(const Temporary&) = delete;
+  ~Temporary() {
+    if (fd_ >= 0) ::close(fd_);
+    if (!name_.empty()) ::unlink(name_.c_str());
+  }
+
+  int fd() const noexcept { return fd_; }
+
+  void close() {
+    const int fd = fd_;
+    fd_ = -1;
+    if (::close(fd) != 0) {
+      const int e = errno;
+      throw std::runtime_error(cannot_write(path_, "closing the file failed: " + error_text(e)));
+    }
+  }
+
+  // Moves the file over `path`; afterwards there is nothing left to remove.
+  void commit() {
+    if (::rename(name_.c_str(), path_.c_str()) != 0) {
+      const int e = errno;
+      throw std::runtime_error(cannot_write(path_, error_text(e)));
+    }
+    name_.clear();
+  }
+
+ private:
+  const fs::path& path_;
+  std::string name_;
+  int fd_ = -1;
+};
 
 }  // namespace
 
@@ -410,34 +483,11 @@ void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const VtkFi
   const Contents contents = collect_contents(mesh, fields);
   check_values(mesh, contents);
 
-  fs::path tmp = path;
-  tmp += ".tmp";
-  std::error_code ignored;
-  {
-    errno = 0;
-    std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-    if (!file) {
-      const int err = errno;
-      throw std::runtime_error(
-          cannot_write(path, err != 0 ? std::strerror(err) : "the file cannot be opened"));
-    }
-    try {
-      Sink out(file);
-      emit(out, mesh, contents);
-      file.close();
-      if (file.fail()) throw std::runtime_error(cannot_write(path, "the write failed"));
-    } catch (...) {
-      file.close();
-      fs::remove(tmp, ignored);
-      throw;
-    }
-  }
-  std::error_code ec;
-  fs::rename(tmp, path, ec);
-  if (ec) {
-    fs::remove(tmp, ignored);
-    throw std::runtime_error(cannot_write(path, ec.message()));
-  }
+  Temporary file(path);
+  Sink out(file.fd(), path);
+  emit(out, mesh, contents);
+  file.close();
+  file.commit();
 }
 
 void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const std::string> fields) {

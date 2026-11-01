@@ -28,9 +28,13 @@
 // that is not per_entity, pending writes, a name that is unknown, ambiguous, or
 // cannot be written) throws std::invalid_argument; a stale field throws
 // StaleField. All checks run before any file is touched. The file is written to
-// `path` + ".tmp" and renamed over `path`, so a failure leaves neither a partial
-// file nor a damaged earlier one. I/O failures throw std::runtime_error naming
-// the path.
+// a new temporary next to `path` (`path` + "." + six random characters, created
+// exclusively) and renamed over `path`, so a failure leaves neither a partial
+// file nor a damaged earlier one, and concurrent writers do not collide. An
+// existing target is replaced by a new file: its mode comes from the umask, and
+// a symlink at `path` is replaced, not followed. Nothing is fsync'ed, so the
+// file is not promised to survive a power loss. I/O failures throw
+// std::runtime_error naming the path and the cause.
 
 #include <filesystem>
 #include <optional>

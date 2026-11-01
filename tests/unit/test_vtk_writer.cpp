@@ -17,8 +17,13 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
+
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
@@ -26,7 +31,6 @@
 #if defined(SOMA_VTK_LIMIT_CHILD) && (defined(__unix__) || defined(__APPLE__))
 #include <spawn.h>
 #include <sys/wait.h>
-#include <unistd.h>
 #define SOMA_TEST_CHILD_PROCESS 1
 extern char** environ;
 #endif
@@ -300,10 +304,25 @@ std::size_t line_index(const std::vector<std::string>& lines, const std::string&
   return static_cast<std::size_t>(it - lines.begin());
 }
 
-fs::path tmp_of(fs::path p) {
-  p += ".tmp";
-  return p;
+// The names in a directory, sorted.
+std::vector<std::string> names_in(const fs::path& dir) {
+  std::vector<std::string> out;
+  for (const auto& e : fs::directory_iterator(dir)) out.push_back(e.path().filename().string());
+  std::sort(out.begin(), out.end());
+  return out;
 }
+
+// Names next to `p` that start with its name and a dot: temporary files.
+std::vector<std::string> temporaries_of(const fs::path& p) {
+  const std::string stem = p.filename().string() + ".";
+  std::vector<std::string> out;
+  for (const std::string& n : names_in(p.parent_path())) {
+    if (n.compare(0, stem.size(), stem) == 0) out.push_back(n);
+  }
+  return out;
+}
+
+using Names = std::vector<std::string>;
 
 template <class T, class M>
 using WriteView = Kokkos::View<T**, Kokkos::LayoutLeft, M, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
@@ -374,7 +393,7 @@ class VtkFiles : public ::testing::Test {
       }
     }
     EXPECT_FALSE(fs::exists(p));
-    EXPECT_FALSE(fs::exists(tmp_of(p)));
+    EXPECT_EQ(temporaries_of(p), Names{});
   }
 
   // The message must also name the last selected field.
@@ -936,7 +955,7 @@ TEST_F(VtkFiles, KnifeElementsHaveNoVtkType) {
     EXPECT_NE(std::string(e.what()).find("knife"), std::string::npos) << e.what();
   }
   EXPECT_FALSE(fs::exists(file()));
-  EXPECT_FALSE(fs::exists(soma_test::tmp_of(file())));
+  EXPECT_EQ(soma_test::temporaries_of(file()), soma_test::Names{});
 }
 
 TEST_F(VtkFiles, PolyhedraAreRejected) {
@@ -1095,7 +1114,7 @@ TEST_F(VtkFiles, StaleFieldsAreNotWrittenSilently) {
   const std::vector<std::string> old_name{"old"};
   EXPECT_THROW(soma::write_vtk(mesh, file(), old_name), soma::StaleField);
   EXPECT_FALSE(fs::exists(file()));
-  EXPECT_FALSE(fs::exists(soma_test::tmp_of(file())));
+  EXPECT_EQ(soma_test::temporaries_of(file()), soma_test::Names{});
   const std::vector<std::string> fresh{"fresh"};
   EXPECT_NO_THROW(soma::write_vtk(mesh, file(), fresh));
   EXPECT_NO_THROW(soma::write_vtk(mesh, file()));
@@ -1124,25 +1143,148 @@ TEST_F(VtkFiles, AFailedRenameLeavesNoTemporaryFile) {
   const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
   const fs::path target = file("occupied");
   fs::create_directory(target);
-  EXPECT_THROW(soma::write_vtk(mesh, target), std::runtime_error);
+  try {
+    soma::write_vtk(mesh, target);
+    ADD_FAILURE() << "expected std::runtime_error";
+  } catch (const std::runtime_error& e) {
+    EXPECT_NE(std::string(e.what()).find(std::generic_category().message(EISDIR)),
+              std::string::npos)
+        << e.what();
+  }
   EXPECT_TRUE(fs::is_directory(target));
-  EXPECT_FALSE(fs::exists(soma_test::tmp_of(target)));
+  EXPECT_EQ(soma_test::names_in(dir_), soma_test::Names{"occupied"});
 }
 
+// A directory without write permission blocks the temporary file. The owner
+// of the earlier file can still write to it, so a writer that opened the
+// target itself would change it.
 TEST_F(VtkFiles, ABlockedTemporaryLeavesTheTargetUntouched) {
+  if (::geteuid() == 0) GTEST_SKIP() << "permissions do not block the superuser";
   auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
   soma::write_vtk(mesh, file());
   const std::string before = soma_test::slurp(file());
-  fs::create_directory(soma_test::tmp_of(file()));
   mesh.fields().add_tag<double>("a", 0, 1);
   const std::vector<std::string> names{"a"};
+  ASSERT_EQ(::chmod(dir_.c_str(), 0500), 0);
   try {
     soma::write_vtk(mesh, file(), names);
     ADD_FAILURE() << "expected std::runtime_error";
   } catch (const std::runtime_error& e) {
-    EXPECT_NE(std::string(e.what()).find(file().string()), std::string::npos) << e.what();
+    const std::string m = e.what();
+    EXPECT_NE(m.find(file().string()), std::string::npos) << m;
+    EXPECT_NE(m.find(std::generic_category().message(EACCES)), std::string::npos) << m;
   }
+  ASSERT_EQ(::chmod(dir_.c_str(), 0700), 0);
   EXPECT_EQ(soma_test::slurp(file()), before);
+  EXPECT_EQ(soma_test::names_in(dir_), soma_test::Names{"out.vtk"});
+}
+
+TEST_F(VtkFiles, AFileAtTheOldTemporaryNameIsLeftAlone) {
+  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  const std::string precious = "a file of the user\n";
+  { std::ofstream(file("out.vtk.tmp"), std::ios::binary) << precious; }
+  soma::write_vtk(mesh, file());
+  EXPECT_EQ(soma_test::slurp(file("out.vtk.tmp")), precious);
+  EXPECT_EQ(soma_test::read_vtk_file(file()).npoints, 7u);
+  EXPECT_EQ(soma_test::names_in(dir_), (soma_test::Names{"out.vtk", "out.vtk.tmp"}));
+}
+
+TEST_F(VtkFiles, ASymlinkAtTheOldTemporaryNameIsNotFollowed) {
+  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  const std::string victim = "not to be overwritten\n";
+  { std::ofstream(file("victim.txt"), std::ios::binary) << victim; }
+  fs::create_symlink(file("victim.txt"), file("out.vtk.tmp"));
+  soma::write_vtk(mesh, file());
+  EXPECT_EQ(soma_test::slurp(file("victim.txt")), victim);
+  EXPECT_TRUE(fs::is_symlink(file("out.vtk.tmp")));
+  EXPECT_FALSE(fs::is_symlink(file()));
+  EXPECT_EQ(soma_test::read_vtk_file(file()).npoints, 7u);
+}
+
+TEST_F(VtkFiles, ASymlinkAtThePathIsReplacedNotFollowed) {
+  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  { std::ofstream(file("real.vtk"), std::ios::binary) << "old\n"; }
+  fs::create_symlink(file("real.vtk"), file());
+  soma::write_vtk(mesh, file());
+  EXPECT_EQ(soma_test::slurp(file("real.vtk")), "old\n");
+  EXPECT_FALSE(fs::is_symlink(file()));
+  EXPECT_EQ(soma_test::read_vtk_file(file()).npoints, 7u);
+}
+
+namespace soma_test {
+
+mode_t mode_of(const fs::path& p) {
+  struct stat st {};
+  if (::stat(p.c_str(), &st) != 0) throw std::runtime_error("cannot stat " + p.string());
+  return st.st_mode & 0777;
+}
+
+}  // namespace soma_test
+
+TEST_F(VtkFiles, TheUmaskDecidesTheModeOfTheFile) {
+  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  { std::ofstream(file(), std::ios::binary) << "earlier\n"; }
+  ASSERT_EQ(::chmod(file().c_str(), 0600), 0);
+  const mode_t saved = ::umask(027);
+  soma::write_vtk(mesh, file());
+  const mode_t replaced = soma_test::mode_of(file());
+  ::umask(022);
+  soma::write_vtk(mesh, file("fresh.vtk"));
+  const mode_t fresh = soma_test::mode_of(file("fresh.vtk"));
+  ::umask(saved);
+  EXPECT_EQ(replaced, mode_t{0640});
+  EXPECT_EQ(fresh, mode_t{0644});
+}
+
+namespace soma_test {
+
+// Each thread writes its own mesh: a registry may not be read from two threads.
+int write_concurrently(const fs::path& path, int rounds, std::string& a, std::string& b) {
+  auto big = two_quads_and_a_triangle(Ordering::file);
+  const auto f = big.fields().add_tag<double>("p", 0, 50);
+  for (std::size_t i = 0; i < f.view().extent(0); ++i) {
+    for (std::size_t c = 0; c < 50; ++c) f.view()(i, c) = static_cast<double>(i + c) / 8;
+  }
+  const std::vector<std::string> names{"p"};
+  const auto small = two_quads_and_a_triangle(Ordering::file);
+  soma::write_vtk(big, path, names);
+  a = slurp(path);
+  soma::write_vtk(small, path);
+  b = slurp(path);
+  int failures = 0;
+  for (int r = 0; r < rounds; ++r) {
+    int first = 0;
+    int second = 0;
+    std::thread t1([&] {
+      try {
+        soma::write_vtk(big, path, names);
+      } catch (const std::exception&) {
+        first = 1;
+      }
+    });
+    std::thread t2([&] {
+      try {
+        soma::write_vtk(small, path);
+      } catch (const std::exception&) {
+        second = 1;
+      }
+    });
+    t1.join();
+    t2.join();
+    const std::string now = slurp(path);
+    failures += first + second + ((now == a || now == b) ? 0 : 1);
+  }
+  return failures;
+}
+
+}  // namespace soma_test
+
+TEST_F(VtkFiles, ConcurrentWritesToOnePathAllSucceed) {
+  std::string a;
+  std::string b;
+  EXPECT_EQ(soma_test::write_concurrently(file(), 200, a, b), 0);
+  EXPECT_NE(a, b);
+  EXPECT_EQ(soma_test::names_in(dir_), soma_test::Names{"out.vtk"});
 }
 
 #ifdef SOMA_TEST_CHILD_PROCESS
@@ -1164,16 +1306,14 @@ TEST_F(VtkFiles, AWriteThatFailsHalfwayLeavesNoPartialFile) {
   ASSERT_GT(soma_test::slurp(file()).size(), 512u);
   EXPECT_TRUE(fs::exists(fresh));
   fs::remove(fresh);
-  ASSERT_FALSE(fs::exists(soma_test::tmp_of(file())));
+  ASSERT_EQ(soma_test::names_in(dir_), soma_test::Names{"out.vtk"});
 
   put_earlier();
   status = soma_test::run_limit_child(file(), fresh, "256");
   ASSERT_TRUE(WIFEXITED(status)) << "status " << status;
   EXPECT_EQ(WEXITSTATUS(status), 0) << "both writes must throw std::runtime_error naming the path";
-  EXPECT_FALSE(fs::exists(soma_test::tmp_of(file())));
   EXPECT_EQ(soma_test::slurp(file()), earlier);
-  EXPECT_FALSE(fs::exists(fresh));
-  EXPECT_FALSE(fs::exists(soma_test::tmp_of(fresh)));
+  EXPECT_EQ(soma_test::names_in(dir_), soma_test::Names{"out.vtk"});
 }
 #endif
 
@@ -1186,7 +1326,7 @@ TEST_F(VtkFiles, AFailedWriteKeepsTheEarlierFile) {
   const std::vector<std::string> names{"a"};
   EXPECT_THROW(soma::write_vtk(mesh, file(), names), soma::StaleField);
   EXPECT_EQ(soma_test::slurp(file()), before);
-  EXPECT_FALSE(fs::exists(soma_test::tmp_of(file())));
+  EXPECT_EQ(soma_test::temporaries_of(file()), soma_test::Names{});
 }
 
 TEST_F(VtkFiles, WritingTwiceGivesIdenticalBytes) {
@@ -1210,7 +1350,7 @@ TEST_F(VtkFiles, WritingTwiceGivesIdenticalBytes) {
   EXPECT_EQ(a, soma_test::slurp(file("b.vtk")));
   soma::write_vtk(mesh, file("a.vtk"), names);
   EXPECT_EQ(a, soma_test::slurp(file("a.vtk")));
-  EXPECT_FALSE(fs::exists(soma_test::tmp_of(file("a.vtk"))));
+  EXPECT_EQ(soma_test::names_in(dir_), (soma_test::Names{"a.vtk", "b.vtk"}));
 }
 
 // The bytes of a fixed mesh and field set do not depend on the platform, the run,
