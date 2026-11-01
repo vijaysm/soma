@@ -35,6 +35,11 @@ void MeshBuilder::add_elements(Topology t, std::span<const GO> gids,
     throw std::invalid_argument("polyhedra need face connectivity and are not supported yet");
   }
   if (t == Topology::polygon) throw std::invalid_argument("use add_polygons for polygons");
+  if (dimension(t) < 1 || dimension(t) > dim_) {
+    throw std::invalid_argument(std::string("add_elements: ") + name(t) +
+                                " elements have dimension " + std::to_string(dimension(t)) +
+                                ", outside [1, " + std::to_string(dim_) + "]");
+  }
   const int nv = num_vertices(t);
   if (nv == 0 || vertex_gids.size() != gids.size() * static_cast<std::size_t>(nv)) {
     throw std::invalid_argument("add_elements: connectivity size does not match the topology");
@@ -53,6 +58,7 @@ void MeshBuilder::add_polygons(std::span<const GO> gids, std::span<const Offset>
   if (offsets.size() != gids.size() + 1) {
     throw std::invalid_argument("add_polygons: offsets must have one more entry than gids");
   }
+  if (dim_ < 2) throw std::invalid_argument("add_polygons: polygons need dimension 2 or 3");
   if (offsets[0] != 0) throw std::invalid_argument("add_polygons: offsets must start at 0");
   constexpr Offset max_arity = std::numeric_limits<std::uint16_t>::max();
   for (std::size_t i = 0; i < gids.size(); ++i) {

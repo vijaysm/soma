@@ -289,3 +289,26 @@ TEST(MeshBuilder, CheckedConversionToOffsetThrowsPastTheLimit) {
   EXPECT_THROW((void)soma::detail::to_offset(std::numeric_limits<std::size_t>::max(), "x"),
                std::length_error);
 }
+
+TEST(MeshBuilder, ElementDimensionMustBeInOneToTheBuilderDimension) {
+  soma::MeshBuilder b2(2);
+  b2.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6, 7, 8}, std::vector<soma::Real>(24, 0.0));
+  EXPECT_THROW(b2.add_elements(Topology::vertex, std::vector<GO>{1}, std::vector<GO>{1}),
+               std::invalid_argument);
+  EXPECT_THROW(b2.add_elements(Topology::hex, std::vector<GO>{1},
+                               std::vector<GO>{1, 2, 3, 4, 5, 6, 7, 8}),
+               std::invalid_argument);
+  b2.add_elements(Topology::quad, std::vector<GO>{1}, std::vector<GO>{1, 2, 3, 4});
+  b2.add_elements(Topology::edge, std::vector<GO>{1}, std::vector<GO>{1, 2});
+  const auto mesh = std::move(b2).build();
+  EXPECT_EQ(mesh.count(3), 0);
+  EXPECT_EQ(mesh.count(2), 1);
+  EXPECT_EQ(mesh.count(1), 1);
+
+  soma::MeshBuilder b1(1);
+  EXPECT_THROW(b1.add_elements(Topology::tri, std::vector<GO>{1}, std::vector<GO>{1, 2, 3}),
+               std::invalid_argument);
+  EXPECT_THROW(b1.add_polygons(std::vector<GO>{1}, std::vector<soma::Offset>{0, 3},
+                               std::vector<GO>{1, 2, 3}),
+               std::invalid_argument);
+}
