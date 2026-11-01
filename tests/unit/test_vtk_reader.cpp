@@ -974,3 +974,24 @@ TEST_F(VtkRead, CharValuesWrapAndSignedCharValuesDoNot) {
   soma_test::expect_field<std::int8_t>(read_text(replaced(sc, "7\n", "-128\n")), "c", 2, 1,
                                        {-128, 8});
 }
+
+TEST_F(VtkRead, OffsetsAndConnectivityMustFitTheirType) {
+  using soma_test::replaced;
+  const std::string& t = soma_test::base_file_51;
+  expect_rejected(replaced(replaced(t, "OFFSETS vtktypeint64", "OFFSETS vtktypeint8"), "0 3 6",
+                           "0 3 128"),
+                  {"line 9", "'128' in OFFSETS is out of range for its type"});
+  expect_rejected(replaced(replaced(t, "OFFSETS vtktypeint64", "OFFSETS unsigned_char"), "0 3 6",
+                           "0 3 256"),
+                  {"line 9", "'256' in OFFSETS is out of range for its type"});
+  expect_rejected(
+      replaced(replaced(t, "CONNECTIVITY vtktypeint64", "CONNECTIVITY vtktypeuint8"), "0 1 2 1 3 2",
+               "0 1 2 1 3 -1"),
+      {"line 11", "'-1' in CONNECTIVITY is out of range for its type"});
+  expect_rejected(replaced(replaced(t, "CONNECTIVITY vtktypeint64", "CONNECTIVITY short"),
+                           "0 1 2 1 3 2", "0 1 2 1 3 32768"),
+                  {"line 11", "'32768' in CONNECTIVITY is out of range for its type"});
+  const auto mesh = read_text(replaced(replaced(t, "OFFSETS vtktypeint64", "OFFSETS vtktypeint8"),
+                                       "CONNECTIVITY vtktypeint64", "CONNECTIVITY vtktypeuint8"));
+  EXPECT_EQ(mesh.count(2), 2);
+}

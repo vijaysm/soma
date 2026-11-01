@@ -410,24 +410,35 @@ void read_points(Lexer& lex, Grid& g) {
   lex.skip_metadata_if_present();
 }
 
-std::int64_t read_id(Lexer& lex, const std::string& of) {
-  static const ValueType any{DataType::i64, std::numeric_limits<std::int64_t>::min(),
-                             static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())};
-  return parse_integer<std::int64_t>(lex, lex.next("a value of " + of), any, of);
+const ValueType any_id{DataType::i64, std::numeric_limits<std::int64_t>::min(),
+                      static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max())};
+
+std::int64_t read_id(Lexer& lex, const std::string& of, const ValueType& vt = any_id) {
+  return parse_integer<std::int64_t>(lex, lex.next("a value of " + of), vt, of);
 }
 
-// Offsets and connectivity may also be declared with VTK's fixed-width names.
-void check_integer_type(Lexer& lex, std::string_view type, const char* of) {
-  static constexpr std::string_view fixed[] = {
-      "vtktypeint8",  "vtktypeint16",  "vtktypeint32",  "vtktypeint64",
-      "vtktypeuint8", "vtktypeuint16", "vtktypeuint32", "vtktypeuint64"};
+// The range of the integer type of OFFSETS or CONNECTIVITY, which may also be
+// one of VTK's fixed-width names; values beyond int64 are out of range anyway.
+ValueType integer_type(Lexer& lex, std::string_view type, const char* of) {
+  using I64 = std::numeric_limits<std::int64_t>;
+  const auto fixed = [](std::int64_t min, std::uint64_t max) {
+    return ValueType{DataType::i64, min, std::min(max, static_cast<std::uint64_t>(I64::max()))};
+  };
   const std::string name = lower(type);
-  if (std::find(std::begin(fixed), std::end(fixed), name) != std::end(fixed)) return;
+  if (name == "vtktypeint8") return fixed(-128, 127);
+  if (name == "vtktypeint16") return fixed(-32768, 32767);
+  if (name == "vtktypeint32") return fixed(-2147483647 - 1, 2147483647);
+  if (name == "vtktypeint64") return fixed(I64::min(), static_cast<std::uint64_t>(I64::max()));
+  if (name == "vtktypeuint8") return fixed(0, 255);
+  if (name == "vtktypeuint16") return fixed(0, 65535);
+  if (name == "vtktypeuint32") return fixed(0, 4294967295u);
+  if (name == "vtktypeuint64") return fixed(0, std::numeric_limits<std::uint64_t>::max());
   const auto t = value_type(type);
   if (!t || !is_integer(t->type)) {
     lex.fail(std::string(of) + " has the value type " + in_quotes(type) +
              "; it needs an integer type");
   }
+  return fixed(t->min, t->max);
 }
 
 void read_cells(Lexer& lex, Grid& g) {
@@ -437,10 +448,10 @@ void read_cells(Lexer& lex, Grid& g) {
     const std::size_t noffsets = lex.count("the CELLS offset count", 1);
     const std::size_t nconn = lex.count("the CELLS connectivity size", 1);
     lex.expect("OFFSETS");
-    check_integer_type(lex, lex.next("the OFFSETS value type"), "OFFSETS");
+    const ValueType offset_type = integer_type(lex, lex.next("the OFFSETS value type"), "OFFSETS");
     g.offsets.reserve(noffsets);
     for (std::size_t i = 0; i < noffsets; ++i) {
-      const std::int64_t v = read_id(lex, "OFFSETS");
+      const std::int64_t v = read_id(lex, "OFFSETS", offset_type);
       if (v < 0) lex.fail("offset " + std::to_string(i) + " is negative: " + std::to_string(v));
       const auto o = static_cast<std::size_t>(v);
       if (i == 0 && o != 0) lex.fail("the first offset is " + std::to_string(o) + ", not 0");
@@ -454,9 +465,12 @@ void read_cells(Lexer& lex, Grid& g) {
                " but CELLS declares a connectivity size of " + std::to_string(nconn));
     }
     lex.expect("CONNECTIVITY");
-    check_integer_type(lex, lex.next("the CONNECTIVITY value type"), "CONNECTIVITY");
+    const ValueType conn_type =
+        integer_type(lex, lex.next("the CONNECTIVITY value type"), "CONNECTIVITY");
     g.conn.reserve(nconn);
-    for (std::size_t k = 0; k < nconn; ++k) g.conn.push_back(read_id(lex, "CONNECTIVITY"));
+    for (std::size_t k = 0; k < nconn; ++k) {
+      g.conn.push_back(read_id(lex, "CONNECTIVITY", conn_type));
+    }
     lex.skip_metadata_if_present();
   } else {
     const std::size_t ncells = lex.count("the CELLS count", 2);
