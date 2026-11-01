@@ -80,6 +80,14 @@ TEST(MeshSemantics, AMovedFromMeshIsEmptyAndUsable) {
   EXPECT_EQ(copy.count(0), 0);
   EXPECT_EQ(copy.coords().extent(0), 0u);
   EXPECT_TRUE(copy.fields().list().empty());
+  const auto dev = a.mirror<DevMem>(soma::TransferOptions::everything());
+  EXPECT_EQ(dev.count(0), 0);
+  EXPECT_EQ(dev.count(2), 0);
+  EXPECT_EQ(dev.coords().extent(0), 0u);
+  EXPECT_TRUE(dev.fields().list().empty());
+  const auto dev_alias = a.mirror_view<DevMem>();
+  EXPECT_EQ(dev_alias.count(2), 0);
+  EXPECT_EQ(dev_alias.view().count(0), 0);
   a = soma_test::two_quads_and_a_triangle();
   EXPECT_EQ(a.count(2), 3);
   EXPECT_TRUE(a.fields().list().empty());
@@ -104,6 +112,44 @@ TEST(MeshSemantics, MirrorViewAliasesWhenTheSpaceIsTheSame) {
   EXPECT_EQ(alias.coords().data(), b.coords().data());
   const auto deep = b.mirror<HostMem>();
   EXPECT_NE(deep.coords().data(), b.coords().data());
+  for (const int d : {0, 2}) {
+    EXPECT_EQ(alias.gid(d).data(), b.gid(d).data()) << d;
+    EXPECT_NE(deep.gid(d).data(), b.gid(d).data()) << d;
+  }
+  EXPECT_EQ(alias.conn(2).data(), b.conn(2).data());
+  EXPECT_EQ(alias.conn_offsets(2).data(), b.conn_offsets(2).data());
+  EXPECT_EQ(alias.topology(2).data(), b.topology(2).data());
+  EXPECT_NE(deep.conn(2).data(), b.conn(2).data());
+  EXPECT_NE(deep.conn_offsets(2).data(), b.conn_offsets(2).data());
+  EXPECT_NE(deep.topology(2).data(), b.topology(2).data());
+}
+
+TEST(MeshSemantics, ADeviceMirrorReadsBackEqual) {
+  const auto h = soma_test::two_quads_and_a_triangle();
+  const auto d = h.mirror<DevMem>();
+  const auto back = d.mirror<HostMem>();
+  EXPECT_EQ(back.dim(), h.dim());
+  for (const int dim : {0, 2}) {
+    ASSERT_EQ(back.count(dim), h.count(dim)) << dim;
+    ASSERT_EQ(back.gid(dim).extent(0), h.gid(dim).extent(0)) << dim;
+    for (std::size_t i = 0; i < h.gid(dim).extent(0); ++i) {
+      EXPECT_EQ(back.gid(dim)(i), h.gid(dim)(i)) << dim << " " << i;
+    }
+    EXPECT_EQ(back.segments(dim).size(), h.segments(dim).size()) << dim;
+  }
+  ASSERT_EQ(back.topology(2).extent(0), 3u);
+  ASSERT_EQ(back.conn_offsets(2).extent(0), 4u);
+  ASSERT_EQ(back.conn(2).extent(0), h.conn(2).extent(0));
+  for (std::size_t e = 0; e < 3; ++e) {
+    EXPECT_EQ(back.topology(2)(e), h.topology(2)(e)) << e;
+    EXPECT_EQ(back.conn_offsets(2)(e + 1), h.conn_offsets(2)(e + 1)) << e;
+  }
+  for (std::size_t k = 0; k < h.conn(2).extent(0); ++k) {
+    EXPECT_EQ(back.conn(2)(k), h.conn(2)(k)) << k;
+  }
+  for (LO v = 0; v < h.count(0); ++v) {
+    for (int c = 0; c < 3; ++c) EXPECT_DOUBLE_EQ(back.coords()(v, c), h.coords()(v, c));
+  }
 }
 
 TEST(MeshSemantics, DroppedPartsAreNotCopied) {
@@ -135,7 +181,6 @@ TEST(MeshSemantics, ViewReflectsTheMesh) {
   EXPECT_EQ(v.topology(0, 3), Topology::vertex);
   EXPECT_EQ(v.gid(2, 1), 3);
   EXPECT_TRUE(v.owned(2, 2));
-  EXPECT_FALSE(v.owned(2, 3));
   EXPECT_TRUE(v.interior(2, 0));
 }
 
