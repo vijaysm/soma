@@ -1233,22 +1233,11 @@ TEST_F(VtkFiles, AMirrorWithoutCoordinatesIsRejected) {
 
 TEST_F(VtkFiles, ConnectivityToMissingVerticesIsRejected) {
   const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
-  soma::TransferOptions opts;
-  opts.dims = {false, true, true, true};
-  opts.coordinates = false;
-  const auto part = soma_test::partial_mirror(mesh, opts);
-  if (!part) GTEST_SKIP() << "the mesh refuses a mirror without vertices";
-  ASSERT_EQ(part->count(0), 0);
-  expect_invalid(*part, {}, "the connectivity of cell row 0 refers to vertex");
-}
-
-TEST_F(VtkFiles, AMirrorWithoutVerticesButWithCoordinatesIsRejected) {
-  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
-  soma::TransferOptions opts;
-  opts.dims = {false, true, true, true};
-  const auto part = soma_test::partial_mirror(mesh, opts);
-  if (!part) GTEST_SKIP() << "the mesh refuses a mirror without vertices";
-  expect_invalid(*part, {}, "the extents of the coordinates are 7 x 3 where the mesh needs 0 x 3");
+  ASSERT_EQ(mesh.count(0), 7);
+  // The mesh offers no way to damage itself, so write through its View.
+  auto* raw = const_cast<soma::LO*>(mesh.conn(2).data());
+  raw[0] = 7;
+  expect_invalid(mesh, {}, "the connectivity of cell row 0 refers to vertex");
 }
 
 TEST_F(VtkFiles, AMirrorWithoutItsCellDimensionWritesPointsOnly) {
