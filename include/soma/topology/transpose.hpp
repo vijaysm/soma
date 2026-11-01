@@ -40,19 +40,24 @@ KOKKOS_INLINE_FUNCTION void sort_row(const Targets& t, const Codes& c, Offset b,
 }
 
 // Exclusive scan of counts(0 .. n-1) into offsets(0 .. n), returning the total.
+// Sums in 64 bits and throws std::length_error if the total does not fit
+// Offset; offsets then holds truncated values and must not be used.
 template <class ExecSpace, class Counts, class Offsets>
 Offset exclusive_scan(const ExecSpace& exec, const std::string& label, LO n, const Counts& counts,
                       const Offsets& offsets) {
-  Offset total = 0;
+  std::int64_t total = 0;
   Kokkos::parallel_scan(
       label, Kokkos::RangePolicy<ExecSpace>(exec, 0, n + 1),
-      KOKKOS_LAMBDA(const LO i, Offset& acc, const bool final) {
-        if (final) offsets(i) = acc;
-        if (i < n) acc += static_cast<Offset>(counts(i));
+      KOKKOS_LAMBDA(const LO i, std::int64_t& acc, const bool final) {
+        if (final) offsets(i) = static_cast<Offset>(acc);
+        if (i < n) acc += static_cast<std::int64_t>(counts(i));
       },
       total);
   exec.fence(label);
-  return total;
+  if (total > std::int64_t{Kokkos::Experimental::finite_max_v<Offset>}) {
+    throw std::length_error(label + ": " + std::to_string(total) + " entries do not fit Offset");
+  }
+  return static_cast<Offset>(total);
 }
 
 }  // namespace detail

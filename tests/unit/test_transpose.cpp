@@ -95,3 +95,19 @@ TEST(Transpose, RejectsRowsWhoseLocalIndexDoesNotFitACode) {
   EXPECT_EQ(g.row_codes(255), std::vector<std::uint8_t>{255});
   EXPECT_TRUE(g.row(256).empty());
 }
+
+TEST(Transpose, ScansThatOverflowOffsetThrow) {
+  soma::View1<Offset, Kokkos::HostSpace> counts("counts", 3);
+  soma::View1<Offset, Kokkos::HostSpace> offsets("offsets", 4);
+  Kokkos::deep_copy(counts, Offset{1000000000});
+  const auto scan = [&] {
+    return soma::topology::detail::exclusive_scan(Kokkos::DefaultHostExecutionSpace{}, "test", 3,
+                                                  counts, offsets);
+  };
+  if constexpr (sizeof(Offset) == 4) {
+    EXPECT_THROW((void)scan(), std::length_error);
+  } else {
+    EXPECT_EQ(static_cast<std::int64_t>(scan()), 3000000000LL);
+    EXPECT_EQ(static_cast<std::int64_t>(offsets(3)), 3000000000LL);
+  }
+}
