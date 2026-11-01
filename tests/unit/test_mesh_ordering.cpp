@@ -34,7 +34,9 @@ constexpr int n = 16;  // cells per side
 // the row-major numbering, so file order (gid order) is far from spatial order.
 soma::HostMesh scrambled_grid(Ordering ordering) {
   const int nv = (n + 1) * (n + 1);
-  const auto vgid = [&](int i, int j) { return static_cast<GO>(1 + (7919 * (i + (n + 1) * j)) % nv); };
+  const auto vgid = [&](int i, int j) {
+    return static_cast<GO>(1 + (7919 * (i + (n + 1) * j)) % nv);
+  };
   const auto egid = [&](int i, int j) { return static_cast<GO>(1 + (97 * (i + n * j)) % (n * n)); };
   soma::MeshBuilder b(2);
   std::vector<GO> vg;
@@ -125,7 +127,8 @@ TEST(MeshOrdering, VerticesFollowTheHilbertKeyThenGid) {
   const auto mesh = scrambled_grid(Ordering::type_major_sfc);
   std::vector<std::tuple<std::uint64_t, GO>> expected;
   for (LO v = 0; v < mesh.count(0); ++v) {
-    expected.emplace_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), n, n), mesh.gid(0)(v));
+    expected.emplace_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), n, n),
+                          mesh.gid(0)(v));
   }
   EXPECT_TRUE(std::is_sorted(expected.begin(), expected.end()));
   EXPECT_FALSE(std::is_sorted(mesh.gid(0).data(), mesh.gid(0).data() + mesh.count(0)));
@@ -299,7 +302,8 @@ TEST(MeshOrdering, TypeBlocksStayTogetherUnderTheCurve) {
   }
   b.add_vertices(vg, xyz);
   b.add_elements(Topology::quad, std::vector<GO>{1, 2}, std::vector<GO>{1, 2, 5, 4, 2, 3, 6, 5});
-  b.add_elements(Topology::tri, std::vector<GO>{3, 4, 5}, std::vector<GO>{4, 5, 8, 5, 6, 9, 4, 8, 7});
+  b.add_elements(Topology::tri, std::vector<GO>{3, 4, 5},
+                 std::vector<GO>{4, 5, 8, 5, 6, 9, 4, 8, 7});
   const auto mesh = std::move(b).build(Ordering::type_major_sfc);
   ASSERT_EQ(mesh.segments(2).size(), 2u);
   EXPECT_EQ(mesh.segments(2)[0].topology, Topology::tri);

@@ -46,11 +46,16 @@ std::vector<GO> gids_of(const soma::HostMesh& m, int dim) {
 }
 
 std::vector<BoxSpec> shapes(Ordering ordering) {
-  return {spec_of(8, 8, 1, Topology::quad, ordering),   spec_of(16, 16, 1, Topology::quad, ordering),
-          spec_of(32, 32, 1, Topology::quad, ordering), spec_of(16, 16, 1, Topology::tri, ordering),
-          spec_of(8, 8, 8, Topology::hex, ordering),    spec_of(16, 16, 16, Topology::hex, ordering),
-          spec_of(8, 16, 16, Topology::hex, ordering),  spec_of(4, 4, 32, Topology::hex, ordering),
-          spec_of(64, 16, 1, Topology::quad, ordering), spec_of(3, 5, 1, Topology::tri, ordering)};
+  return {spec_of(8, 8, 1, Topology::quad, ordering),
+          spec_of(16, 16, 1, Topology::quad, ordering),
+          spec_of(32, 32, 1, Topology::quad, ordering),
+          spec_of(16, 16, 1, Topology::tri, ordering),
+          spec_of(8, 8, 8, Topology::hex, ordering),
+          spec_of(16, 16, 16, Topology::hex, ordering),
+          spec_of(8, 16, 16, Topology::hex, ordering),
+          spec_of(4, 4, 32, Topology::hex, ordering),
+          spec_of(64, 16, 1, Topology::quad, ordering),
+          spec_of(3, 5, 1, Topology::tri, ordering)};
 }
 
 }  // namespace
@@ -80,7 +85,8 @@ TEST(BoxMeshOrdering, TheCurveHoldsTheSameEntitiesAndTheSameCoordinatesPerGid) {
     for (LO v = 0; v < by_curve.count(0); ++v) {
       const std::vector<double>& p = where.at(by_curve.gid(0)(v));
       for (int c = 0; c < 3; ++c) {
-        EXPECT_EQ(by_curve.coords()(v, c), p[static_cast<std::size_t>(c)]) << "vertex gid " << by_curve.gid(0)(v);
+        EXPECT_EQ(by_curve.coords()(v, c), p[static_cast<std::size_t>(c)])
+            << "vertex gid " << by_curve.gid(0)(v);
       }
     }
   }
@@ -95,8 +101,8 @@ TEST(BoxMeshOrdering, TheCurveReordersWhatFileOrderLeavesByGid) {
     EXPECT_TRUE(std::is_sorted(by_file.gid(0).data(), by_file.gid(0).data() + by_file.count(0)));
     EXPECT_FALSE(std::is_sorted(by_curve.gid(0).data(), by_curve.gid(0).data() + by_curve.count(0)))
         << soma::name(t);
-    EXPECT_FALSE(std::is_sorted(by_curve.gid(dim).data(), by_curve.gid(dim).data() + by_curve.count(dim)))
-        << soma::name(t);
+    const GO* elements = by_curve.gid(dim).data();
+    EXPECT_FALSE(std::is_sorted(elements, elements + by_curve.count(dim))) << soma::name(t);
     const auto again = soma::testing::box_mesh(spec_of(8, 8, nz, t, Ordering::type_major_sfc));
     EXPECT_EQ(gids_of(again, 0), gids_of(by_curve, 0));
     EXPECT_EQ(gids_of(again, dim), gids_of(by_curve, dim));
@@ -127,9 +133,12 @@ TEST(BoxMeshOrdering, FileOrderVertexSpanIsTheClosedForm) {
 // under the curve was several times the file-order one in every shape probed.
 TEST(BoxMeshOrdering, TheCurveKeepsTheMeanVertexSpanNearFileOrderOnCompactBoxes) {
   const std::vector<BoxSpec> compact{
-      spec_of(8, 8, 1, Topology::quad, Ordering::file),   spec_of(16, 16, 1, Topology::quad, Ordering::file),
-      spec_of(32, 32, 1, Topology::quad, Ordering::file), spec_of(16, 16, 1, Topology::tri, Ordering::file),
-      spec_of(8, 8, 8, Topology::hex, Ordering::file),    spec_of(16, 16, 16, Topology::hex, Ordering::file)};
+      spec_of(8, 8, 1, Topology::quad, Ordering::file),
+      spec_of(16, 16, 1, Topology::quad, Ordering::file),
+      spec_of(32, 32, 1, Topology::quad, Ordering::file),
+      spec_of(16, 16, 1, Topology::tri, Ordering::file),
+      spec_of(8, 8, 8, Topology::hex, Ordering::file),
+      spec_of(16, 16, 16, Topology::hex, Ordering::file)};
   for (BoxSpec spec : compact) {
     SCOPED_TRACE(describe(spec));
     const auto by_file = soma::testing::box_mesh(spec);

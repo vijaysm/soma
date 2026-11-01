@@ -177,7 +177,9 @@ double least_measure(soma::MeshView<M> v) {
   Kokkos::parallel_reduce(
       "soma::test::box_measure_min",
       Kokkos::RangePolicy<typename M::execution_space>(0, v.count(dim)),
-      KOKKOS_LAMBDA(const LO e, double& acc) { acc = Kokkos::min(acc, signed_measure<M>(v, dim, e)); },
+      KOKKOS_LAMBDA(const LO e, double& acc) {
+        acc = Kokkos::min(acc, signed_measure<M>(v, dim, e));
+      },
       Kokkos::Min<double>(lowest));
   return lowest;
 }
@@ -244,7 +246,8 @@ TEST(BoxMesh, HexCountsMatchTheClosedForms) {
   };
   for (const Shape s : {Shape{1, 1, 1}, Shape{2, 3, 4}, Shape{5, 1, 7}, Shape{1, 9, 1},
                         Shape{8, 16, 16}}) {
-    const auto mesh = soma::testing::box_mesh(soma_test::make_spec(s.nx, s.ny, s.nz, Topology::hex));
+    const auto mesh =
+        soma::testing::box_mesh(soma_test::make_spec(s.nx, s.ny, s.nz, Topology::hex));
     EXPECT_EQ(mesh.dim(), 3);
     EXPECT_EQ(mesh.count(0), (s.nx + 1) * (s.ny + 1) * (s.nz + 1));
     EXPECT_EQ(mesh.count(3), s.nx * s.ny * s.nz);
@@ -256,7 +259,8 @@ TEST(BoxMesh, HexCountsMatchTheClosedForms) {
 // data/hex_2048.h5m holds 16 x 16 x 8 hexes on 2 x 2 x 1; the counts alone
 // (2601 vertices, 2048 hexes) do not tell the axes apart.
 TEST(BoxMesh, The2048HexBoxesHaveTheCountsOfTheDataFile) {
-  for (const BoxSpec& spec : {BoxSpec{8, 16, 16, Topology::hex}, BoxSpec{16, 16, 8, Topology::hex, 2, 2, 1}}) {
+  for (const BoxSpec& spec :
+       {BoxSpec{8, 16, 16, Topology::hex}, BoxSpec{16, 16, 8, Topology::hex, 2, 2, 1}}) {
     const auto mesh = soma::testing::box_mesh(spec);
     EXPECT_EQ(mesh.count(0), 2601);
     EXPECT_EQ(mesh.count(3), 2048);
@@ -339,7 +343,8 @@ TEST(BoxMesh, ElementGidsRunIFastestThenJThenK) {
 }
 
 TEST(BoxMesh, CoordinatesAreBitwiseLengthTimesIndexOverCount) {
-  const auto mesh = soma::testing::box_mesh(soma_test::make_spec(5, 6, 7, Topology::hex, 0.1, 0.3, 0.7));
+  const auto mesh =
+      soma::testing::box_mesh(soma_test::make_spec(5, 6, 7, Topology::hex, 0.1, 0.3, 0.7));
   const int px = 6;
   const int py = 7;
   for (LO v = 0; v < mesh.count(0); ++v) {
@@ -355,7 +360,8 @@ TEST(BoxMesh, CoordinatesAreBitwiseLengthTimesIndexOverCount) {
 }
 
 TEST(BoxMesh, TheFarFaceSitsExactlyAtTheLength) {
-  const auto hex = soma::testing::box_mesh(soma_test::make_spec(3, 3, 9, Topology::hex, 0.1, 0.7, 0.9));
+  const auto hex =
+      soma::testing::box_mesh(soma_test::make_spec(3, 3, 9, Topology::hex, 0.1, 0.7, 0.9));
   // lx * nx / nx is not lx here, so the far face is set, not computed.
   EXPECT_NE(hex.coords()(3, 0), 0.1 * 3 / 3);
   double max_x = 0;
@@ -369,7 +375,8 @@ TEST(BoxMesh, TheFarFaceSitsExactlyAtTheLength) {
   EXPECT_EQ(max_x, 0.1);
   EXPECT_EQ(max_y, 0.7);
   EXPECT_EQ(max_z, 0.9);
-  const auto quad = soma::testing::box_mesh(soma_test::make_spec(3, 9, 1, Topology::quad, 0.1, 0.9));
+  const auto quad =
+      soma::testing::box_mesh(soma_test::make_spec(3, 9, 1, Topology::quad, 0.1, 0.9));
   EXPECT_EQ(quad.coords()(quad.count(0) - 1, 0), 0.1);
   EXPECT_EQ(quad.coords()(quad.count(0) - 1, 1), 0.9);
 }
@@ -444,24 +451,32 @@ TEST(BoxMesh, BoundaryVerticesAreTheTotalMinusTheInteriorClosedForm) {
 TEST(BoxMesh, EveryTopologyOtherThanHexQuadTriIsRejectedByName) {
   for (int t = 0; t < soma::topology_count; ++t) {
     const auto topology = static_cast<Topology>(t);
-    if (topology == Topology::hex || topology == Topology::quad || topology == Topology::tri) continue;
+    if (topology == Topology::hex || topology == Topology::quad || topology == Topology::tri) {
+      continue;
+    }
     SCOPED_TRACE(soma::name(topology));
     soma_test::expect_throws_naming<std::invalid_argument>(
         soma_test::make_spec(2, 2, 2, topology), soma::name(topology));
   }
-  soma_test::expect_throws_naming<std::invalid_argument>(soma_test::make_spec(2, 2, 2, Topology::tet),
-                                                         "supported: hex, quad, tri");
+  soma_test::expect_throws_naming<std::invalid_argument>(
+      soma_test::make_spec(2, 2, 2, Topology::tet), "supported: hex, quad, tri");
 }
 
 TEST(BoxMesh, CellCountsBelowOneAreRejectedByAxis) {
   for (const int bad : {0, -1, -100}) {
-    soma_test::expect_throws_naming<std::invalid_argument>(soma_test::make_spec(bad, 2, 2, Topology::hex), "nx");
-    soma_test::expect_throws_naming<std::invalid_argument>(soma_test::make_spec(2, bad, 2, Topology::hex), "ny");
-    soma_test::expect_throws_naming<std::invalid_argument>(soma_test::make_spec(2, 2, bad, Topology::hex), "nz");
-    soma_test::expect_throws_naming<std::invalid_argument>(soma_test::make_spec(bad, 2, 1, Topology::quad), "nx");
-    soma_test::expect_throws_naming<std::invalid_argument>(soma_test::make_spec(2, bad, 1, Topology::tri), "ny");
+    soma_test::expect_throws_naming<std::invalid_argument>(
+        soma_test::make_spec(bad, 2, 2, Topology::hex), "nx");
+    soma_test::expect_throws_naming<std::invalid_argument>(
+        soma_test::make_spec(2, bad, 2, Topology::hex), "ny");
+    soma_test::expect_throws_naming<std::invalid_argument>(
+        soma_test::make_spec(2, 2, bad, Topology::hex), "nz");
+    soma_test::expect_throws_naming<std::invalid_argument>(
+        soma_test::make_spec(bad, 2, 1, Topology::quad), "nx");
+    soma_test::expect_throws_naming<std::invalid_argument>(
+        soma_test::make_spec(2, bad, 1, Topology::tri), "ny");
   }
-  soma_test::expect_throws_naming<std::invalid_argument>(soma_test::make_spec(0, 2, 2, Topology::hex), "at least 1");
+  soma_test::expect_throws_naming<std::invalid_argument>(
+      soma_test::make_spec(0, 2, 2, Topology::hex), "at least 1");
 }
 
 TEST(BoxMesh, LengthsMustBePositiveAndFinite) {
@@ -578,9 +593,11 @@ TEST(BoxCounts, EachCountIsCheckedAgainstTheWidthOfItsType) {
     const std::int64_t per_cell = c.element == Topology::tri ? 2 : 1;
     const int arity = soma::num_vertices(c.element);
     const bool vertices_fit = fits(px, py, lo_max) && fits(px * py, pz, lo_max);
-    const bool elements_fit = fits(c.nx, c.ny, lo_max) && fits(std::int64_t{c.nx} * c.ny, c.nz, lo_max) &&
+    const bool elements_fit = fits(c.nx, c.ny, lo_max) &&
+                              fits(std::int64_t{c.nx} * c.ny, c.nz, lo_max) &&
                               fits(std::int64_t{c.nx} * c.ny * c.nz, per_cell, lo_max);
-    const bool connectivity_fit = elements_fit && fits(std::int64_t{c.nx} * c.ny * c.nz * per_cell, arity, offset_max);
+    const bool connectivity_fit =
+        elements_fit && fits(std::int64_t{c.nx} * c.ny * c.nz * per_cell, arity, offset_max);
     if (!vertices_fit) {
       soma_test::expect_overflow_naming(spec, "vertices", "LO");
     } else if (!elements_fit) {

@@ -47,8 +47,8 @@ TEST(Hilbert, FirstOrderCurvesAreTheDefinition) {
   for (std::size_t k = 0; k < two.size(); ++k) {
     EXPECT_EQ(index_2d(two[k][0], two[k][1], 1), k);
   }
-  const std::vector<std::array<std::uint32_t, 3>> three{{0, 0, 0}, {0, 0, 1}, {0, 1, 1}, {0, 1, 0},
-                                                         {1, 1, 0}, {1, 1, 1}, {1, 0, 1}, {1, 0, 0}};
+  const std::vector<std::array<std::uint32_t, 3>> three{
+      {0, 0, 0}, {0, 0, 1}, {0, 1, 1}, {0, 1, 0}, {1, 1, 0}, {1, 1, 1}, {1, 0, 1}, {1, 0, 0}};
   for (std::size_t k = 0; k < three.size(); ++k) {
     EXPECT_EQ(index_3d(three[k][0], three[k][1], three[k][2], 1), k);
   }
@@ -59,7 +59,8 @@ TEST(Hilbert, TwoDimensionsMatchTheIndependentReference) {
     const std::uint32_t n = std::uint32_t{1} << bits;
     for (std::uint32_t x = 0; x < n; ++x) {
       for (std::uint32_t y = 0; y < n; ++y) {
-        ASSERT_EQ(index_2d(x, y, bits), soma_test::hilbert_reference_2d(n, x, y)) << "bits " << bits << " (" << x << "," << y << ")";
+        ASSERT_EQ(index_2d(x, y, bits), soma_test::hilbert_reference_2d(n, x, y))
+            << "bits " << bits << " (" << x << "," << y << ")";
       }
     }
   }
