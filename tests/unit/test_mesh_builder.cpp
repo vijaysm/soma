@@ -206,3 +206,68 @@ TEST(MeshBuilder, UnsupportedInputsThrow) {
   EXPECT_THROW(soma::MeshBuilder(4), std::invalid_argument);
   EXPECT_THROW(std::move(b).build(soma::Ordering::tiled), std::invalid_argument);
 }
+
+namespace {
+
+using Offsets = std::vector<soma::Offset>;
+
+soma::MeshBuilder six_vertices() {
+  soma::MeshBuilder b(2);
+  b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6}, std::vector<soma::Real>(18, 0.0));
+  return b;
+}
+
+std::string polygon_error(const Offsets& offsets, const std::vector<GO>& vertex_gids) {
+  auto b = six_vertices();
+  std::vector<GO> gids(offsets.empty() ? 0 : offsets.size() - 1);
+  for (std::size_t i = 0; i < gids.size(); ++i) gids[i] = static_cast<GO>(i + 1);
+  try {
+    b.add_polygons(gids, offsets, vertex_gids);
+  } catch (const std::invalid_argument& e) {
+    return e.what();
+  }
+  return "";
+}
+
+}  // namespace
+
+TEST(MeshBuilder, PolygonOffsetsMustStartAtZero) {
+  EXPECT_NE(polygon_error(Offsets{1, 4}, std::vector<GO>{1, 2, 3, 4}).find("start at 0"),
+            std::string::npos);
+  EXPECT_NE(polygon_error(Offsets{2, 5}, std::vector<GO>{1, 2, 3, 4, 5}).find("start at 0"),
+            std::string::npos);
+}
+
+TEST(MeshBuilder, PolygonOffsetsMustNotDecrease) {
+  EXPECT_NE(polygon_error(Offsets{0, 3, 0}, std::vector<GO>{1, 2, 3}).find("decrease"),
+            std::string::npos);
+}
+
+TEST(MeshBuilder, PolygonOffsetsMustEndAtTheConnectivitySize) {
+  EXPECT_NE(polygon_error(Offsets{0, 10}, std::vector<GO>{1, 2, 3}).find("end at"),
+            std::string::npos);
+  EXPECT_NE(polygon_error(Offsets{0, 3}, std::vector<GO>{1, 2, 3, 4}).find("end at"),
+            std::string::npos);
+}
+
+TEST(MeshBuilder, PolygonArityMustFitTheSegmentArity) {
+  EXPECT_NE(polygon_error(Offsets{0, 0, 3}, std::vector<GO>{1, 2, 3}).find("arity 0"),
+            std::string::npos);
+  EXPECT_NE(polygon_error(Offsets{0, 2}, std::vector<GO>{1, 2}).find("arity 2"),
+            std::string::npos);
+  std::vector<GO> big(65536);
+  for (std::size_t i = 0; i < big.size(); ++i) big[i] = static_cast<GO>(i % 6 + 1);
+  EXPECT_NE(polygon_error(Offsets{0, 65536}, big).find("arity 65536"), std::string::npos);
+  big.pop_back();
+  EXPECT_EQ(polygon_error(Offsets{0, 65535}, big), "");
+}
+
+TEST(MeshBuilder, ARejectedPolygonBlockLeavesTheBuilderUsable) {
+  auto b = six_vertices();
+  EXPECT_THROW(b.add_polygons(std::vector<GO>{1}, Offsets{0, 10}, std::vector<GO>{1, 2, 3}),
+               std::invalid_argument);
+  b.add_polygons(std::vector<GO>{2}, Offsets{0, 3}, std::vector<GO>{1, 2, 3});
+  const auto mesh = std::move(b).build();
+  EXPECT_EQ(mesh.count(2), 1);
+  EXPECT_EQ(mesh.gid(2)(0), 2);
+}

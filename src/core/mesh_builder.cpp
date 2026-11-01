@@ -4,6 +4,8 @@
 #include "soma/core/mesh_builder.hpp"
 
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <numeric>
 #include <stdexcept>
 #include <string>
@@ -45,6 +47,25 @@ void MeshBuilder::add_polygons(std::span<const GO> gids, std::span<const Offset>
                                std::span<const GO> vertex_gids) {
   if (offsets.size() != gids.size() + 1) {
     throw std::invalid_argument("add_polygons: offsets must have one more entry than gids");
+  }
+  if (offsets[0] != 0) throw std::invalid_argument("add_polygons: offsets must start at 0");
+  constexpr Offset max_arity = std::numeric_limits<std::uint16_t>::max();
+  for (std::size_t i = 0; i < gids.size(); ++i) {
+    if (offsets[i + 1] < offsets[i]) {
+      throw std::invalid_argument("add_polygons: offsets decrease at polygon " +
+                                  std::to_string(gids[i]));
+    }
+    const Offset arity = offsets[i + 1] - offsets[i];
+    if (arity < 3 || arity > max_arity) {
+      throw std::invalid_argument("add_polygons: polygon " + std::to_string(gids[i]) +
+                                  " has arity " + std::to_string(arity) + ", outside [3, " +
+                                  std::to_string(max_arity) + "]");
+    }
+  }
+  if (static_cast<std::size_t>(offsets.back()) != vertex_gids.size()) {
+    throw std::invalid_argument("add_polygons: offsets end at " + std::to_string(offsets.back()) +
+                                " but there are " + std::to_string(vertex_gids.size()) +
+                                " vertex gids");
   }
   blocks_[2].push_back(Block{Topology::polygon,
                              {gids.begin(), gids.end()},
