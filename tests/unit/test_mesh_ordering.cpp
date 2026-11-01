@@ -211,14 +211,24 @@ TEST(MeshOrdering, NoiseJustAboveOneCellKeepsTheSpanOfThePlane) {
 }
 
 // The box spans more than the largest Real; the vertices still sort along x.
+// So do edges whose vertex sums overflow: summed first, the centroids of the
+// two edges on each side would saturate to one cell and fall back to the gid.
 TEST(MeshOrdering, CoordinatesNearTheLimitOfRealStillOrderAlongTheAxis) {
   soma::MeshBuilder b(1);
-  b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5},
-                 std::vector<Real>{1e308, 0, 0, -1e308, 0, 0, 0, 0, 0, 5e307, 0, 0, -5e307, 0, 0});
+  b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6, 7, 8, 9},
+                 std::vector<Real>{1e308, 0, 0, -1e308, 0, 0, 0, 0, 0, 5e307, 0, 0, -5e307, 0, 0,
+                                   9e307, 0, 0, 9.5e307, 0, 0, -9e307, 0, 0, -9.5e307, 0, 0});
+  b.add_elements(Topology::edge, std::vector<GO>{1, 2, 3, 4},
+                 std::vector<GO>{7, 1, 6, 7, 8, 9, 9, 2});
   const auto mesh = std::move(b).build(Ordering::type_major_sfc);
-  const std::vector<GO> by_x{2, 5, 3, 4, 1};
+  const std::vector<GO> by_x{2, 9, 8, 5, 3, 4, 6, 7, 1};
   for (LO v = 0; v < mesh.count(0); ++v) {
     EXPECT_EQ(mesh.gid(0)(v), by_x[static_cast<std::size_t>(v)]) << "vertex " << v;
+  }
+  const std::vector<GO> edges_by_x{4, 3, 2, 1};
+  ASSERT_EQ(mesh.count(1), 4);
+  for (LO e = 0; e < mesh.count(1); ++e) {
+    EXPECT_EQ(mesh.gid(1)(e), edges_by_x[static_cast<std::size_t>(e)]) << "edge " << e;
   }
 }
 
