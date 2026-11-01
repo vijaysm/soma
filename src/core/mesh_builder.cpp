@@ -25,8 +25,14 @@ void MeshBuilder::add_vertices(std::span<const GO> gids, std::span<const Real> x
   if (xyz.size() != 3 * gids.size()) {
     throw std::invalid_argument("add_vertices: xyz must hold 3 values per vertex");
   }
+  const std::size_t old = vertex_gids_.size();
   vertex_gids_.insert(vertex_gids_.end(), gids.begin(), gids.end());
-  xyz_.insert(xyz_.end(), xyz.begin(), xyz.end());
+  try {
+    xyz_.insert(xyz_.end(), xyz.begin(), xyz.end());
+  } catch (...) {
+    vertex_gids_.resize(old);  // keep the two arrays paired
+    throw;
+  }
 }
 
 void MeshBuilder::add_elements(Topology t, std::span<const GO> gids,

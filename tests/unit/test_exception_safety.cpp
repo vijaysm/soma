@@ -16,6 +16,7 @@
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
 
+#include "soma/core/mesh_builder.hpp"
 #include "soma/core/types.hpp"
 #include "soma/fields/domain.hpp"
 #include "soma/fields/errors.hpp"
@@ -188,6 +189,24 @@ TEST(ExceptionSafety, AFailedMirrorLeavesTheDestinationEmptyAndRetryable) {
     EXPECT_EQ(dst.get<float>(b.id()).rows(), 1);
     EXPECT_DOUBLE_EQ(dst.get<double>("a").view()(0, 0), 2.5);
   }
+}
+
+TEST(ExceptionSafety, AFailedAddVerticesKeepsGidsAndCoordinatesTogether) {
+  soma::MeshBuilder b(2);
+  b.add_vertices(std::vector<soma::GO>{1, 2}, std::vector<soma::Real>{0, 0, 0, 1, 0, 0});
+  const std::vector<soma::GO> more{3, 4};
+  const std::vector<soma::Real> more_xyz{0, 1, 0, 1, 1, 0};
+  const long failures = sweep([&] { b.add_vertices(more, more_xyz); },
+                              [&](long n) {
+                                soma::MeshBuilder copy = b;
+                                const auto mesh = std::move(copy).build(soma::Ordering::file);
+                                ASSERT_EQ(mesh.count(0), 2) << "failed allocation " << n;
+                                EXPECT_DOUBLE_EQ(mesh.coords()(1, 0), 1.0) << n;
+                              });
+  EXPECT_GT(failures, 0);
+  const auto mesh = std::move(b).build(soma::Ordering::file);
+  ASSERT_EQ(mesh.count(0), 4);
+  EXPECT_DOUBLE_EQ(mesh.coords()(3, 1), 1.0);
 }
 
 // "good" is mirrored first; "late" was defined at another epoch and is stale.
