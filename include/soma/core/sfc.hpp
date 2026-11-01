@@ -8,8 +8,9 @@
 // close in memory. The index of a cell follows Skilling's transpose algorithm
 // (J. Skilling, "Programming the Hilbert curve", AIP Conf. Proc. 707, 2004):
 // the cell coordinates are turned into the transposed Hilbert index by Gray
-// coding in place, and the bits are then interleaved. Everything is a
-// constexpr-friendly, allocation-free function that works in device code.
+// coding in place, and the bits are then interleaved. Everything is
+// allocation-free, and everything but KeyBox::make, which runs on the host,
+// works in device code.
 
 #include <cmath>
 #include <cstdint>
@@ -81,7 +82,7 @@ struct KeyBox {
   Real lo[3] = {0, 0, 0};  // scaled
   Real extent = 0;  // scaled; the widest axis, shared by every kept axis
 
-  // lo and hi are the finite box corners.
+  // lo and hi are the finite box corners. Host only.
   static KeyBox make(const Real* lo, const Real* hi) {
     KeyBox b;
     for (int d = 0; d < 3; ++d) {
