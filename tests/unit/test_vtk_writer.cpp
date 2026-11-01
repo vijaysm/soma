@@ -1765,6 +1765,17 @@ TEST_F(VtkReaderFiles, TheVersionAndFormatLinesAreChecked) {
   expect_rejected(replaced(t, "ASCII", "ASCII "), "format");
 }
 
+TEST_F(VtkReaderFiles, ThePointTypeAndFieldDataKeywordsAreChecked) {
+  using soma_test::replaced;
+  const std::string& t = soma_test::small_file;
+  for (const char* type : {"float", "int", "Double", "doubles"}) {
+    expect_rejected(replaced(t, "POINTS 3 double", std::string("POINTS 3 ") + type),
+                    std::string("unexpected POINTS type '") + type + "'");
+  }
+  expect_rejected(replaced(t, "FIELD FieldData 1", "FIELD Other 1"),
+                  "expected FieldData, found Other");
+}
+
 template <class M>
 class VtkTyped : public VtkFiles {};
 using Spaces = ::testing::Types<HostMem, DevMem>;

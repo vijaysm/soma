@@ -171,7 +171,7 @@ inline VtkAttributes read_attributes(VtkTokens& tok, std::size_t count) {
   out.present = true;
   out.count = count;
   tok.expect("FIELD");
-  tok.next();
+  tok.expect("FieldData");
   const auto narrays = tok.number<std::size_t>();
   for (std::size_t a = 0; a < narrays; ++a) {
     VtkArray arr;
@@ -216,6 +216,9 @@ inline VtkFile read_vtk_file(const std::filesystem::path& path) {
   tok.expect("POINTS");
   f.npoints = tok.number<std::size_t>();
   f.point_type = tok.next();
+  if (f.point_type != "double") {
+    throw std::runtime_error("vtk: unexpected POINTS type '" + f.point_type + "'");
+  }
   for (std::size_t i = 0; i < 3 * f.npoints; ++i) f.points.push_back(tok.number<double>());
 
   tok.expect("CELLS");
