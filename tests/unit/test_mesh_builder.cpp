@@ -96,6 +96,18 @@ TEST(MeshBuilder, SegmentsAndOwnershipBoundaries) {
   EXPECT_EQ(mesh.segments(0)[0].end, 7);
 }
 
+TEST(MeshBuilder, VertexCoordinatesMustHoldThreeValuesPerVertex) {
+  soma::MeshBuilder b(2);
+  EXPECT_THROW(b.add_vertices(std::vector<GO>{1, 2}, std::vector<soma::Real>(5, 0.0)),
+               std::invalid_argument);
+  EXPECT_THROW(b.add_vertices(std::vector<GO>{1}, std::vector<soma::Real>(4, 0.0)),
+               std::invalid_argument);
+  b.add_vertices(std::vector<GO>{1}, std::vector<soma::Real>{1, 2, 3});
+  const auto mesh = std::move(b).build();
+  ASSERT_EQ(mesh.count(0), 1);
+  EXPECT_DOUBLE_EQ(mesh.coords()(0, 2), 3.0);
+}
+
 TEST(MeshBuilder, DuplicateVertexGidThrows) {
   soma::MeshBuilder b(2);
   const std::vector<GO> vg{1, 2, 1};
