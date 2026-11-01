@@ -359,17 +359,26 @@ class VtkFiles : public ::testing::Test {
   }
   fs::path file(const std::string& name = "out.vtk") const { return dir_ / name; }
 
-  void expect_invalid(const soma::HostMesh& mesh, const std::vector<std::string>& names,
-                      const std::string& needle) const {
+  // Expects std::invalid_argument with every needle in its message, and no file.
+  void expect_invalid_all(const soma::HostMesh& mesh, const std::vector<std::string>& names,
+                          const std::vector<std::string>& needles) const {
     const fs::path p = file("rejected.vtk");
     try {
       soma::write_vtk(mesh, p, names);
-      ADD_FAILURE() << "expected std::invalid_argument containing '" << needle << "'";
+      ADD_FAILURE() << "expected std::invalid_argument containing '" << needles.front() << "'";
     } catch (const std::invalid_argument& e) {
-      EXPECT_NE(std::string(e.what()).find(needle), std::string::npos) << e.what();
+      for (const std::string& needle : needles) {
+        EXPECT_NE(std::string(e.what()).find(needle), std::string::npos)
+            << "'" << needle << "' is not in: " << e.what();
+      }
     }
     EXPECT_FALSE(fs::exists(p));
     EXPECT_FALSE(fs::exists(tmp_of(p)));
+  }
+
+  void expect_invalid(const soma::HostMesh& mesh, const std::vector<std::string>& names,
+                      const std::string& needle) const {
+    expect_invalid_all(mesh, names, {needle});
   }
 
   fs::path dir_;
@@ -758,31 +767,66 @@ TEST_F(VtkFiles, ComponentsOfOneTupleShareALine) {
   EXPECT_EQ(lines[b + 3], "20.5 21.5 22.5");
 }
 
-TEST_F(VtkFiles, ExtremeValuesSurviveTheText) {
+TEST_F(VtkFiles, FiniteExtremesSurviveTheText) {
+  using DL = std::numeric_limits<double>;
+  using FL = std::numeric_limits<float>;
   auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
-  const double dv[7] = {0.1, 1.0 / 3.0, -0.0, 5e-324, 1e300, std::numeric_limits<double>::infinity(),
-                        -std::numeric_limits<double>::infinity()};
-  const float fv[7] = {0.1f, 1.0f / 3.0f, -0.0f, 1e-45f, 3.4028235e38f,
-                       std::numeric_limits<float>::infinity(), 16777217.0f};
+  const double dv[7] = {0.1, 1.0 / 3.0, -0.0, DL::min(), 1e300, DL::max(), DL::lowest()};
+  const float fv[7] = {0.1f, 1.0f / 3.0f, -0.0f, FL::min(), FL::max(), FL::lowest(), 16777217.0f};
   const auto d = mesh.fields().add_tag<double>("d", 0, 1);
   const auto s = mesh.fields().add_tag<float>("s", 0, 1);
-  const auto nan = mesh.fields().add_tag<double>("nan", 2, 1);
   for (std::size_t i = 0; i < 7; ++i) {
     d.view()(i, 0) = dv[i];
     s.view()(i, 0) = fv[i];
   }
-  for (std::size_t i = 0; i < 3; ++i) nan.view()(i, 0) = std::numeric_limits<double>::quiet_NaN();
-  const std::vector<std::string> names{"d", "s", "nan"};
+  const std::vector<std::string> names{"d", "s"};
   soma::write_vtk(mesh, file(), names);
   const auto f = soma_test::read_vtk_file(file());
-  soma_test::expect_same_bits(f.point_data.find("d")->values<double>(), std::vector<double>(dv, dv + 7), "d");
-  soma_test::expect_same_bits(f.point_data.find("s")->values<float>(), std::vector<float>(fv, fv + 7), "s");
+  soma_test::expect_same_bits(f.point_data.find("d")->values<double>(),
+                              std::vector<double>(dv, dv + 7), "d");
+  soma_test::expect_same_bits(f.point_data.find("s")->values<float>(),
+                              std::vector<float>(fv, fv + 7), "s");
   const std::string text = soma_test::slurp(file());
   EXPECT_NE(text.find("\n0.33333334\n"), std::string::npos);
   EXPECT_NE(text.find("\n16777216\n"), std::string::npos);
   EXPECT_NE(text.find("\n0.3333333333333333\n"), std::string::npos);
   EXPECT_NE(text.find("\n-0\n"), std::string::npos);
-  for (const double v : f.cell_data.find("nan")->values<double>()) EXPECT_TRUE(std::isnan(v));
+}
+
+namespace soma_test {
+
+template <class T>
+std::vector<std::pair<T, std::string>> unreadable_values() {
+  using L = std::numeric_limits<T>;
+  return {{L::quiet_NaN(), "is NaN"},
+          {L::infinity(), "is infinite"},
+          {-L::infinity(), "is infinite"},
+          {L::denorm_min(), "is subnormal"},
+          {-L::min() / 2, "is subnormal"}};
+}
+
+}  // namespace soma_test
+
+TEST_F(VtkFiles, NonFiniteAndSubnormalValuesAreRejected) {
+  for (const auto& [v, why] : soma_test::unreadable_values<double>()) {
+    auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+    mesh.fields().add_tag<double>("fine", 0, 1);
+    mesh.fields().add_tag<double>("bad", 2, 2).view()(1, 1) = v;
+    expect_invalid_all(mesh, {"fine", "bad"}, {"field 'bad'", "row 1, component 1", why});
+  }
+  for (const auto& [v, why] : soma_test::unreadable_values<float>()) {
+    auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+    mesh.fields().add_tag<float>("bad32", 0, 1).view()(4, 0) = v;
+    expect_invalid_all(mesh, {"bad32"}, {"field 'bad32'", "row 4, component 0", why});
+  }
+}
+
+TEST_F(VtkFiles, NonFiniteAndSubnormalCoordinatesAreRejected) {
+  for (const auto& [v, why] : soma_test::unreadable_values<double>()) {
+    auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+    mesh.coords()(5, 2) = v;
+    expect_invalid_all(mesh, {}, {"coordinates", "row 5, component 2", why});
+  }
 }
 
 TEST_F(VtkFiles, ArraysFollowTheOrderOfTheSelection) {

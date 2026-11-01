@@ -20,7 +20,9 @@
 // Arrays follow the order of the selection. Value types f64, f32, i32, i64, u8,
 // u32 and u64 map to double, float, int, long, unsigned_char, unsigned_int and
 // unsigned_long; i8 has no portable legacy name and is rejected. Doubles and
-// floats are written in the shortest form that reads back bitwise equal.
+// floats are written in the shortest form that reads back bitwise equal. A
+// NaN, an infinity or a subnormal value, in a field or in the coordinates,
+// throws std::invalid_argument: legacy VTK readers cannot read them.
 //
 // Anything else a field can be (another dimension, a subset domain, a layout
 // that is not per_entity, pending writes, a name that is unknown, ambiguous, or

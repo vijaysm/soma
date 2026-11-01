@@ -49,14 +49,9 @@ class Sink {
     buf_.append(tmp, r.ptr);
   }
 
-  // The shortest text that reads back as the same value; NaN carries no sign
-  // or payload in the file.
+  // The shortest text that reads back as the same value.
   template <class F>
   void real(F v) {
-    if (std::isnan(v)) {
-      buf_ += "nan";
-      return;
-    }
     char tmp[40];
     const auto r = std::to_chars(tmp, tmp + sizeof tmp, v);
     buf_.append(tmp, r.ptr);
@@ -248,6 +243,46 @@ Contents collect_contents(const HostMesh& mesh, std::span<const VtkField> fields
   return contents;
 }
 
+// Legacy VTK readers stop at a NaN or an infinity and lose the rest of the
+// file; their strtod rejects subnormal values.
+template <class F>
+const char* unreadable(F v) {
+  switch (std::fpclassify(v)) {
+    case FP_NAN: return "is NaN";
+    case FP_INFINITE: return "is infinite";
+    case FP_SUBNORMAL: return "is subnormal";
+    default: return nullptr;
+  }
+}
+
+template <class V>
+void check_reals(const V& v, std::size_t rows, std::size_t ncomp, const std::string& what) {
+  for (std::size_t i = 0; i < rows; ++i) {
+    for (std::size_t c = 0; c < ncomp; ++c) {
+      if (const char* why = unreadable(v(i, c))) {
+        throw std::invalid_argument("write_vtk: " + what + " at row " + std::to_string(i) +
+                                    ", component " + std::to_string(c) + " " + why +
+                                    ", which legacy VTK cannot read");
+      }
+    }
+  }
+}
+
+void check_values(const HostMesh& mesh, const Contents& contents) {
+  check_reals(mesh.coords(), static_cast<std::size_t>(mesh.count(0)), 3, "coordinates");
+  for (const auto* arrays : {&contents.point_arrays, &contents.cell_arrays}) {
+    for (const Array& a : *arrays) {
+      dispatch_data_type(a.info.type, [&]<class T>() {
+        if constexpr (std::is_floating_point_v<T>) {
+          check_reals(mesh.fields().template get<T>(a.info.id).view(),
+                      static_cast<std::size_t>(mesh.count(a.dim)),
+                      static_cast<std::size_t>(a.info.ncomp), "field " + in_quotes(a.info.name));
+        }
+      });
+    }
+  }
+}
+
 template <class T>
 void emit_values(Sink& out, const HostMesh& mesh, const Array& a) {
   const auto v = mesh.fields().template get<T>(a.info.id).view();
@@ -354,6 +389,7 @@ std::string cannot_write(const fs::path& path, const std::string& why) {
 
 void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const VtkField> fields) {
   const Contents contents = collect_contents(mesh, fields);
+  check_values(mesh, contents);
 
   fs::path tmp = path;
   tmp += ".tmp";
