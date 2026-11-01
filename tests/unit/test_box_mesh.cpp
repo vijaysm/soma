@@ -507,7 +507,9 @@ TEST(BoxMesh, LengthsWhoseProductWithTheCellCountOverflowsAreRejectedByAxis) {
   EXPECT_THROW((void)soma::testing::box_counts(soma_test::make_spec(4, 1, 1, Topology::hex, 1e308)),
                std::invalid_argument);
   const auto mesh = soma::testing::box_mesh(soma_test::make_spec(4, 1, 1, Topology::hex, 1e307));
-  for (LO v = 0; v < 5; ++v) EXPECT_EQ(mesh.coords()(v, 0), 1e307 * v / 4) << "vertex " << v;
+  for (LO v = 0; v < 5; ++v) {
+    EXPECT_EQ(mesh.coords()(v, 0), 1e307 * static_cast<double>(v) / 4) << "vertex " << v;
+  }
 }
 
 TEST(BoxMesh, PlanarElementsRequireOneCellInZAndIgnoreLz) {
