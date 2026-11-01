@@ -62,6 +62,7 @@ soma_add_test(test_device_structs SOURCES unit/test_device_structs.cpp)
 soma_add_test(test_static_lifetime SOURCES unit/test_static_lifetime.cpp)
 soma_add_test(test_move_noexcept SOURCES unit/test_move_noexcept.cpp)
 soma_add_test(test_mesh_builder SOURCES unit/test_mesh_builder.cpp)
+soma_add_test(test_mesh_semantics SOURCES unit/test_mesh_semantics.cpp)
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   find_package(MOAB REQUIRED)
