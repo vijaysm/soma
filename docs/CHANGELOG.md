@@ -72,6 +72,8 @@ All notable changes to SOMA are recorded here. The format follows
   `moab::CN`, and the polygon behavior of MOAB is pinned.
 - A policy test fails if `SOMA_ENABLE_MPI` is tested outside the Comm seam.
 - Every test has an injected-fault record in `docs/negative_controls.md`.
+- `soma::testing::box_mesh` builds structured hex, quad and triangle boxes with closed-form
+  counts, gids, coordinates and orientation, so tests do not depend on a file or a mesher.
 
 ### Packaging
 
