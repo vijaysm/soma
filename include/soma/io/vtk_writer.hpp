@@ -5,7 +5,7 @@
 #define SOMA_IO_VTK_WRITER_HPP_
 
 // Legacy VTK output (ASCII, `# vtk DataFile Version 3.0`, DATASET
-// UNSTRUCTURED_GRID) with no dependency beyond the standard library.
+// UNSTRUCTURED_GRID). POSIX only (open, write, rename); no other dependency.
 //
 // Cells: every element of dimension mesh.dim(), in local id order, referring to
 // the vertices by local id. Vertex order is the canonical order of the element,
@@ -32,15 +32,18 @@
 // StaleField. All checks run before any file is touched. The file is written to
 // a new temporary next to `path` (`path` + "." + six random characters, created
 // exclusively) and renamed over `path`, so a failure leaves neither a partial
-// file nor a damaged earlier one, and concurrent writers do not collide. An
-// existing target is replaced by a new file: its mode comes from the umask, and
-// a symlink at `path` is replaced, not followed. Nothing is fsync'ed, so the
+// file nor a damaged earlier one, and concurrent writers do not collide. The
+// suffix takes 7 bytes, so where file names are limited to 255 bytes a name of
+// 249 to 255 bytes throws std::runtime_error. An existing target is replaced
+// by a new file: its mode comes from the umask, and a symlink at `path` is
+// replaced, not followed. Nothing is fsync'ed, so the
 // file is not promised to survive a power loss. I/O failures throw
 // std::runtime_error naming the path and the cause. A mesh with more than
 // INT32_MAX points, or a CELLS section of more than INT32_MAX integers, throws
 // std::length_error: version 3.0 readers read those as int. A mesh whose Views
 // do not match its counts (a mirror that left out the coordinates or the
-// vertices, say) throws std::invalid_argument before any file is touched.
+// vertices, say), or whose connectivity offsets do not start at 0, throws
+// std::invalid_argument before any file is touched.
 //
 // Needs floating-point std::to_chars (libstdc++ 11+, libc++ 14+, macOS 13.3+).
 

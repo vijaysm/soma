@@ -56,21 +56,23 @@ All notable changes to SOMA are recorded here. The format follows
 
 ### Legacy VTK output
 
-- `write_vtk` writes a `HostMesh` as an ASCII legacy VTK unstructured grid (version 3.0) with no
-  dependency: cells of the mesh dimension, and `per_entity` fields over full domains as
+- `write_vtk` writes a `HostMesh` as an ASCII legacy VTK unstructured grid (version 3.0),
+  POSIX only and with no other dependency: cells of the mesh dimension, and `per_entity` fields over full domains as
   `FIELD` arrays in `POINT_DATA` and `CELL_DATA`. Subset, stale and uncommitted fields, and
   `knife` and `polyhedron` elements, are rejected. Output goes through a temporary file and a
   rename, and is byte-for-byte deterministic.
 - The temporary file has a unique name next to the target and is created exclusively, so an
   existing `<path>.tmp` or a symlink there is never touched and concurrent writers do not
   collide. The target is replaced by a new file whose mode comes from the umask; nothing is
-  fsync'ed. I/O errors name the path and the cause.
+  fsync'ed. I/O errors name the path and the cause. The temporary name adds 7 bytes, so a file
+  name of 249 to 255 bytes fails where names are limited to 255 bytes.
 - NaN, infinite and subnormal values, in fields or coordinates, throw `std::invalid_argument`
   before any file is touched; VTK readers stop at them.
 - More than `INT32_MAX` points, or a `CELLS` section of more than `INT32_MAX` integers, throws
   `std::length_error`: version 3.0 readers read those counts as `int`.
-- A mesh whose Views do not match its counts (a mirror without coordinates or vertices) throws
-  `std::invalid_argument` instead of reading past the end of a View.
+- A mesh whose Views do not match its counts (a mirror without coordinates or vertices), or
+  whose connectivity offsets do not start at 0, throws `std::invalid_argument` instead of
+  reading past the end of a View or writing an inconsistent `CELLS` section.
 - Wedges follow the VTK 9.7 vertex order. Older readers (ParaView 6.1 and earlier) show them
   with inverted orientation.
 - Needs floating-point `std::to_chars` (libstdc++ 11+, libc++ 14+, macOS 13.3+).
