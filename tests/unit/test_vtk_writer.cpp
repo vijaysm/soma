@@ -360,11 +360,12 @@ class VtkFiles : public ::testing::Test {
   fs::path file(const std::string& name = "out.vtk") const { return dir_ / name; }
 
   // Expects std::invalid_argument with every needle in its message, and no file.
-  void expect_invalid_all(const soma::HostMesh& mesh, const std::vector<std::string>& names,
-                          const std::vector<std::string>& needles) const {
+  template <class Selection>
+  void expect_invalid_selection(const soma::HostMesh& mesh, const Selection& selection,
+                                const std::vector<std::string>& needles) const {
     const fs::path p = file("rejected.vtk");
     try {
-      soma::write_vtk(mesh, p, names);
+      soma::write_vtk(mesh, p, selection);
       ADD_FAILURE() << "expected std::invalid_argument containing '" << needles.front() << "'";
     } catch (const std::invalid_argument& e) {
       for (const std::string& needle : needles) {
@@ -374,6 +375,13 @@ class VtkFiles : public ::testing::Test {
     }
     EXPECT_FALSE(fs::exists(p));
     EXPECT_FALSE(fs::exists(tmp_of(p)));
+  }
+
+  // The message must also name the last selected field.
+  void expect_invalid_all(const soma::HostMesh& mesh, const std::vector<std::string>& names,
+                          std::vector<std::string> needles) const {
+    if (!names.empty()) needles.push_back("'" + names.back() + "'");
+    expect_invalid_selection(mesh, names, needles);
   }
 
   void expect_invalid(const soma::HostMesh& mesh, const std::vector<std::string>& names,
@@ -864,7 +872,7 @@ TEST_F(VtkFiles, ASharedNameIsSelectedByDimension) {
   for (std::size_t i = 0; i < 7; ++i) a.view()(i, 0) = 1.5;
   for (std::size_t i = 0; i < 3; ++i) b.view()(i, 0) = 2.5;
 
-  expect_invalid(mesh, {"dup"}, "ambiguous");
+  expect_invalid_all(mesh, {"dup"}, {"ambiguous", "select it with a dimension"});
 
   const std::vector<VtkField> point_only{{"dup", 0}};
   soma::write_vtk(mesh, file(), point_only);
@@ -886,7 +894,8 @@ TEST_F(VtkFiles, TwoTypesUnderOneNameAndDimensionAreAmbiguous) {
   mesh.fields().add_tag<float>("x", 0, 1);
   expect_invalid(mesh, {"x"}, "ambiguous");
   const std::vector<VtkField> by_dim{{"x", 0}};
-  EXPECT_THROW(soma::write_vtk(mesh, file(), by_dim), std::invalid_argument);
+  expect_invalid_selection(mesh, by_dim,
+                           {"field 'x' on dimension 0 is ambiguous", "f64x1", "f32x1"});
 }
 
 TEST_F(VtkFiles, KnifeElementsHaveNoVtkType) {
@@ -997,8 +1006,7 @@ TEST_F(VtkFiles, UnknownNamesAreRejected) {
   mesh.fields().add_tag<double>("known", 0, 1);
   expect_invalid(mesh, {"unknown"}, "unknown");
   const std::vector<VtkField> wrong_dim{{"known", 2}};
-  EXPECT_THROW(soma::write_vtk(mesh, file(), wrong_dim), std::invalid_argument);
-  EXPECT_FALSE(fs::exists(file()));
+  expect_invalid_selection(mesh, wrong_dim, {"no field 'known' on dimension 2"});
 }
 
 TEST_F(VtkFiles, NamesThatBreakTheFormatAreRejected) {
@@ -1069,8 +1077,7 @@ TEST_F(VtkFiles, StaleFieldsAreNotWrittenSilently) {
 
 TEST_F(VtkFiles, AMeshWithoutElementsIsRejected) {
   const soma::HostMesh empty;
-  EXPECT_THROW(soma::write_vtk(empty, file()), std::invalid_argument);
-  EXPECT_FALSE(fs::exists(file()));
+  expect_invalid(empty, {}, "the mesh has no elements");
 }
 
 TEST_F(VtkFiles, AnUnwritablePathThrowsAndNamesIt) {
