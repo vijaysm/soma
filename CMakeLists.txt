@@ -112,6 +112,10 @@ if(SOMA_ENABLE_TESTS)
   add_subdirectory(tests)
 endif()
 
+if(SOMA_ENABLE_MOAB_REFERENCE)
+  add_subdirectory(bench)
+endif()
+
 if(SOMA_INSTALL)
   include(SomaInstall)
 endif()
