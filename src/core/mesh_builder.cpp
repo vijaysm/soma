@@ -240,8 +240,8 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     e.conn_offsets = View1<Offset, Kokkos::HostSpace>("soma::mesh::offsets", recs.size() + 1);
     e.topology = View1<std::uint8_t, Kokkos::HostSpace>("soma::mesh::topology", recs.size());
     e.gid = View1<GO, Kokkos::HostSpace>("soma::mesh::gid", recs.size());
-    std::vector<LO> conn;
-    conn.reserve(entries);
+    e.conn = View1<LO, Kokkos::HostSpace>("soma::mesh::conn", entries);
+    std::size_t written = 0;
     std::vector<Ownership> own(recs.size(), Ownership::interior);
     std::vector<Topology> top(recs.size());
     std::vector<std::uint16_t> ar(recs.size());
@@ -250,16 +250,14 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       const Block& blk = blocks_[d][recs[r].block];
       const std::vector<LO>& ids = local[recs[r].block];
       for (Offset k = blk.offsets[recs[r].index]; k < blk.offsets[recs[r].index + 1]; ++k) {
-        conn.push_back(ids[static_cast<std::size_t>(k)]);
+        e.conn(written++) = ids[static_cast<std::size_t>(k)];
       }
-      e.conn_offsets(r + 1) = detail::to_offset(conn.size(), "connectivity size");
+      e.conn_offsets(r + 1) = detail::to_offset(written, "connectivity size");
       e.topology(r) = static_cast<std::uint8_t>(recs[r].t);
       e.gid(r) = recs[r].gid;
       top[r] = recs[r].t;
       ar[r] = recs[r].arity;
     }
-    e.conn = View1<LO, Kokkos::HostSpace>("soma::mesh::conn", conn.size());
-    for (std::size_t i = 0; i < conn.size(); ++i) e.conn(i) = conn[i];
     e.segments = make_segments(own, top, ar);
   }
   mesh.epoch_ = 1;
