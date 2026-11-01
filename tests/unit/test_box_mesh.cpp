@@ -350,13 +350,14 @@ TEST(BoxMesh, CoordinatesAreBitwiseLengthTimesIndexOverCount) {
     if (j < 6) EXPECT_EQ(mesh.coords()(v, 1), 0.3 * j / 6) << "vertex " << v;
     if (k < 7) EXPECT_EQ(mesh.coords()(v, 2), 0.7 * k / 7) << "vertex " << v;
   }
-  // Both rules are within rounding of each other; they differ in the last bit.
-  EXPECT_NE(0.1 * 3 / 5, 3 * (0.1 / 5));
+  // Vertex 3 tells the rule apart from i * (lx / nx), which differs in the last bit.
+  EXPECT_NE(mesh.coords()(3, 0), 3 * (0.1 / 5));
 }
 
 TEST(BoxMesh, TheFarFaceSitsExactlyAtTheLength) {
   const auto hex = soma::testing::box_mesh(soma_test::make_spec(3, 3, 9, Topology::hex, 0.1, 0.7, 0.9));
-  EXPECT_NE(0.1 * 3 / 3, 0.1);
+  // lx * nx / nx is not lx here, so the far face is set, not computed.
+  EXPECT_NE(hex.coords()(3, 0), 0.1 * 3 / 3);
   double max_x = 0;
   double max_y = 0;
   double max_z = 0;

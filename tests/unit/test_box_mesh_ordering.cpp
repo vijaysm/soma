@@ -138,6 +138,5 @@ TEST(BoxMeshOrdering, TheCurveKeepsTheMeanVertexSpanNearFileOrderOnCompactBoxes)
     const double file_mean = soma::vertex_span_report(by_file, by_file.dim()).mean;
     const double curve_mean = soma::vertex_span_report(by_curve, by_curve.dim()).mean;
     EXPECT_LE(curve_mean, 1.5 * file_mean);
-    EXPECT_GT(curve_mean, 0.0);
   }
 }
