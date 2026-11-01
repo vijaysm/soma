@@ -177,6 +177,16 @@ class FieldRegistry {
   bool has_entities(int dim) const noexcept {
     return dim >= 0 && dim < 4 && entities_[static_cast<std::size_t>(dim)].set;
   }
+  // True if a live field's domain has a block on dimension dim.
+  bool uses_dimension(int dim) const noexcept {
+    for (const Entry& e : entries_) {
+      if (!e.alive) continue;
+      for (const int d : e.info.dims) {
+        if (d == dim) return true;
+      }
+    }
+    return false;
+  }
 
   template <class T>
   Field<T, MemSpace> add(std::string name, const Space<MemSpace>& space, int ncomp,
