@@ -1345,26 +1345,77 @@ TEST_F(VtkFiles, ABlockedTemporaryLeavesTheTargetUntouched) {
   EXPECT_EQ(soma_test::names_in(dir_), soma_test::Names{"out.vtk"});
 }
 
-TEST_F(VtkFiles, AFileAtTheOldTemporaryNameIsLeftAlone) {
-  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
-  const std::string precious = "a file of the user\n";
-  { std::ofstream(file("out.vtk.tmp"), std::ios::binary) << precious; }
-  soma::write_vtk(mesh, file());
-  EXPECT_EQ(soma_test::slurp(file("out.vtk.tmp")), precious);
-  EXPECT_EQ(soma_test::read_vtk_file(file()).npoints, 7u);
-  EXPECT_EQ(soma_test::names_in(dir_), (soma_test::Names{"out.vtk", "out.vtk.tmp"}));
+namespace soma_test {
+
+// Writes `mesh` to `path`, offering `names` as the temporary file names in
+// turn (the last one repeated), and counts the names asked for in `asked`.
+void write_with_temporaries(const soma::HostMesh& mesh, const fs::path& path,
+                            const std::vector<fs::path>& names, int& asked) {
+  asked = 0;
+  const auto candidate = [&](int attempt) {
+    ++asked;
+    const auto k = std::min(static_cast<std::size_t>(attempt), names.size() - 1);
+    return names[k].string();
+  };
+  soma::detail::write_vtk_with_temporary_names(mesh, path, {}, candidate);
 }
 
-TEST_F(VtkFiles, ASymlinkAtTheOldTemporaryNameIsNotFollowed) {
+}  // namespace soma_test
+
+TEST_F(VtkFiles, AFileAtATemporaryNameIsLeftAlone) {
+  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  const std::string precious = "a file of the user\n";
+  { std::ofstream(file("taken"), std::ios::binary) << precious; }
+  int asked = 0;
+  soma_test::write_with_temporaries(mesh, file(), {file("taken"), file("free")}, asked);
+  EXPECT_EQ(asked, 2);
+  EXPECT_EQ(soma_test::slurp(file("taken")), precious);
+  EXPECT_EQ(soma_test::read_vtk_file(file()).npoints, 7u);
+  EXPECT_EQ(soma_test::names_in(dir_), (soma_test::Names{"out.vtk", "taken"}));
+}
+
+TEST_F(VtkFiles, ASymlinkAtATemporaryNameIsNotFollowed) {
   const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
   const std::string victim = "not to be overwritten\n";
   { std::ofstream(file("victim.txt"), std::ios::binary) << victim; }
-  fs::create_symlink(file("victim.txt"), file("out.vtk.tmp"));
-  soma::write_vtk(mesh, file());
+  fs::create_symlink(file("victim.txt"), file("link"));
+  int asked = 0;
+  soma_test::write_with_temporaries(mesh, file(), {file("link"), file("free")}, asked);
+  EXPECT_EQ(asked, 2);
   EXPECT_EQ(soma_test::slurp(file("victim.txt")), victim);
-  EXPECT_TRUE(fs::is_symlink(file("out.vtk.tmp")));
+  EXPECT_TRUE(fs::is_symlink(file("link")));
   EXPECT_FALSE(fs::is_symlink(file()));
   EXPECT_EQ(soma_test::read_vtk_file(file()).npoints, 7u);
+  EXPECT_EQ(soma_test::names_in(dir_), (soma_test::Names{"link", "out.vtk", "victim.txt"}));
+}
+
+TEST_F(VtkFiles, NoFreeTemporaryNameThrowsAndOverwritesNothing) {
+  const auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  const std::string earlier = "an earlier file\n";
+  const std::string precious = "a file of the user\n";
+  const std::string victim = "not to be overwritten\n";
+  { std::ofstream(file(), std::ios::binary) << earlier; }
+  { std::ofstream(file("taken"), std::ios::binary) << precious; }
+  { std::ofstream(file("victim.txt"), std::ios::binary) << victim; }
+  fs::create_symlink(file("victim.txt"), file("link"));
+  int asked = 0;
+  try {
+    soma_test::write_with_temporaries(mesh, file(), {file("taken"), file("link")}, asked);
+    ADD_FAILURE() << "expected std::runtime_error";
+  } catch (const std::invalid_argument&) {
+    ADD_FAILURE() << "an I/O failure is not an invalid argument";
+  } catch (const std::runtime_error& e) {
+    const std::string m = e.what();
+    EXPECT_NE(m.find(file().string()), std::string::npos) << m;
+    EXPECT_NE(m.find("no unused temporary file name"), std::string::npos) << m;
+  }
+  EXPECT_EQ(asked, soma::detail::vtk_temporary_attempts);
+  EXPECT_EQ(soma_test::slurp(file()), earlier);
+  EXPECT_EQ(soma_test::slurp(file("taken")), precious);
+  EXPECT_EQ(soma_test::slurp(file("victim.txt")), victim);
+  EXPECT_TRUE(fs::is_symlink(file("link")));
+  EXPECT_EQ(soma_test::names_in(dir_),
+            (soma_test::Names{"link", "out.vtk", "taken", "victim.txt"}));
 }
 
 TEST_F(VtkFiles, ASymlinkAtThePathIsReplacedNotFollowed) {
