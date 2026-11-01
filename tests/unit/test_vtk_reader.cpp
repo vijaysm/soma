@@ -1047,3 +1047,35 @@ TEST_F(VtkRead, PolygonsOfMoreThan65535VerticesAreRejected) {
   ASSERT_EQ(mesh.count(2), 1);
   EXPECT_EQ(mesh.conn_offsets(2)(1), 65535);
 }
+
+TEST_F(VtkRead, ParaViewStringArraysAreSkipped) {
+  for (const char* name : {"strings_51.vtk", "strings_42.vtk"}) {
+    SCOPED_TRACE(name);
+    const auto mesh = soma::read_vtk(soma_test::reference(name));
+    ASSERT_EQ(mesh.dim(), 2);
+    soma_test::expect_field<double>(mesh, "h", 0, 1, {0.5, 1.5, 2.5, 3.5, 4.5});
+    soma_test::expect_field<std::int32_t>(mesh, "ci", 2, 1, {3, 4});
+    EXPECT_EQ(mesh.fields().list().size(), 2u);
+    EXPECT_FALSE(mesh.fields().contains("names"));
+  }
+}
+
+TEST_F(VtkRead, StringAndVariantArraysAreSkippedWhereverTheyAre) {
+  using soma_test::replaced;
+  const std::string text = replaced(
+      replaced(soma_test::base_file, "POINTS 4 double",
+               "FIELD FieldData 2\nnote 2 1 string\n\nx%20y\nv 1 1 variant\n6 3\n"
+               "POINTS 4 double"),
+      "FIELD FieldData 1\n",
+      "FIELD FieldData 3\nlabel 1 2 string\nfirst\n\nv 1 2 variant\n6 1\n13 a\n");
+  const auto mesh = read_text(text);
+  soma_test::expect_field<std::int32_t>(mesh, "c", 2, 1, {7, 8});
+  EXPECT_EQ(mesh.fields().list().size(), 1u);
+  expect_rejected(replaced(soma_test::base_file, "FIELD FieldData 1\n",
+                           "FIELD FieldData 2\nlabel 1 3 string\na\nb\nc\n"),
+                  {"line 18", "array 'label' of CELL_DATA has 3 tuples for 2 entities"});
+  const std::string& t = soma_test::base_file;
+  expect_rejected(t.substr(0, t.find("FIELD")) + "FIELD FieldData 1\nlabel 1 2 string\na\n",
+                  {"line 20", "the file ends where a value of array 'label' of CELL_DATA was "
+                              "expected"});
+}

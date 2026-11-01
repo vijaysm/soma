@@ -151,6 +151,19 @@ class Lexer {
     }
   }
 
+  // The rest of the line, then `n` x `per` lines: VTK writes one string or
+  // variant value per line, an empty string as an empty line.
+  void skip_lines(std::size_t n, std::size_t per, const std::string& what) {
+    if (n > (text_.size() - pos_) / per) {
+      fail(what + " needs more lines than the rest of the file holds");
+    }
+    skip_line();
+    for (std::size_t i = 0; i < n * per; ++i) {
+      if (pos_ >= text_.size()) fail_at(cur_line_, "the file ends where " + what + " was expected");
+      skip_line();
+    }
+  }
+
   void skip_metadata_if_present() {
     if (!at_end() && lower(peek()) == "metadata") {
       next("METADATA");
@@ -161,6 +174,16 @@ class Lexer {
   std::size_t line() const { return line_; }
 
  private:
+  void skip_line() {
+    const std::size_t end = text_.find('\n', pos_);
+    if (end == std::string::npos) {
+      pos_ = text_.size();
+      return;
+    }
+    pos_ = end + 1;
+    ++cur_line_;
+  }
+
   void skip_space() {
     while (pos_ < text_.size() && is_space(text_[pos_])) {
       if (text_[pos_] == '\n') ++cur_line_;
@@ -341,6 +364,12 @@ int positive_int(Lexer& lex, const std::string& what) {
   return static_cast<int>(n);
 }
 
+// String and variant arrays, which the reader skips.
+bool is_skipped_type(std::string_view vtk) {
+  const std::string t = lower(vtk);
+  return t == "string" || t == "variant";
+}
+
 // FIELD name n, then n arrays `name ncomp ntuples type` and their values.
 // `rows` is the tuple count every array must have, or nullopt for dataset field data.
 std::vector<Array> read_field(Lexer& lex, std::optional<std::size_t> rows, const char* section) {
@@ -354,12 +383,16 @@ std::vector<Array> read_field(Lexer& lex, std::optional<std::size_t> rows, const
     const std::string of = "array " + in_quotes(name) + " of " + section;
     const int ncomp = positive_int(lex, "the component count of " + of);
     const std::size_t line = lex.line();
-    const std::size_t tuples =
-        lex.count("the tuple count of " + of, static_cast<std::size_t>(ncomp));
+    const std::size_t tuples = lex.count("the tuple count of " + of);
     const std::string_view type = lex.next("the value type of " + of);
     if (rows && tuples != *rows) {
       lex.fail_at(line, of + " has " + std::to_string(tuples) + " tuples for " +
                             std::to_string(*rows) + " entities");
+    }
+    if (is_skipped_type(type)) {
+      lex.skip_lines(tuples, static_cast<std::size_t>(ncomp), "a value of " + of);
+      lex.skip_metadata_if_present();
+      continue;
     }
     const ValueType vt = value_type_or_fail(lex, type, of);
     out.push_back(read_values(lex, name, vt, ncomp, tuples, of));
