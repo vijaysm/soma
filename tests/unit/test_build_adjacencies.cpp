@@ -232,6 +232,9 @@ TEST(BuildAdjacencies, MirrorRebuildsOrCopiesTheGraphs) {
   lean.adjacencies = AdjacencyRequest{}.add(0, 3);
   const auto b = host.mirror<DevMem>(lean);
   EXPECT_EQ(b.count(2), 0);
+  auto expected = host.clone();
+  soma::build_adjacencies(expected, AdjacencyRequest{}.add(0, 3));
+  EXPECT_EQ(soma_test::to_host(b.adjacency(0, 3)), soma_test::to_host(expected.adjacency(0, 3)));
   soma::TransferOptions both = rebuild;
   both.dims = {true, false, false, true};
   both.adjacencies = AdjacencyRequest{};
