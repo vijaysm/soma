@@ -119,15 +119,16 @@ int cell_type_code(Topology t) {
   return -1;
 }
 
-const char* value_type_name(DataType t) {
+const char* value_type_name(DataType t, VtkLegacyVersion version) {
+  const bool v51 = version == VtkLegacyVersion::v5_1;
   switch (t) {
     case DataType::f64: return "double";
     case DataType::f32: return "float";
     case DataType::i32: return "int";
-    case DataType::i64: return "long";
+    case DataType::i64: return v51 ? "vtktypeint64" : "long";
     case DataType::u8: return "unsigned_char";
     case DataType::u32: return "unsigned_int";
-    case DataType::u64: return "unsigned_long";
+    case DataType::u64: return v51 ? "vtktypeuint64" : "unsigned_long";
     case DataType::i8: break;  // rejected by choice; widening to i32 writes it
   }
   return nullptr;
@@ -234,7 +235,7 @@ Array resolve(const HostMesh& mesh, const VtkField& want) {
     throw std::invalid_argument("write_vtk: field " + in_quotes(info.name) + " has layout " +
                                 describe(info.layout) + "; only per_entity can be written");
   }
-  if (value_type_name(info.type) == nullptr) {
+  if (value_type_name(info.type, VtkLegacyVersion::v5_1) == nullptr) {
     throw std::invalid_argument("write_vtk: field " + in_quotes(info.name) +
                                 " has value type " + name(info.type) +
                                 ", which the writer does not write; widen it to i32");
@@ -379,18 +380,18 @@ void check_reals(const V& v, std::size_t rows, std::size_t ncomp, const std::str
 }
 
 // Defensive: no mesh small enough to build reaches these limits.
-void check_ids(const HostMesh& mesh, const Contents& contents) {
+void check_ids(const HostMesh& mesh, const Contents& contents, VtkLegacyVersion version) {
   const auto nc = static_cast<std::size_t>(mesh.count(contents.dim));
   std::int64_t largest = -1;
-  std::int64_t size = 0;
+  std::int64_t nrefs = 0;
   if (nc > 0) {
     const auto offsets = mesh.conn_offsets(contents.dim);
     const auto conn = mesh.conn(contents.dim);
     const auto end = static_cast<std::size_t>(offsets(nc));
     for (std::size_t k = 0; k < end; ++k) largest = std::max<std::int64_t>(largest, conn(k));
-    size = static_cast<std::int64_t>(nc) + static_cast<std::int64_t>(offsets(nc));
+    nrefs = static_cast<std::int64_t>(offsets(nc));
   }
-  detail::check_vtk_int32(mesh.count(0), largest, size);
+  detail::check_vtk_limits(version, mesh.count(0), static_cast<std::int64_t>(nc), largest, nrefs);
 }
 
 void check_values(const HostMesh& mesh, const Contents& contents) {
@@ -427,7 +428,7 @@ void emit_values(Sink& out, const HostMesh& mesh, const Array& a) {
 }
 
 void emit_attributes(Sink& out, const HostMesh& mesh, const char* section, LO count,
-                     const std::vector<Array>& arrays) {
+                     const std::vector<Array>& arrays, VtkLegacyVersion version) {
   if (arrays.empty()) return;
   out.text(section);
   out.put(' ');
@@ -443,14 +444,15 @@ void emit_attributes(Sink& out, const HostMesh& mesh, const char* section, LO co
     out.put(' ');
     out.integer(count);
     out.put(' ');
-    out.text(value_type_name(a.info.type));
+    out.text(value_type_name(a.info.type, version));
     out.end_line();
     dispatch_data_type(a.info.type, [&]<class T>() { emit_values<T>(out, mesh, a); });
   }
 }
 
-void emit(Sink& out, const HostMesh& mesh, const Contents& contents) {
-  out.text("# vtk DataFile Version 3.0");
+void emit(Sink& out, const HostMesh& mesh, const Contents& contents, VtkLegacyVersion version) {
+  const bool v51 = version == VtkLegacyVersion::v5_1;
+  out.text(v51 ? "# vtk DataFile Version 5.1" : "# vtk DataFile Version 3.0");
   out.end_line();
   out.text("SOMA mesh");
   out.end_line();
@@ -477,18 +479,32 @@ void emit(Sink& out, const HostMesh& mesh, const Contents& contents) {
   const auto offsets = mesh.conn_offsets(contents.dim);
   const auto conn = mesh.conn(contents.dim);
   const auto nce = static_cast<std::size_t>(nc);
+  const std::int64_t nrefs = nce == 0 ? 0 : static_cast<std::int64_t>(offsets(nce));
+  const detail::VtkCellsLine line =
+      detail::vtk_cells_line(version, static_cast<std::int64_t>(nce), nrefs);
   out.text("CELLS ");
-  out.integer(nc);
+  out.integer(line.first);
   out.put(' ');
-  out.integer(nce == 0 ? std::int64_t{0}
-                      : static_cast<std::int64_t>(nce) + static_cast<std::int64_t>(offsets(nce)));
+  out.integer(line.second);
   out.end_line();
+  if (v51) {
+    out.text("OFFSETS vtktypeint64");
+    out.end_line();
+    out.integer(std::int64_t{0});
+    out.end_line();
+    for (std::size_t e = 0; e < nce; ++e) {
+      out.integer(static_cast<std::int64_t>(offsets(e + 1)));
+      out.end_line();
+    }
+    out.text("CONNECTIVITY vtktypeint64");
+    out.end_line();
+  }
   for (std::size_t e = 0; e < nce; ++e) {
     const auto first = static_cast<std::size_t>(offsets(e));
     const auto last = static_cast<std::size_t>(offsets(e + 1));
-    out.integer(last - first);
+    if (!v51) out.integer(last - first);
     for (std::size_t k = first; k < last; ++k) {
-      out.put(' ');
+      if (!v51 || k != first) out.put(' ');
       out.integer(conn(k));
     }
     out.end_line();
@@ -502,8 +518,8 @@ void emit(Sink& out, const HostMesh& mesh, const Contents& contents) {
     out.end_line();
   }
 
-  emit_attributes(out, mesh, "POINT_DATA", nv, contents.point_arrays);
-  emit_attributes(out, mesh, "CELL_DATA", nc, contents.cell_arrays);
+  emit_attributes(out, mesh, "POINT_DATA", nv, contents.point_arrays, version);
+  emit_attributes(out, mesh, "CELL_DATA", nc, contents.cell_arrays, version);
   out.finish();
 }
 
@@ -564,7 +580,8 @@ class Temporary {
 
 }  // namespace
 
-void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const VtkField> fields) {
+void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const VtkField> fields,
+               const VtkWriteOptions& options) {
   static constexpr char letters[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
   std::random_device random;
@@ -573,19 +590,20 @@ void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const VtkFi
     for (int k = 0; k < 6; ++k) name += letters[random() % (sizeof letters - 1)];
     return name;
   };
-  detail::write_vtk_with_temporary_names(mesh, path, fields, random_name);
+  detail::write_vtk_with_temporary_names(mesh, path, fields, random_name, options);
 }
 
 void detail::write_vtk_with_temporary_names(const HostMesh& mesh, const fs::path& path,
                                             std::span<const VtkField> fields,
-                                            const std::function<std::string(int)>& candidate) {
+                                            const std::function<std::string(int)>& candidate,
+                                            const VtkWriteOptions& options) {
   const Contents contents = collect_contents(mesh, fields);
-  check_ids(mesh, contents);
+  check_ids(mesh, contents, options.version);
   check_values(mesh, contents);
 
   Temporary file(path, candidate);
   Sink out(file.fd(), path);
-  emit(out, mesh, contents);
+  emit(out, mesh, contents, options.version);
   file.close();
   file.commit();
 }
@@ -605,6 +623,18 @@ void detail::check_vtk_int32(std::int64_t npoints, std::int64_t largest_id,
   check(cells_size, "the CELLS size (cells plus vertex references)");
 }
 
+detail::VtkCellsLine detail::vtk_cells_line(VtkLegacyVersion version, std::int64_t ncells,
+                                            std::int64_t nrefs) {
+  if (version == VtkLegacyVersion::v5_1) return {ncells + 1, nrefs};
+  return {ncells, ncells + nrefs};
+}
+
+void detail::check_vtk_limits(VtkLegacyVersion version, std::int64_t npoints, std::int64_t ncells,
+                              std::int64_t largest_id, std::int64_t nrefs) {
+  if (version != VtkLegacyVersion::v3_0) return;
+  check_vtk_int32(npoints, largest_id, vtk_cells_line(version, ncells, nrefs).second);
+}
+
 void detail::check_vtk_extent(const std::string& what, std::size_t rows, std::size_t cols,
                               std::size_t want_rows, std::size_t want_cols) {
   if (rows != want_rows || cols != want_cols) {
@@ -615,11 +645,16 @@ void detail::check_vtk_extent(const std::string& what, std::size_t rows, std::si
   }
 }
 
-void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const std::string> fields) {
+void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const std::string> fields,
+               const VtkWriteOptions& options) {
   std::vector<VtkField> selection;
   selection.reserve(fields.size());
   for (const std::string& n : fields) selection.push_back(VtkField{n, std::nullopt});
-  write_vtk(mesh, path, std::span<const VtkField>(selection));
+  write_vtk(mesh, path, std::span<const VtkField>(selection), options);
+}
+
+void write_vtk(const HostMesh& mesh, const fs::path& path, const VtkWriteOptions& options) {
+  write_vtk(mesh, path, std::span<const VtkField>{}, options);
 }
 
 }  // namespace soma

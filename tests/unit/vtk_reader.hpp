@@ -5,7 +5,8 @@
 #define SOMA_TESTS_VTK_READER_HPP_
 
 // A strict reader of the legacy ASCII subset that the writer produces
-// (UNSTRUCTURED_GRID with POINT_DATA / CELL_DATA FIELD arrays). It follows the
+// (UNSTRUCTURED_GRID with POINT_DATA / CELL_DATA FIELD arrays, in the version
+// 3.0 or the version 5.1 layout). It follows the
 // published format and shares no code with the writer: every count that the
 // format ties together is checked, and anything unexpected throws.
 
@@ -100,6 +101,7 @@ struct VtkAttributes {
 struct VtkFile {
   std::string text;
   std::string version_line;
+  std::string version;  // "3.0" or "5.1"
   std::string title;
   std::string format;
   std::size_t npoints = 0;
@@ -153,28 +155,35 @@ class VtkTokens {
   std::istringstream& in_;
 };
 
-// Every value must parse as its declared type.
-inline void check_value(const std::string& type, const std::string& token) {
+// Every value must parse as its declared type. The 64-bit names differ by version.
+inline void check_value(const std::string& type, const std::string& token,
+                        const std::string& version) {
+  const bool v51 = version == "5.1";
+  if (type == (v51 ? "long" : "vtktypeint64") ||
+      type == (v51 ? "unsigned_long" : "vtktypeuint64")) {
+    throw std::runtime_error("vtk: value type " + type + " in a version " + version + " file");
+  }
   if (type == "double") {
     parse_number<double>(token);
   } else if (type == "float") {
     parse_number<float>(token);
   } else if (type == "int") {
     parse_number<std::int32_t>(token);
-  } else if (type == "long") {
+  } else if (type == "long" || type == "vtktypeint64") {
     parse_number<std::int64_t>(token);
   } else if (type == "unsigned_char") {
     parse_number<std::uint8_t>(token);
   } else if (type == "unsigned_int") {
     parse_number<std::uint32_t>(token);
-  } else if (type == "unsigned_long") {
+  } else if (type == "unsigned_long" || type == "vtktypeuint64") {
     parse_number<std::uint64_t>(token);
   } else {
     throw std::runtime_error("vtk: unknown value type " + type);
   }
 }
 
-inline VtkAttributes read_attributes(VtkTokens& tok, std::size_t count) {
+inline VtkAttributes read_attributes(VtkTokens& tok, std::size_t count,
+                                     const std::string& version) {
   VtkAttributes out;
   out.present = true;
   out.count = count;
@@ -199,11 +208,68 @@ inline VtkAttributes read_attributes(VtkTokens& tok, std::size_t count) {
     const std::size_t n = arr.tuples * static_cast<std::size_t>(arr.ncomp);
     for (std::size_t i = 0; i < n; ++i) {
       arr.tokens.push_back(tok.next());
-      check_value(arr.type, arr.tokens.back());
+      check_value(arr.type, arr.tokens.back(), version);
     }
     out.arrays.push_back(std::move(arr));
   }
   return out;
+}
+
+inline void check_point_id(const VtkFile& f, std::size_t cell, std::int64_t id) {
+  if (id < 0 || static_cast<std::size_t>(id) >= f.npoints) {
+    throw std::runtime_error("vtk: cell " + std::to_string(cell) + " refers to point " +
+                             std::to_string(id) + " of " + std::to_string(f.npoints));
+  }
+}
+
+// Version 3.0: `count ids...` per cell; CELLS declares the cells and the integers.
+inline void read_cell_list(VtkTokens& tok, VtkFile& f) {
+  std::size_t used = 0;
+  for (std::size_t c = 0; c < f.cells_declared; ++c) {
+    const auto k = tok.count("the vertex count of cell " + std::to_string(c));
+    std::vector<std::int64_t> cell;
+    for (std::size_t i = 0; i < k; ++i) {
+      const auto id = tok.number<std::int64_t>();
+      check_point_id(f, c, id);
+      cell.push_back(id);
+    }
+    used += 1 + k;
+    f.cells.push_back(std::move(cell));
+  }
+  if (used != f.cells_size_declared) {
+    throw std::runtime_error("vtk: CELLS declares " + std::to_string(f.cells_size_declared) +
+                             " integers and holds " + std::to_string(used));
+  }
+}
+
+// Version 5.1: CELLS declares ncells + 1 offsets and the connectivity size.
+inline void read_offsets_and_connectivity(VtkTokens& tok, VtkFile& f) {
+  if (f.cells_declared < 1) throw std::runtime_error("vtk: CELLS declares no offsets");
+  tok.expect("OFFSETS");
+  tok.expect("vtktypeint64");
+  std::vector<std::size_t> offsets;
+  for (std::size_t i = 0; i < f.cells_declared; ++i) {
+    offsets.push_back(tok.count("offset " + std::to_string(i)));
+    if (i == 0 && offsets[0] != 0) throw std::runtime_error("vtk: the first offset is not 0");
+    if (i > 0 && offsets[i] < offsets[i - 1]) {
+      throw std::runtime_error("vtk: offsets decrease at " + std::to_string(i));
+    }
+  }
+  if (offsets.back() != f.cells_size_declared) {
+    throw std::runtime_error("vtk: the last offset is " + std::to_string(offsets.back()) +
+                             " and CELLS declares " + std::to_string(f.cells_size_declared));
+  }
+  tok.expect("CONNECTIVITY");
+  tok.expect("vtktypeint64");
+  for (std::size_t c = 0; c + 1 < offsets.size(); ++c) {
+    std::vector<std::int64_t> cell;
+    for (std::size_t k = offsets[c]; k < offsets[c + 1]; ++k) {
+      const auto id = tok.number<std::int64_t>();
+      check_point_id(f, c, id);
+      cell.push_back(id);
+    }
+    f.cells.push_back(std::move(cell));
+  }
 }
 
 inline VtkFile read_vtk_file(const std::filesystem::path& path) {
@@ -216,7 +282,11 @@ inline VtkFile read_vtk_file(const std::filesystem::path& path) {
   std::getline(in, f.version_line);
   std::getline(in, f.title);
   std::getline(in, f.format);
-  if (f.version_line != "# vtk DataFile Version 3.0") {
+  if (f.version_line == "# vtk DataFile Version 3.0") {
+    f.version = "3.0";
+  } else if (f.version_line == "# vtk DataFile Version 5.1") {
+    f.version = "5.1";
+  } else {
     throw std::runtime_error("vtk: unexpected version line '" + f.version_line + "'");
   }
   if (f.title.size() > 256) throw std::runtime_error("vtk: title is longer than 256 characters");
@@ -236,29 +306,15 @@ inline VtkFile read_vtk_file(const std::filesystem::path& path) {
   tok.expect("CELLS");
   f.cells_declared = tok.count("the CELLS count");
   f.cells_size_declared = tok.count("the CELLS size");
-  std::size_t used = 0;
-  for (std::size_t c = 0; c < f.cells_declared; ++c) {
-    const auto k = tok.count("the vertex count of cell " + std::to_string(c));
-    std::vector<std::int64_t> cell;
-    for (std::size_t i = 0; i < k; ++i) {
-      const auto id = tok.number<std::int64_t>();
-      if (id < 0 || static_cast<std::size_t>(id) >= f.npoints) {
-        throw std::runtime_error("vtk: cell " + std::to_string(c) + " refers to point " +
-                                 std::to_string(id) + " of " + std::to_string(f.npoints));
-      }
-      cell.push_back(id);
-    }
-    used += 1 + k;
-    f.cells.push_back(std::move(cell));
-  }
-  if (used != f.cells_size_declared) {
-    throw std::runtime_error("vtk: CELLS declares " + std::to_string(f.cells_size_declared) +
-                             " integers and holds " + std::to_string(used));
+  if (f.version == "5.1") {
+    read_offsets_and_connectivity(tok, f);
+  } else {
+    read_cell_list(tok, f);
   }
 
   tok.expect("CELL_TYPES");
   const auto ntypes = tok.count("the CELL_TYPES count");
-  if (ntypes != f.cells_declared) {
+  if (ntypes != f.cells.size()) {
     throw std::runtime_error("vtk: CELL_TYPES count differs from CELLS");
   }
   for (std::size_t c = 0; c < ntypes; ++c) {
@@ -282,13 +338,13 @@ inline VtkFile read_vtk_file(const std::filesystem::path& path) {
       if (count != f.npoints) {
         throw std::runtime_error("vtk: POINT_DATA count differs from POINTS");
       }
-      f.point_data = read_attributes(tok, count);
+      f.point_data = read_attributes(tok, count, f.version);
     } else if (section == "CELL_DATA") {
       if (f.cell_data.present) throw std::runtime_error("vtk: CELL_DATA appears twice");
-      if (count != f.cells_declared) {
+      if (count != f.cells.size()) {
         throw std::runtime_error("vtk: CELL_DATA count differs from CELLS");
       }
-      f.cell_data = read_attributes(tok, count);
+      f.cell_data = read_attributes(tok, count, f.version);
     } else {
       throw std::runtime_error("vtk: unexpected section " + section);
     }

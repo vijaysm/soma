@@ -327,6 +327,9 @@ std::vector<std::string> temporaries_of(const fs::path& p) {
 
 using Names = std::vector<std::string>;
 
+const soma::VtkWriteOptions v3_0{soma::VtkLegacyVersion::v3_0};
+const soma::VtkWriteOptions v5_1{soma::VtkLegacyVersion::v5_1};
+
 template <class T, class M>
 using WriteView = Kokkos::View<T**, Kokkos::LayoutLeft, M, Kokkos::MemoryTraits<Kokkos::Unmanaged>>;
 
@@ -465,7 +468,7 @@ TEST_F(VtkFiles, GoldenTextOfASmallMesh) {
   for (std::size_t i = 0; i < 3; ++i) mat.view()(i, 0) = 100 + static_cast<std::int32_t>(i);
 
   const std::vector<std::string> names{"p", "mat"};
-  soma::write_vtk(mesh, file(), names);
+  soma::write_vtk(mesh, file(), names, soma_test::v3_0);
   EXPECT_EQ(soma_test::slurp(file()),
             "# vtk DataFile Version 3.0\n"
             "SOMA mesh\n"
@@ -505,6 +508,123 @@ TEST_F(VtkFiles, GoldenTextOfASmallMesh) {
             "102\n");
 }
 
+TEST_F(VtkFiles, GoldenTextOfASmallMeshInVersion51) {
+  auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  const auto p = mesh.fields().add_tag<double>("p", 0, 2);
+  const auto n = mesh.fields().add_tag<std::uint64_t>("n", 0, 1);
+  for (std::size_t i = 0; i < 7; ++i) {
+    p.view()(i, 0) = static_cast<double>(i);
+    p.view()(i, 1) = static_cast<double>(i) + 0.5;
+    n.view()(i, 0) = std::numeric_limits<std::uint64_t>::max() - i;
+  }
+  const auto big = mesh.fields().add_tag<std::int64_t>("big", 2, 1);
+  for (std::size_t i = 0; i < 3; ++i) {
+    big.view()(i, 0) = std::numeric_limits<std::int64_t>::min() + static_cast<std::int64_t>(i);
+  }
+
+  const std::vector<std::string> names{"p", "n", "big"};
+  soma::write_vtk(mesh, file(), names, soma_test::v5_1);
+  EXPECT_EQ(soma_test::slurp(file()),
+            "# vtk DataFile Version 5.1\n"
+            "SOMA mesh\n"
+            "ASCII\n"
+            "DATASET UNSTRUCTURED_GRID\n"
+            "POINTS 7 double\n"
+            "0 0 0\n"
+            "1 0 0\n"
+            "2 0 0\n"
+            "0 1 0\n"
+            "1 1 0\n"
+            "2 1 0\n"
+            "3 0.5 0\n"
+            "CELLS 4 11\n"
+            "OFFSETS vtktypeint64\n"
+            "0\n"
+            "3\n"
+            "7\n"
+            "11\n"
+            "CONNECTIVITY vtktypeint64\n"
+            "2 6 5\n"
+            "1 2 5 4\n"
+            "0 1 4 3\n"
+            "CELL_TYPES 3\n"
+            "5\n"
+            "9\n"
+            "9\n"
+            "POINT_DATA 7\n"
+            "FIELD FieldData 2\n"
+            "p 2 7 double\n"
+            "0 0.5\n"
+            "1 1.5\n"
+            "2 2.5\n"
+            "3 3.5\n"
+            "4 4.5\n"
+            "5 5.5\n"
+            "6 6.5\n"
+            "n 1 7 vtktypeuint64\n"
+            "18446744073709551615\n"
+            "18446744073709551614\n"
+            "18446744073709551613\n"
+            "18446744073709551612\n"
+            "18446744073709551611\n"
+            "18446744073709551610\n"
+            "18446744073709551609\n"
+            "CELL_DATA 3\n"
+            "FIELD FieldData 1\n"
+            "big 1 3 vtktypeint64\n"
+            "-9223372036854775808\n"
+            "-9223372036854775807\n"
+            "-9223372036854775806\n");
+}
+
+TEST_F(VtkFiles, MeshWithoutCellsHasOneOffsetInVersion51) {
+  soma::MeshBuilder b(2);
+  const std::vector<GO> g{4, 2};
+  const std::vector<double> xyz{0, 0, 0, 1, 0, 0};
+  b.add_vertices(g, xyz);
+  const auto mesh = std::move(b).build(Ordering::file);
+  soma::write_vtk(mesh, file(), soma_test::v5_1);
+  const auto lines = soma_test::lines_of(soma_test::slurp(file()));
+  ASSERT_EQ(lines.size(), 12u);
+  EXPECT_EQ(lines[7], "CELLS 1 0");
+  EXPECT_EQ(lines[8], "OFFSETS vtktypeint64");
+  EXPECT_EQ(lines[9], "0");
+  EXPECT_EQ(lines[10], "CONNECTIVITY vtktypeint64");
+  EXPECT_EQ(lines[11], "CELL_TYPES 0");
+  const auto f = soma_test::read_vtk_file(file());
+  EXPECT_EQ(f.npoints, 2u);
+  EXPECT_TRUE(f.cells.empty());
+}
+
+TEST_F(VtkFiles, Version51NamesThe64BitTypesAndKeepsTheValues) {
+  Model m = soma_test::mixed_cells();
+  auto mesh = Model(m).build(Ordering::type_major_sfc);
+  const auto pid = soma_test::fill_tag<std::int64_t>(mesh, "pid", 0, 2, [](GO g, int c) {
+    return g == 31 ? std::numeric_limits<std::int64_t>::min() + c : -g * 1000003 - c;
+  });
+  const auto count = soma_test::fill_tag<std::uint64_t>(mesh, "count", 3, 1, [](GO g, int) {
+    return g == 12 ? std::numeric_limits<std::uint64_t>::max() : static_cast<std::uint64_t>(g);
+  });
+  const auto flags = soma_test::fill_tag<std::uint32_t>(
+      mesh, "flags", 3, 1, [](GO g, int) { return static_cast<std::uint32_t>(g); });
+  const std::vector<std::string> names{"pid", "count", "flags"};
+  soma::write_vtk(mesh, file(), names, soma_test::v5_1);
+  const auto f = soma_test::read_vtk_file(file());
+  EXPECT_EQ(f.version, "5.1");
+  EXPECT_EQ(f.cells_declared, 5u);
+  EXPECT_EQ(f.cells_size_declared, 4u + 5u + 6u + 8u);
+  soma_test::expect_matches_model(f, mesh, m);
+  ASSERT_NE(f.point_data.find("pid"), nullptr);
+  ASSERT_NE(f.cell_data.find("count"), nullptr);
+  ASSERT_NE(f.cell_data.find("flags"), nullptr);
+  EXPECT_EQ(f.point_data.find("pid")->type, "vtktypeint64");
+  EXPECT_EQ(f.cell_data.find("count")->type, "vtktypeuint64");
+  EXPECT_EQ(f.cell_data.find("flags")->type, "unsigned_int");
+  soma_test::expect_same_bits(f.point_data.find("pid")->values<std::int64_t>(), pid, "pid");
+  soma_test::expect_same_bits(f.cell_data.find("count")->values<std::uint64_t>(), count, "count");
+  soma_test::expect_same_bits(f.cell_data.find("flags")->values<std::uint32_t>(), flags, "flags");
+}
+
 TEST_F(VtkFiles, HexHeaderAndCounts) {
   const std::vector<Xyz> cube{{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0},
                               {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
@@ -516,7 +636,7 @@ TEST_F(VtkFiles, HexHeaderAndCounts) {
   }
   m.element(Topology::hex, 1, ids);
   const auto mesh = std::move(m).build(Ordering::file);
-  soma::write_vtk(mesh, file());
+  soma::write_vtk(mesh, file(), soma_test::v3_0);
   const auto lines = soma_test::lines_of(soma_test::slurp(file()));
   ASSERT_GE(lines.size(), 4u);
   EXPECT_EQ(lines[0], "# vtk DataFile Version 3.0");
@@ -534,7 +654,7 @@ TEST_F(VtkFiles, HexHeaderAndCounts) {
 TEST_F(VtkFiles, MixedTriangleAndQuadCounts) {
   for (const Ordering ordering : {Ordering::file, Ordering::type_major_sfc}) {
     const auto mesh = soma_test::two_quads_and_a_triangle(ordering);
-    soma::write_vtk(mesh, file());
+    soma::write_vtk(mesh, file(), soma_test::v3_0);
     const auto f = soma_test::read_vtk_file(file());
     EXPECT_EQ(f.npoints, 7u);
     EXPECT_EQ(f.cells_declared, 3u);
@@ -567,7 +687,7 @@ TEST_F(VtkFiles, PolygonsOfArityFiveAndSix) {
   m.polygon(20, b);
   m.polygon(10, c);
   const auto mesh = std::move(m).build(Ordering::type_major_sfc);
-  soma::write_vtk(mesh, file());
+  soma::write_vtk(mesh, file(), soma_test::v3_0);
   const auto f = soma_test::read_vtk_file(file());
   EXPECT_EQ(f.cells_declared, 3u);
   EXPECT_EQ(f.cells_size_declared, 3u + 5u + 6u + 6u);
@@ -590,7 +710,7 @@ TEST_F(VtkFiles, EdgesAreTypeThreeAndTheirDataIsCellData) {
   soma_test::fill_tag<double>(mesh, "node", 0, 1,
                               [](GO g, int c) { return soma_test::awkward(g, c); });
   const std::vector<std::string> names{"seg", "node"};
-  soma::write_vtk(mesh, file(), names);
+  soma::write_vtk(mesh, file(), names, soma_test::v3_0);
   const auto f = soma_test::read_vtk_file(file());
   EXPECT_EQ(f.cell_types, (std::vector<int>{3, 3, 3}));
   EXPECT_EQ(f.cells_size_declared, 9u);
@@ -608,7 +728,7 @@ TEST_F(VtkFiles, MeshWithoutCellsWritesPointsOnly) {
   const std::vector<double> xyz{0, 0, 0, 1, 0, 0};
   b.add_vertices(g, xyz);
   const auto mesh = std::move(b).build(Ordering::file);
-  soma::write_vtk(mesh, file());
+  soma::write_vtk(mesh, file(), soma_test::v3_0);
   const auto f = soma_test::read_vtk_file(file());
   EXPECT_EQ(f.npoints, 2u);
   EXPECT_EQ(f.cells_declared, 0u);
@@ -691,7 +811,7 @@ TEST_F(VtkFiles, PointsAndConnectivityRoundTripExactly) {
   for (const Ordering ordering : {Ordering::file, Ordering::type_major_sfc}) {
     Model m = soma_test::mixed_cells();
     const auto mesh = Model(m).build(ordering);
-    soma::write_vtk(mesh, file());
+    soma::write_vtk(mesh, file(), soma_test::v3_0);
     const auto f = soma_test::read_vtk_file(file());
     EXPECT_EQ(f.point_type, "double");
     EXPECT_EQ(f.cells_declared, 4u);
@@ -774,7 +894,7 @@ TEST_F(VtkFiles, FieldsKeepTheirValuesTypesAndPlacement) {
 
   const std::vector<std::string> names{"temperature", "velocity", "uv",   "pid",   "material",
                                        "flux",        "stress",   "count", "color", "flags"};
-  soma::write_vtk(mesh, file(), names);
+  soma::write_vtk(mesh, file(), names, soma_test::v3_0);
   const auto f = soma_test::read_vtk_file(file());
 
   ASSERT_TRUE(f.point_data.present);
@@ -935,6 +1055,32 @@ TEST(VtkLimits, CountsAndIdsMustFitA32BitInt) {
   expect_too_large(most + 1, 0, 0, "number of points");
   expect_too_large(0, most + 1, 0, "largest connectivity id");
   expect_too_large(0, 0, most + 1, "CELLS size");
+}
+
+TEST(VtkLimits, Version51HasNo32BitLimit) {
+  using soma::VtkLegacyVersion;
+  constexpr std::int64_t most = std::numeric_limits<std::int32_t>::max();
+  constexpr std::int64_t huge = std::int64_t{3} * most;
+  EXPECT_NO_THROW(soma::detail::check_vtk_limits(VtkLegacyVersion::v5_1, huge, huge, huge, huge));
+  EXPECT_NO_THROW(soma::detail::check_vtk_limits(VtkLegacyVersion::v5_1, most + 1, 1, most + 1, 1));
+  EXPECT_NO_THROW(soma::detail::check_vtk_limits(VtkLegacyVersion::v3_0, most, 1, most - 1,
+                                                 most - 1));
+  EXPECT_THROW(soma::detail::check_vtk_limits(VtkLegacyVersion::v3_0, most + 1, 1, 0, 1),
+               std::length_error);
+  EXPECT_THROW(soma::detail::check_vtk_limits(VtkLegacyVersion::v3_0, 8, 1, most + 1, 1),
+               std::length_error);
+  EXPECT_THROW(soma::detail::check_vtk_limits(VtkLegacyVersion::v3_0, 8, 1, 7, most),
+               std::length_error);
+
+  const auto v30 = soma::detail::vtk_cells_line(VtkLegacyVersion::v3_0, huge, 4 * huge);
+  EXPECT_EQ(v30.first, huge);
+  EXPECT_EQ(v30.second, 5 * huge);
+  const auto v51 = soma::detail::vtk_cells_line(VtkLegacyVersion::v5_1, huge, 4 * huge);
+  EXPECT_EQ(v51.first, huge + 1);
+  EXPECT_EQ(v51.second, 4 * huge);
+  const auto empty = soma::detail::vtk_cells_line(VtkLegacyVersion::v5_1, 0, 0);
+  EXPECT_EQ(empty.first, 1);
+  EXPECT_EQ(empty.second, 0);
 }
 
 TEST_F(VtkFiles, ArraysFollowTheOrderOfTheSelection) {
@@ -1247,7 +1393,7 @@ TEST_F(VtkFiles, AMirrorWithoutItsCellDimensionWritesPointsOnly) {
   const auto part = soma_test::partial_mirror(mesh, opts);
   if (!part) GTEST_SKIP() << "the mesh refuses a mirror without its cells";
   ASSERT_EQ(part->count(2), 0);
-  soma::write_vtk(*part, file());
+  soma::write_vtk(*part, file(), soma_test::v3_0);
   const auto f = soma_test::read_vtk_file(file());
   EXPECT_EQ(f.npoints, 7u);
   EXPECT_EQ(f.cells_declared, 0u);
@@ -1664,10 +1810,29 @@ TEST_F(VtkFiles, OutputBytesAreFixed) {
   soma_test::fill_tag<std::int32_t>(
       mesh, "material", 3, 1, [](GO g, int) { return static_cast<std::int32_t>(g * 7 - 100); });
   const std::vector<std::string> names{"flux", "temperature", "material", "pid", "uv"};
-  soma::write_vtk(mesh, file(), names);
+  soma::write_vtk(mesh, file(), names, soma_test::v3_0);
   const std::string text = soma_test::slurp(file());
   EXPECT_EQ(text.size(), 1753u);
   EXPECT_EQ(soma_test::fnv1a(text), 6740742393939861679ull);
+}
+
+// The bytes of the version 5.1 layout of the same mesh and fields.
+TEST_F(VtkFiles, OutputBytesAreFixedInVersion51) {
+  Model m = soma_test::mixed_cells();
+  auto mesh = Model(m).build(Ordering::file);
+  const auto d = [](GO g, int c) { return soma_test::exact(g, c); };
+  const auto s = [](GO g, int c) { return static_cast<float>(soma_test::exact(g, c)); };
+  soma_test::fill_tag<double>(mesh, "temperature", 0, 1, d);
+  soma_test::fill_tag<float>(mesh, "uv", 0, 2, s);
+  soma_test::fill_tag<std::int64_t>(mesh, "pid", 0, 1, [](GO g, int) { return g * 1000003; });
+  soma_test::fill_tag<double>(mesh, "flux", 3, 3, d);
+  soma_test::fill_tag<std::int32_t>(
+      mesh, "material", 3, 1, [](GO g, int) { return static_cast<std::int32_t>(g * 7 - 100); });
+  const std::vector<std::string> names{"flux", "temperature", "material", "pid", "uv"};
+  soma::write_vtk(mesh, file(), names, soma_test::v5_1);
+  const std::string text = soma_test::slurp(file());
+  EXPECT_EQ(text.size(), 1812u);
+  EXPECT_EQ(soma_test::fnv1a(text), 8207954283994656709ull);
 }
 
 namespace soma_test {
@@ -1722,6 +1887,61 @@ TEST_F(VtkReaderFiles, TheSmallFileIsAccepted) {
   EXPECT_EQ(f.point_data.find("v")->values<double>(), (std::vector<double>{1, 2, 3}));
 }
 
+namespace soma_test {
+
+const std::string small_file_51 =
+    "# vtk DataFile Version 5.1\n"
+    "t\n"
+    "ASCII\n"
+    "DATASET UNSTRUCTURED_GRID\n"
+    "POINTS 4 double\n"
+    "0 0 0\n"
+    "1 0 0\n"
+    "0 1 0\n"
+    "1 1 0\n"
+    "CELLS 3 6\n"
+    "OFFSETS vtktypeint64\n"
+    "0\n"
+    "3\n"
+    "6\n"
+    "CONNECTIVITY vtktypeint64\n"
+    "0 1 2\n"
+    "1 3 2\n"
+    "CELL_TYPES 2\n"
+    "5\n"
+    "5\n"
+    "CELL_DATA 2\n"
+    "FIELD FieldData 1\n"
+    "c 1 2 vtktypeint64\n"
+    "-7\n"
+    "9\n";
+
+}  // namespace soma_test
+
+TEST_F(VtkReaderFiles, TheSmallFileIsAcceptedInVersion51) {
+  { std::ofstream(file("crafted.vtk"), std::ios::binary) << soma_test::small_file_51; }
+  const auto f = soma_test::read_vtk_file(file("crafted.vtk"));
+  EXPECT_EQ(f.version, "5.1");
+  EXPECT_EQ(f.npoints, 4u);
+  EXPECT_EQ(f.cells, (std::vector<std::vector<std::int64_t>>{{0, 1, 2}, {1, 3, 2}}));
+  EXPECT_EQ(f.cell_types, (std::vector<int>{5, 5}));
+  EXPECT_EQ(f.cell_data.find("c")->values<std::int64_t>(), (std::vector<std::int64_t>{-7, 9}));
+}
+
+TEST_F(VtkReaderFiles, Version51OffsetsAndTypeNamesAreChecked) {
+  using soma_test::replaced;
+  const std::string& t = soma_test::small_file_51;
+  expect_rejected(replaced(t, "0\n3\n6\n", "1\n3\n6\n"), "first offset is not 0");
+  expect_rejected(replaced(t, "0\n3\n6\n", "0\n7\n6\n"), "offsets decrease at 2");
+  expect_rejected(replaced(t, "CELLS 3 6", "CELLS 3 5"), "the last offset is 6");
+  expect_rejected(replaced(t, "CELLS 3 6", "CELLS 0 6"), "declares no offsets");
+  expect_rejected(replaced(t, "OFFSETS vtktypeint64", "OFFSETS int"), "found int");
+  expect_rejected(replaced(t, "1 3 2", "1 4 2"), "refers to point 4");
+  expect_rejected(replaced(t, "c 1 2 vtktypeint64", "c 1 2 long"), "value type long");
+  expect_rejected(replaced(soma_test::small_file, "v 1 3 double", "v 1 3 vtktypeint64"),
+                  "value type vtktypeint64");
+}
+
 TEST_F(VtkReaderFiles, NonFiniteAndSubnormalTokensAreRejected) {
   using soma_test::replaced;
   const std::string& t = soma_test::small_file;
@@ -1758,7 +1978,7 @@ TEST_F(VtkReaderFiles, AVertexCountThatDoesNotFitTheTypeIsRejected) {
 TEST_F(VtkReaderFiles, TheVersionAndFormatLinesAreChecked) {
   using soma_test::replaced;
   const std::string& t = soma_test::small_file;
-  expect_rejected(replaced(t, "Version 3.0", "Version 5.1"), "version line");
+  expect_rejected(replaced(t, "Version 3.0", "Version 4.2"), "version line");
   expect_rejected(replaced(t, "# vtk", "# VTK"), "version line");
   expect_rejected(replaced(t, "ASCII", "BINARY"), "format");
   expect_rejected(replaced(t, "ASCII", "ascii"), "format");
