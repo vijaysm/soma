@@ -30,7 +30,7 @@ namespace soma_test {
 //  v gids:  10(0,0) 20(1,0) 30(2,0) 40(0,1) 50(1,1) 60(2,1) 70(3,0.5)
 //  quads:   gid 7 -> [10 20 50 40],  gid 3 -> [20 30 60 50]
 //  tri:     gid 5 -> [30 70 60]
-inline soma::HostMesh two_quads_and_a_triangle() {
+inline soma::HostMesh two_quads_and_a_triangle(soma::Ordering ordering = soma::Ordering::file) {
   using soma::GO;
   using soma::Real;
   soma::MeshBuilder b(2);
@@ -39,7 +39,7 @@ inline soma::HostMesh two_quads_and_a_triangle() {
   b.add_vertices(vg, xyz);
   b.add_elements(soma::Topology::quad, std::vector<GO>{7, 3}, std::vector<GO>{10, 20, 50, 40, 20, 30, 60, 50});
   b.add_elements(soma::Topology::tri, std::vector<GO>{5}, std::vector<GO>{30, 70, 60});
-  return std::move(b).build(soma::Ordering::file);
+  return std::move(b).build(ordering);
 }
 
 // The fixture mesh with its three elements relabelled interior, shared, ghost

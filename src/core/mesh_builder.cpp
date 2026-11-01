@@ -8,6 +8,9 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <utility>
+
+#include "soma/core/sfc.hpp"
 
 namespace soma {
 
@@ -49,40 +52,90 @@ void MeshBuilder::add_polygons(std::span<const GO> gids, std::span<const Offset>
                              {vertex_gids.begin(), vertex_gids.end()}});
 }
 
+namespace {
+
+struct Keys {
+  sfc::KeyBox box;
+  bool active = false;
+
+  std::uint64_t operator()(Real x, Real y, Real z) const {
+    return active ? sfc::hilbert_key(box, x, y, z) : 0;
+  }
+};
+
+Keys make_keys(Ordering ordering, const std::vector<Real>& xyz) {
+  Keys k;
+  if (ordering != Ordering::type_major_sfc || xyz.empty()) return k;
+  Real lo[3] = {xyz[0], xyz[1], xyz[2]};
+  Real hi[3] = {xyz[0], xyz[1], xyz[2]};
+  for (std::size_t i = 0; i < xyz.size(); i += 3) {
+    for (std::size_t d = 0; d < 3; ++d) {
+      lo[d] = std::min(lo[d], xyz[i + d]);
+      hi[d] = std::max(hi[d], xyz[i + d]);
+    }
+  }
+  k.box = sfc::KeyBox::make(lo, hi);
+  k.active = true;
+  return k;
+}
+
+}  // namespace
+
 HostMesh MeshBuilder::build(Ordering ordering) && {
-  if (ordering != Ordering::file) {
-    throw std::invalid_argument("MeshBuilder::build: only Ordering::file is implemented");
+  if (ordering != Ordering::file && ordering != Ordering::type_major_sfc) {
+    throw std::invalid_argument("MeshBuilder::build: ordering is not implemented");
   }
   HostMesh mesh;
   mesh.dim_ = dim_;
+  const Keys keys = make_keys(ordering, xyz_);
 
-  std::vector<std::size_t> vorder(vertex_gids_.size());
-  std::iota(vorder.begin(), vorder.end(), std::size_t{0});
-  std::sort(vorder.begin(), vorder.end(),
-            [&](std::size_t a, std::size_t b) { return vertex_gids_[a] < vertex_gids_[b]; });
-  std::vector<GO> vg(vorder.size());
-  mesh.coords_ = CoordView<Kokkos::HostSpace>("soma::mesh::coords", vorder.size());
-  for (std::size_t i = 0; i < vorder.size(); ++i) {
-    vg[i] = vertex_gids_[vorder[i]];
-    if (i > 0 && vg[i] == vg[i - 1]) {
-      throw std::invalid_argument("duplicate vertex gid " + std::to_string(vg[i]));
-    }
-    for (std::size_t k = 0; k < 3; ++k) mesh.coords_(i, k) = xyz_[3 * vorder[i] + k];
+  // Vertices: (key, gid). With Ordering::file every key is 0, so by gid.
+  const std::size_t nv = vertex_gids_.size();
+  std::vector<std::uint64_t> vkey(nv);
+  for (std::size_t i = 0; i < nv; ++i) {
+    vkey[i] = keys(xyz_[3 * i], xyz_[3 * i + 1], xyz_[3 * i + 2]);
   }
+  std::vector<std::size_t> vorder(nv);
+  std::iota(vorder.begin(), vorder.end(), std::size_t{0});
+  std::sort(vorder.begin(), vorder.end(), [&](std::size_t a, std::size_t b) {
+    return std::tuple(vkey[a], vertex_gids_[a]) < std::tuple(vkey[b], vertex_gids_[b]);
+  });
+  {
+    std::vector<GO> sorted = vertex_gids_;
+    std::sort(sorted.begin(), sorted.end());
+    const auto dup = std::adjacent_find(sorted.begin(), sorted.end());
+    if (dup != sorted.end()) {
+      throw std::invalid_argument("duplicate vertex gid " + std::to_string(*dup));
+    }
+  }
+  std::vector<std::pair<GO, LO>> local_of(nv);
+  mesh.coords_ = CoordView<Kokkos::HostSpace>("soma::mesh::coords", nv);
   auto& v = mesh.ents_[0];
-  v.count = static_cast<LO>(vg.size());
-  v.gid = View1<GO, Kokkos::HostSpace>("soma::mesh::gid0", vg.size());
-  for (std::size_t i = 0; i < vg.size(); ++i) v.gid(i) = vg[i];
-  const std::vector<Ownership> vown(vg.size(), Ownership::interior);
-  const std::vector<Topology> vtop(vg.size(), Topology::vertex);
-  const std::vector<std::uint16_t> var(vg.size(), 1);
+  v.count = static_cast<LO>(nv);
+  v.gid = View1<GO, Kokkos::HostSpace>("soma::mesh::gid0", nv);
+  for (std::size_t i = 0; i < nv; ++i) {
+    const std::size_t src = vorder[i];
+    v.gid(i) = vertex_gids_[src];
+    local_of[i] = {vertex_gids_[src], static_cast<LO>(i)};
+    for (std::size_t k = 0; k < 3; ++k) mesh.coords_(i, k) = xyz_[3 * src + k];
+  }
+  std::sort(local_of.begin(), local_of.end());
+  const std::vector<Ownership> vown(nv, Ownership::interior);
+  const std::vector<Topology> vtop(nv, Topology::vertex);
+  const std::vector<std::uint16_t> var(nv, 1);
   v.segments = make_segments(vown, vtop, var);
+
+  const auto find_vertex = [&](GO g) -> LO {
+    const auto it = std::lower_bound(local_of.begin(), local_of.end(), std::pair<GO, LO>{g, 0});
+    return (it == local_of.end() || it->first != g) ? invalid_lo : it->second;
+  };
 
   for (std::size_t d = 1; d <= 3; ++d) {
     struct Rec {
       Topology t;
       std::uint16_t arity;
       GO gid;
+      std::uint64_t key;
       std::size_t block;
       std::size_t index;
     };
@@ -90,8 +143,24 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     for (std::size_t b = 0; b < blocks_[d].size(); ++b) {
       const Block& blk = blocks_[d][b];
       for (std::size_t i = 0; i < blk.gids.size(); ++i) {
-        recs.push_back(Rec{blk.topology, static_cast<std::uint16_t>(blk.offsets[i + 1] - blk.offsets[i]),
-                           blk.gids[i], b, i});
+        Real c[3] = {0, 0, 0};
+        const Offset first = blk.offsets[i];
+        const Offset last = blk.offsets[i + 1];
+        for (Offset k = first; k < last; ++k) {
+          const GO g = blk.vertex_gids[static_cast<std::size_t>(k)];
+          const LO l = find_vertex(g);
+          if (l == invalid_lo) {
+            throw std::invalid_argument("unknown vertex gid " + std::to_string(g) + " in " +
+                                        name(blk.topology) + " element " +
+                                        std::to_string(blk.gids[i]));
+          }
+          const auto src = static_cast<std::size_t>(l);
+          for (std::size_t q = 0; q < 3; ++q) c[q] += mesh.coords_(src, q);
+        }
+        const auto arity = static_cast<std::uint16_t>(last - first);
+        const Real inv = arity > 0 ? Real{1} / static_cast<Real>(arity) : Real{0};
+        recs.push_back(Rec{blk.topology, arity, blk.gids[i],
+                           keys(c[0] * inv, c[1] * inv, c[2] * inv), b, i});
       }
     }
     {
@@ -114,7 +183,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       }
     }
     std::sort(recs.begin(), recs.end(), [](const Rec& x, const Rec& y) {
-      return std::tuple(x.t, x.arity, x.gid) < std::tuple(y.t, y.arity, y.gid);
+      return std::tuple(x.t, x.arity, x.key, x.gid) < std::tuple(y.t, y.arity, y.key, y.gid);
     });
     auto& e = mesh.ents_[d];
     e.count = static_cast<LO>(recs.size());
@@ -129,13 +198,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     for (std::size_t r = 0; r < recs.size(); ++r) {
       const Block& blk = blocks_[d][recs[r].block];
       for (Offset k = blk.offsets[recs[r].index]; k < blk.offsets[recs[r].index + 1]; ++k) {
-        const GO g = blk.vertex_gids[static_cast<std::size_t>(k)];
-        const auto it = std::lower_bound(vg.begin(), vg.end(), g);
-        if (it == vg.end() || *it != g) {
-          throw std::invalid_argument("unknown vertex gid " + std::to_string(g) + " in " +
-                                      name(recs[r].t) + " element " + std::to_string(recs[r].gid));
-        }
-        conn.push_back(static_cast<LO>(it - vg.begin()));
+        conn.push_back(find_vertex(blk.vertex_gids[static_cast<std::size_t>(k)]));
       }
       e.conn_offsets(r + 1) = static_cast<Offset>(conn.size());
       e.topology(r) = static_cast<std::uint8_t>(recs[r].t);

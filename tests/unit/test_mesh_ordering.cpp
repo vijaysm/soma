@@ -1,0 +1,164 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2022-2026, Vijay Mahadevan.
+
+#include <algorithm>
+#include <cstdint>
+#include <numeric>
+#include <tuple>
+#include <utility>
+#include <vector>
+
+#include <gtest/gtest.h>
+
+#include "hilbert_reference.hpp"
+#include "mesh_fixture.hpp"
+#include "soma/core/locality.hpp"
+#include "soma/core/mesh_builder.hpp"
+#include "soma/core/sfc.hpp"
+
+using soma::GO;
+using soma::LO;
+using soma::Ordering;
+using soma::Real;
+using soma::Topology;
+
+namespace {
+
+constexpr int n = 16;  // cells per side
+
+// An n x n grid of quads whose vertex and element gids are a fixed scramble of
+// the row-major numbering, so file order (gid order) is far from spatial order.
+soma::HostMesh scrambled_grid(Ordering ordering) {
+  const int nv = (n + 1) * (n + 1);
+  const auto vgid = [&](int i, int j) { return static_cast<GO>(1 + (7919 * (i + (n + 1) * j)) % nv); };
+  const auto egid = [&](int i, int j) { return static_cast<GO>(1 + (97 * (i + n * j)) % (n * n)); };
+  soma::MeshBuilder b(2);
+  std::vector<GO> vg;
+  std::vector<Real> xyz;
+  for (int j = 0; j <= n; ++j) {
+    for (int i = 0; i <= n; ++i) {
+      vg.push_back(vgid(i, j));
+      xyz.insert(xyz.end(), {static_cast<Real>(i), static_cast<Real>(j), 0.0});
+    }
+  }
+  b.add_vertices(vg, xyz);
+  std::vector<GO> eg;
+  std::vector<GO> conn;
+  for (int j = 0; j < n; ++j) {
+    for (int i = 0; i < n; ++i) {
+      eg.push_back(egid(i, j));
+      conn.insert(conn.end(), {vgid(i, j), vgid(i + 1, j), vgid(i + 1, j + 1), vgid(i, j + 1)});
+    }
+  }
+  b.add_elements(Topology::quad, eg, conn);
+  return std::move(b).build(ordering);
+}
+
+// The same quantisation as the library (floor(t * (2^21 - 1)) on each axis of
+// the vertex box), fed to the independent 2D reference.
+std::uint64_t reference_key(double x, double y, double extent_x, double extent_y) {
+  const auto cell = [](double v, double extent) {
+    const double t = v / extent;
+    if (!(t > 0)) return std::uint32_t{0};
+    if (t >= 1) return soma::sfc::max_cell;
+    return static_cast<std::uint32_t>(t * static_cast<double>(soma::sfc::max_cell));
+  };
+  return soma_test::hilbert_reference_2d(std::uint32_t{1} << soma::sfc::bits_per_axis, cell(x, extent_x),
+                                         cell(y, extent_y));
+}
+
+}  // namespace
+
+TEST(MeshOrdering, VerticesFollowTheHilbertKeyThenGid) {
+  const auto mesh = scrambled_grid(Ordering::type_major_sfc);
+  std::vector<std::tuple<std::uint64_t, GO>> expected;
+  for (LO v = 0; v < mesh.count(0); ++v) {
+    expected.emplace_back(reference_key(mesh.coords()(v, 0), mesh.coords()(v, 1), n, n), mesh.gid(0)(v));
+  }
+  EXPECT_TRUE(std::is_sorted(expected.begin(), expected.end()));
+  EXPECT_FALSE(std::is_sorted(mesh.gid(0).data(), mesh.gid(0).data() + mesh.count(0)));
+}
+
+TEST(MeshOrdering, ElementsFollowTheCentroidKeyThenGid) {
+  const auto mesh = scrambled_grid(Ordering::type_major_sfc);
+  std::vector<std::tuple<std::uint64_t, GO>> keys;
+  for (LO e = 0; e < mesh.count(2); ++e) {
+    double cx = 0;
+    double cy = 0;
+    for (soma::Offset k = mesh.conn_offsets(2)(e); k < mesh.conn_offsets(2)(e + 1); ++k) {
+      cx += mesh.coords()(mesh.conn(2)(k), 0) / 4;
+      cy += mesh.coords()(mesh.conn(2)(k), 1) / 4;
+    }
+    keys.emplace_back(reference_key(cx, cy, n, n), mesh.gid(2)(e));
+  }
+  EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end()));
+  EXPECT_FALSE(std::is_sorted(mesh.gid(2).data(), mesh.gid(2).data() + mesh.count(2)));
+}
+
+TEST(MeshOrdering, FileOrderStaysByGid) {
+  const auto mesh = scrambled_grid(Ordering::file);
+  EXPECT_TRUE(std::is_sorted(mesh.gid(0).data(), mesh.gid(0).data() + mesh.count(0)));
+  EXPECT_TRUE(std::is_sorted(mesh.gid(2).data(), mesh.gid(2).data() + mesh.count(2)));
+}
+
+TEST(MeshOrdering, OrderingsHoldTheSameEntities) {
+  const auto a = scrambled_grid(Ordering::file);
+  const auto b = scrambled_grid(Ordering::type_major_sfc);
+  std::vector<GO> ga(a.gid(2).data(), a.gid(2).data() + a.count(2));
+  std::vector<GO> gb(b.gid(2).data(), b.gid(2).data() + b.count(2));
+  std::sort(gb.begin(), gb.end());
+  EXPECT_EQ(ga, gb);
+}
+
+TEST(MeshOrdering, ConnectivityStaysConsistentWithTheCoordinates) {
+  const auto mesh = scrambled_grid(Ordering::type_major_sfc);
+  for (LO e = 0; e < mesh.count(2); ++e) {
+    const LO first = mesh.conn(2)(mesh.conn_offsets(2)(e));
+    double xmin = 1e9;
+    double ymin = 1e9;
+    for (soma::Offset k = mesh.conn_offsets(2)(e); k < mesh.conn_offsets(2)(e + 1); ++k) {
+      xmin = std::min(xmin, mesh.coords()(mesh.conn(2)(k), 0));
+      ymin = std::min(ymin, mesh.coords()(mesh.conn(2)(k), 1));
+    }
+    EXPECT_DOUBLE_EQ(mesh.coords()(first, 0), xmin) << "element " << e;
+    EXPECT_DOUBLE_EQ(mesh.coords()(first, 1), ymin) << "element " << e;
+  }
+}
+
+TEST(MeshOrdering, SpaceFillingOrderShrinksTheVertexSpan) {
+  const auto by_gid = soma::vertex_span_report(scrambled_grid(Ordering::file), 2);
+  const auto by_curve = soma::vertex_span_report(scrambled_grid(Ordering::type_major_sfc), 2);
+  EXPECT_EQ(by_gid.elements, n * n);
+  EXPECT_GT(by_gid.mean, 100.0);
+  EXPECT_LT(by_curve.mean, 0.25 * by_gid.mean);
+  EXPECT_LT(by_curve.max, by_gid.max);
+}
+
+TEST(MeshOrdering, VertexSpanOfASingleQuad) {
+  const auto mesh = soma_test::two_quads_and_a_triangle();
+  const auto r = soma::vertex_span_report(mesh, 2);
+  EXPECT_EQ(r.elements, 3);
+  EXPECT_EQ(r.max, 4);
+  EXPECT_NEAR(r.mean, (4.0 + 4.0 + 4.0) / 3.0, 1e-12);
+  EXPECT_EQ(soma::vertex_span_report(mesh, 3).elements, 0);
+}
+
+TEST(MeshOrdering, TypeBlocksStayTogetherUnderTheCurve) {
+  soma::MeshBuilder b(2);
+  std::vector<GO> vg;
+  std::vector<Real> xyz;
+  for (int j = 0; j < 3; ++j) {
+    for (int i = 0; i < 3; ++i) {
+      vg.push_back(1 + i + 3 * j);
+      xyz.insert(xyz.end(), {static_cast<Real>(i), static_cast<Real>(j), 0.0});
+    }
+  }
+  b.add_vertices(vg, xyz);
+  b.add_elements(Topology::quad, std::vector<GO>{1, 2}, std::vector<GO>{1, 2, 5, 4, 2, 3, 6, 5});
+  b.add_elements(Topology::tri, std::vector<GO>{3, 4, 5}, std::vector<GO>{4, 5, 8, 5, 6, 9, 4, 8, 7});
+  const auto mesh = std::move(b).build(Ordering::type_major_sfc);
+  ASSERT_EQ(mesh.segments(2).size(), 2u);
+  EXPECT_EQ(mesh.segments(2)[0].topology, Topology::tri);
+  EXPECT_EQ(mesh.segments(2)[0].size(), 3);
+  EXPECT_EQ(mesh.segments(2)[1].topology, Topology::quad);
+}

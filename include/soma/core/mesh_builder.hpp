@@ -27,10 +27,13 @@ class MeshBuilder {
   void add_polygons(std::span<const GO> gids, std::span<const Offset> offsets,
                     std::span<const GO> vertex_gids);
 
-  // Sorts every dimension by (topology, arity, gid) and translates connectivity
-  // to local ids. Element gids are identities within a dimension: two elements
-  // of one dimension may not share a gid, whatever their topology. Only
-  // Ordering::file is implemented; other orderings throw.
+  // Orders every dimension and translates connectivity to local ids.
+  //   Ordering::file            elements (topology, arity, gid); vertices by gid
+  //   Ordering::type_major_sfc  elements (topology, arity, hilbert key of the
+  //                             centroid, gid); vertices (hilbert key, gid)
+  // The key uses one box, that of the vertices, for every dimension. Element
+  // gids are identities within a dimension: two elements of one dimension may
+  // not share a gid, whatever their topology. Ordering::tiled throws.
   HostMesh build(Ordering ordering = default_ordering) &&;
 
  private:
