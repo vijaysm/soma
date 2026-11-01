@@ -80,6 +80,7 @@ soma_add_test(test_mesh_domains SOURCES unit/test_mesh_domains.cpp)
 soma_add_test(test_box_mesh SOURCES unit/test_box_mesh.cpp)
 soma_add_test(test_box_mesh_ordering SOURCES unit/test_box_mesh_ordering.cpp)
 soma_add_test(test_adjacency_store SOURCES unit/test_adjacency_store.cpp)
+soma_add_test(test_transpose SOURCES unit/test_transpose.cpp)
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   find_package(MOAB REQUIRED)
