@@ -68,6 +68,10 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   and `CELL_DATA`. Subset, stale and uncommitted fields, and
   `knife` and `polyhedron` elements, are rejected. Output goes through a temporary file and a
   rename, and is byte-for-byte deterministic.
+- The `write_vtk` overloads gained a trailing `VtkWriteOptions` parameter. Calls compile
+  unchanged, but taking the address of an overload with its old signature no longer does.
+- `i8` fields are written as `signed_char` in version 5.1, so a file `read_vtk` read with `char`
+  or `signed_char` arrays writes back. Version 3.0 still rejects them: widen them to `i32`.
 - The temporary file has a unique name next to the target and is created exclusively, so an
   existing `<path>.tmp` or a symlink there is never touched and concurrent writers do not
   collide. The target is replaced by a new file whose mode comes from the umask; nothing is

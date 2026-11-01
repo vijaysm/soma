@@ -29,7 +29,8 @@
 // Arrays follow the order of the selection. Value types f64, f32, i32, u8 and
 // u32 map to double, float, int, unsigned_char and unsigned_int; i64 and u64 as
 // above (`long` and `unsigned_long` are 64-bit on LP64 platforms). i8 is
-// rejected by choice, not for want of a name: widen it to i32 to write it.
+// `signed_char` in version 5.1, which VTK 9 reads; version 3.0 rejects it by
+// choice: widen it to i32 or write version 5.1.
 // Doubles and floats are written in the shortest form that reads back bitwise
 // equal. A NaN, an infinity or a subnormal value, in a field or in the
 // coordinates, throws std::invalid_argument: legacy VTK readers cannot read them.
