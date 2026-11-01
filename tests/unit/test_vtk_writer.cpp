@@ -856,6 +856,25 @@ TEST_F(VtkFiles, NonFiniteAndSubnormalCoordinatesAreRejected) {
   }
 }
 
+TEST(VtkLimits, CountsAndIdsMustFitA32BitInt) {
+  constexpr std::int64_t most = std::numeric_limits<std::int32_t>::max();
+  EXPECT_NO_THROW(soma::detail::check_vtk_int32(most, most, most));
+  EXPECT_NO_THROW(soma::detail::check_vtk_int32(0, -1, 0));
+  const auto expect_too_large = [](std::int64_t n, std::int64_t id, std::int64_t size,
+                                   const std::string& needle) {
+    try {
+      soma::detail::check_vtk_int32(n, id, size);
+      ADD_FAILURE() << "expected std::length_error for " << needle;
+    } catch (const std::length_error& e) {
+      EXPECT_NE(std::string(e.what()).find(needle), std::string::npos) << e.what();
+      EXPECT_NE(std::string(e.what()).find("2147483648"), std::string::npos) << e.what();
+    }
+  };
+  expect_too_large(most + 1, 0, 0, "number of points");
+  expect_too_large(0, most + 1, 0, "largest connectivity id");
+  expect_too_large(0, 0, most + 1, "CELLS size");
+}
+
 TEST_F(VtkFiles, ArraysFollowTheOrderOfTheSelection) {
   auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
   for (const char* n : {"a", "b", "c", "d", "e", "f"}) mesh.fields().add_tag<double>(n, 0, 1);

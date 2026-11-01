@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -305,6 +306,20 @@ void check_reals(const V& v, std::size_t rows, std::size_t ncomp, const std::str
   }
 }
 
+void check_ids(const HostMesh& mesh, const Contents& contents) {
+  const auto nc = static_cast<std::size_t>(mesh.count(contents.dim));
+  std::int64_t largest = -1;
+  std::int64_t size = 0;
+  if (nc > 0) {
+    const auto offsets = mesh.conn_offsets(contents.dim);
+    const auto conn = mesh.conn(contents.dim);
+    const auto end = static_cast<std::size_t>(offsets(nc));
+    for (std::size_t k = 0; k < end; ++k) largest = std::max<std::int64_t>(largest, conn(k));
+    size = static_cast<std::int64_t>(nc) + static_cast<std::int64_t>(offsets(nc));
+  }
+  detail::check_vtk_int32(mesh.count(0), largest, size);
+}
+
 void check_values(const HostMesh& mesh, const Contents& contents) {
   check_reals(mesh.coords(), static_cast<std::size_t>(mesh.count(0)), 3, "coordinates");
   for (const auto* arrays : {&contents.point_arrays, &contents.cell_arrays}) {
@@ -481,6 +496,7 @@ class Temporary {
 
 void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const VtkField> fields) {
   const Contents contents = collect_contents(mesh, fields);
+  check_ids(mesh, contents);
   check_values(mesh, contents);
 
   Temporary file(path);
@@ -488,6 +504,21 @@ void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const VtkFi
   emit(out, mesh, contents);
   file.close();
   file.commit();
+}
+
+void detail::check_vtk_int32(std::int64_t npoints, std::int64_t largest_id,
+                             std::int64_t cells_size) {
+  constexpr std::int64_t most = std::numeric_limits<std::int32_t>::max();
+  const auto check = [](std::int64_t v, const char* what) {
+    if (v > most) {
+      throw std::length_error("write_vtk: " + std::string(what) + " is " + std::to_string(v) +
+                              ", more than the 32-bit int (" + std::to_string(most) +
+                              ") a legacy VTK reader uses");
+    }
+  };
+  check(npoints, "the number of points");
+  check(largest_id, "the largest connectivity id");
+  check(cells_size, "the CELLS size (cells plus vertex references)");
 }
 
 void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const std::string> fields) {

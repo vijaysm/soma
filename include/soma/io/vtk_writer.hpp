@@ -34,8 +34,11 @@
 // existing target is replaced by a new file: its mode comes from the umask, and
 // a symlink at `path` is replaced, not followed. Nothing is fsync'ed, so the
 // file is not promised to survive a power loss. I/O failures throw
-// std::runtime_error naming the path and the cause.
+// std::runtime_error naming the path and the cause. A mesh with more than
+// INT32_MAX points, or a CELLS section of more than INT32_MAX integers, throws
+// std::length_error: version 3.0 readers read those as int.
 
+#include <cstdint>
 #include <filesystem>
 #include <optional>
 #include <span>
@@ -57,6 +60,15 @@ void write_vtk(const HostMesh& mesh, const std::filesystem::path& path,
 
 void write_vtk(const HostMesh& mesh, const std::filesystem::path& path,
                std::span<const VtkField> fields);
+
+namespace detail {
+
+// Throws std::length_error unless the point count, the largest connectivity id
+// and the CELLS size (cells plus vertex references) each fit the 32-bit int
+// that a version 3.0 reader uses for them.
+void check_vtk_int32(std::int64_t npoints, std::int64_t largest_id, std::int64_t cells_size);
+
+}  // namespace detail
 
 }  // namespace soma
 
