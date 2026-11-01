@@ -61,6 +61,19 @@ All notable changes to SOMA are recorded here. The format follows
   `FIELD` arrays in `POINT_DATA` and `CELL_DATA`. Subset, stale and uncommitted fields, and
   `knife` and `polyhedron` elements, are rejected. Output goes through a temporary file and a
   rename, and is byte-for-byte deterministic.
+- The temporary file has a unique name next to the target and is created exclusively, so an
+  existing `<path>.tmp` or a symlink there is never touched and concurrent writers do not
+  collide. The target is replaced by a new file whose mode comes from the umask; nothing is
+  fsync'ed. I/O errors name the path and the cause.
+- NaN, infinite and subnormal values, in fields or coordinates, throw `std::invalid_argument`
+  before any file is touched; VTK readers stop at them.
+- More than `INT32_MAX` points, or a `CELLS` section of more than `INT32_MAX` integers, throws
+  `std::length_error`: version 3.0 readers read those counts as `int`.
+- A mesh whose Views do not match its counts (a mirror without coordinates or vertices) throws
+  `std::invalid_argument` instead of reading past the end of a View.
+- Wedges follow the VTK 9.7 vertex order. Older readers (ParaView 6.1 and earlier) show them
+  with inverted orientation.
+- Needs floating-point `std::to_chars` (libstdc++ 11+, libc++ 14+, macOS 13.3+).
 
 ### Testing
 
