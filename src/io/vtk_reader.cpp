@@ -19,6 +19,7 @@
 #include <string_view>
 #include <system_error>
 #include <type_traits>
+#include <unordered_set>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -370,11 +371,26 @@ bool is_skipped_type(std::string_view vtk) {
   return t == "string" || t == "variant";
 }
 
+// The most arrays one section (dataset field data, POINT_DATA or CELL_DATA)
+// may hold, skipped ones included.
+constexpr std::size_t max_arrays = 1024;
+
+// Adds `more` to the `count` arrays of a section, or throws past max_arrays.
+void count_arrays(Lexer& lex, std::size_t& count, std::size_t more, const char* section) {
+  if (more > max_arrays - count) {
+    lex.fail(std::string(section) + " holds more than " + std::to_string(max_arrays) +
+             " arrays, the most the reader takes in one section");
+  }
+  count += more;
+}
+
 // FIELD name n, then n arrays `name ncomp ntuples type` and their values.
 // `rows` is the tuple count every array must have, or nullopt for dataset field data.
-std::vector<Array> read_field(Lexer& lex, std::optional<std::size_t> rows, const char* section) {
+std::vector<Array> read_field(Lexer& lex, std::optional<std::size_t> rows, const char* section,
+                              std::size_t& count) {
   lex.next("the FIELD name");
   const std::size_t narrays = lex.count("the FIELD array count");
+  count_arrays(lex, count, narrays, section);
   std::vector<Array> out;
   for (std::size_t k = 0; k < narrays; ++k) {
     const std::string_view raw = lex.next("an array name");
@@ -630,13 +646,21 @@ Array read_ids(Lexer& lex, const std::string& name, std::string_view type, std::
 // The attribute arrays of one POINT_DATA or CELL_DATA section.
 std::vector<Array> read_attributes(Lexer& lex, std::size_t rows, const char* section) {
   std::vector<Array> out;
+  std::size_t count = 0;
+  std::unordered_set<std::string> names;
+  const auto add = [&](Array a) {
+    if (!names.insert(a.name).second) {
+      lex.fail_at(a.line, "the array name " + in_quotes(a.name) + " appears twice in " + section);
+    }
+    out.push_back(std::move(a));
+  };
   while (!lex.at_end()) {
     const std::string key = lower(lex.peek());
     if (key == "point_data" || key == "cell_data") break;
     lex.next("a keyword");
     const std::size_t key_line = lex.line();
     if (key == "field") {
-      for (Array& a : read_field(lex, rows, section)) out.push_back(std::move(a));
+      for (Array& a : read_field(lex, rows, section, count)) add(std::move(a));
     } else if (key == "metadata") {
       lex.skip_metadata();
     } else if (key == "lookup_table") {
@@ -650,6 +674,7 @@ std::vector<Array> read_attributes(Lexer& lex, std::size_t rows, const char* sec
       for (std::size_t i = 0; i < rows * n; ++i) lex.next("a COLOR_SCALARS value");
     } else if (key == "scalars" || key == "vectors" || key == "normals" || key == "tensors" ||
                key == "tensors6" || key == "texture_coordinates") {
+      count_arrays(lex, count, 1, section);
       const std::string name = decode_name(lex, lex.next(upper(key) + " name"));
       const std::string of = upper(key) + " " + in_quotes(name) + " of " + section;
       int ncomp = key == "vectors" || key == "normals" ? 3
@@ -666,8 +691,9 @@ std::vector<Array> read_attributes(Lexer& lex, std::size_t rows, const char* sec
         lex.expect("LOOKUP_TABLE");
         lex.next("the LOOKUP_TABLE name of " + of);
       }
-      out.push_back(read_values(lex, name, vt, ncomp, rows, of));
+      add(read_values(lex, name, vt, ncomp, rows, of));
     } else if (key == "global_ids" || key == "pedigree_ids") {
+      count_arrays(lex, count, 1, section);
       const std::string name = decode_name(lex, lex.next(upper(key) + " name"));
       const std::string of = upper(key) + " " + in_quotes(name) + " of " + section;
       const std::string_view type = lex.next("the value type of " + of);
@@ -675,19 +701,11 @@ std::vector<Array> read_attributes(Lexer& lex, std::size_t rows, const char* sec
         lex.skip_lines(rows, 1, "a value of " + of);
         lex.skip_metadata_if_present();
       } else {
-        out.push_back(read_ids(lex, name, type, rows, of));
+        add(read_ids(lex, name, type, rows, of));
       }
     } else {
       lex.fail_at(key_line,
                   "the section " + in_quotes(key) + " in " + section + " is not supported");
-    }
-  }
-  for (std::size_t i = 0; i < out.size(); ++i) {
-    for (std::size_t j = 0; j < i; ++j) {
-      if (out[i].name == out[j].name) {
-        lex.fail_at(out[i].line,
-                    "the array name " + in_quotes(out[i].name) + " appears twice in " + section);
-      }
     }
   }
   return out;
@@ -726,10 +744,11 @@ Grid parse(Lexer& lex) {
 
   bool have_point_data = false;
   bool have_cell_data = false;
+  std::size_t dataset_arrays = 0;
   while (!lex.at_end()) {
     const std::string key = lower(lex.next("a keyword"));
     if (key == "field" && !have_point_data && !have_cell_data) {
-      read_field(lex, std::nullopt, "the dataset");
+      read_field(lex, std::nullopt, "the dataset", dataset_arrays);
     } else if (key == "points" && !have_point_data && !have_cell_data) {
       read_points(lex, g);
     } else if (key == "cells" && !have_point_data && !have_cell_data) {

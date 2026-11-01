@@ -1124,3 +1124,43 @@ TEST_F(VtkRead, IdsOfEveryIntegerTypeBecomeI64) {
   EXPECT_FALSE(skipped.fields().contains("p"));
   soma_test::expect_field<std::int32_t>(skipped, "c", 2, 1, {7, 8});
 }
+
+namespace soma_test {
+
+// base_file with `n` one-value int arrays in CELL_DATA, as SCALARS (`scalars`) or as
+// one FIELD; their names are a0, a1, ...
+std::string many_arrays(std::size_t n, bool scalars) {
+  const std::string& t = base_file;
+  std::string text = t.substr(0, t.find("FIELD"));
+  if (!scalars) text += "FIELD FieldData " + std::to_string(n) + "\n";
+  for (std::size_t k = 0; k < n; ++k) {
+    const std::string name = "a" + std::to_string(k);
+    text += scalars ? "SCALARS " + name + " int\nLOOKUP_TABLE default\n" : name + " 1 2 int\n";
+    text += std::to_string(k) + " 1\n";
+  }
+  return text;
+}
+
+}  // namespace soma_test
+
+TEST_F(VtkRead, ASectionHoldsAtMost1024Arrays) {
+  for (const bool scalars : {false, true}) {
+    SCOPED_TRACE(scalars ? "SCALARS" : "FIELD");
+    const auto mesh = read_text(soma_test::many_arrays(1024, scalars));
+    EXPECT_EQ(mesh.fields().list().size(), 1024u);
+    soma_test::expect_field<std::int32_t>(mesh, "a1023", 2, 1, {1023, 1});
+  }
+  expect_rejected(soma_test::many_arrays(1025, false),
+                  {"line 17", "CELL_DATA holds more than 1024 arrays"});
+  expect_rejected(soma_test::many_arrays(1025, true),
+                  {"line " + std::to_string(17 + 3 * 1024),
+                   "CELL_DATA holds more than 1024 arrays"});
+  const std::string& t = soma_test::base_file;
+  expect_rejected(soma_test::replaced(t, "POINTS 4 double",
+                                      "FIELD f 1025\nPOINTS 4 double"),
+                  {"line 5", "the dataset holds more than 1024 arrays"});
+  expect_rejected(soma_test::replaced(t, "FIELD FieldData 1\n",
+                                      "SCALARS c int\nLOOKUP_TABLE default\n1 2\n"
+                                      "FIELD FieldData 1\n"),
+                  {"line 21", "the array name 'c' appears twice in CELL_DATA"});
+}
