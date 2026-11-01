@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <utility>
 
 #include <Kokkos_Core.hpp>
@@ -169,6 +170,10 @@ class Mesh {
 
   template <class Dst>
   Mesh<Dst> copy_to(const TransferOptions& o, bool alias) const {
+    if (!o.dims[0] && (o.dims[1] || o.dims[2] || o.dims[3] || o.coordinates)) {
+      throw std::invalid_argument(
+          "TransferOptions: element dimensions and coordinates need dims[0] (the vertices)");
+    }
     Mesh<Dst> out;
     out.dim_ = dim_;
     out.epoch_ = epoch_;

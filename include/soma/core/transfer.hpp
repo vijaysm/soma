@@ -11,7 +11,9 @@
 namespace soma {
 
 // What a mirror copies. The default is lean: all topology dimensions and
-// coordinates, no fields. Adjacency selection is not an option yet.
+// coordinates, no fields. Adjacency selection is not an option yet. Element
+// connectivity and coordinates refer to vertices, so keeping either without
+// dims[0] is rejected with std::invalid_argument.
 struct TransferOptions {
   std::array<bool, 4> dims{true, true, true, true};
   bool coordinates = true;

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <stdexcept>
 #include <type_traits>
 #include <utility>
 
@@ -161,4 +162,25 @@ TEST(MeshSemantics, ViewDoesNotOwn) {
   const auto v = h.view();
   EXPECT_EQ(h.coords().use_count(), before);
   EXPECT_EQ(v.count(2), 3);
+}
+
+TEST(MeshSemantics, ATransferThatDropsVerticesKeepsNothingThatNeedsThem) {
+  const auto b = soma_test::two_quads_and_a_triangle();
+  soma::TransferOptions elements;
+  elements.dims = {false, false, true, false};
+  elements.coordinates = false;
+  EXPECT_THROW((void)b.mirror<HostMem>(elements), std::invalid_argument);
+  EXPECT_THROW((void)b.mirror_view<HostMem>(elements), std::invalid_argument);
+  EXPECT_THROW((void)b.mirror<DevMem>(elements), std::invalid_argument);
+  soma::TransferOptions coords;
+  coords.dims = {false, false, false, false};
+  EXPECT_THROW((void)b.mirror<HostMem>(coords), std::invalid_argument);
+  EXPECT_THROW((void)b.mirror_view<DevMem>(coords), std::invalid_argument);
+  soma::TransferOptions nothing;
+  nothing.dims = {false, false, false, false};
+  nothing.coordinates = false;
+  const auto m = b.mirror<HostMem>(nothing);
+  EXPECT_EQ(m.count(0), 0);
+  EXPECT_EQ(m.count(2), 0);
+  EXPECT_NO_THROW((void)b.clone());
 }
