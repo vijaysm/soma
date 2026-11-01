@@ -56,12 +56,14 @@ class Mesh {
  public:
   using memory_space = MemSpace;
 
-  Mesh() = default;
+  // An empty mesh has zero entities of every dimension, as a clone of it does.
+  // Handing empty counts to the registry allocates nothing.
+  Mesh() noexcept { attach_fields(); }
   Mesh(const Mesh&) = delete;
   Mesh& operator=(const Mesh&) = delete;
   // A View "move" leaves the source referencing the data, so move by swapping
   // with an empty mesh; the moved-from mesh is genuinely empty.
-  Mesh(Mesh&& other) noexcept { swap(other); }
+  Mesh(Mesh&& other) noexcept : Mesh() { swap(other); }
   Mesh& operator=(Mesh&& other) noexcept {
     Mesh tmp(std::move(other));
     swap(tmp);

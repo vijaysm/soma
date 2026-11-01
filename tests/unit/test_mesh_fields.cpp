@@ -29,6 +29,22 @@ TEST(MeshFields, MeshStartsAtEpochOneAndTheRegistryAgrees) {
   EXPECT_TRUE(mesh.fields().has_entities(2));
 }
 
+// An empty mesh has zero entities of every dimension, whether it was default
+// constructed, moved from or cloned, so add_tag behaves the same on all three.
+TEST(MeshFields, AnEmptyMeshTakesTagsLikeItsClone) {
+  soma::HostMesh fresh;
+  auto source = soma_test::two_quads_and_a_triangle();
+  const soma::HostMesh taken = std::move(source);
+  auto copy = fresh.clone();
+  for (soma::HostMesh* m : {&fresh, &source, &copy}) {  // NOLINT(bugprone-use-after-move)
+    for (int d = 0; d < 4; ++d) EXPECT_TRUE(m->fields().has_entities(d)) << d;
+    const auto t = m->fields().add_tag<double>("t", 0, 1);
+    EXPECT_EQ(t.rows(), 0);
+    EXPECT_EQ(t.domain(), soma::Domain<HostMem>::all(0, 0, 1));
+  }
+  EXPECT_EQ(taken.count(2), 3);
+}
+
 TEST(MeshFields, AddTagThroughTheMeshUsesCountsAndGlobalIds) {
   auto mesh = soma_test::two_quads_and_a_triangle();
   auto t = mesh.fields().add_tag<double>("temperature", 0, 1);
