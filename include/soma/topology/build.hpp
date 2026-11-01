@@ -127,8 +127,8 @@ struct DefaultExec {
   using type = std::conditional_t<
       std::is_same_v<typename Kokkos::DefaultExecutionSpace::memory_space, MemSpace>,
       Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>;
-  static_assert(std::is_same_v<typename type::memory_space, MemSpace>,
-                "build_adjacencies: no default execution space for this memory space");
+  // False for spaces such as CudaUVMSpace or CudaHostPinnedSpace.
+  static constexpr bool available = std::is_same_v<typename type::memory_space, MemSpace>;
 };
 
 }  // namespace topology::detail
@@ -211,14 +211,26 @@ void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRe
 
 template <class MemSpace>
 void build_adjacencies(Mesh<MemSpace>& mesh, AdjacencyRequest req) {
-  using Exec = typename topology::detail::DefaultExec<MemSpace>::type;
-  build_adjacencies(mesh, req, Exec{});
+  using Default = topology::detail::DefaultExec<MemSpace>;
+  static_assert(Default::available,
+                "build_adjacencies: no default execution space for this memory space; pass one");
+  build_adjacencies(mesh, req, typename Default::type{});
 }
 
 namespace detail {
+// Every Mesh::mirror instantiates this, so a space without a default execution
+// space must compile; asking it to rebuild is a run-time error.
 template <class MemSpace>
 void rebuild_adjacencies(Mesh<MemSpace>& mesh, AdjacencyRequest req) {
-  build_adjacencies(mesh, req);
+  if constexpr (topology::detail::DefaultExec<MemSpace>::available) {
+    build_adjacencies(mesh, req);
+  } else {
+    (void)mesh;
+    (void)req;
+    throw std::invalid_argument(
+        "TransferOptions: this memory space has no default execution space to rebuild "
+        "adjacencies in; copy them instead");
+  }
 }
 }  // namespace detail
 

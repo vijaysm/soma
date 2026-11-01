@@ -25,6 +25,7 @@ using soma::Topology;
 
 using DevExec = Kokkos::DefaultExecutionSpace;
 using DevMem = DevExec::memory_space;
+using HostMem = Kokkos::HostSpace;
 using HostExec = Kokkos::DefaultHostExecutionSpace;
 
 namespace soma_test {
@@ -257,3 +258,13 @@ TEST(BuildAdjacencies, DerivingWithoutElementsIsRejected) {
   EXPECT_EQ(m.count(2), host.count(2));
   EXPECT_TRUE(m.has_adjacency(0, 2));
 }
+
+namespace soma_test {
+struct NoExecutionSpace {};
+}  // namespace soma_test
+
+// Mesh::mirror<Dst> instantiates the rebuild path for every Dst, so a space
+// without a default execution space must still compile (as CudaUVMSpace).
+static_assert(soma::topology::detail::DefaultExec<HostMem>::available);
+static_assert(soma::topology::detail::DefaultExec<DevMem>::available);
+static_assert(!soma::topology::detail::DefaultExec<soma_test::NoExecutionSpace>::available);
