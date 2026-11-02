@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <algorithm>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -177,6 +178,78 @@ TEST(MeshBuilder, UnknownVertexGidNamesTheGid) {
     FAIL() << "expected std::invalid_argument";
   } catch (const std::invalid_argument& e) {
     EXPECT_NE(std::string(e.what()).find("77"), std::string::npos) << e.what();
+  }
+}
+
+TEST(MeshBuilder, AGidBelowTheSmallestVertexGidIsUnknown) {
+  soma::MeshBuilder b(2);
+  b.add_vertices(std::vector<GO>{1, 2, 3}, std::vector<soma::Real>(9, 0.0));
+  b.add_elements(Topology::tri, std::vector<GO>{9}, std::vector<GO>{1, 0, 3});
+  try {
+    std::move(b).build();
+    FAIL() << "expected std::invalid_argument";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_NE(std::string(e.what()).find("unknown vertex gid 0"), std::string::npos) << e.what();
+  }
+}
+
+// Contiguous vertex gids are looked up by index, others by search; both must
+// give the same mesh.
+TEST(MeshBuilder, ContiguousAndScatteredGidsGiveTheSameConnectivity) {
+  const auto build = [](GO scale) {
+    soma::MeshBuilder b(2);
+    std::vector<GO> vg;
+    for (GO g = 1; g <= 6; ++g) vg.push_back(g * scale);
+    b.add_vertices(vg, std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 1, 0, 1, 1, 0, 2, 1, 0});
+    const std::vector<GO> quads{1, 2, 5, 4, 2, 3, 6, 5};
+    std::vector<GO> conn;
+    for (const GO g : quads) conn.push_back(g * scale);
+    b.add_elements(Topology::quad, std::vector<GO>{8, 7}, conn);
+    return std::move(b).build(soma::Ordering::file);
+  };
+  const auto a = build(1);
+  const auto s = build(10);
+  ASSERT_EQ(a.count(2), 2);
+  ASSERT_EQ(s.count(2), 2);
+  const std::vector<LO> want{1, 2, 5, 4, 0, 1, 4, 3};
+  for (std::size_t k = 0; k < want.size(); ++k) {
+    EXPECT_EQ(a.conn(2)(k), want[k]) << k;
+    EXPECT_EQ(s.conn(2)(k), want[k]) << k;
+  }
+}
+
+// Sorted input skips the sorts; the mesh must not depend on it.
+TEST(MeshBuilder, InputInAnyOrderGivesTheSameMesh) {
+  const std::vector<soma::Real> xyz{0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 1, 0, 1, 1, 0, 2, 1, 0};
+  const auto build = [&](bool reversed, soma::Ordering ordering) {
+    soma::MeshBuilder b(2);
+    std::vector<GO> vg{1, 2, 3, 4, 5, 6};
+    std::vector<soma::Real> v = xyz;
+    if (reversed) {
+      std::reverse(vg.begin(), vg.end());
+      for (std::size_t i = 0; i < 3; ++i) {
+        for (std::size_t c = 0; c < 3; ++c) std::swap(v[3 * i + c], v[3 * (5 - i) + c]);
+      }
+    }
+    b.add_vertices(vg, v);
+    if (reversed) {
+      b.add_elements(Topology::tri, std::vector<GO>{12, 11}, std::vector<GO>{3, 6, 5, 2, 3, 5});
+      b.add_elements(Topology::quad, std::vector<GO>{10}, std::vector<GO>{1, 2, 5, 4});
+    } else {
+      b.add_elements(Topology::quad, std::vector<GO>{10}, std::vector<GO>{1, 2, 5, 4});
+      b.add_elements(Topology::tri, std::vector<GO>{11, 12}, std::vector<GO>{2, 3, 5, 3, 6, 5});
+    }
+    return std::move(b).build(ordering);
+  };
+  for (const auto ordering : {soma::Ordering::file, soma::Ordering::type_major_sfc}) {
+    const auto a = build(false, ordering);
+    const auto r = build(true, ordering);
+    for (int d : {0, 2}) {
+      ASSERT_EQ(a.count(d), r.count(d));
+      for (LO i = 0; i < a.count(d); ++i) EXPECT_EQ(a.gid(d)(i), r.gid(d)(i)) << "dim " << d << " entity " << i;
+    }
+    for (std::size_t k = 0; k < a.conn(2).extent(0); ++k) EXPECT_EQ(a.conn(2)(k), r.conn(2)(k)) << k;
+    for (LO i = 0; i < a.count(0); ++i) EXPECT_EQ(a.coords()(i, 0), r.coords()(i, 0)) << i;
   }
 }
 

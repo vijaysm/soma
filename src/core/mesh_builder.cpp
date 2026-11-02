@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <numeric>
 #include <stdexcept>
@@ -108,6 +109,12 @@ struct Keys {
   }
 };
 
+// Input in file order is usually sorted already; checking is linear.
+template <class It, class Less>
+void sort_unless_sorted(It first, It last, Less less) {
+  if (!std::is_sorted(first, last, less)) std::sort(first, last, less);
+}
+
 Keys make_keys(Ordering ordering, const std::vector<Real>& xyz) {
   Keys k;
   if (ordering != Ordering::type_major_sfc || xyz.empty()) return k;
@@ -142,17 +149,9 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
   }
   std::vector<std::size_t> vorder(nv);
   std::iota(vorder.begin(), vorder.end(), std::size_t{0});
-  std::sort(vorder.begin(), vorder.end(), [&](std::size_t a, std::size_t b) {
+  sort_unless_sorted(vorder.begin(), vorder.end(), [&](std::size_t a, std::size_t b) {
     return std::tuple(vkey[a], vertex_gids_[a]) < std::tuple(vkey[b], vertex_gids_[b]);
   });
-  {
-    std::vector<GO> sorted = vertex_gids_;
-    std::sort(sorted.begin(), sorted.end());
-    const auto dup = std::adjacent_find(sorted.begin(), sorted.end());
-    if (dup != sorted.end()) {
-      throw std::invalid_argument("duplicate vertex gid " + std::to_string(*dup));
-    }
-  }
   std::vector<std::pair<GO, LO>> local_of(nv);
   mesh.coords_ = CoordView<Kokkos::HostSpace>("soma::mesh::coords", nv);
   auto& v = mesh.ents_[0];
@@ -164,13 +163,30 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     local_of[i] = {vertex_gids_[src], static_cast<LO>(i)};
     for (std::size_t k = 0; k < 3; ++k) mesh.coords_(i, k) = xyz_[3 * src + k];
   }
-  std::sort(local_of.begin(), local_of.end());
+  sort_unless_sorted(local_of.begin(), local_of.end(), std::less<>());
+  const auto dup = std::adjacent_find(local_of.begin(), local_of.end(),
+                                      [](const auto& a, const auto& b) { return a.first == b.first; });
+  if (dup != local_of.end()) {
+    throw std::invalid_argument("duplicate vertex gid " + std::to_string(dup->first));
+  }
+  // Unique gids that are also contiguous (file ids are) give a vertex's
+  // local id by indexing instead of a search.
+  std::vector<LO> dense_local;
+  const GO gmin = nv > 0 ? local_of.front().first : 0;
+  const GO gmax = nv > 0 ? local_of.back().first : -1;
+  if (nv > 0 && gmax - gmin == static_cast<GO>(nv) - 1) {
+    dense_local.resize(nv);
+    for (const auto& [g, l] : local_of) dense_local[static_cast<std::size_t>(g - gmin)] = l;
+  }
   const std::vector<Ownership> vown(nv, Ownership::interior);
   const std::vector<Topology> vtop(nv, Topology::vertex);
   const std::vector<std::uint16_t> var(nv, 1);
   v.segments = make_segments(vown, vtop, var);
 
   const auto find_vertex = [&](GO g) -> LO {
+    if (!dense_local.empty()) {
+      return g < gmin || g > gmax ? invalid_lo : dense_local[static_cast<std::size_t>(g - gmin)];
+    }
     const auto it = std::lower_bound(local_of.begin(), local_of.end(), std::pair<GO, LO>{g, 0});
     return (it == local_of.end() || it->first != g) ? invalid_lo : it->second;
   };
@@ -185,6 +201,11 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       std::size_t index;
     };
     std::vector<Rec> recs;
+    {
+      std::size_t n = 0;
+      for (const Block& blk : blocks_[d]) n += blk.gids.size();
+      recs.reserve(n);
+    }
     std::vector<std::vector<LO>> local(blocks_[d].size());  // per connectivity entry
     std::size_t entries = 0;
     for (std::size_t b = 0; b < blocks_[d].size(); ++b) {
@@ -196,7 +217,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
         const Offset first = blk.offsets[i];
         const Offset last = blk.offsets[i + 1];
         const auto arity = static_cast<std::uint16_t>(last - first);
-        const Real inv = arity > 0 ? Real{1} / static_cast<Real>(arity) : Real{0};
+        const Real inv = keys.active && arity > 0 ? Real{1} / static_cast<Real>(arity) : Real{0};
         for (Offset k = first; k < last; ++k) {
           const GO g = blk.vertex_gids[static_cast<std::size_t>(k)];
           const LO l = find_vertex(g);
@@ -206,6 +227,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
                                         std::to_string(blk.gids[i]));
           }
           local[b][static_cast<std::size_t>(k)] = l;
+          if (!keys.active) continue;
           const auto src = static_cast<std::size_t>(l);
           // Summing x / arity, not x, keeps centroids near the largest Real finite.
           for (std::size_t q = 0; q < 3; ++q) c[q] += mesh.coords_(src, q) * inv;
@@ -216,7 +238,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     {
       std::vector<std::size_t> by_gid(recs.size());
       std::iota(by_gid.begin(), by_gid.end(), std::size_t{0});
-      std::sort(by_gid.begin(), by_gid.end(), [&](std::size_t x, std::size_t y) {
+      sort_unless_sorted(by_gid.begin(), by_gid.end(), [&](std::size_t x, std::size_t y) {
         return std::tuple(recs[x].gid, recs[x].t, recs[x].arity) <
                std::tuple(recs[y].gid, recs[y].t, recs[y].arity);
       });
@@ -232,7 +254,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
         throw std::invalid_argument("duplicate element gid " + std::to_string(q.gid));
       }
     }
-    std::sort(recs.begin(), recs.end(), [](const Rec& x, const Rec& y) {
+    sort_unless_sorted(recs.begin(), recs.end(), [](const Rec& x, const Rec& y) {
       return std::tuple(x.t, x.arity, x.key, x.gid) < std::tuple(y.t, y.arity, y.key, y.gid);
     });
     auto& e = mesh.ents_[d];
