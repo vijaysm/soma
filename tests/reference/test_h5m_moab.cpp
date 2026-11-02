@@ -32,6 +32,7 @@
 #include <gtest/gtest.h>
 
 #include "h5m_writer.hpp"
+#include "mesh_text.hpp"
 #include "moab/CN.hpp"
 #include "moab/Core.hpp"
 #include "moab/Range.hpp"
@@ -746,6 +747,22 @@ TEST(H5mMoabFormat, ReadsASparseTagStoredDense) {
   }
 }
 
+// A file read by read_h5m and written by write_h5m reads back as the same
+// mesh: every MOAB-written kind of tag, set and entity survives.
+class H5mMoabWritten : public ::testing::TestWithParam<std::string> {};
+
+TEST_P(H5mMoabWritten, ReadsAsTheOriginal) {
+  const soma::HostMesh original = soma::read_h5m(path_of(GetParam()));
+  // write_h5m adds GLOBAL_ID to a mesh without one.
+  soma::HostMesh written = soma::read_h5m(path_of("written:" + GetParam()));
+  if (!original.fields().contains("GLOBAL_ID") && written.fields().contains("GLOBAL_ID")) {
+    for (const soma::FieldInfo& info : written.fields().list()) {
+      if (info.name == "GLOBAL_ID") written.fields().remove(info.id);
+    }
+  }
+  EXPECT_EQ(mesh_difference(written, original), "");
+}
+
 INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                          ::testing::Values("64bricks_1khex.h5m", "hex_2048.h5m", "hexes_mixed.h5m",
                                            "hybrid_3quad_1tri.h5m", "moab_i.h5m", "recMeshOcn128.h5m",
@@ -754,6 +771,16 @@ INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                                            "written:hexes_mixed.h5m", "written:hybrid_3quad_1tri.h5m",
                                            "written:moab_i.h5m", "written:recMeshOcn128.h5m",
                                            "written:poly_indices", "written:tag_kinds", "written:sets_kinds"),
+                         [](const auto& info) {
+                           std::string n = info.param;
+                           std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
+                           return n;
+                         });
+
+INSTANTIATE_TEST_SUITE_P(Files, H5mMoabWritten,
+                         ::testing::Values("64bricks_1khex.h5m", "hex_2048.h5m", "hexes_mixed.h5m",
+                                           "hybrid_3quad_1tri.h5m", "moab_i.h5m", "recMeshOcn128.h5m",
+                                           "tag_kinds", "poly_indices", "sets_kinds"),
                          [](const auto& info) {
                            std::string n = info.param;
                            std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
