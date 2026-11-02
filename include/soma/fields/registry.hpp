@@ -13,7 +13,10 @@
 // count, and a layout (the family key; the domain is not part of it). The
 // layout is in the key so that a per_entity field and a node field of one name
 // can coexist on the same entities, and the component count so that a
-// 1-component and a 3-component field of one name stay apart.
+// 1-component and a 3-component field of one name stay apart. A
+// variable-length field (VarField, added with add_var and fetched with
+// get_var) has component count 0 in its key, so it shares a family only with
+// variable-length fields; it takes no pending writes.
 // Members of a family must be disjoint: add() throws FieldOverlap otherwise
 // (the check is exact and only compares members that share a dimension). A
 // family resolves an entity to (member, row) through a per-dimension index that
@@ -63,6 +66,7 @@
 #include "soma/fields/overlap.hpp"
 #include "soma/fields/resolver.hpp"
 #include "soma/fields/space.hpp"
+#include "soma/fields/var_field.hpp"
 
 namespace soma {
 
@@ -193,68 +197,54 @@ class FieldRegistry {
   Field<T, MemSpace> add(std::string name, const Space<MemSpace>& space, int ncomp,
                          FieldOptions<T> options = {}) {
     if (ncomp < 1) throw std::invalid_argument("field '" + name + "': ncomp must be positive");
-    if (space.domain().empty()) {
-      throw std::invalid_argument("field '" + name + "': the domain has no blocks");
-    }
-    if (space.domain().epoch() != epoch_) throw StaleField(stale_message(name, space.domain()));
     check_values(name, options.default_value, ncomp, "default");
     check_values(name, options.global_value, ncomp, "global");
-
-    const DataType type = data_type_of<T>();
-    for (const Entry& e : entries_) {
-      if (e.alive && e.info.name == name && e.info.type == type && e.info.ncomp == ncomp &&
-          e.space == space) {
-        throw FieldClash("field '" + name + "' (" + type_text(type, ncomp) + ") on " +
-                         describe(space.layout()) + " with this domain already exists");
-      }
-    }
-
-    check_disjoint(name, type, ncomp, space);
-    check_pending(name, type, ncomp, space);
-    check_member_limit(name, type, ncomp, space);
+    check_new(name, data_type_of<T>(), ncomp, space);
 
     View2<T, MemSpace> data(
         Kokkos::view_alloc("soma::field::" + name, Kokkos::WithoutInitializing),
         static_cast<std::size_t>(space.rows()), static_cast<std::size_t>(ncomp));
     fill(data, options.default_value);
-
-    const FamilyId existing = find_family(name, type, ncomp, space.layout());
-    FieldInfo info;
-    info.id = static_cast<FieldId>(entries_.size());
-    info.family = existing != invalid_family ? existing : static_cast<FamilyId>(families_.size());
-    info.name = name;
-    info.type = type;
-    info.ncomp = ncomp;
-    info.layout = space.layout();
-    info.rows = space.rows();
-    for (int b = 0; b < space.domain().num_blocks(); ++b) {
-      info.dims.push_back(space.domain().info(b).dim);
-    }
-    std::optional<Family> created;
-    if (existing == invalid_family) {
-      created.emplace(FamilyKey{name, type, ncomp, space.layout()});
-      created->members.reserve(1);
-    }
-
-    Field<T, MemSpace> f(info.id, space, data, options.default_value.value_or(std::vector<T>{}),
+    Field<T, MemSpace> f(static_cast<FieldId>(entries_.size()), space, data,
+                         options.default_value.value_or(std::vector<T>{}),
                          options.global_value.value_or(std::vector<T>{}), 0, serial_);
-    Entry entry{std::move(info), space, std::any(f), true};
+    insert(std::move(name), data_type_of<T>(), ncomp, space, std::any(f));
+    return f;
+  }
 
-    // Everything that can throw has happened by now. Make room for the family
-    // first; entries_.push_back is then the only step left that can throw, and
-    // it does so before changing anything because Entry moves without throwing.
-    // The pushes after it cannot fail.
-    static_assert(std::is_nothrow_move_constructible_v<Entry>);
-    if (created) {
-      grow_for_one(families_);
-    } else {
-      grow_for_one(families_[existing].members);
+  // A variable-length field over a per_entity space: member r holds
+  // values[offsets[r] .. offsets[r + 1]). offsets has one entry more than the
+  // space has members, starts at 0, never decreases, and ends at
+  // values.size(). The default and the global value may have any length.
+  template <class T>
+  VarField<T, MemSpace> add_var(std::string name, const Space<MemSpace>& space, std::span<const Offset> offsets,
+                                std::span<const T> values, FieldOptions<T> options = {}) {
+    if (space.layout().kind != Layout::Kind::per_entity) {
+      throw std::invalid_argument("field '" + name + "': a variable-length field needs a per_entity layout");
     }
-    entries_.push_back(std::move(entry));
-    if (created) families_.push_back(std::move(*created));
-    Family& fam = families_[entries_.back().info.family];
-    fam.members.push_back(f.id());
-    ++fam.version;
+    check_new(name, data_type_of<T>(), 0, space);
+    const auto rows = static_cast<std::size_t>(space.rows());
+    if (offsets.size() != rows + 1) {
+      throw std::invalid_argument("field '" + name + "': " + std::to_string(offsets.size()) + " offsets for " +
+                                  std::to_string(rows) + " members; it needs one more than the members");
+    }
+    if (offsets.front() != 0 || !std::is_sorted(offsets.begin(), offsets.end()) ||
+        static_cast<std::size_t>(offsets.back()) != values.size()) {
+      throw std::invalid_argument("field '" + name + "': the offsets must start at 0, never decrease and end at " +
+                                  std::to_string(values.size()) + ", the number of values");
+    }
+    View1<Offset, Kokkos::HostSpace> ho(Kokkos::view_alloc("soma::field::" + name + "::offsets",
+                                                           Kokkos::WithoutInitializing),
+                                        offsets.size());
+    std::copy(offsets.begin(), offsets.end(), ho.data());
+    View1<T, Kokkos::HostSpace> hv(Kokkos::view_alloc("soma::field::" + name, Kokkos::WithoutInitializing),
+                                   values.size());
+    std::copy(values.begin(), values.end(), hv.data());
+    VarField<T, MemSpace> f(static_cast<FieldId>(entries_.size()), space,
+                            Kokkos::create_mirror_view_and_copy(MemSpace{}, ho),
+                            Kokkos::create_mirror_view_and_copy(MemSpace{}, hv), std::move(options.default_value),
+                            std::move(options.global_value), 0, serial_);
+    insert(std::move(name), data_type_of<T>(), 0, space, std::any(f));
     return f;
   }
 
@@ -277,37 +267,13 @@ class FieldRegistry {
   // the overloads below) or when T is not the stored value type.
   template <class T>
   Field<T, MemSpace> get(std::string_view name) const {
-    const Entry* found = nullptr;
-    for (const Entry& e : entries_) {
-      if (!e.alive || e.info.name != name) continue;
-      if (found != nullptr) {
-        throw std::invalid_argument("field name '" + std::string(name) +
-                                    "' is ambiguous; select by dimension, space, or id");
-      }
-      found = &e;
-    }
-    if (found == nullptr) throw std::out_of_range("no field named '" + std::string(name) + "'");
-    return fetch<T>(*found);
+    return fetch<T>(named(name));
   }
 
   // The field called `name` that has members on dimension `dim`.
   template <class T>
   Field<T, MemSpace> get(std::string_view name, int dim) const {
-    const Entry* found = nullptr;
-    for (const Entry& e : entries_) {
-      if (!e.alive || e.info.name != name) continue;
-      if (std::find(e.info.dims.begin(), e.info.dims.end(), dim) == e.info.dims.end()) continue;
-      if (found != nullptr) {
-        throw std::invalid_argument("field name '" + std::string(name) + "' has several fields on dimension " +
-                                    std::to_string(dim) + "; select by space or id");
-      }
-      found = &e;
-    }
-    if (found == nullptr) {
-      throw std::out_of_range("no field '" + std::string(name) + "' on dimension " +
-                              std::to_string(dim));
-    }
-    return fetch<T>(*found);
+    return fetch<T>(named(name, dim));
   }
 
   template <class T>
@@ -320,6 +286,21 @@ class FieldRegistry {
   template <class T>
   Field<T, MemSpace> get(FieldId id) const {
     return fetch<T>(entry(id));
+  }
+
+  // The variable-length fields, selected like get(). get() on one of them, or
+  // get_var() on a fixed-length field, throws std::invalid_argument.
+  template <class T>
+  VarField<T, MemSpace> get_var(std::string_view name) const {
+    return fetch_var<T>(named(name));
+  }
+  template <class T>
+  VarField<T, MemSpace> get_var(std::string_view name, int dim) const {
+    return fetch_var<T>(named(name, dim));
+  }
+  template <class T>
+  VarField<T, MemSpace> get_var(FieldId id) const {
+    return fetch_var<T>(entry(id));
   }
 
   bool contains(std::string_view name) const noexcept {
@@ -338,9 +319,11 @@ class FieldRegistry {
   // not). The mesh epoch is not judged here (get() does that).
   template <class T>
   bool is_current(const Field<T, MemSpace>& f) const noexcept {
-    if (f.id() >= entries_.size()) return false;
-    const Entry& e = entries_[f.id()];
-    return e.alive && f.owner() == serial_ && f.revision() == e.info.revision;
+    return current(f.id(), f.owner(), f.revision());
+  }
+  template <class T>
+  bool is_current(const VarField<T, MemSpace>& f) const noexcept {
+    return current(f.id(), f.owner(), f.revision());
   }
 
   // Revision of the field's current storage (the value Field::revision() has
@@ -449,6 +432,10 @@ class FieldRegistry {
   template <class T>
   void set_pending(FieldId id, LO lid, std::span<const T> values) {
     Entry& e = entry_mut(id);
+    if (e.info.variable) {
+      throw std::invalid_argument("field '" + e.info.name +
+                                  "' is variable-length; its lengths are fixed when it is added");
+    }
     if (e.info.type != data_type_of<T>()) {
       throw std::invalid_argument("field '" + e.info.name + "' written as the wrong value type (stored " +
                                   name(e.info.type) + ")");
@@ -590,17 +577,17 @@ class FieldRegistry {
         }
         out.space = sp->second;
         dispatch_data_type(e.info.type, [&]<class T>() {
-          const auto src = std::any_cast<const Field<T, MemSpace>&>(e.field);
-          View2<T, Dst> view;
-          if (alias) {
-            view = Kokkos::create_mirror_view_and_copy(Dst{}, src.view());
-          } else {
-            view = Kokkos::create_mirror(Kokkos::view_alloc(Dst{}, Kokkos::WithoutInitializing),
-                                         src.view());
-            Kokkos::deep_copy(view, src.view());
+          if (e.info.variable) {
+            const auto src = std::any_cast<const VarField<T, MemSpace>&>(e.field);
+            out.field = VarField<T, Dst>(src.id(), out.space,
+                                         copy_of<View1<const Offset, Dst>>(src.offsets(), alias),
+                                         copy_of<View1<T, Dst>>(src.values(), alias), src.default_value(),
+                                         src.global_value(), src.revision(), dst.serial_);
+            return;
           }
-          out.field = Field<T, Dst>(src.id(), out.space, view, src.default_value(),
-                                    src.global_value(), src.revision(), dst.serial_);
+          const auto src = std::any_cast<const Field<T, MemSpace>&>(e.field);
+          out.field = Field<T, Dst>(src.id(), out.space, copy_of<View2<T, Dst>>(src.view(), alias),
+                                    src.default_value(), src.global_value(), src.revision(), dst.serial_);
         });
         out.alive = true;
         built.families_[out.info.family].members.push_back(out.info.id);
@@ -659,7 +646,115 @@ class FieldRegistry {
   }
 
   static std::string type_text(DataType t, int ncomp) {
-    return std::string(name(t)) + "x" + std::to_string(ncomp);
+    return std::string(name(t)) + "x" + (ncomp == 0 ? std::string("*") : std::to_string(ncomp));
+  }
+
+  // A copy of src in Dst, or src itself when alias is set and Dst can use it.
+  template <class Out, class V>
+  static Out copy_of(const V& src, bool alias) {
+    if (alias) return Kokkos::create_mirror_view_and_copy(typename Out::memory_space{}, src);
+    auto out = Kokkos::create_mirror(Kokkos::view_alloc(typename Out::memory_space{}, Kokkos::WithoutInitializing),
+                                     src);
+    Kokkos::deep_copy(out, src);
+    return out;
+  }
+
+  // Throws what add() and add_var() throw for a field that cannot join the
+  // registry: no blocks, a stale domain, a clash, an overlap with its family,
+  // or too many members. Nothing is modified.
+  void check_new(const std::string& name, DataType type, int ncomp, const Space<MemSpace>& space) const {
+    if (space.domain().empty()) {
+      throw std::invalid_argument("field '" + name + "': the domain has no blocks");
+    }
+    if (space.domain().epoch() != epoch_) throw StaleField(stale_message(name, space.domain()));
+    for (const Entry& e : entries_) {
+      if (e.alive && e.info.name == name && e.info.type == type && e.info.ncomp == ncomp &&
+          e.space == space) {
+        throw FieldClash("field '" + name + "' (" + type_text(type, ncomp) + ") on " +
+                         describe(space.layout()) + " with this domain already exists");
+      }
+    }
+    check_disjoint(name, type, ncomp, space);
+    check_pending(name, type, ncomp, space);
+    check_member_limit(name, type, ncomp, space);
+  }
+
+  // Adds the checked field f (a Field or VarField with the next id), joining
+  // or creating its family. Nothing changes when it throws.
+  void insert(std::string name, DataType type, int ncomp, const Space<MemSpace>& space, std::any f) {
+    const FamilyId existing = find_family(name, type, ncomp, space.layout());
+    FieldInfo info;
+    info.id = static_cast<FieldId>(entries_.size());
+    info.family = existing != invalid_family ? existing : static_cast<FamilyId>(families_.size());
+    info.name = std::move(name);
+    info.type = type;
+    info.ncomp = ncomp;
+    info.variable = ncomp == 0;
+    info.layout = space.layout();
+    info.rows = space.rows();
+    for (int b = 0; b < space.domain().num_blocks(); ++b) {
+      info.dims.push_back(space.domain().info(b).dim);
+    }
+    std::optional<Family> created;
+    if (existing == invalid_family) {
+      created.emplace(FamilyKey{info.name, type, ncomp, space.layout()});
+      created->members.reserve(1);
+    }
+    Entry entry{std::move(info), space, std::move(f), true};
+
+    // Everything that can throw has happened by now. Make room for the family
+    // first; entries_.push_back is then the only step left that can throw, and
+    // it does so before changing anything because Entry moves without throwing.
+    // The pushes after it cannot fail.
+    static_assert(std::is_nothrow_move_constructible_v<Entry>);
+    if (created) {
+      grow_for_one(families_);
+    } else {
+      grow_for_one(families_[existing].members);
+    }
+    entries_.push_back(std::move(entry));
+    if (created) families_.push_back(std::move(*created));
+    Family& fam = families_[entries_.back().info.family];
+    fam.members.push_back(entries_.back().info.id);
+    ++fam.version;
+  }
+
+  bool current(FieldId id, std::uint64_t owner, std::uint64_t revision) const noexcept {
+    if (id >= entries_.size()) return false;
+    const Entry& e = entries_[id];
+    return e.alive && owner == serial_ && revision == e.info.revision;
+  }
+
+  const Entry& named(std::string_view name) const {
+    const Entry* found = nullptr;
+    for (const Entry& e : entries_) {
+      if (!e.alive || e.info.name != name) continue;
+      if (found != nullptr) {
+        throw std::invalid_argument("field name '" + std::string(name) +
+                                    "' is ambiguous; select by dimension, space, or id");
+      }
+      found = &e;
+    }
+    if (found == nullptr) throw std::out_of_range("no field named '" + std::string(name) + "'");
+    return *found;
+  }
+
+  const Entry& named(std::string_view name, int dim) const {
+    const Entry* found = nullptr;
+    for (const Entry& e : entries_) {
+      if (!e.alive || e.info.name != name) continue;
+      if (std::find(e.info.dims.begin(), e.info.dims.end(), dim) == e.info.dims.end()) continue;
+      if (found != nullptr) {
+        throw std::invalid_argument("field name '" + std::string(name) + "' has several fields on dimension " +
+                                    std::to_string(dim) + "; select by space or id");
+      }
+      found = &e;
+    }
+    if (found == nullptr) {
+      throw std::out_of_range("no field '" + std::string(name) + "' on dimension " +
+                              std::to_string(dim));
+    }
+    return *found;
   }
 
   std::string stale_message(const std::string& name, const Domain<MemSpace>& d) const {
@@ -984,12 +1079,28 @@ class FieldRegistry {
 
   template <class T>
   Field<T, MemSpace> fetch(const Entry& e) const {
+    if (e.info.variable) {
+      throw std::invalid_argument("field '" + e.info.name + "' is variable-length; fetch it with get_var");
+    }
     if (e.info.type != data_type_of<T>()) {
       throw std::invalid_argument("field '" + e.info.name + "' requested as the wrong value type (stored " +
                                   name(e.info.type) + ")");
     }
     if (e.space.domain().epoch() != epoch_) throw StaleField(stale_message(e.info.name, e.space.domain()));
     return std::any_cast<Field<T, MemSpace>>(e.field);
+  }
+
+  template <class T>
+  VarField<T, MemSpace> fetch_var(const Entry& e) const {
+    if (!e.info.variable) {
+      throw std::invalid_argument("field '" + e.info.name + "' has fixed-length values; fetch it with get");
+    }
+    if (e.info.type != data_type_of<T>()) {
+      throw std::invalid_argument("field '" + e.info.name + "' requested as the wrong value type (stored " +
+                                  name(e.info.type) + ")");
+    }
+    if (e.space.domain().epoch() != epoch_) throw StaleField(stale_message(e.info.name, e.space.domain()));
+    return std::any_cast<VarField<T, MemSpace>>(e.field);
   }
 
   // Mutable because commit is logically const: it replaces storage by storage

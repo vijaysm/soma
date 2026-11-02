@@ -382,6 +382,36 @@ TEST(ExceptionSafety, AFailedAddChangesNothingAtEveryCapacityBoundary) {
   }
 }
 
+// A variable-length field joins a registry the same way: at every failed
+// allocation nothing is added, and a mirror of it leaves the destination empty.
+TEST(ExceptionSafety, AFailedVariableLengthAddOrMirrorChangesNothing) {
+  for (int existing = 0; existing <= 5; ++existing) {
+    Reg reg;
+    reg.set_entities(2, 100);
+    const std::vector<soma::Offset> one{0, 2};
+    const std::vector<double> two{1, 2};
+    for (int i = 0; i < existing; ++i) {
+      reg.add_var<double>("V", subset(reg, 100, {static_cast<LO>(i)}), one, two);
+    }
+    const Spc space = subset(reg, 100, {50});
+    const long failures = sweep([&] { reg.add_var<double>("V", space, one, two); },
+                                [&](long n) {
+                                  EXPECT_EQ(reg.list().size(), static_cast<std::size_t>(existing)) << n;
+                                  if (existing == 0) {
+                                    EXPECT_THROW(reg.family<double>("V", 0), std::out_of_range) << n;
+                                  } else {
+                                    EXPECT_FALSE(reg.lookup(reg.family<double>("V", 0), 2, 50).found()) << n;
+                                  }
+                                });
+    EXPECT_GT(failures, 0) << existing;
+    EXPECT_TRUE(reg.lookup(reg.family<double>("V", 0), 2, 50).found());
+    Reg dst;
+    sweep([&] { reg.mirror_into<HostMem>(dst, {"*"}, {true, true, true, true, true}, false); },
+          [&](long n) { EXPECT_TRUE(dst.list().empty()) << n; });
+    EXPECT_EQ(dst.list().size(), static_cast<std::size_t>(existing) + 1);
+  }
+}
+
 // The same sweep for a mirror into the default memory space and into the host.
 // Both are HostSpace in a Serial or OpenMP build, so this only differs from the
 // HostSpace sweep above on a GPU build, where it runs the device-copy path.

@@ -1280,6 +1280,15 @@ TEST_F(VtkFiles, FieldsThatAreNotPerEntityAreRejected) {
   expect_invalid(mesh, {"nodal"}, "element_nodes");
 }
 
+TEST_F(VtkFiles, VariableLengthFieldsAreRejected) {
+  auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
+  const auto points = soma::Domain<HostMem>::all(mesh, 0);
+  const std::vector<soma::Offset> off(static_cast<std::size_t>(mesh.count(0)) + 1, 0);
+  mesh.fields().add_var<double>("lists", soma::Space<HostMem>(points, soma::Layout::per_entity()), off,
+                                std::vector<double>{});
+  expect_invalid(mesh, {"lists"}, "is variable-length; a VTK array has a fixed number of components");
+}
+
 TEST_F(VtkFiles, OtherDimensionsAreRejected) {
   auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
   mesh.fields().add_tag<double>("edge_tag", 1, 1);

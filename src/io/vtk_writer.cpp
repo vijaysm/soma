@@ -219,6 +219,10 @@ Array resolve(const HostMesh& mesh, const VtkField& want, VtkLegacyVersion versi
     throw std::invalid_argument("write_vtk: " + what + " is ambiguous (" + list + "); " + advice);
   }
   const FieldInfo& info = *hits.front();
+  if (info.variable) {
+    throw std::invalid_argument("write_vtk: field " + in_quotes(info.name) +
+                                " is variable-length; a VTK array has a fixed number of components");
+  }
   const DomainKind kind = domain_kind(mesh, info);
   if (info.dims.size() != 1) {
     throw std::invalid_argument("write_vtk: field " + in_quotes(info.name) +

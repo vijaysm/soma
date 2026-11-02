@@ -28,7 +28,8 @@ inline constexpr FamilyId invalid_family = std::numeric_limits<FamilyId>::max();
 
 // The value of an entity that was never set. default_value (ncomp values) is
 // also the initial fill; without one, fields start zeroed and has_default() is
-// false. global_value is the one value per mesh that MOAB tags can carry.
+// false. global_value is the one value per mesh that MOAB tags can carry. For
+// a variable-length field either may have any length.
 template <class T>
 struct FieldOptions {
   std::optional<std::vector<T>> default_value;
@@ -40,7 +41,8 @@ struct FieldInfo {
   FamilyId family = invalid_family;
   std::string name;
   DataType type = DataType::f64;
-  int ncomp = 1;
+  int ncomp = 1;  // 0 for a variable-length field
+  bool variable = false;  // a VarField, fetched with get_var
   Layout layout{};
   LO rows = 0;
   std::vector<int> dims;  // dimensions the domain has members on
