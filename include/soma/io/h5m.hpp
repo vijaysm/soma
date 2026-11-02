@@ -93,6 +93,12 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // in file order is written under its file ids when they were laid out so.
 // No history is written, so equal meshes give byte-equal files.
 //
+// Entity sets take the file ids after the elements, in set order, with their
+// flags; an unordered set's contents are its members' file ids sorted, as
+// (start, count) pairs (flag 0x8) when MOAB would store them so
+// (io::moab_ranged); an ordered set's are its sequence. A set holding an
+// entity of a dimension not written throws std::invalid_argument.
+//
 // The file is written to a new temporary next to `path` (`path` + "." + six
 // random characters, created exclusively) and renamed over `path`, so a
 // failure leaves neither a partial file nor a damaged earlier one. A mesh that

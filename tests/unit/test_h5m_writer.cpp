@@ -26,6 +26,7 @@
 
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/core/set_builder.hpp"
 #include "soma/core/transfer.hpp"
 #include "soma/io/h5m.hpp"
 #include "soma/testing/box_mesh.hpp"
@@ -100,6 +101,40 @@ std::map<GO, Entity> entities(const HostMesh& m, int d) {
   return out;
 }
 
+// Sets by gid: flags, members by slot and gid (in order for an ordered set),
+// children and parents by gid.
+struct SetText {
+  std::uint8_t flags = 0;
+  std::vector<std::pair<int, GO>> members;
+  std::vector<GO> children, parents;
+  friend bool operator==(const SetText&, const SetText&) = default;
+};
+
+std::map<GO, SetText> sets_of(const HostMesh& m) {
+  std::map<GO, SetText> out;
+  const auto& sets = m.sets();
+  const auto gid_of = [&](int slot, LO l) {
+    return slot == soma::set_dim ? sets.gid()(static_cast<std::size_t>(l)) : m.gid(slot)(static_cast<std::size_t>(l));
+  };
+  for (LO s = 0; s < sets.count(); ++s) {
+    SetText t;
+    t.flags = sets.flags(s);
+    if (sets.ordered(s)) {
+      for (const auto& e : sets.sequence(s)) t.members.emplace_back(e.slot, gid_of(e.slot, e.lid));
+    } else {
+      for (int slot = 0; slot < soma::num_field_slots; ++slot) {
+        if (slot != soma::set_dim && slot > m.dim()) continue;
+        for (const LO l : sets.members_of(s, slot)) t.members.emplace_back(slot, gid_of(slot, l));
+      }
+      std::sort(t.members.begin(), t.members.end());
+    }
+    for (const LO x : sets.children(s)) t.children.push_back(gid_of(soma::set_dim, x));
+    for (const LO x : sets.parents(s)) t.parents.push_back(gid_of(soma::set_dim, x));
+    out[sets.gid()(static_cast<std::size_t>(s))] = t;
+  }
+  return out;
+}
+
 std::map<GO, std::array<double, 3>> coordinates(const HostMesh& m) {
   std::map<GO, std::array<double, 3>> out;
   const auto xyz = m.coords();
@@ -160,6 +195,7 @@ TEST_P(H5mWriteBack, ReadsBackTheSameEntitiesUnderTheSameFileIds) {
       EXPECT_EQ(back.input(d), in.input(d)) << d;
       EXPECT_EQ(entities(back, d), entities(in, d)) << "dimension " << d;
     }
+    EXPECT_EQ(sets_of(back), sets_of(in));
   }
 }
 
@@ -229,6 +265,102 @@ TEST(H5mWrite, FileHasTheMoabLayout) {
   H5Tclose(qt);
   H5Dclose(q);
   H5Fclose(f);
+}
+
+// Sets take the ids after the elements; unordered contents are sorted file
+// ids, as pairs where MOAB stores them so (flag 0x8); ordered ones keep their
+// sequence; list ends are inclusive and cumulative from -1.
+TEST(H5mWrite, SetsAreWrittenAsMoabWritesThem) {
+  HostMesh in = mixed_2d();
+  const auto lid = [&](int d, GO g) {
+    for (std::size_t i = 0; i < static_cast<std::size_t>(in.count(d)); ++i) {
+      if (in.gid(d)(i) == g) return static_cast<GO>(i);
+    }
+    return GO{-1};
+  };
+  using soma::SetSpec;
+  constexpr int sd = soma::set_dim;
+  soma::SetBuilder b;
+  // Vertices 10, 20, 30 (ids 1-3) and the triangle (id 8): runs 1-3 and 8.
+  b.add(SetSpec{5, soma::set_unique, {{0, lid(0, 30)}, {0, lid(0, 10)}, {2, lid(2, 7)}, {0, lid(0, 20)}}, {6}, {}});
+  // Repeats and order kept, sets included.
+  b.add(SetSpec{6, soma::set_ordered, {{2, lid(2, 9)}, {0, lid(0, 70)}, {2, lid(2, 9)}, {sd, 5}}, {}, {5}});
+  b.add(SetSpec{7, soma::set_unique | soma::set_track_owner, {{0, lid(0, 70)}, {0, lid(0, 10)}}, {}, {}});
+  b.add(SetSpec{8, soma::set_unique, {}, {}, {}});
+  std::move(b).install(in);
+  const fs::path out = scratch() / "sets.h5m";
+  soma::write_h5m(in, out);
+
+  const hid_t f = open_file(out);
+  EXPECT_EQ(int_attribute(f, "/tstt", "max_id"), 14);
+  EXPECT_EQ(int_attribute(f, "/tstt/sets/list", "start_id"), 11);
+  const auto read = [&](const char* path, hid_t mem, auto zero) {
+    std::vector<decltype(zero)> v;
+    std::size_t n = 1;
+    for (const hsize_t x : extent(f, path)) n *= x;
+    v.resize(n);
+    const hid_t ds = H5Dopen2(f, path, H5P_DEFAULT);
+    H5Dread(ds, mem, H5S_ALL, H5S_ALL, H5P_DEFAULT, v.data());
+    H5Dclose(ds);
+    return v;
+  };
+  EXPECT_EQ(read("/tstt/sets/list", H5T_NATIVE_INT64, std::int64_t{}),
+            (std::vector<std::int64_t>{3, 0, -1, 0x2 | 0x8,    //
+                                       7, 0, 0, 0x4,           //
+                                       9, 0, 0, 0x1 | 0x2,     //
+                                       9, 0, 0, 0x2}));
+  EXPECT_EQ(read("/tstt/sets/contents", H5T_NATIVE_UINT64, std::uint64_t{}),
+            (std::vector<std::uint64_t>{1, 3, 8, 1, /**/ 10, 7, 10, 11, /**/ 1, 7}));
+  EXPECT_EQ(read("/tstt/sets/children", H5T_NATIVE_UINT64, std::uint64_t{}), (std::vector<std::uint64_t>{12}));
+  EXPECT_EQ(read("/tstt/sets/parents", H5T_NATIVE_UINT64, std::uint64_t{}), (std::vector<std::uint64_t>{11}));
+  H5Fclose(f);
+
+  // Read back under the file ids, as the same sets.
+  const HostMesh back = soma::read_h5m(out);
+  std::map<GO, SetText> want;
+  const auto fid = [](int slot, GO g) -> std::pair<int, GO> {
+    if (slot == 0) return {0, g / 10};
+    if (slot == 2) return {2, g == 7 ? 8 : g == 4 ? 9 : 10};
+    return {slot, g + 6};
+  };
+  for (auto [g, t] : sets_of(in)) {
+    for (auto& m : t.members) m = fid(m.first, m.second);
+    if (!(t.flags & soma::set_ordered)) std::sort(t.members.begin(), t.members.end());
+    for (auto& c : t.children) c += 6;
+    for (auto& c : t.parents) c += 6;
+    want[g + 6] = t;
+  }
+  EXPECT_EQ(sets_of(back), want);
+}
+
+// Without sets, /tstt/sets holds only its tags group.
+TEST(H5mWrite, NoSetsNoSetTable) {
+  const fs::path out = scratch() / "nosets.h5m";
+  soma::write_h5m(mixed_2d(), out);
+  const hid_t f = open_file(out);
+  for (const char* d : {"/tstt/sets/list", "/tstt/sets/contents", "/tstt/sets/children", "/tstt/sets/parents"}) {
+    EXPECT_EQ(H5Lexists(f, d, H5P_DEFAULT), 0) << d;
+  }
+  H5Fclose(f);
+}
+
+TEST(H5mWrite, RejectsSetsHoldingEntitiesNotWritten) {
+  HostMesh in = soma::testing::box_mesh({2, 1, 1});
+  soma::build_adjacencies(in, soma::AdjacencyRequest{}.add(3, 1), Kokkos::DefaultHostExecutionSpace{});
+  soma::SetBuilder b;
+  b.add(soma::SetSpec{3, soma::set_unique, {{1, 4}}, {}, {}});
+  std::move(b).install(in);
+  const fs::path dir = scratch() / "edge_set";
+  fs::create_directory(dir);
+  try {
+    soma::write_h5m(in, dir / "m.h5m");
+    ADD_FAILURE() << "written without its members";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_STREQ(e.what(), "write_h5m: set 3 holds an entity of dimension 1, which is not written");
+  }
+  EXPECT_TRUE(listing(dir).empty());
+  soma::write_h5m(in, dir / "m.h5m", {.dims = std::array<bool, 4>{true, true, false, true}});
+  EXPECT_EQ(sets_of(soma::read_h5m(dir / "m.h5m")).size(), 1u);
 }
 
 TEST(H5mWrite, PolygonsGetOneGroupPerArity) {

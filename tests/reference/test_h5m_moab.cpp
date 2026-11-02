@@ -755,7 +755,7 @@ INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                                            "written:64bricks_1khex.h5m", "written:hex_2048.h5m",
                                            "written:hexes_mixed.h5m", "written:hybrid_3quad_1tri.h5m",
                                            "written:moab_i.h5m", "written:recMeshOcn128.h5m",
-                                           "written:poly_indices"),
+                                           "written:poly_indices", "written:sets_kinds"),
                          [](const auto& info) {
                            std::string n = info.param;
                            std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');

@@ -13,8 +13,10 @@
 #include <vector>
 
 #include "hdf5.hpp"
+#include "soma/core/sets.hpp"
 #include "soma/core/topology.hpp"
 #include "soma/io/h5m.hpp"
+#include "soma/io/id_runs.hpp"
 #include "temporary.hpp"
 
 namespace soma {
@@ -39,13 +41,26 @@ struct Group {
   std::string name() const { return type_names[static_cast<int>(type)] + std::to_string(arity); }
 };
 
+// The set flag of contents stored as (start, count) pairs.
+constexpr std::uint8_t ranged_contents = 0x8;
+
+// /tstt/sets: per set the inclusive ends of its contents, children and
+// parents, then its flags; and those three columns.
+struct SetTable {
+  std::vector<std::int64_t> list;
+  std::vector<std::uint64_t> contents, children, parents;
+};
+
 // What is written and under which file ids, settled before the file is
 // touched.
 struct Plan {
   std::array<bool, 4> dims{};
   std::vector<LO> nodes;  // vertex rows in gid order
   std::vector<Group> groups;
-  std::array<std::vector<std::uint64_t>, 4> fid;  // by dimension and local id; 0 = not written
+  // By slot (dimension, or set_dim) and local id (set index); 0 = not written.
+  std::array<std::vector<std::uint64_t>, num_field_slots> fid;
+  std::uint64_t set_start = 0;
+  SetTable sets;
   std::uint64_t max_id = 0;
 };
 
@@ -70,6 +85,44 @@ std::array<bool, 4> written_dims(const HostMesh& mesh, const H5mWriteOptions& op
     for (int d = 0; d <= mesh.dim(); ++d) w[static_cast<std::size_t>(d)] = d == 0 || d == mesh.dim() || mesh.input(d);
   }
   return w;
+}
+
+// Each set's contents in file ids: an ordered set's sequence as stored, an
+// unordered set's members sorted, as pairs where MOAB would store them so;
+// children and parents as set file ids.
+void plan_sets(const HostMesh& mesh, Plan& p) {
+  const auto& sets = mesh.sets();
+  SetTable& t = p.sets;
+  for (LO s = 0; s < sets.count(); ++s) {
+    const std::string set = "set " + std::to_string(sets.gid()(static_cast<std::size_t>(s)));
+    const auto fid = [&](int slot, LO lid) {
+      const auto& f = p.fid[static_cast<std::size_t>(slot)];
+      const std::uint64_t id = static_cast<std::size_t>(lid) < f.size() ? f[static_cast<std::size_t>(lid)] : 0;
+      if (id == 0) reject(set + " holds an entity of dimension " + std::to_string(slot) + ", which is not written");
+      return id;
+    };
+    std::vector<std::uint64_t> ids;
+    if (sets.ordered(s)) {
+      for (const SetEntry& e : sets.sequence(s)) ids.push_back(fid(e.slot, e.lid));
+    } else {
+      for (int slot = 0; slot < num_field_slots; ++slot) {
+        if (slot != set_dim && slot > mesh.dim()) continue;
+        if (!sets.has_members(slot)) {
+          reject(set + ": the mesh does not hold the set members of dimension " + std::to_string(slot));
+        }
+        for (const LO l : sets.members_of(s, slot)) ids.push_back(fid(slot, l));
+      }
+      std::sort(ids.begin(), ids.end());
+    }
+    const io::SetContents c = io::set_contents(ids, sets.ordered(s));
+    t.contents.insert(t.contents.end(), c.column.begin(), c.column.end());
+    for (const LO x : sets.children(s)) t.children.push_back(fid(set_dim, x));
+    for (const LO x : sets.parents(s)) t.parents.push_back(fid(set_dim, x));
+    t.list.push_back(static_cast<std::int64_t>(t.contents.size()) - 1);
+    t.list.push_back(static_cast<std::int64_t>(t.children.size()) - 1);
+    t.list.push_back(static_cast<std::int64_t>(t.parents.size()) - 1);
+    t.list.push_back((sets.flags(s) & set_flag_bits) | (c.ranged ? ranged_contents : 0));
+  }
 }
 
 Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
@@ -117,7 +170,12 @@ Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
     auto& fid = p.fid[static_cast<std::size_t>(g.dim)];
     for (const LO l : g.rows) fid[static_cast<std::size_t>(l)] = next++;
   }
+  // Sets come last, in set order (gid order).
+  p.set_start = next;
+  p.fid[set_dim].resize(static_cast<std::size_t>(mesh.sets().count()));
+  for (auto& id : p.fid[set_dim]) id = next++;
   p.max_id = next - 1;
+  plan_sets(mesh, p);
   return p;
 }
 
@@ -216,6 +274,17 @@ void write_file(const std::string& name, const HostMesh& mesh, const Plan& p) {
 
   {
     const Id sets = f.group(tstt.get(), "sets");
+    const SetTable& t = p.sets;
+    if (!t.list.empty()) {
+      const Id ds = f.dataset(sets.get(), "list", H5T_STD_I64LE, {t.list.size() / 4, 4}, H5T_NATIVE_INT64,
+                              t.list.data());
+      const auto start = static_cast<std::int64_t>(p.set_start);
+      File::attribute(ds.get(), "start_id", H5T_STD_I64LE, H5T_NATIVE_INT64, &start);
+    }
+    for (const auto& [column, ids] : {std::pair{"contents", &t.contents}, std::pair{"children", &t.children},
+                                      std::pair{"parents", &t.parents}}) {
+      if (!ids->empty()) f.dataset(sets.get(), column, H5T_STD_U64LE, {ids->size()}, H5T_NATIVE_UINT64, ids->data());
+    }
     f.group(sets.get(), "tags");
   }
   f.group(tstt.get(), "tags");
