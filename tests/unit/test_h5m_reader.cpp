@@ -635,6 +635,70 @@ TEST_F(H5mRead, SetsKeepTheirContentsFlagsAndLinks) {
   }
 }
 
+// A strip of 2 x 500 vertices (file ids 1..1000) and 499 quads (1001..1499)
+// with 2002 ranged sets from 1500 on: 2000 over every vertex, one over
+// vertices 1..10 and 501..510, one over every vertex and quad. Rows are built
+// from the ranges as runs, so the 2000 full rows store nothing.
+TEST_F(H5mRead, RangedSetsAreHeldAsRuns) {
+  {
+    Writer w(file());
+    std::vector<double> xyz;
+    for (int i = 0; i < 1000; ++i) xyz.insert(xyz.end(), {double(i % 500), double(i / 500), 0.0});
+    w.nodes(1, 3, xyz);
+    std::vector<std::uint64_t> conn;
+    for (std::uint64_t j = 1; j < 500; ++j) conn.insert(conn.end(), {j, j + 1, j + 501, j + 500});
+    w.elements("Quad4", "Quad", 1001, 4, conn);
+    std::vector<Writer::Set> sets(2000, Writer::Set{0xA, {1, 1000}, {}, {}});
+    sets.push_back({0xA, {501, 10, 1, 10}, {}, {}});
+    sets.push_back({0xA, {1, 1499}, {}, {}});
+    w.sets(1500, sets);
+  }
+  std::vector<GO> two_runs;
+  for (GO g = 1; g <= 10; ++g) two_runs.push_back(g);
+  for (GO g = 501; g <= 510; ++g) two_runs.push_back(g);
+  std::vector<GO> every_quad;
+  for (GO g = 1001; g <= 1499; ++g) every_quad.push_back(g);
+  for (const Ordering ordering : {Ordering::file, Ordering::type_major_sfc}) {
+    SCOPED_TRACE(ordering == Ordering::file ? "file" : "sfc");
+    soma::H5mReadOptions o;
+    o.ordering = ordering;
+    const HostMesh m = soma::read_h5m(file(), o);
+    const auto& sets = m.sets();
+    ASSERT_EQ(sets.count(), 2002);
+    for (LO i = 0; i < 2000; ++i) ASSERT_EQ(sets.members_of(i, 0).kind, soma::DomainKind::full) << i;
+    EXPECT_EQ(sets.members_of(2001, 0).kind, soma::DomainKind::full);
+    EXPECT_EQ(sets.members_of(2001, 2).kind, soma::DomainKind::full);
+    EXPECT_EQ(member_gids(m, 2000, 0), two_runs);
+    EXPECT_EQ(member_gids(m, 2001, 2), every_quad);
+    if (ordering == Ordering::file) {
+      EXPECT_EQ(sets.members_of(2000, 0).kind, soma::DomainKind::intervals);
+      EXPECT_EQ(sets.data(0).extent(0), 5u);  // the one intervals row: 2 runs
+    }
+    EXPECT_EQ(sets.data(2).extent(0), 0u);
+  }
+}
+
+// Two quads in two groups whose file ids leave a gap (10 and 20): in file
+// order their lids follow each other but their file ids do not, so a range
+// over quad 20 must not be found through quad 10.
+TEST_F(H5mRead, RangesFindEntitiesAcrossGapsInFileIds) {
+  {
+    Writer w(file());
+    w.nodes(1, 2, {0, 0, 1, 0, 1, 1, 0, 1, 2, 0, 2, 1});
+    w.elements("Quad4", "Quad", 10, 4, {1, 2, 3, 4});
+    w.elements("Quad4_b", "Quad", 20, 4, {2, 5, 6, 3});
+    w.sets(30, {{0xA, {20, 1}, {}, {}}, {0xA, {10, 1, 20, 1}, {}, {}}});
+  }
+  for (const Ordering ordering : {Ordering::file, Ordering::type_major_sfc}) {
+    SCOPED_TRACE(ordering == Ordering::file ? "file" : "sfc");
+    soma::H5mReadOptions o;
+    o.ordering = ordering;
+    const HostMesh m = soma::read_h5m(file(), o);
+    EXPECT_EQ(member_gids(m, 0, 2), (std::vector<GO>{20}));
+    EXPECT_EQ(member_gids(m, 1, 2), (std::vector<GO>{10, 20}));
+  }
+}
+
 // Values on sets, dense and sparse, are fields on the set slot; GLOBAL_ID-like
 // tags on sets and vertices share a family.
 TEST_F(H5mRead, TagValuesOnSetsAreFieldsOnTheSetSlot) {

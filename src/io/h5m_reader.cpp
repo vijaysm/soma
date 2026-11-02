@@ -279,6 +279,14 @@ class Locator {
       p.resize(gid.extent(0));
       for (std::size_t l = 0; l < p.size(); ++l) p[l] = {gid(l), static_cast<LO>(l)};
       if (!std::is_sorted(p.begin(), p.end())) std::sort(p.begin(), p.end());
+      auto& sg = segs_[static_cast<std::size_t>(d)];
+      for (const auto& [g, l] : p) {
+        if (!sg.empty() && g == sg.back().gid + sg.back().len && l == sg.back().lid + sg.back().len) {
+          ++sg.back().len;
+        } else {
+          sg.push_back({g, l, 1});
+        }
+      }
     }
   }
 
@@ -298,6 +306,23 @@ class Locator {
     return it->second;
   }
 
+  // Local ids of the count entities of dimension dim from file id first on,
+  // as runs (not sorted); every id of the range must name an entity. Costs the
+  // runs, not the entities: one run when the lids follow the file ids.
+  std::vector<Interval> lid_runs(int dim, GO first, GO count) const {
+    const auto& sg = segs_[static_cast<std::size_t>(dim)];
+    auto it = std::upper_bound(sg.begin(), sg.end(), first, [](GO v, const Seg& s) { return v < s.gid; });
+    --it;
+    std::vector<Interval> out;
+    for (GO id = first; id < first + count; ++it) {
+      const GO end = std::min(first + count, it->gid + it->len);
+      const auto l = static_cast<LO>(it->lid + (id - it->gid));
+      out.push_back(Interval{l, static_cast<LO>(l + (end - id))});
+      id = end;
+    }
+    return out;
+  }
+
   // Local ids of the count entities of dimension dim from file id first on.
   std::vector<LO> lids(int dim, GO first, GO count) const {
     if (dim == set_dim) {
@@ -313,8 +338,15 @@ class Locator {
   }
 
  private:
+  // gid gid .. gid + len - 1 at lids lid .. lid + len - 1.
+  struct Seg {
+    GO gid;
+    LO lid;
+    LO len;
+  };
   std::vector<IdRange> ranges_;
   std::array<std::vector<std::pair<GO, LO>>, 4> pairs_;
+  std::array<std::vector<Seg>, 4> segs_;
   GO set_first_ = 1;
 };
 
@@ -391,12 +423,17 @@ void read_sets(HostMesh& mesh, hid_t tstt, const IdRange& sets, std::uint64_t ma
     SetSpec spec;
     spec.gid = sets.first + static_cast<GO>(i);
     spec.flags = static_cast<std::uint8_t>(flags & set_flag_bits);
+    std::vector<SetRun> spec_runs;
+    // A piece of a range within one dataset: set gids are file ids, entities
+    // become runs of lids.
     const auto add = [&](const IdRange& r, GO first, GO count) {
       if (r.dim == set_dim) {
-        for (GO id = first; id < first + count; ++id) spec.contents.push_back({set_dim, id});
+        spec_runs.push_back({set_dim, first, count});
         return;
       }
-      for (const LO l : at.lids(r.dim, first, count)) spec.contents.push_back({r.dim, l});
+      for (const Interval& l : at.lid_runs(r.dim, first, count)) {
+        spec_runs.push_back({r.dim, GO{l.begin}, GO{l.end - l.begin}});
+      }
     };
     const std::span<const std::uint64_t> contents(ids[0].data() + from[0], to[0] - from[0]);
     if ((flags & ranged) == 0) {
@@ -426,7 +463,7 @@ void read_sets(HostMesh& mesh, hid_t tstt, const IdRange& sets, std::uint64_t ma
         }
         runs.emplace_back(start, start + count - 1);
       }
-      // Merged runs are disjoint, so expanding them yields at most max_id ids.
+      // Merged runs are disjoint, so they hold at most max_id ids.
       std::sort(runs.begin(), runs.end());
       std::size_t m = 0;
       for (std::size_t j = 1; j < runs.size(); ++j) {
@@ -451,7 +488,7 @@ void read_sets(HostMesh& mesh, hid_t tstt, const IdRange& sets, std::uint64_t ma
     spec.children = set_ids(i, 1, from[1], to[1]);
     spec.parents = set_ids(i, 2, from[2], to[2]);
     from = to;
-    b.add(std::move(spec));
+    b.add(std::move(spec), std::move(spec_runs));
   }
   std::move(b).install(mesh);
 }
