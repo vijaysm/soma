@@ -350,7 +350,7 @@ void read_sets(HostMesh& mesh, hid_t tstt, const IdRange& sets, std::uint64_t ma
     const Id ds = h5::open_dataset(tstt, path);
     const auto ext = h5::extent(ds.get(), where);
     if (ext.size() != 1) fail(where + " must be one-dimensional");
-    if (static_cast<std::uint64_t>(prev + 1) != ext[0]) {
+    if (static_cast<std::uint64_t>(prev) + 1 != ext[0]) {  // prev >= -1, so this is exact
       fail(where + " has " + str(std::uint64_t{ext[0]}) + " entries, but " + sets.where + " ends " + column[c] +
            " at index " + str(prev));
     }
@@ -824,7 +824,11 @@ void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const T
       prev = last[i];
     }
     if (!h5::exists(tag.get(), "values")) fail(where + " has an id_list but no values");
-    values = read_rows<T>(tstt, "tags/" + name + "/values", k, static_cast<GO>(prev + 1));
+    const std::uint64_t held_values = static_cast<std::uint64_t>(prev) + 1;  // prev >= -1
+    if (held_values > static_cast<std::uint64_t>(std::numeric_limits<GO>::max())) {
+      fail(xw + " ends at index " + str(prev) + ", beyond what an index can count");
+    }
+    values = read_rows<T>(tstt, "tags/" + name + "/values", k, static_cast<GO>(held_values));
     if (handle) {
       check_handles<T>(values, at, where, [&](std::size_t i) {
         const auto j = static_cast<std::size_t>(

@@ -720,6 +720,8 @@ TEST_F(H5mRead, RejectsVariableLengthValuesItCannotPlace) {
   expect("decreasing", [&](Writer& w) { w.var_sparse("VL", {1, 2}, {1, 0}, v, 2); },
          {"/tstt/tags/VL/var_indices: file id 2 ends its values at index 0; the ends must be at least -1"});
   expect("count", [&](Writer& w) { w.var_sparse("VL", {1, 2}, {0, 1}, v, 3); }, {"/tstt/tags/VL/values must hold"});
+  expect("last", [&](Writer& w) { w.var_sparse("VL", {1}, {std::numeric_limits<std::int64_t>::max()}, v, 1); },
+         {"/tstt/tags/VL/var_indices ends at index 9223372036854775807, beyond what an index can count"});
   expect("noentity", [&](Writer& w) {
     w.var_sparse("VL", {1, 9}, {0, 1}, v, 2);
     w.max_id(9);
@@ -868,6 +870,10 @@ TEST_F(H5mRead, RejectsSetsItCannotPlace) {
     w.set_list(6, {1, -1, -1, 2});
     w.set_column("contents", {1, 2, 3});
   }, {"/tstt/sets/contents has 3 entries, but /tstt/sets/list ends contents at index 1"});
+  expect("last", [](Writer& w) {
+    w.set_list(6, {std::numeric_limits<std::int64_t>::max(), -1, -1, 2});
+    w.set_column("contents", {1});
+  }, {"/tstt/sets/contents has 1 entries, but /tstt/sets/list ends contents at index 9223372036854775807"});
   expect("flags", [](Writer& w) { w.sets(6, {Set{0x12, {}, {}, {}}}); },
          {"/tstt/sets/list: set 6 has flags 0x12, outside 0x0f"});
   expect("negative", [](Writer& w) { w.sets(6, {Set{-1, {}, {}, {}}}); }, {"set 6 has flags -0x1, outside 0x0f"});
