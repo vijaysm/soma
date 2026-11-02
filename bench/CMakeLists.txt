@@ -4,9 +4,22 @@
 # bench_backends compares SOMA's execution spaces with each other and needs
 # nothing but Kokkos. The MOAB comparisons need SOMA_ENABLE_MOAB_REFERENCE.
 
+# Reconfigured when HEAD, its branch or the index changes, so the tag the
+# binaries carry follows the commit and the dirty state.
 find_package(Git QUIET)
 set(SOMA_GIT_DESCRIBE "unknown")
 if(Git_FOUND)
+  set(_soma_git_dir "${PROJECT_SOURCE_DIR}/.git")
+  if(EXISTS "${_soma_git_dir}/HEAD")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+      "${_soma_git_dir}/HEAD" "${_soma_git_dir}/index")
+    file(READ "${_soma_git_dir}/HEAD" _soma_head)
+    string(STRIP "${_soma_head}" _soma_head)
+    if(_soma_head MATCHES "^ref: (.*)$" AND EXISTS "${_soma_git_dir}/${CMAKE_MATCH_1}")
+      set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+        "${_soma_git_dir}/${CMAKE_MATCH_1}")
+    endif()
+  endif()
   execute_process(COMMAND ${GIT_EXECUTABLE} describe --always --dirty
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     OUTPUT_VARIABLE _soma_git OUTPUT_STRIP_TRAILING_WHITESPACE
