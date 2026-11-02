@@ -219,8 +219,14 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   connectivity), out-of-range or overlapping ids, malformed `poly_indices` and duplicate tag
   values throw `std::runtime_error` naming the file and the dataset; HDF5 prints nothing.
 - `MeshBuilder::build` looks contiguous vertex gids up by index, skips sorts whose input is
-  already sorted, and computes centroids only for curve keys: the same mesh, about 7x faster on
-  file input.
+  already sorted, computes centroids only for curve keys, copies in-order blocks whole and builds
+  segments from their runs: the same mesh, about 10x faster on file input. Under
+  `Ordering::type_major_sfc` it computes keys on host threads and orders by a stable radix sort
+  on the key, which gives the same order.
+- `sfc::hilbert_index` works without branches, with the axis count as a template parameter: the
+  same keys, 3.7x faster each.
+- `read_h5m` places tag values by lid in one pass instead of sorting them, and builds each full
+  domain once for every tag that covers it.
 
 ### Benchmarks
 
@@ -230,7 +236,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `bench/run_adjacency.sh` repeats it at threads = 1, 2, 4, ..., N. Results are in
   `docs/benchmarks.md`.
 - `bench/bench_h5m_read` times `read_h5m` against MOAB `load_file` on the bundled meshes, the
-  large ones when present, and a MOAB-written box of N^3 hexes (`--box N`, default 64).
+  large ones when present, and a MOAB-written box of N^3 hexes (`--box N`, default 64); the
+  `soma_sfc` workflow times the read in `Ordering::type_major_sfc`.
 
 ### Packaging
 
