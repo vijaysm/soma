@@ -19,6 +19,7 @@
 #include "soma/fields/domain_mesh.hpp"
 #include "soma/fields/registry.hpp"
 #include "soma/testing/box_mesh.hpp"
+#include "soma/topology/build.hpp"
 
 using soma::GO;
 using soma::Layout;
@@ -117,6 +118,17 @@ TEST(HandleRef, GidsSharedBySlotsAreRejected) {
   EXPECT_NE(what_of([&] { soma::HandleRef<HostMem>::build(mesh); })
                 .find("gid 70 names entities of dimension 0 and the entity sets"),
             std::string::npos);
+}
+
+// Derived edges are numbered within their dimension, so their gids meet the
+// vertex and element gids of the fixture and handles cannot tell them apart.
+TEST(HandleRef, DerivedEntitiesRepeatGids) {
+  soma::HostMesh mesh = soma_test::two_quads_and_a_triangle();
+  EXPECT_NO_THROW(soma::HandleRef<HostMem>::build(mesh));
+  soma::build_adjacencies(mesh, soma::AdjacencyRequest{}.add(2, 1));
+  ASSERT_GT(mesh.count(1), 0);
+  const std::string what = what_of([&] { soma::HandleRef<HostMem>::build(mesh); });
+  EXPECT_NE(what.find("names entities of dimension 1 and dimension 2"), std::string::npos) << what;
 }
 
 TEST(HandleRef, GidZeroIsTheNullHandle) {

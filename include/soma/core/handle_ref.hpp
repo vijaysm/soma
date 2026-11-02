@@ -33,9 +33,11 @@ struct HandleTarget {
 // mesh's gids; build it again after the mesh changes. 0, the null handle, and
 // gids the mesh does not hold resolve to no target. build throws
 // std::invalid_argument when one gid names entities of two slots, or an
-// entity has gid 0, since handles could not tell them apart: box_mesh and VTK
-// input number every dimension from the same start, while .h5m file ids are
-// unique across a file.
+// entity has gid 0, since handles could not tell them apart. box_mesh and VTK
+// input number every dimension from the same start. .h5m file ids are unique
+// across a file, but derived edges and faces are numbered within their
+// dimension from 1 (or above its largest explicit gid), so after
+// build_adjacencies derives entities the gids usually repeat and build throws.
 template <class MemSpace>
 class HandleRef {
  public:
