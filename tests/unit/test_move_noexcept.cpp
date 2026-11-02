@@ -39,10 +39,15 @@ struct ArmedScope {
 
 }  // namespace soma_test
 
+// nvcc compiles a replaced global operator new for the device too, where
+// throwing is not allowed: the host body is host-only, the device gets malloc.
 void* operator new(std::size_t n) {
-  if (soma_test::fail_every_allocation) throw std::bad_alloc();
-  if (void* p = std::malloc(n == 0 ? 1 : n)) return p;
-  throw std::bad_alloc();
+  KOKKOS_IF_ON_HOST((
+    if (soma_test::fail_every_allocation) throw std::bad_alloc();
+    if (void* p = std::malloc(n == 0 ? 1 : n)) return p;
+    throw std::bad_alloc();
+  ))
+  KOKKOS_IF_ON_DEVICE((return malloc(n == 0 ? 1 : n);))
 }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }

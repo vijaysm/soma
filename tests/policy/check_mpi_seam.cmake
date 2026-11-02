@@ -3,6 +3,8 @@
 
 # Fails if SOMA_ENABLE_MPI is tested anywhere outside the Comm seam. Keeps
 # MPI-only code paths from hiding where a shared-memory build never compiles them.
+# Run with cmake -P: the policy level is needed for IN_LIST (CMP0057).
+cmake_minimum_required(VERSION 3.24)
 set(allowed
   include/soma/parallel/comm.hpp
   src/parallel/comm_mpi.cpp

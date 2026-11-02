@@ -34,22 +34,29 @@ struct Case {
   int expected;
 };
 
-constexpr Case closed_form[] = {
-    {Topology::edge, 1, 2},    {Topology::edge, 4, 5},    {Topology::tri, 1, 3},
-    {Topology::tri, 2, 6},     {Topology::tri, 4, 15},    {Topology::quad, 1, 4},
-    {Topology::quad, 2, 9},    {Topology::quad, 4, 25},   {Topology::tet, 1, 4},
-    {Topology::tet, 2, 10},    {Topology::tet, 4, 35},    {Topology::prism, 1, 6},
-    {Topology::prism, 2, 18},  {Topology::prism, 4, 75},  {Topology::hex, 1, 8},
-    {Topology::hex, 2, 27},    {Topology::hex, 4, 125},   {Topology::pyramid, 1, 5},
-    {Topology::pyramid, 2, 14},
-};
+constexpr int case_count = 19;
 
-constexpr int case_count = static_cast<int>(sizeof(closed_form) / sizeof(closed_form[0]));
+// A function rather than a namespace-scope array: device compilers (nvcc)
+// admit only scalar constexpr variables in device code, but a local constexpr
+// table inside a constexpr function is fine for host and device alike.
+KOKKOS_INLINE_FUNCTION constexpr Case closed_form(int k) {
+  constexpr Case table[] = {
+      {Topology::edge, 1, 2},    {Topology::edge, 4, 5},    {Topology::tri, 1, 3},
+      {Topology::tri, 2, 6},     {Topology::tri, 4, 15},    {Topology::quad, 1, 4},
+      {Topology::quad, 2, 9},    {Topology::quad, 4, 25},   {Topology::tet, 1, 4},
+      {Topology::tet, 2, 10},    {Topology::tet, 4, 35},    {Topology::prism, 1, 6},
+      {Topology::prism, 2, 18},  {Topology::prism, 4, 75},  {Topology::hex, 1, 8},
+      {Topology::hex, 2, 27},    {Topology::hex, 4, 125},   {Topology::pyramid, 1, 5},
+      {Topology::pyramid, 2, 14},
+  };
+  static_assert(sizeof(table) / sizeof(table[0]) == case_count);
+  return table[k];
+}
 
 KOKKOS_INLINE_FUNCTION int count_of(int k) {
-  return soma::num_element_nodes(closed_form[k].topology,
-                                 Layout::element_nodes(NodeFamily::lagrange_equispaced,
-                                                       closed_form[k].order));
+  const Case c = closed_form(k);
+  return soma::num_element_nodes(
+      c.topology, Layout::element_nodes(NodeFamily::lagrange_equispaced, c.order));
 }
 
 Kokkos::View<int*, Kokkos::HostSpace> counts_from_default_space() {
@@ -62,7 +69,8 @@ Kokkos::View<int*, Kokkos::HostSpace> counts_from_default_space() {
 }  // namespace soma_test
 
 TEST(Layout, NodeCountsMatchTheClosedForms) {
-  for (const auto& c : soma_test::closed_form) {
+  for (int k = 0; k < soma_test::case_count; ++k) {
+    const soma_test::Case c = soma_test::closed_form(k);
     for (const NodeFamily f : {NodeFamily::lagrange_equispaced, NodeFamily::gll}) {
       if (c.topology == Topology::pyramid && c.order == 2 && f == NodeFamily::gll) continue;
       EXPECT_EQ(soma::num_element_nodes(c.topology, Layout::element_nodes(f, c.order)), c.expected)
@@ -201,6 +209,6 @@ TEST(Layout, SharedAndQuadratureKindsAreRepresentable) {
 TEST(Layout, DeviceEvaluationMatchesHost) {
   const auto device = soma_test::counts_from_default_space();
   for (int k = 0; k < soma_test::case_count; ++k) {
-    EXPECT_EQ(device(k), soma_test::closed_form[k].expected) << "case " << k;
+    EXPECT_EQ(device(k), soma_test::closed_form(k).expected) << "case " << k;
   }
 }

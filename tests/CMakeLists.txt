@@ -153,6 +153,10 @@ soma_add_test(test_handle_ref SOURCES unit/test_handle_ref.cpp)
 soma_add_test(test_family SOURCES unit/test_family.cpp)
 soma_add_test(test_field_commit SOURCES unit/test_field_commit.cpp)
 soma_add_test(test_exception_safety SOURCES unit/test_exception_safety.cpp)
+# The harness recognises Kokkos frames by name through backtrace_symbols(),
+# which reads the dynamic symbol table only: export it, or a statically linked
+# Kokkos is invisible and an injected failure inside its deallocate aborts.
+set_target_properties(test_exception_safety PROPERTIES ENABLE_EXPORTS ON)
 soma_add_test(test_device_structs SOURCES unit/test_device_structs.cpp)
 soma_add_test(test_static_lifetime SOURCES unit/test_static_lifetime.cpp)
 soma_add_test(test_move_noexcept SOURCES unit/test_move_noexcept.cpp)

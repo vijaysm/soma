@@ -79,15 +79,20 @@ constexpr bool can_skip_kokkos_deallocation = false;
 
 }  // namespace soma_test
 
+// nvcc compiles a replaced global operator new for the device too, where
+// throwing is not allowed: the host body is host-only, the device gets malloc.
 void* operator new(std::size_t n) {
-  if (soma_test::allocations_until_failure == 0 && soma_test::inside_kokkos_deallocate()) {
-    // leave the counter at zero: the next allocation outside it fails
-  } else if (soma_test::allocations_until_failure >= 0 &&
-             soma_test::allocations_until_failure-- == 0) {
+  KOKKOS_IF_ON_HOST((
+    if (soma_test::allocations_until_failure == 0 && soma_test::inside_kokkos_deallocate()) {
+      // leave the counter at zero: the next allocation outside it fails
+    } else if (soma_test::allocations_until_failure >= 0 &&
+               soma_test::allocations_until_failure-- == 0) {
+      throw std::bad_alloc();
+    }
+    if (void* p = std::malloc(n == 0 ? 1 : n)) return p;
     throw std::bad_alloc();
-  }
-  if (void* p = std::malloc(n == 0 ? 1 : n)) return p;
-  throw std::bad_alloc();
+  ))
+  KOKKOS_IF_ON_DEVICE((return malloc(n == 0 ? 1 : n);))
 }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }

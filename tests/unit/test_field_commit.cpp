@@ -68,8 +68,12 @@ namespace soma_test {
 using soma::detail::RowWritePath;
 static_assert(soma::detail::write_row_path<Kokkos::HostSpace>() == RowWritePath::direct);
 static_assert(soma::detail::write_row_path<ManagedLikeSpace>() == RowWritePath::fenced_direct);
-static_assert(soma::detail::write_row_path<Kokkos::DefaultExecutionSpace::memory_space>() !=
-              RowWritePath::staged);
+// The default memory space is staged exactly when the host cannot reach it
+// (device memory); a host default space is written directly.
+static_assert((soma::detail::write_row_path<Kokkos::DefaultExecutionSpace::memory_space>() ==
+               RowWritePath::staged) ==
+              !Kokkos::SpaceAccessibility<Kokkos::HostSpace,
+                                          Kokkos::DefaultExecutionSpace::memory_space>::accessible);
 
 }  // namespace soma_test
 

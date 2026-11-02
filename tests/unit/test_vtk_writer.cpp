@@ -1001,7 +1001,10 @@ TEST_F(VtkFiles, FiniteExtremesSurviveTheText) {
   using FL = std::numeric_limits<float>;
   auto mesh = soma_test::two_quads_and_a_triangle(Ordering::file);
   const double dv[7] = {0.1, 1.0 / 3.0, -0.0, DL::min(), 1e300, DL::max(), DL::lowest()};
-  const float fv[7] = {0.1f, 1.0f / 3.0f, -0.0f, FL::min(), FL::max(), FL::lowest(), 16777217.0f};
+  // 2^24, the largest float whose integer neighbours are all representable; its
+  // shortest text is the integer. (Not 16777217.0f: that literal is a rounding tie,
+  // and nvcc's front end rounds it to 16777218 where IEEE ties-to-even gives 2^24.)
+  const float fv[7] = {0.1f, 1.0f / 3.0f, -0.0f, FL::min(), FL::max(), FL::lowest(), 16777216.0f};
   const auto d = mesh.fields().add_tag<double>("d", 0, 1);
   const auto s = mesh.fields().add_tag<float>("s", 0, 1);
   for (std::size_t i = 0; i < 7; ++i) {

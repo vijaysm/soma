@@ -24,18 +24,38 @@
 
 namespace soma_test {
 
-template <class... Ts>
-inline constexpr bool all_trivially_copyable = (std::is_trivially_copyable_v<Ts> && ...);
+template <template <class...> class Pred, class... Ts>
+inline constexpr bool all_of = (Pred<Ts>::value && ...);
 
-template <class M>
-inline constexpr bool views_are_trivially_copyable = all_trivially_copyable<
-    soma::DomainBlockView<M>, soma::DomainView<M>, typename soma::DomainView<M>::Location,
+template <class... Ts>
+inline constexpr bool all_trivially_copyable = all_of<std::is_trivially_copyable, Ts...>;
+
+template <class M, template <class...> class Pred>
+inline constexpr bool every_view_struct = all_of<
+    Pred, soma::DomainBlockView<M>, soma::DomainView<M>, typename soma::DomainView<M>::Location,
     soma::SpaceBlockView<M>, soma::SpaceView<M>, typename soma::SpaceView<M>::Location,
     soma::FamilyDimView<M>, soma::FamilyView<M>, soma::NodeTableView<M>,
     typename soma::NodeTables<M>::Permutation, soma::UView1<soma::LO, M>>;
 
-static_assert(views_are_trivially_copyable<Kokkos::HostSpace>);
-static_assert(views_are_trivially_copyable<Kokkos::DefaultExecutionSpace::memory_space>);
+// Under nvcc (and NVHPC) Kokkos gives View a user-provided copy constructor, a
+// workaround for defaulted constructors with constraints, so there no struct
+// holding a View is trivially copyable; Kokkos still copies Views bytewise into
+// kernels (ViewsSurviveAByteCopy below). Where this Kokkos build's own unmanaged
+// View is trivially copyable, every SOMA view struct must be; everywhere, none
+// may own anything (trivially destructible).
+template <class M>
+inline constexpr bool kokkos_view_is_trivially_copyable =
+    std::is_trivially_copyable_v<Kokkos::View<int*, M, Kokkos::MemoryTraits<Kokkos::Unmanaged>>>;
+
+using HostMem = Kokkos::HostSpace;
+using DevMem = Kokkos::DefaultExecutionSpace::memory_space;
+
+static_assert(every_view_struct<HostMem, std::is_trivially_destructible>);
+static_assert(every_view_struct<DevMem, std::is_trivially_destructible>);
+static_assert(!kokkos_view_is_trivially_copyable<HostMem> ||
+              every_view_struct<HostMem, std::is_trivially_copyable>);
+static_assert(!kokkos_view_is_trivially_copyable<DevMem> ||
+              every_view_struct<DevMem, std::is_trivially_copyable>);
 
 static_assert(all_trivially_copyable<soma::RowRange, soma::FamilyHit, soma::detail::MemberRec,
                                      soma::Fingerprint, soma::Interval, soma::Layout,
