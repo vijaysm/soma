@@ -589,6 +589,16 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - GoogleTest harness with a shared `main` that creates the runtime scope first and agrees on
   the exit code across ranks. `soma_add_test` registers MPI tests at 1, 2 and 4 ranks with a
   60 second timeout.
+- Device parity: `test_mirror_roundtrip` sends every topology fixture (a hex box and planar
+  boxes in curve order, the mixed 3D mesh, merged polygons, a mesh with shared and ghost
+  elements) with derived sides, every graph and three committed fields to the other memory
+  space and back, and compares the return exactly: counts, segment tables, gids, topology,
+  connectivity, coordinates, graphs with their codes, fields, epoch. Kernels in the mirror's
+  own execution space checksum what was copied, and a lean mirror rebuilt there matches the
+  host. The mesh-domain and static-lifetime suites run typed over the host and the device
+  memory space. The smoke test asserts the device is the default execution space on a device
+  build instead of skipping. On a host build the device space is the host and the cases run
+  twice.
 - `SOMA_FETCH_GTEST=ON` downloads GoogleTest. Without it, a missing GoogleTest is a clear
   configure error.
 - Smoke tests for Kokkos initialization, a parallel reduction on the default execution space,
@@ -755,6 +765,19 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   sections time Laplacian smoothing against MOAB's, and `FemSpace`, the three assemblies and
   CG alone; its `advect` section, `FvSpace` and upwind steps alone. `bench/run_parallel.sh` runs it
   over rank counts and sizes into JSON files; its header lists what a run at scale needs.
+- `bench/bench_backends` times SOMA against itself on every execution space of the build
+  (Serial, the host parallel backend at the process's thread count, the device) on generated
+  boxes in curve order: lean mirror in, derivation, vertex-to-element, both bridges, an
+  element traversal kernel, a vertex walk kernel, and the copy of everything back to the host.
+  The copies are attributed to a memory space, the rest to an execution space. Every workflow
+  checksums its result where it ran, in fixed-point integers, and the spaces must agree or the
+  run exits 2. It needs neither MOAB nor a file and builds with `SOMA_ENABLE_BENCHMARKS=ON`
+  (the MOAB comparisons still need `SOMA_ENABLE_MOAB_REFERENCE`); with tests on, a tiny run
+  is a ctest. `bench/run_backends.sh` sweeps the thread count.
+- Every benchmark row now records the execution space, the git commit of the build, and the
+  host and device backends (`space`, `git`, `host_backend`, `device_backend`).
+  `bench/compare_bench.py` diffs two JSON-lines runs, flags changes inside the measurement
+  spread, and keeps rows present on one side only; `bench/results/` holds committed baselines.
 
 ### Packaging
 
