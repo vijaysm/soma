@@ -61,9 +61,8 @@ void MeshBuilder::add_elements(Topology t, std::span<const GO> gids,
   (void)detail::to_offset(vertex_gids.size(), "add_elements: connectivity size");
   Block b{t, {gids.begin(), gids.end()}, {}, {vertex_gids.begin(), vertex_gids.end()}};
   const auto stride = static_cast<std::size_t>(nv);
-  for (std::size_t i = 0; i <= gids.size(); ++i) {
-    b.offsets.push_back(static_cast<Offset>(i * stride));
-  }
+  b.offsets.resize(gids.size() + 1);
+  for (std::size_t i = 0; i <= gids.size(); ++i) b.offsets[i] = static_cast<Offset>(i * stride);
   blocks_[static_cast<std::size_t>(dimension(t))].push_back(std::move(b));
 }
 
@@ -143,6 +142,26 @@ void stable_sort_by_key(std::vector<R>& v, KeyOf key_of) {
   }
 }
 
+// The segments of n interior entities, sorted by (topology, arity) already:
+// what make_segments returns for them, without per-entity key arrays.
+template <class KeyOf>
+SegmentTable interior_segments(std::size_t n, KeyOf key_of) {
+  SegmentTable out;
+  out.count = static_cast<LO>(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    const auto [t, arity] = key_of(i);
+    const auto at = static_cast<LO>(i);
+    if (out.segments.empty() || out.segments.back().topology != t ||
+        out.segments.back().arity != arity) {
+      out.segments.push_back(Segment{at, at, t, arity, Ownership::interior});
+    }
+    out.segments.back().end = static_cast<LO>(i + 1);
+  }
+  out.interior_end = out.count;
+  out.owned_end = out.count;
+  return out;
+}
+
 Keys make_keys(Ordering ordering, const std::vector<Real>& xyz) {
   Keys k;
   if (ordering != Ordering::type_major_sfc || xyz.empty()) return k;
@@ -200,29 +219,50 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     rank[src] = static_cast<LO>(i);
     for (std::size_t k = 0; k < 3; ++k) mesh.coords_(i, k) = xyz_[3 * src + k];
   }
-  // (gid, local id) by gid; input in gid order needs no sort.
-  std::vector<std::pair<GO, LO>> local_of(nv);
-  for (std::size_t i = 0; i < nv; ++i) local_of[i] = {vertex_gids_[i], rank[i]};
-  sort_unless_sorted(local_of.begin(), local_of.end(), std::less<>());
-  const auto dup = std::adjacent_find(local_of.begin(), local_of.end(),
-                                      [](const auto& a, const auto& b) { return a.first == b.first; });
-  if (dup != local_of.end()) {
-    throw std::invalid_argument("duplicate vertex gid " + std::to_string(dup->first));
-  }
   // Unique gids that are also contiguous (file ids are) give a vertex's
-  // local id by indexing instead of a search.
+  // local id by indexing instead of a search. Input gids that increase by one
+  // are that already: the local ids by gid are the ranks.
+  std::vector<std::pair<GO, LO>> local_of;  // (gid, local id) by gid, unless dense
   std::vector<LO> dense_local;
-  const GO gmin = nv > 0 ? local_of.front().first : 0;
-  const GO gmax = nv > 0 ? local_of.back().first : -1;
+  GO gmin = 0;
+  GO gmax = -1;
   // Unsigned, since gmax - gmin overflows GO for gids spanning its range.
-  if (nv > 0 && static_cast<std::uint64_t>(gmax) - static_cast<std::uint64_t>(gmin) == nv - 1) {
-    dense_local.resize(nv);
-    for (const auto& [g, l] : local_of) dense_local[static_cast<std::size_t>(g - gmin)] = l;
+  const auto contiguous = [&] {
+    return static_cast<std::uint64_t>(gmax) - static_cast<std::uint64_t>(gmin) == nv - 1;
+  };
+  const bool increasing =
+      nv > 0 && std::adjacent_find(vertex_gids_.begin(), vertex_gids_.end(),
+                                   std::greater_equal<>()) == vertex_gids_.end();
+  if (increasing) {
+    gmin = vertex_gids_.front();
+    gmax = vertex_gids_.back();
   }
-  const std::vector<Ownership> vown(nv, Ownership::interior);
-  const std::vector<Topology> vtop(nv, Topology::vertex);
-  const std::vector<std::uint16_t> var(nv, 1);
-  v.segments = make_segments(vown, vtop, var);
+  if (increasing && contiguous()) {
+    dense_local = std::move(rank);
+  } else {
+    local_of.resize(nv);
+    for (std::size_t i = 0; i < nv; ++i) local_of[i] = {vertex_gids_[i], rank[i]};
+    sort_unless_sorted(local_of.begin(), local_of.end(), std::less<>());
+    const auto same_gid = [](const auto& x, const auto& y) { return x.first == y.first; };
+    const auto dup = std::adjacent_find(local_of.begin(), local_of.end(), same_gid);
+    if (dup != local_of.end()) {
+      throw std::invalid_argument("duplicate vertex gid " + std::to_string(dup->first));
+    }
+    if (nv > 0) {
+      gmin = local_of.front().first;
+      gmax = local_of.back().first;
+    }
+    if (nv > 0 && contiguous()) {
+      dense_local.resize(nv);
+      for (const auto& [g, l] : local_of) dense_local[static_cast<std::size_t>(g - gmin)] = l;
+    }
+  }
+  v.segments.count = v.count;
+  if (nv > 0) {
+    v.segments.segments.push_back(Segment{0, v.count, Topology::vertex, 1, Ownership::interior});
+  }
+  v.segments.interior_end = v.count;
+  v.segments.owned_end = v.count;
 
   const auto find_vertex = [&](GO g) -> LO {
     if (!dense_local.empty()) {
@@ -331,23 +371,48 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     e.gid = View1<GO, Kokkos::HostSpace>(uninit("soma::mesh::gid"), recs.size());
     e.conn = View1<LO, Kokkos::HostSpace>(uninit("soma::mesh::conn"), entries);
     std::size_t written = 0;
-    std::vector<Ownership> own(recs.size(), Ownership::interior);
-    std::vector<Topology> top(recs.size());
-    std::vector<std::uint16_t> ar(recs.size());
+    // Elements still in block order (file order usually is) copy each block's
+    // connectivity whole.
+    bool in_block_order = true;
+    {
+      std::size_t b = 0;
+      std::size_t i = 0;
+      for (const Rec& rec : recs) {
+        while (i == blocks_[d][b].gids.size()) {
+          ++b;
+          i = 0;
+        }
+        if (rec.block != b || rec.index != i) {
+          in_block_order = false;
+          break;
+        }
+        ++i;
+      }
+    }
+    if (in_block_order) {
+      for (const std::vector<LO>& ids : local) {
+        std::copy(ids.begin(), ids.end(), e.conn.data() + written);
+        written += ids.size();
+      }
+      written = 0;
+    }
     e.conn_offsets(0) = 0;
     for (std::size_t r = 0; r < recs.size(); ++r) {
       const Block& blk = blocks_[d][recs[r].block];
-      const std::vector<LO>& ids = local[recs[r].block];
-      for (Offset k = blk.offsets[recs[r].index]; k < blk.offsets[recs[r].index + 1]; ++k) {
-        e.conn(written++) = ids[static_cast<std::size_t>(k)];
+      const Offset first = blk.offsets[recs[r].index];
+      const Offset last = blk.offsets[recs[r].index + 1];
+      if (in_block_order) {
+        written += static_cast<std::size_t>(last - first);
+      } else {
+        const std::vector<LO>& ids = local[recs[r].block];
+        for (Offset k = first; k < last; ++k) e.conn(written++) = ids[static_cast<std::size_t>(k)];
       }
       e.conn_offsets(r + 1) = static_cast<Offset>(written);
       e.topology(r) = static_cast<std::uint8_t>(recs[r].t);
       e.gid(r) = recs[r].gid;
-      top[r] = recs[r].t;
-      ar[r] = recs[r].arity;
     }
-    e.segments = make_segments(own, top, ar);
+    e.segments =
+        interior_segments(ne, [&](std::size_t r) { return std::pair(recs[r].t, recs[r].arity); });
   }
   mesh.epoch_ = 1;
   mesh.attach_fields();

@@ -95,7 +95,22 @@ TEST(MeshBuilder, SegmentsAndOwnershipBoundaries) {
   EXPECT_EQ(mesh.segment_table(2).owned_end, 3);
   EXPECT_EQ(mesh.segment_table(2).interior_end, 3);
   ASSERT_EQ(mesh.segments(0).size(), 1u);
-  EXPECT_EQ(mesh.segments(0)[0].end, 7);
+  EXPECT_EQ(mesh.segments(0)[0], (Segment{0, 7, Topology::vertex, 1, Ownership::interior}));
+  EXPECT_EQ(mesh.segment_table(0).count, 7);
+  EXPECT_EQ(mesh.segment_table(0).owned_end, 7);
+  EXPECT_EQ(mesh.segment_table(0).interior_end, 7);
+  EXPECT_EQ(mesh.segment_table(2).count, 3);
+}
+
+// Without entities there are no segments and both ends are 0.
+TEST(MeshBuilder, AnEmptyMeshHasNoSegments) {
+  const auto mesh = soma::MeshBuilder(2).build();
+  for (int d = 0; d <= 2; ++d) {
+    EXPECT_TRUE(mesh.segments(d).empty()) << d;
+    EXPECT_EQ(mesh.segment_table(d).count, 0) << d;
+    EXPECT_EQ(mesh.segment_table(d).owned_end, 0) << d;
+    EXPECT_EQ(mesh.segment_table(d).interior_end, 0) << d;
+  }
 }
 
 TEST(MeshBuilder, VertexCoordinatesMustHoldThreeValuesPerVertex) {
