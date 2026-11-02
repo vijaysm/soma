@@ -4,7 +4,8 @@
 // Reading a .h5m file: SOMA read_h5m against MOAB load_file, both serial.
 // MOAB reads everything; SOMA every fixed-length tag on vertices and elements,
 // not sets or the other tag kinds yet. Each read is checked to have found the same
-// vertex and element counts; a mismatch exits with status 2.
+// vertex and element counts; a mismatch exits with status 2. The soma_sfc
+// workflow reads in Ordering::type_major_sfc, which MOAB has no counterpart of.
 //
 //   bench_h5m_read [--json] [--repeats N] [--box N] [mesh.h5m ...]
 //
@@ -102,6 +103,10 @@ bool run_mesh(const soma::Comm& comm, const std::string& path, int repeats, bool
   const auto ts = runner.run("read_h5m", "soma", elements, [&] { mesh = soma::HostMesh(); },
                              [&] { mesh = soma::read_h5m(path); });
   runner.compare(tm, ts);
+  soma::H5mReadOptions sfc;
+  sfc.ordering = soma::Ordering::type_major_sfc;
+  runner.run("read_h5m", "soma_sfc", elements, [&] { mesh = soma::HostMesh(); },
+             [&] { mesh = soma::read_h5m(path, sfc); });
   bool ok = mesh.dim() == moab_dim;
   for (int d = 0; d <= mesh.dim(); ++d) ok = ok && mesh.count(d) == moab_counts[d];
   if (!ok) std::cerr << "[bench] " << name << ": SOMA and MOAB read different entity counts\n";
