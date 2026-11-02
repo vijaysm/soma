@@ -156,10 +156,17 @@ TEST(HandleFields, AreGidFieldsOfTheirOwnFamily) {
   EXPECT_TRUE(reg.info(var.id()).variable);
   EXPECT_THROW(reg.add_var<double>("Y", sp, off, std::vector<double>{1, 2, 3}, wrong), std::invalid_argument);
 
+  // On one space, the handle and plain fields are told apart by id only; the
+  // variable-length one is not a fixed field.
+  EXPECT_NE(what_of([&] { reg.get<GO>("ADJ", sp); }).find("has several fields of this value type on this space"),
+            std::string::npos);
+  reg.remove(plain.id());
+  EXPECT_EQ(reg.get<GO>("ADJ", sp).id(), f.id());
+
   // Mirrors keep the mark.
   soma::FieldRegistry<HostMem> copy;
   reg.mirror_into<HostMem>(copy, {"*"}, {true, true, true, true, true}, false);
   EXPECT_TRUE(copy.info(f.id()).handle);
   EXPECT_TRUE(copy.info(var.id()).handle);
-  EXPECT_FALSE(copy.info(plain.id()).handle);
+  EXPECT_FALSE(copy.contains("Y"));
 }

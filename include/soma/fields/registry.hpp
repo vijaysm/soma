@@ -280,6 +280,8 @@ class FieldRegistry {
     return fetch<T>(named(name, dim));
   }
 
+  // The fixed-length field called `name` on `space`; std::invalid_argument when
+  // several (of other component counts or handle marks) are there.
   template <class T>
   Field<T, MemSpace> get(std::string_view name, const Space<MemSpace>& space) const {
     const Entry* e = find(name, data_type_of<T>(), space);
@@ -1087,11 +1089,19 @@ class FieldRegistry {
     return const_cast<Entry&>(std::as_const(*this).entry(id));
   }
 
+  // The fixed-length field of that name and type on the space. Fields that
+  // differ only by component count or handle mark are told apart by id only.
   const Entry* find(std::string_view name, DataType type, const Space<MemSpace>& space) const {
+    const Entry* found = nullptr;
     for (const Entry& e : entries_) {
-      if (e.alive && e.info.name == name && e.info.type == type && e.space == space) return &e;
+      if (!e.alive || e.info.variable || e.info.name != name || e.info.type != type || !(e.space == space)) continue;
+      if (found != nullptr) {
+        throw std::invalid_argument("field name '" + std::string(name) +
+                                    "' has several fields of this value type on this space; select by id");
+      }
+      found = &e;
     }
-    return nullptr;
+    return found;
   }
 
   template <class T>
