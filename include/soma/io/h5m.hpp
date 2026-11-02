@@ -4,9 +4,9 @@
 #ifndef SOMA_IO_H5M_HPP_
 #define SOMA_IO_H5M_HPP_
 
-// MOAB .h5m input, read on one process with the HDF5 C API (no MOAB). Needs a
-// build with SOMA_ENABLE_HDF5; without it read_h5m throws and h5m_available()
-// is false.
+// MOAB .h5m input and output on one process with the HDF5 C API (no MOAB).
+// Needs a build with SOMA_ENABLE_HDF5; without it read_h5m and write_h5m
+// throw and h5m_available() is false.
 //
 // Entities: /tstt/nodes/coordinates (1 to 3 columns; missing ones are zero)
 // and every group of /tstt/elements whose element_type is Edge, Tri, Quad,
@@ -51,7 +51,9 @@
 // stored as ranges, dense values of a variable-length tag, a handle tag whose
 // values are not 64-bit integers, and two values of one tag on one entity.
 
+#include <array>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -79,6 +81,28 @@ bool h5m_available() noexcept;
 HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& options = {});
 HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& options,
                   H5mReport& report);
+
+// write_h5m writes a file that MOAB's load_file and read_h5m read.
+//
+// Entities: the vertices, the elements of mesh.dim() and of every dimension
+// the mesh was built with (Mesh::input), or the dimensions options.dims
+// names (dims[0] must be true). One group per element type and node count
+// (Edge2, Tri3, Quad4, Polygon5, Hex8, ...), in type order and then node
+// count; knives and polyhedra throw. File ids are 1-based and contiguous:
+// the vertices, then the groups, each in gid order. A mesh that read_h5m read
+// in file order is written under its file ids when they were laid out so.
+// No history is written, so equal meshes give byte-equal files.
+//
+// The file is written to a new temporary next to `path` (`path` + "." + six
+// random characters, created exclusively) and renamed over `path`, so a
+// failure leaves neither a partial file nor a damaged earlier one. A mesh that
+// cannot be written throws std::invalid_argument before any file is touched;
+// I/O failures throw std::runtime_error naming the path and the cause.
+struct H5mWriteOptions {
+  std::optional<std::array<bool, 4>> dims{};
+};
+
+void write_h5m(const HostMesh& mesh, const std::filesystem::path& path, const H5mWriteOptions& options = {});
 
 }  // namespace soma
 

@@ -4,6 +4,8 @@
 // read_h5m against MOAB's load_file on the same files: entity counts per
 // type, coordinates and connectivity bitwise, and every tag MOAB holds on
 // vertices and elements, value by value, with its default and global value.
+// The "written:" files are those files read by read_h5m and written again by
+// write_h5m, so MOAB is checked to read what SOMA writes.
 //
 // MOAB numbers a freshly loaded file's entities of one type in file id
 // order, so the i-th handle of a type is the entity with the i-th smallest
@@ -260,7 +262,19 @@ fs::path sets_kinds_file() {
   return p;
 }
 
+fs::path path_of(const std::string& name);
+
+// The file `name` names, read by read_h5m and written again by write_h5m.
+fs::path written_file(const std::string& name) {
+  std::string flat = name;
+  std::replace(flat.begin(), flat.end(), ':', '_');
+  const fs::path p = scratch_dir() / ("written_" + flat);
+  if (!fs::exists(p)) soma::write_h5m(soma::read_h5m(path_of(name)), p);
+  return p;
+}
+
 fs::path path_of(const std::string& name) {
+  if (name.rfind("written:", 0) == 0) return written_file(name.substr(8));
   if (name == "tag_kinds") return tag_kinds_file();
   if (name == "poly_indices") return poly_indices_file();
   if (name == "sets_kinds") return sets_kinds_file();
@@ -660,11 +674,13 @@ TEST_P(H5mMoab, EveryTagMatchesValueByValue) {
     EXPECT_EQ(global ? global : def, mroot);
   }
   // Not vacuous: every file but hex_2048 carries entity tags, and the files
-  // MOAB wrote carry every kind.
+  // MOAB wrote carry every kind. write_h5m writes no tags yet.
   const auto has = [&](const char* n) {
     return std::any_of(compared.begin(), compared.end(), [&](const auto& c) { return c.first == n; });
   };
-  if (GetParam() != "hex_2048.h5m") EXPECT_FALSE(compared.empty());
+  const bool written = GetParam().rfind("written:", 0) == 0;
+  if (GetParam() != "hex_2048.h5m" && !written) EXPECT_FALSE(compared.empty());
+  if (written) EXPECT_TRUE(compared.empty());
   if (GetParam() == "tag_kinds") {
     for (const char* n : {"DENSE_D2", "SPARSE_I", "PAIR", "OPAQUE7", "BITS3", "WITH_GLOBAL"}) EXPECT_TRUE(has(n)) << n;
   }
@@ -735,7 +751,11 @@ TEST(H5mMoabFormat, ReadsASparseTagStoredDense) {
 INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                          ::testing::Values("64bricks_1khex.h5m", "hex_2048.h5m", "hexes_mixed.h5m",
                                            "hybrid_3quad_1tri.h5m", "moab_i.h5m", "recMeshOcn128.h5m",
-                                           "tag_kinds", "poly_indices", "sets_kinds"),
+                                           "tag_kinds", "poly_indices", "sets_kinds",
+                                           "written:64bricks_1khex.h5m", "written:hex_2048.h5m",
+                                           "written:hexes_mixed.h5m", "written:hybrid_3quad_1tri.h5m",
+                                           "written:moab_i.h5m", "written:recMeshOcn128.h5m",
+                                           "written:poly_indices"),
                          [](const auto& info) {
                            std::string n = info.param;
                            std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');

@@ -23,3 +23,15 @@ TEST(H5mUnavailable, ReadingThrowsAndSaysHowToEnableIt) {
   EXPECT_TRUE(report.skipped.empty());
   EXPECT_THROW(soma::read_h5m("mesh.h5m"), std::runtime_error);
 }
+
+TEST(H5mUnavailable, WritingThrowsAndSaysHowToEnableIt) {
+  const soma::HostMesh mesh;
+  try {
+    soma::write_h5m(mesh, "out.h5m");
+    ADD_FAILURE() << "write_h5m returned in a build without HDF5";
+  } catch (const std::runtime_error& e) {
+    const std::string what = e.what();
+    EXPECT_EQ(what.rfind("write_h5m: out.h5m: ", 0), 0u) << what;
+    EXPECT_NE(what.find("-DSOMA_ENABLE_HDF5=ON"), std::string::npos) << what;
+  }
+}

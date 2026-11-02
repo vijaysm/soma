@@ -1,0 +1,426 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2022-2026, Vijay Mahadevan.
+
+// write_h5m: what read_h5m reads back, the MOAB layout of the file, the file
+// ids, the dimensions written, and how a failed write leaves the disk.
+
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cstdint>
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <map>
+#include <set>
+#include <stdexcept>
+#include <string>
+#include <system_error>
+#include <vector>
+
+#include <hdf5.h>
+#include <unistd.h>
+
+#include <gtest/gtest.h>
+
+#include "soma/core/mesh.hpp"
+#include "soma/core/mesh_builder.hpp"
+#include "soma/core/transfer.hpp"
+#include "soma/io/h5m.hpp"
+#include "soma/testing/box_mesh.hpp"
+#include "soma/topology/build.hpp"
+
+namespace fs = std::filesystem;
+
+using soma::GO;
+using soma::HostMesh;
+using soma::LO;
+using soma::Topology;
+
+namespace soma_test {
+namespace {
+
+// One scratch directory per run, removed when the program ends.
+fs::path scratch() {
+  struct Scratch {
+    fs::path dir;
+    Scratch() {
+      const char* t = std::getenv("TMPDIR");
+      std::string pattern = ((t != nullptr && *t != '\0') ? fs::path(t) : fs::path("/tmp")) / "soma_h5mw_XXXXXX";
+      if (mkdtemp(pattern.data()) == nullptr) throw std::runtime_error("cannot create " + pattern);
+      dir = pattern;
+    }
+    Scratch(const Scratch&) = delete;
+    Scratch& operator=(const Scratch&) = delete;
+    ~Scratch() {
+      std::error_code ignored;
+      fs::remove_all(dir, ignored);
+    }
+  };
+  static const Scratch s;
+  return s.dir;
+}
+
+fs::path data(const std::string& name) { return fs::path(SOMA_TEST_DATA_DIR) / name; }
+
+std::vector<std::string> listing(const fs::path& dir) {
+  std::vector<std::string> out;
+  for (const auto& e : fs::directory_iterator(dir)) out.push_back(e.path().filename().string());
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+std::string bytes(const fs::path& p) {
+  std::ifstream in(p, std::ios::binary);
+  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+// Entities of one dimension by gid: topology and vertex gids.
+struct Entity {
+  Topology type = Topology::vertex;
+  std::vector<GO> vertices;
+  friend bool operator==(const Entity&, const Entity&) = default;
+};
+
+std::map<GO, Entity> entities(const HostMesh& m, int d) {
+  std::map<GO, Entity> out;
+  if (d > m.dim()) return out;
+  const auto gid = m.gid(d);
+  const auto g0 = m.gid(0);
+  for (std::size_t e = 0; e < static_cast<std::size_t>(m.count(d)); ++e) {
+    Entity x;
+    if (d > 0) {
+      x.type = static_cast<Topology>(m.topology(d)(e));
+      const auto off = m.conn_offsets(d);
+      for (auto k = off(e); k < off(e + 1); ++k) x.vertices.push_back(g0(static_cast<std::size_t>(m.conn(d)(static_cast<std::size_t>(k)))));
+    }
+    out[gid(e)] = x;
+  }
+  return out;
+}
+
+std::map<GO, std::array<double, 3>> coordinates(const HostMesh& m) {
+  std::map<GO, std::array<double, 3>> out;
+  const auto xyz = m.coords();
+  for (std::size_t v = 0; v < static_cast<std::size_t>(m.count(0)); ++v) {
+    out[m.gid(0)(v)] = {xyz(v, 0), xyz(v, 1), xyz(v, 2)};
+  }
+  return out;
+}
+
+// Two quads and a triangle with vertex gids 30, 20, 10, ...: gid order is
+// not the order they were given in.
+HostMesh mixed_2d() {
+  soma::MeshBuilder b(2);
+  const std::vector<GO> vg{60, 50, 40, 30, 20, 10, 70};
+  b.add_vertices(vg, std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 1, 0, 1, 1, 0, 2, 1, 0, 3, 0, 0});
+  b.add_elements(Topology::quad, std::vector<GO>{9, 4}, std::vector<GO>{60, 50, 20, 30, 50, 40, 10, 20});
+  b.add_elements(Topology::tri, std::vector<GO>{7}, std::vector<GO>{40, 70, 10});
+  return std::move(b).build();
+}
+
+hid_t open_file(const fs::path& p) { return H5Fopen(p.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT); }
+
+std::int64_t int_attribute(hid_t file, const char* object, const char* name) {
+  const hid_t o = H5Oopen(file, object, H5P_DEFAULT);
+  const hid_t a = H5Aopen(o, name, H5P_DEFAULT);
+  std::int64_t v = -1;
+  H5Aread(a, H5T_NATIVE_INT64, &v);
+  H5Aclose(a);
+  H5Oclose(o);
+  return v;
+}
+
+std::vector<hsize_t> extent(hid_t file, const char* dataset) {
+  const hid_t ds = H5Dopen2(file, dataset, H5P_DEFAULT);
+  const hid_t s = H5Dget_space(ds);
+  std::vector<hsize_t> dims(static_cast<std::size_t>(H5Sget_simple_extent_ndims(s)));
+  H5Sget_simple_extent_dims(s, dims.data(), nullptr);
+  H5Sclose(s);
+  H5Dclose(ds);
+  return dims;
+}
+
+class H5mWriteBack : public ::testing::TestWithParam<std::string> {};
+
+// Every entity, by gid, comes back with its type, vertices and coordinates,
+// and a file MOAB wrote keeps its file ids, however the mesh ordered its
+// local ids.
+TEST_P(H5mWriteBack, ReadsBackTheSameEntitiesUnderTheSameFileIds) {
+  for (const soma::Ordering ordering : {soma::Ordering::file, soma::Ordering::type_major_sfc}) {
+    SCOPED_TRACE(static_cast<int>(ordering));
+    const HostMesh in = soma::read_h5m(data(GetParam()), {.ordering = ordering});
+    const fs::path out = scratch() / ("back_" + GetParam());
+    soma::write_h5m(in, out);
+    const HostMesh back = soma::read_h5m(out);
+    ASSERT_EQ(back.dim(), in.dim());
+    EXPECT_EQ(coordinates(back), coordinates(in));
+    for (int d = 1; d <= in.dim(); ++d) {
+      EXPECT_EQ(back.input(d), in.input(d)) << d;
+      EXPECT_EQ(entities(back, d), entities(in, d)) << "dimension " << d;
+    }
+  }
+}
+
+INSTANTIATE_TEST_SUITE_P(Files, H5mWriteBack,
+                         ::testing::Values("64bricks_1khex.h5m", "hex_2048.h5m", "hexes_mixed.h5m",
+                                           "hybrid_3quad_1tri.h5m", "moab_i.h5m", "recMeshOcn128.h5m"),
+                         [](const auto& info) {
+                           std::string n = info.param;
+                           std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
+                           return n;
+                         });
+
+TEST(H5mWrite, FileIdsFollowGidsVerticesFirstThenGroupsInTypeOrder) {
+  const HostMesh in = mixed_2d();
+  const fs::path out = scratch() / "mixed.h5m";
+  soma::write_h5m(in, out);
+  const HostMesh back = soma::read_h5m(out);
+  // Vertices 10, 20, ..., 70 are file ids 1..7, triangle 7 is 8, quads 4 and 9
+  // are 9 and 10.
+  std::map<GO, std::array<double, 3>> want;
+  const auto c = coordinates(in);
+  GO id = 1;
+  for (const auto& [g, xyz] : c) want[id++] = xyz;
+  EXPECT_EQ(coordinates(back), want);
+  const auto f = [](GO g) { return g / 10; };
+  const auto e = entities(back, 2);
+  ASSERT_EQ(e.size(), 3u);
+  EXPECT_EQ(e.at(8), (Entity{Topology::tri, {f(40), f(70), f(10)}}));
+  EXPECT_EQ(e.at(9), (Entity{Topology::quad, {f(50), f(40), f(10), f(20)}}));
+  EXPECT_EQ(e.at(10), (Entity{Topology::quad, {f(60), f(50), f(20), f(30)}}));
+}
+
+TEST(H5mWrite, FileHasTheMoabLayout) {
+  const HostMesh in = mixed_2d();
+  const fs::path out = scratch() / "layout.h5m";
+  soma::write_h5m(in, out);
+  const hid_t f = open_file(out);
+  ASSERT_GE(f, 0);
+  EXPECT_EQ(int_attribute(f, "/tstt", "max_id"), 10);
+  EXPECT_EQ(extent(f, "/tstt/nodes/coordinates"), (std::vector<hsize_t>{7, 3}));
+  EXPECT_EQ(int_attribute(f, "/tstt/nodes/coordinates", "start_id"), 1);
+  EXPECT_EQ(extent(f, "/tstt/elements/Tri3/connectivity"), (std::vector<hsize_t>{1, 3}));
+  EXPECT_EQ(int_attribute(f, "/tstt/elements/Tri3/connectivity", "start_id"), 8);
+  EXPECT_EQ(extent(f, "/tstt/elements/Quad4/connectivity"), (std::vector<hsize_t>{2, 4}));
+  EXPECT_EQ(int_attribute(f, "/tstt/elements/Quad4/connectivity", "start_id"), 9);
+  for (const char* g : {"/tstt/tags", "/tstt/sets/tags", "/tstt/nodes/tags", "/tstt/elements/Tri3/tags",
+                        "/tstt/elements/Quad4/tags"}) {
+    EXPECT_GT(H5Lexists(f, g, H5P_DEFAULT), 0) << g;
+  }
+  EXPECT_EQ(H5Lexists(f, "/tstt/history", H5P_DEFAULT), 0);
+
+  // The committed element type enumeration names MOAB's ten types.
+  const hid_t t = H5Topen2(f, "/tstt/elemtypes", H5P_DEFAULT);
+  ASSERT_GE(t, 0);
+  EXPECT_EQ(H5Tget_nmembers(t), 10);
+  EXPECT_GT(H5Tequal(H5Tget_super(t), H5T_STD_U8LE), 0);
+  const char* names[] = {"Edge", "Tri", "Quad", "Polygon", "Tet", "Pyramid", "Prism", "Knife", "Hex", "Polyhedron"};
+  for (std::uint8_t v = 1; v <= 10; ++v) {
+    char name[32] = {};
+    ASSERT_GE(H5Tenum_nameof(t, &v, name, sizeof name), 0);
+    EXPECT_STREQ(name, names[v - 1]);
+  }
+  H5Tclose(t);
+  const hid_t q = H5Dopen2(f, "/tstt/elements/Quad4/connectivity", H5P_DEFAULT);
+  const hid_t qt = H5Dget_type(q);
+  EXPECT_GT(H5Tequal(qt, H5T_STD_U64LE), 0);
+  H5Tclose(qt);
+  H5Dclose(q);
+  H5Fclose(f);
+}
+
+TEST(H5mWrite, PolygonsGetOneGroupPerArity) {
+  soma::MeshBuilder b(2);
+  std::vector<soma::Real> xyz;
+  std::vector<GO> vg;
+  for (GO v = 1; v <= 9; ++v) {
+    vg.push_back(v);
+    xyz.insert(xyz.end(), {static_cast<double>(v), static_cast<double>(v * v % 7), 0});
+  }
+  b.add_vertices(vg, xyz);
+  b.add_polygons(std::vector<GO>{3, 1, 2}, std::vector<soma::Offset>{0, 5, 11, 16},
+                 std::vector<GO>{1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 6, 5, 6, 7, 8, 9});
+  const HostMesh in = std::move(b).build();
+  const fs::path out = scratch() / "polygons.h5m";
+  soma::write_h5m(in, out);
+  const hid_t f = open_file(out);
+  EXPECT_EQ(extent(f, "/tstt/elements/Polygon5/connectivity"), (std::vector<hsize_t>{2, 5}));
+  EXPECT_EQ(extent(f, "/tstt/elements/Polygon6/connectivity"), (std::vector<hsize_t>{1, 6}));
+  EXPECT_EQ(int_attribute(f, "/tstt/elements/Polygon5/connectivity", "start_id"), 10);
+  EXPECT_EQ(int_attribute(f, "/tstt/elements/Polygon6/connectivity", "start_id"), 12);
+  H5Fclose(f);
+  const HostMesh back = soma::read_h5m(out);
+  const auto e = entities(back, 2);
+  ASSERT_EQ(e.size(), 3u);
+  EXPECT_EQ(e.at(10).vertices, (std::vector<GO>{5, 6, 7, 8, 9}));     // gid 2
+  EXPECT_EQ(e.at(11).vertices, (std::vector<GO>{1, 2, 3, 4, 5}));     // gid 3
+  EXPECT_EQ(e.at(12).vertices, (std::vector<GO>{1, 2, 3, 4, 5, 6}));  // gid 1
+}
+
+// Derived dimensions are left out unless options.dims names them; input
+// ones are written.
+TEST(H5mWrite, WritesTheInputDimensionsOrThoseNamed) {
+  HostMesh in = soma::testing::box_mesh({2, 1, 1});
+  soma::build_adjacencies(in, soma::AdjacencyRequest{}.add(3, 2).add(3, 1), Kokkos::DefaultHostExecutionSpace{});
+  ASSERT_GT(in.count(2), 0);
+  const fs::path out = scratch() / "dims.h5m";
+  soma::write_h5m(in, out);
+  HostMesh back = soma::read_h5m(out);
+  EXPECT_EQ(back.count(1), 0);
+  EXPECT_EQ(back.count(2), 0);
+  EXPECT_EQ(back.count(3), 2);
+
+  soma::write_h5m(in, out, {.dims = std::array<bool, 4>{true, false, true, true}});
+  back = soma::read_h5m(out);
+  EXPECT_EQ(back.count(1), 0);
+  EXPECT_EQ(back.count(2), in.count(2));
+  // Faces take the file ids after the vertices, then the hexes; the hexes
+  // keep their vertices, in gid order.
+  const auto values = [](const std::map<GO, Entity>& m) {
+    std::vector<Entity> v;
+    for (const auto& [g, e] : m) v.push_back(e);
+    return v;
+  };
+  EXPECT_EQ(values(entities(back, 3)), values(entities(in, 3)));
+  EXPECT_EQ(values(entities(back, 2)), values(entities(in, 2)));
+  EXPECT_EQ(entities(back, 2).begin()->first, in.count(0) + 1);
+  EXPECT_EQ(entities(back, 3).begin()->first, in.count(0) + in.count(2) + 1);
+
+  soma::write_h5m(in, out, {.dims = std::array<bool, 4>{true, true, false, true}});
+  back = soma::read_h5m(out);
+  EXPECT_EQ(back.count(1), in.count(1));
+  EXPECT_EQ(back.count(2), 0);
+}
+
+// Derived faces of two prisms: a Tri3 group, then a Quad4 group, then the
+// prisms.
+TEST(H5mWrite, DerivedFacesAreGroupedByType) {
+  soma::MeshBuilder b(3);
+  b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6, 7, 8},
+                 std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1});
+  b.add_elements(Topology::prism, std::vector<GO>{1, 2}, std::vector<GO>{1, 2, 3, 4, 5, 6, 2, 7, 3, 5, 8, 6});
+  HostMesh in = std::move(b).build();
+  soma::build_adjacencies(in, soma::AdjacencyRequest{}.add(3, 2), Kokkos::DefaultHostExecutionSpace{});
+  std::vector<Topology> faces;
+  for (std::size_t e = 0; e < static_cast<std::size_t>(in.count(2)); ++e) faces.push_back(static_cast<Topology>(in.topology(2)(e)));
+  const auto ntri = std::count(faces.begin(), faces.end(), Topology::tri);
+  ASSERT_EQ(ntri, 4);
+  const fs::path out = scratch() / "faces.h5m";
+  soma::write_h5m(in, out, {.dims = std::array<bool, 4>{true, false, true, true}});
+  const hid_t f = open_file(out);
+  EXPECT_EQ(int_attribute(f, "/tstt/elements/Tri3/connectivity", "start_id"), 9);
+  EXPECT_EQ(int_attribute(f, "/tstt/elements/Quad4/connectivity", "start_id"), 13);
+  EXPECT_EQ(int_attribute(f, "/tstt/elements/Prism6/connectivity", "start_id"), 9 + in.count(2));
+  H5Fclose(f);
+  const HostMesh back = soma::read_h5m(out);
+  const auto values = [](const std::map<GO, Entity>& m) {
+    std::multiset<std::vector<GO>> v;
+    for (const auto& [g, e] : m) v.insert(e.vertices);
+    return v;
+  };
+  EXPECT_EQ(values(entities(back, 2)), values(entities(in, 2)));
+}
+
+// A mirror without coordinates cannot be written.
+TEST(H5mWrite, RejectsAMeshWithoutCoordinates) {
+  const HostMesh in = soma::testing::box_mesh({2, 1, 1});
+  const fs::path dir = scratch() / "missing";
+  fs::create_directory(dir);
+  soma::TransferOptions no_coords;
+  no_coords.coordinates = false;
+  try {
+    soma::write_h5m(in.mirror<Kokkos::HostSpace>(no_coords), dir / "m.h5m");
+    ADD_FAILURE() << "written without coordinates";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_STREQ(e.what(), "write_h5m: the mesh holds 12 vertices but not their coordinates and gids");
+  }
+  EXPECT_TRUE(listing(dir).empty());
+}
+
+TEST(H5mWrite, VerticesCannotBeLeftOut) {
+  const HostMesh in = mixed_2d();
+  const fs::path dir = scratch() / "no_vertices";
+  fs::create_directory(dir);
+  try {
+    soma::write_h5m(in, dir / "m.h5m", {.dims = std::array<bool, 4>{false, false, true, false}});
+    ADD_FAILURE() << "written without vertices";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_STREQ(e.what(), "write_h5m: the vertices are always written; dims[0] must be true");
+  }
+  EXPECT_TRUE(listing(dir).empty());
+}
+
+TEST(H5mWrite, EqualMeshesGiveEqualBytes) {
+  const fs::path a = scratch() / "same_a.h5m";
+  const fs::path b = scratch() / "same_b.h5m";
+  soma::write_h5m(mixed_2d(), a);
+  soma::write_h5m(mixed_2d(), b);
+  const std::string x = bytes(a);
+  EXPECT_FALSE(x.empty());
+  EXPECT_TRUE(x == bytes(b));
+}
+
+// No object carries a time, so the bytes depend on the mesh alone.
+TEST(H5mWrite, ObjectsCarryNoTimes) {
+  const fs::path out = scratch() / "times.h5m";
+  soma::write_h5m(mixed_2d(), out);
+  const hid_t f = open_file(out);
+  std::vector<std::string> timed;
+  int objects = 0;
+  struct Visit {
+    std::vector<std::string>* timed;
+    int* objects;
+  } visit{&timed, &objects};
+  const auto each = [](hid_t, const char* name, const H5O_info2_t* info, void* data) -> herr_t {
+    auto* v = static_cast<Visit*>(data);
+    ++*v->objects;
+    if (info->ctime != 0 || info->mtime != 0 || info->btime != 0 || info->atime != 0) v->timed->push_back(name);
+    return 0;
+  };
+  ASSERT_GE(H5Ovisit3(f, H5_INDEX_NAME, H5_ITER_INC, each, &visit, H5O_INFO_BASIC | H5O_INFO_TIME), 0);
+  H5Fclose(f);
+  EXPECT_GT(objects, 10);
+  EXPECT_TRUE(timed.empty()) << timed.front();
+}
+
+TEST(H5mWrite, ReplacesAnEarlierFile) {
+  const fs::path dir = scratch() / "replace";
+  fs::create_directory(dir);
+  const fs::path out = dir / "m.h5m";
+  std::ofstream(out) << "not a mesh";
+  soma::write_h5m(mixed_2d(), out);
+  EXPECT_EQ(soma::read_h5m(out).count(2), 3);
+  EXPECT_EQ(listing(dir), std::vector<std::string>{"m.h5m"});
+}
+
+// A rename that fails (the target is a directory) leaves the directory and
+// no temporary file.
+TEST(H5mWrite, AFailedWriteLeavesNothingBehind) {
+  const fs::path dir = scratch() / "failed";
+  fs::create_directories(dir / "m.h5m" / "inside");
+  try {
+    soma::write_h5m(mixed_2d(), dir / "m.h5m");
+    ADD_FAILURE() << "renamed over a directory";
+  } catch (const std::runtime_error& e) {
+    const std::string what = e.what();
+    EXPECT_EQ(what.rfind("write_h5m: cannot write " + (dir / "m.h5m").string() + ": ", 0), 0u) << what;
+  }
+  EXPECT_EQ(listing(dir), std::vector<std::string>{"m.h5m"});
+  EXPECT_TRUE(fs::is_directory(dir / "m.h5m" / "inside"));
+
+  const fs::path missing = scratch() / "no_such_dir" / "m.h5m";
+  try {
+    soma::write_h5m(mixed_2d(), missing);
+    ADD_FAILURE() << "written into a missing directory";
+  } catch (const std::runtime_error& e) {
+    const std::string what = e.what();
+    EXPECT_EQ(what.rfind("write_h5m: cannot write " + missing.string() + ": cannot create a temporary file: ", 0), 0u)
+        << what;
+  }
+  EXPECT_FALSE(fs::exists(missing.parent_path()));
+}
+
+}  // namespace
+}  // namespace soma_test
