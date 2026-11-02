@@ -15,8 +15,9 @@ if(HDF5_IS_PARALLEL AND NOT SOMA_ENABLE_MPI)
     "SOMA_ENABLE_HDF5=ON found a parallel HDF5 (${HDF5_C_INCLUDE_DIRS}), which needs MPI. "
     "Configure with -DSOMA_ENABLE_MPI=ON, or set HDF5_ROOT to a serial HDF5.")
 endif()
-if(HDF5_VERSION VERSION_LESS 1.10)
-  message(FATAL_ERROR "SOMA_ENABLE_HDF5=ON needs HDF5 1.10 or newer (found ${HDF5_VERSION})")
+# H5Literate2 and H5Fis_accessible are 1.12 API.
+if(HDF5_VERSION VERSION_LESS 1.12)
+  message(FATAL_ERROR "SOMA_ENABLE_HDF5=ON needs HDF5 1.12 or newer (found ${HDF5_VERSION})")
 endif()
 # Recorded in the package config so consumers find the same HDF5; only a root
 # the user gave, since one guessed from the include directory can be wrong.
