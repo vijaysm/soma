@@ -117,23 +117,12 @@ class SetBuilder {
       h.parent_offsets_[i + 1] = detail::to_offset(h.parents_.size(), "number of parents");
     }
     for (std::size_t k = 0; k < rows.size(); ++k) {
-      std::size_t total = 0;
       for (auto& r : rows[k]) {
         std::sort(r.begin(), r.end());
         r.erase(std::unique(r.begin(), r.end()), r.end());
-        total += r.size();
       }
-      auto& slot = h.slots_[k];
-      slot.offsets = View1<Offset, Kokkos::HostSpace>("soma::sets::offsets", n + 1);
-      slot.members = View1<LO, Kokkos::HostSpace>("soma::sets::members", total);
-      std::size_t at = 0;
-      slot.offsets(0) = 0;
-      for (std::size_t i = 0; i < n; ++i) {
-        for (const LO l : rows[k][i]) slot.members(at++) = l;
-        slot.offsets(i + 1) = detail::to_offset(at, "set membership size");
-      }
-      slot.host_offsets = slot.offsets;
-      slot.host_members = slot.members;
+      const LO entities = k == static_cast<std::size_t>(set_dim) ? static_cast<LO>(n) : mesh.count(static_cast<int>(k));
+      h.slots_[k] = EntitySets<Kokkos::HostSpace>::Slot::packed(rows[k], entities);
     }
     h.host_gid_ = h.gid_;
 

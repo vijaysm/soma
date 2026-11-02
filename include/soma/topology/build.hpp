@@ -217,7 +217,7 @@ void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRe
       const auto it = std::lower_bound(by_gid.begin(), by_gid.end(), key);
       if (it != by_gid.end() && it->first == before(i)) new_lid[i] = it->second;
     }
-    sets = (sets ? *sets : mesh.sets()).renumbered(k, new_lid);
+    sets = (sets ? *sets : mesh.sets()).renumbered(k, new_lid, work.count(k));
   }
 
   // Install; nothing below throws.

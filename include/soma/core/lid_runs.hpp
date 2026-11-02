@@ -11,8 +11,12 @@
 //   list       a = the sorted ids
 // intervals is chosen when 2 runs + 1 < size, full when size == count.
 
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <span>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include <Kokkos_Core.hpp>
@@ -41,6 +45,27 @@ struct Interval {
 };
 
 namespace detail {
+
+// Size or offset to LO, for counts that come from containers or Views and have
+// no bound that the type system knows. Throws std::length_error naming `what`.
+inline LO to_lo(std::size_t n, const char* what) {
+  constexpr auto limit = static_cast<std::size_t>(std::numeric_limits<LO>::max());
+  if (n > limit) {
+    throw std::length_error(std::string(what) + " " + std::to_string(n) +
+                            " exceeds the largest local ordinal " + std::to_string(limit));
+  }
+  return static_cast<LO>(n);
+}
+
+// The same check for CSR offsets.
+inline Offset to_offset(std::size_t n, const char* what) {
+  constexpr auto limit = static_cast<std::size_t>(std::numeric_limits<Offset>::max());
+  if (n > limit) {
+    throw std::length_error(std::string(what) + " " + std::to_string(n) +
+                            " exceeds the largest offset " + std::to_string(limit));
+  }
+  return static_cast<Offset>(n);
+}
 
 // Canonical runs of a sorted id list.
 inline std::vector<Interval> runs_of(std::span<const LO> lids) {

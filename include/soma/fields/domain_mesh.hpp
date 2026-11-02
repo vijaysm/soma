@@ -83,7 +83,8 @@ Domain<MemSpace> Domain<MemSpace>::from_list(const Mesh<MemSpace>& mesh, int dim
 template <class MemSpace>
 Domain<MemSpace> Domain<MemSpace>::from_set(const Mesh<MemSpace>& mesh, LO set, int slot) {
   check_dim(slot, 0);
-  return from_list(mesh, slot, mesh.sets().members_of(set, slot));
+  return from_intervals(slot, detail::slot_count(mesh, slot), mesh.epoch(),
+                        detail::runs_of(mesh.sets().members_of(set, slot)), detail::slot_gid(mesh, slot));
 }
 
 // Per-dimension topology and polygon connectivity offsets of the mesh, the

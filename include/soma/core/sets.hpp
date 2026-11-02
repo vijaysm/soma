@@ -5,14 +5,18 @@
 #define SOMA_CORE_SETS_HPP_
 
 // Entity sets: groups of entities and of other sets, as MOAB's meshsets.
-// Membership is one CSR per field slot (dimensions 0 to 3, then the sets),
-// each row sorted and unique, and is readable on the device through SetsView.
+// Membership is one row per set and field slot (dimensions 0 to 3, then the
+// sets): sorted, unique ids held in the smallest of the forms of
+// soma/core/lid_runs.hpp (full, intervals or list), readable on the device
+// through SetsView.
 // Flags, the file order of ordered sets and the parent/child links stay on the
 // host. Sets are made by SetBuilder (soma/core/set_builder.hpp).
 
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -22,6 +26,7 @@
 
 #include <Kokkos_Core.hpp>
 
+#include "soma/core/lid_runs.hpp"
 #include "soma/core/types.hpp"
 #include "soma/core/view_types.hpp"
 #include "soma/topology/adjacency.hpp"
@@ -50,34 +55,133 @@ class MissingSetMembers : public std::logic_error {
   using std::logic_error::logic_error;
 };
 
+namespace detail {
+// Indexes a pointer with operator(), as the run search expects.
+struct PtrAt {
+  const LO* p = nullptr;
+  KOKKOS_INLINE_FUNCTION LO operator()(LO i) const { return p[i]; }
+};
+}  // namespace detail
+
+// One set's members in one slot, read in place: size sorted, unique ids out of
+// [0, count). r[k] is the k-th member (O(log runs) for intervals), row(lid)
+// its index or invalid_lo; the iterator walks the runs in order. Valid while
+// the EntitySets it came from lives.
+struct SetRow {
+  DomainKind kind = DomainKind::list;
+  LO count = 0;  // entities of the slot (sets for set_dim)
+  LO size = 0;   // members
+  LO runs = 0;
+  const LO* a = nullptr;
+  const LO* b = nullptr;
+
+  // The row whose stored ids, len of them, start at p.
+  KOKKOS_INLINE_FUNCTION static SetRow of(DomainKind kind, LO count, const LO* p, LO len) {
+    SetRow r;
+    r.kind = kind;
+    r.count = count;
+    r.a = p;
+    switch (kind) {
+      case DomainKind::full: r.size = count; break;
+      case DomainKind::list: r.size = len; break;
+      case DomainKind::intervals:
+        r.runs = (len - 1) / 2;
+        r.b = p + r.runs;
+        r.size = r.b[r.runs];
+        break;
+    }
+    return r;
+  }
+
+  KOKKOS_INLINE_FUNCTION LO operator[](LO k) const {
+    return detail::run_entity(kind, size, runs, detail::PtrAt{a}, detail::PtrAt{b}, k);
+  }
+  KOKKOS_INLINE_FUNCTION LO row(LO lid) const {
+    return detail::run_row(kind, count, size, runs, detail::PtrAt{a}, detail::PtrAt{b}, lid);
+  }
+  KOKKOS_INLINE_FUNCTION bool contains(LO lid) const { return row(lid) != invalid_lo; }
+  KOKKOS_INLINE_FUNCTION bool empty() const { return size == 0; }
+
+  class iterator {
+   public:
+    using iterator_category = std::forward_iterator_tag;
+    using value_type = LO;
+    using difference_type = std::ptrdiff_t;
+    using pointer = void;
+    using reference = LO;
+
+    iterator() = default;
+    KOKKOS_INLINE_FUNCTION iterator(DomainKind kind, LO runs, const LO* a, const LO* b, LO k)
+        : kind_(kind), runs_(runs), a_(a), b_(b), k_(k) {}
+    KOKKOS_INLINE_FUNCTION LO operator*() const {
+      switch (kind_) {
+        case DomainKind::full: return k_;
+        case DomainKind::list: return a_[k_];
+        case DomainKind::intervals: return a_[run_] + (k_ - b_[run_]);
+      }
+      return invalid_lo;
+    }
+    KOKKOS_INLINE_FUNCTION iterator& operator++() {
+      ++k_;
+      if (kind_ == DomainKind::intervals && run_ + 1 < runs_ && k_ == b_[run_ + 1]) ++run_;
+      return *this;
+    }
+    KOKKOS_INLINE_FUNCTION iterator operator++(int) {
+      iterator old = *this;
+      ++*this;
+      return old;
+    }
+    KOKKOS_INLINE_FUNCTION friend bool operator==(const iterator& x, const iterator& y) { return x.k_ == y.k_; }
+
+   private:
+    DomainKind kind_ = DomainKind::list;
+    LO runs_ = 0;
+    const LO* a_ = nullptr;
+    const LO* b_ = nullptr;
+    LO k_ = 0;
+    LO run_ = 0;  // the run of k_ (intervals)
+  };
+  KOKKOS_INLINE_FUNCTION iterator begin() const { return iterator(kind, runs, a, b, 0); }
+  KOKKOS_INLINE_FUNCTION iterator end() const { return iterator(kind, runs, a, b, size); }
+};
+
+namespace detail {
+// The runs of a row, read without listing its members.
+inline std::vector<Interval> runs_of(const SetRow& r) {
+  std::vector<Interval> out;
+  switch (r.kind) {
+    case DomainKind::full:
+      if (r.size > 0) out.push_back(Interval{0, r.size});
+      break;
+    case DomainKind::intervals:
+      for (LO i = 0; i < r.runs; ++i) out.push_back(Interval{r.a[i], r.a[i] + (r.b[i + 1] - r.b[i])});
+      break;
+    case DomainKind::list:
+      out = runs_of(std::span<const LO>(r.a, static_cast<std::size_t>(r.size)));
+      break;
+  }
+  return out;
+}
+}  // namespace detail
+
 // Kernel handle; valid while the EntitySets it came from lives. Rows exist for
 // the slots the sets hold (EntitySets::has_members).
 template <class MemSpace>
 struct SetsView {
   LO count = 0;
   UView1<GO, MemSpace> gid{};
+  Kokkos::Array<LO, num_field_slots> entities{};
+  Kokkos::Array<UView1<std::uint8_t, MemSpace>, num_field_slots> kinds{};
   Kokkos::Array<UView1<Offset, MemSpace>, num_field_slots> offsets{};
-  Kokkos::Array<UView1<LO, MemSpace>, num_field_slots> members{};
+  Kokkos::Array<UView1<LO, MemSpace>, num_field_slots> data{};
 
-  KOKKOS_INLINE_FUNCTION Row<const LO> row(int slot, LO set) const {
+  KOKKOS_INLINE_FUNCTION SetRow row(int slot, LO set) const {
     const auto k = static_cast<std::size_t>(slot);
     const Offset b = offsets[k](set);
-    return {members[k].data() + b, static_cast<LO>(offsets[k](set + 1) - b)};
+    return SetRow::of(static_cast<DomainKind>(kinds[k](set)), entities[k], data[k].data() + b,
+                      static_cast<LO>(offsets[k](set + 1) - b));
   }
-  KOKKOS_INLINE_FUNCTION bool contains(int slot, LO set, LO lid) const {
-    const Row<const LO> r = row(slot, set);
-    LO lo = 0;
-    LO hi = r.size;
-    while (lo < hi) {
-      const LO mid = lo + (hi - lo) / 2;
-      if (r[mid] < lid) {
-        lo = mid + 1;
-      } else {
-        hi = mid;
-      }
-    }
-    return lo < r.size && r[lo] == lid;
-  }
+  KOKKOS_INLINE_FUNCTION bool contains(int slot, LO set, LO lid) const { return row(slot, set).contains(lid); }
 };
 
 class SetBuilder;
@@ -123,10 +227,14 @@ class EntitySets {
     check_slot(slot);
     return slots_[static_cast<std::size_t>(slot)].present;
   }
-  // CSR of one slot: count + 1 offsets into members, none at all when there
-  // are no sets. Throws MissingSetMembers for a slot the sets do not hold.
+  // Storage of one slot: the form of each row (a DomainKind), count + 1
+  // offsets into data, and the stored ids of every row; none at all when there
+  // are no sets. entities() is the count the rows are out of. Throws
+  // MissingSetMembers for a slot the sets do not hold.
+  View1<const std::uint8_t, MemSpace> kinds(int slot) const { return held(slot).kinds; }
   View1<const Offset, MemSpace> offsets(int slot) const { return held(slot).offsets; }
-  View1<const LO, MemSpace> members(int slot) const { return held(slot).members; }
+  View1<const LO, MemSpace> data(int slot) const { return held(slot).data; }
+  LO entities(int slot) const { return held(slot).entities; }
 
   // A view of temporary sets would dangle, so that overload is deleted.
   SetsView<MemSpace> view() const& {
@@ -134,8 +242,10 @@ class EntitySets {
     v.count = count_;
     v.gid = gid_;
     for (std::size_t k = 0; k < slots_.size(); ++k) {
+      v.entities[k] = slots_[k].entities;
+      v.kinds[k] = slots_[k].kinds;
       v.offsets[k] = slots_[k].offsets;
-      v.members[k] = slots_[k].members;
+      v.data[k] = slots_[k].data;
     }
     return v;
   }
@@ -145,13 +255,14 @@ class EntitySets {
   std::uint8_t flags(LO set) const { return flags_[index(set)]; }
   bool ordered(LO set) const { return (flags(set) & set_ordered) != 0; }
 
-  // Sorted, unique local ids (set indices for set_dim) of one slot.
-  std::span<const LO> members_of(LO set, int slot) const {
+  // Sorted, unique local ids (set indices for set_dim) of one slot, in host
+  // memory; std::vector<LO>(r.begin(), r.end()) lists them.
+  SetRow members_of(LO set, int slot) const {
     const Slot& s = held(slot);
     const std::size_t i = index(set);
-    const auto b = static_cast<std::size_t>(s.host_offsets(i));
-    const auto e = static_cast<std::size_t>(s.host_offsets(i + 1));
-    return {s.host_members.data() + b, e - b};
+    const Offset b = s.host_offsets(i);
+    return SetRow::of(static_cast<DomainKind>(s.host_kinds(i)), s.entities, s.host_data.data() + b,
+                      static_cast<LO>(s.host_offsets(i + 1) - b));
   }
 
   // Contents of an ordered set in their stored order, repeats included. Throws
@@ -211,10 +322,11 @@ class EntitySets {
   }
 
   // The same sets with the members of one dimension renumbered: lid l becomes
-  // new_lid[l]. Rows are sorted again; sequences keep their order. Throws
-  // std::logic_error when a member has no new lid (invalid_lo).
-  EntitySets renumbered(int dim, const std::vector<LO>& new_lid) const {
-    const Slot& s = held(dim);
+  // new_lid[l], out of count entities. Rows are sorted and take their form
+  // again; sequences keep their order. Throws std::logic_error when a member
+  // has no new lid (invalid_lo).
+  EntitySets renumbered(int dim, const std::vector<LO>& new_lid, LO count) const {
+    (void)held(dim);
     const auto map = [&](LO l) {
       const auto at = static_cast<std::size_t>(l);
       const LO m = at < new_lid.size() ? new_lid[at] : invalid_lo;
@@ -224,20 +336,12 @@ class EntitySets {
       }
       return m;
     };
-    const auto n = static_cast<std::size_t>(count_);
-    View1<Offset, Kokkos::HostSpace> offs("soma::sets::offsets", n + 1);
-    View1<LO, Kokkos::HostSpace> mem("soma::sets::members", s.host_members.extent(0));
-    std::vector<LO> row;
-    for (std::size_t i = 0; i < n; ++i) {
-      row.clear();
-      const auto b = static_cast<std::size_t>(s.host_offsets(i));
-      const auto e = static_cast<std::size_t>(s.host_offsets(i + 1));
-      for (std::size_t k = b; k < e; ++k) row.push_back(map(s.host_members(k)));
+    std::vector<std::vector<LO>> rows(static_cast<std::size_t>(count_));
+    for (LO i = 0; i < count_; ++i) {
+      auto& row = rows[static_cast<std::size_t>(i)];
+      for (const LO l : members_of(i, dim)) row.push_back(map(l));
       std::sort(row.begin(), row.end());
-      for (std::size_t k = 0; k < row.size(); ++k) mem(b + k) = row[k];
-      offs(i) = s.host_offsets(i);
     }
-    offs(n) = s.host_offsets(n);
     std::vector<SetEntry> seq = seq_;
     for (SetEntry& e : seq) {
       if (e.slot == dim) e.lid = map(e.lid);
@@ -247,11 +351,7 @@ class EntitySets {
     out.gid_ = gid_;
     out.host_gid_ = host_gid_;
     out.slots_ = slots_;
-    auto& t = out.slots_[static_cast<std::size_t>(dim)];
-    t.offsets = Kokkos::create_mirror_view_and_copy(MemSpace{}, offs);
-    t.members = Kokkos::create_mirror_view_and_copy(MemSpace{}, mem);
-    t.host_offsets = offs;
-    t.host_members = mem;
+    out.slots_[static_cast<std::size_t>(dim)] = Slot::packed(rows, count);
     out.flags_ = flags_;
     out.seq_offsets_ = seq_offsets_;
     out.seq_ = std::move(seq);
@@ -275,10 +375,13 @@ class EntitySets {
       auto& t = out.slots_[k];
       t.present = s.present && (k == static_cast<std::size_t>(set_dim) || keep[k]);
       if (!t.present) continue;
+      t.entities = s.entities;
+      transfer(t.kinds, s.kinds, alias);
       transfer(t.offsets, s.offsets, alias);
-      transfer(t.members, s.members, alias);
+      transfer(t.data, s.data, alias);
+      t.host_kinds = host_of(t.kinds);
       t.host_offsets = host_of(t.offsets);
-      t.host_members = host_of(t.members);
+      t.host_data = host_of(t.data);
     }
     out.flags_ = flags_;
     out.seq_offsets_ = seq_offsets_;
@@ -297,11 +400,46 @@ class EntitySets {
 
   struct Slot {
     bool present = true;
+    LO entities = 0;
+    View1<std::uint8_t, MemSpace> kinds;
     View1<Offset, MemSpace> offsets;
-    View1<LO, MemSpace> members;
+    View1<LO, MemSpace> data;
+    View1<std::uint8_t, Kokkos::HostSpace> host_kinds;
     View1<Offset, Kokkos::HostSpace> host_offsets;
-    View1<LO, Kokkos::HostSpace> host_members;
+    View1<LO, Kokkos::HostSpace> host_data;
+
+    // Rows of sorted, unique ids out of count, each in its smallest form.
+    static Slot packed(const std::vector<std::vector<LO>>& rows, LO count) {
+      const std::size_t n = rows.size();
+      std::vector<std::uint8_t> kinds(n);
+      std::vector<Offset> offsets(n + 1, 0);
+      std::vector<LO> data;
+      for (std::size_t i = 0; i < n; ++i) {
+        const auto runs = detail::runs_of(rows[i]);
+        const DomainKind k = detail::form_of(static_cast<LO>(rows[i].size()), count, static_cast<LO>(runs.size()));
+        kinds[i] = static_cast<std::uint8_t>(k);
+        const std::vector<LO> packed = detail::pack_runs(runs, k);
+        data.insert(data.end(), packed.begin(), packed.end());
+        offsets[i + 1] = detail::to_offset(data.size(), "set membership size");
+      }
+      Slot s;
+      s.entities = count;
+      s.host_kinds = host_view(kinds, "soma::sets::kinds");
+      s.host_offsets = host_view(n == 0 ? std::vector<Offset>{} : offsets, "soma::sets::offsets");
+      s.host_data = host_view(data, "soma::sets::data");
+      s.kinds = Kokkos::create_mirror_view_and_copy(MemSpace{}, s.host_kinds);
+      s.offsets = Kokkos::create_mirror_view_and_copy(MemSpace{}, s.host_offsets);
+      s.data = Kokkos::create_mirror_view_and_copy(MemSpace{}, s.host_data);
+      return s;
+    }
   };
+  template <class T>
+  static View1<T, Kokkos::HostSpace> host_view(const std::vector<T>& v, const char* label) {
+    View1<T, Kokkos::HostSpace> out(Kokkos::view_alloc(std::string(label), Kokkos::WithoutInitializing),
+                                    v.size());
+    for (std::size_t i = 0; i < v.size(); ++i) out(i) = v[i];
+    return out;
+  }
 
   static void check_slot(int slot) {
     if (slot < 0 || slot > set_dim) {

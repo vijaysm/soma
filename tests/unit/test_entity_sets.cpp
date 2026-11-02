@@ -16,6 +16,7 @@
 #include "soma/core/set_builder.hpp"
 #include "soma/core/sets.hpp"
 #include "soma/fields/domain_mesh.hpp"
+#include "soma/testing/box_mesh.hpp"
 #include "soma/topology/build.hpp"
 
 using soma::GO;
@@ -192,12 +193,12 @@ TEST(EntitySets, MirrorsCarryTheSetsByDefault) {
     EXPECT_EQ(soma_test::vec(m.sets().members_of(0, 2)), (std::vector<LO>{0, 2}));
     EXPECT_EQ(m.sets().sequence(1).size(), 5u);
     EXPECT_EQ(soma_test::vec(m.sets().children(0)), (std::vector<LO>{3}));
-    EXPECT_NE(m.sets().members(2).data(), mesh.sets().members(2).data());
+    EXPECT_NE(m.sets().data(2).data(), mesh.sets().data(2).data());
   };
   check(mesh.mirror<HostMem>());
   check(mesh.clone());
   const auto alias = mesh.mirror_view<HostMem>();
-  EXPECT_EQ(alias.sets().members(2).data(), mesh.sets().members(2).data());
+  EXPECT_EQ(alias.sets().data(2).data(), mesh.sets().data(2).data());
   soma::TransferOptions none;
   none.sets = false;
   EXPECT_EQ(mesh.mirror<HostMem>(none).sets().count(), 0);
@@ -211,13 +212,13 @@ TEST(EntitySets, MembersOfADroppedDimensionThrowInTheMirror) {
   const auto& s = m.sets();
   EXPECT_FALSE(s.has_members(1));
   EXPECT_TRUE(s.has_members(set_dim));
-  EXPECT_THROW((void)s.members(1), soma::MissingSetMembers);
+  EXPECT_THROW((void)s.data(1), soma::MissingSetMembers);
   EXPECT_THROW((void)s.offsets(1), soma::MissingSetMembers);
   EXPECT_THROW((void)s.members_of(0, 1), soma::MissingSetMembers);
   EXPECT_THROW((void)s.members_recursive(0, 1), soma::MissingSetMembers);
   EXPECT_THROW((void)s.sequence(1), soma::MissingSetMembers);  // holds edge 0
   try {
-    (void)s.members(1);
+    (void)s.data(1);
   } catch (const soma::MissingSetMembers& e) {
     EXPECT_NE(std::string(e.what()).find("set members of dimension 1 were not transferred"),
               std::string::npos) << e.what();
@@ -248,4 +249,155 @@ TEST(EntitySets, FieldsOnSetsUseTheSetSlot) {
   const auto bare = mesh.mirror<HostMem>(with);
   EXPECT_THROW((void)bare.fields().get<int>("GLOBAL_ID", set_dim), std::out_of_range);
   EXPECT_EQ(bare.fields().get<int>("GLOBAL_ID", 0).rows(), 7);
+}
+
+namespace {
+
+// A 10 x 10 quad box (100 faces, 121 vertices) with five sets of faces:
+//   gid 10 every face (full), 20 faces 0-9 and 50-59 (intervals),
+//   30 the even faces below 20 (list), 40 empty, 50 every vertex and no face.
+soma::HostMesh box_with_shaped_sets() {
+  soma::HostMesh mesh = soma::testing::box_mesh({10, 10, 1, soma::Topology::quad});
+  std::vector<SetItem> all;
+  std::vector<SetItem> two_runs;
+  std::vector<SetItem> evens;
+  std::vector<SetItem> vertices;
+  for (GO f = 0; f < 100; ++f) all.push_back({2, f});
+  for (GO f = 0; f < 10; ++f) two_runs.push_back({2, 50 + f});
+  for (GO f = 0; f < 10; ++f) two_runs.push_back({2, f});
+  for (GO f = 0; f < 20; f += 2) evens.push_back({2, f});
+  for (GO v = 0; v < 121; ++v) vertices.push_back({0, v});
+  soma::SetBuilder b;
+  b.add(SetSpec{10, soma::set_unique, all, {}, {}});
+  b.add(SetSpec{20, soma::set_unique, two_runs, {}, {}});
+  b.add(SetSpec{30, soma::set_unique, evens, {}, {}});
+  b.add(SetSpec{40, soma::set_unique, {}, {}, {}});
+  b.add(SetSpec{50, soma::set_unique, vertices, {}, {}});
+  std::move(b).install(mesh);
+  return mesh;
+}
+
+std::vector<LO> face_rows(LO set) {
+  std::vector<LO> out;
+  if (set == 0) {
+    for (LO f = 0; f < 100; ++f) out.push_back(f);
+  } else if (set == 1) {
+    for (LO f = 0; f < 10; ++f) out.push_back(f);
+    for (LO f = 50; f < 60; ++f) out.push_back(f);
+  } else if (set == 2) {
+    for (LO f = 0; f < 20; f += 2) out.push_back(f);
+  }
+  return out;
+}
+
+}  // namespace
+
+// Each row is held in its smallest form and reads back the same through
+// indexing, lookup and iteration.
+TEST(EntitySets, RowsTakeTheSmallestForm) {
+  using soma::DomainKind;
+  const auto mesh = box_with_shaped_sets();
+  const auto& s = mesh.sets();
+  ASSERT_EQ(s.count(), 5);
+  const auto kinds = s.kinds(2);
+  std::vector<DomainKind> got;
+  for (std::size_t i = 0; i < kinds.extent(0); ++i) got.push_back(static_cast<DomainKind>(kinds(i)));
+  EXPECT_EQ(got, (std::vector<DomainKind>{DomainKind::full, DomainKind::intervals, DomainKind::list,
+                                          DomainKind::list, DomainKind::list}));
+  const auto off = s.offsets(2);
+  EXPECT_EQ((std::vector<soma::Offset>{off(0), off(1), off(2), off(3), off(4), off(5)}),
+            (std::vector<soma::Offset>{0, 0, 5, 15, 15, 15}));
+  EXPECT_EQ(s.data(2).extent(0), 15u);
+  EXPECT_EQ(s.entities(2), 100);
+  EXPECT_EQ(static_cast<DomainKind>(s.kinds(0)(4)), DomainKind::full);
+  EXPECT_EQ(s.data(0).extent(0), 0u);
+
+  for (LO set = 0; set < 5; ++set) {
+    const std::vector<LO> want = face_rows(set);
+    const soma::SetRow r = s.members_of(set, 2);
+    EXPECT_EQ(r.size, static_cast<LO>(want.size())) << set;
+    EXPECT_EQ(soma_test::vec(r), want) << set;
+    for (LO k = 0; k < r.size; ++k) EXPECT_EQ(r[k], want[static_cast<std::size_t>(k)]) << set << " " << k;
+    EXPECT_EQ(r[r.size], soma::invalid_lo);
+    for (LO l = -1; l <= 100; ++l) {
+      const auto it = std::find(want.begin(), want.end(), l);
+      const LO row = it == want.end() ? soma::invalid_lo : static_cast<LO>(it - want.begin());
+      EXPECT_EQ(r.row(l), row) << set << " " << l;
+      EXPECT_EQ(r.contains(l), row != soma::invalid_lo) << set << " " << l;
+    }
+    const auto dom = soma::Domain<HostMem>::from_set(mesh, set, 2);
+    EXPECT_EQ(dom.size(), static_cast<LO>(want.size())) << set;
+    for (LO k = 0; k < dom.size(); ++k) {
+      EXPECT_EQ(dom.view().locate(k).lid, want[static_cast<std::size_t>(k)]) << set << " " << k;
+    }
+  }
+  EXPECT_EQ(soma::Domain<HostMem>::from_set(mesh, 0, 2).info(0).kind, DomainKind::full);
+  EXPECT_EQ(soma::Domain<HostMem>::from_set(mesh, 1, 2).info(0).kind, DomainKind::intervals);
+}
+
+// On the device, rows index, look up and iterate as on the host.
+TEST(EntitySets, ShapedRowsReadTheSameInKernels) {
+  const auto host = box_with_shaped_sets();
+  const auto dev = host.mirror<DevMem>();
+  const auto v = dev.sets().view();
+  Kokkos::View<LO**, DevMem> kth("soma::test::kth", 5, 101);
+  Kokkos::View<LO**, DevMem> row("soma::test::row", 5, 101);
+  Kokkos::View<LO*, DevMem> walked("soma::test::walked", 5);
+  Kokkos::parallel_for(
+      "soma::test::shaped_rows", Kokkos::RangePolicy<DevMem::execution_space>(0, 5), KOKKOS_LAMBDA(const LO set) {
+        const soma::SetRow r = v.row(2, set);
+        for (LO k = 0; k <= 100; ++k) {
+          kth(set, k) = r[k];
+          row(set, k) = r.row(k);
+        }
+        LO sum = 0;
+        LO n = 0;
+        for (const LO l : r) {
+          sum += l;
+          ++n;
+        }
+        walked(set) = n == r.size ? sum : -1;
+      });
+  const auto hk = Kokkos::create_mirror_view_and_copy(HostMem{}, kth);
+  const auto hr = Kokkos::create_mirror_view_and_copy(HostMem{}, row);
+  const auto hw = Kokkos::create_mirror_view_and_copy(HostMem{}, walked);
+  for (LO set = 0; set < 5; ++set) {
+    const soma::SetRow r = host.sets().members_of(set, 2);
+    LO sum = 0;
+    for (const LO l : face_rows(set)) sum += l;
+    EXPECT_EQ(hw(static_cast<std::size_t>(set)), sum) << set;
+    for (LO k = 0; k <= 100; ++k) {
+      EXPECT_EQ(hk(static_cast<std::size_t>(set), static_cast<std::size_t>(k)), r[k]) << set << " " << k;
+      EXPECT_EQ(hr(static_cast<std::size_t>(set), static_cast<std::size_t>(k)), r.row(k)) << set << " " << k;
+    }
+  }
+}
+
+// Renumbering takes each row's form again, out of the new count.
+TEST(EntitySets, RenumberedRowsTakeTheirFormAgain) {
+  using soma::DomainKind;
+  const auto mesh = box_with_shaped_sets();
+  std::vector<LO> shift(100);
+  for (LO f = 0; f < 100; ++f) shift[static_cast<std::size_t>(f)] = f + 3;
+  const auto grown = mesh.sets().renumbered(2, shift, 110);
+  EXPECT_EQ(grown.entities(2), 110);
+  const soma::SetRow all = grown.members_of(0, 2);
+  EXPECT_EQ(all.kind, DomainKind::intervals);  // 100 of 110: one run
+  EXPECT_EQ(soma_test::vec(all).front(), 3);
+  EXPECT_EQ(all.size, 100);
+  std::vector<LO> halve(100, soma::invalid_lo);
+  for (LO f = 0; f < 20; f += 2) halve[static_cast<std::size_t>(f)] = f / 2;
+  const auto packed = [&] {
+    // Only the evens set survives this map; the others name faces it drops.
+    soma::HostMesh m = soma::testing::box_mesh({10, 10, 1, soma::Topology::quad});
+    soma::SetBuilder b;
+    std::vector<SetItem> evens;
+    for (GO f = 0; f < 20; f += 2) evens.push_back({2, f});
+    b.add(SetSpec{30, soma::set_unique, evens, {}, {}});
+    std::move(b).install(m);
+    return m.sets().renumbered(2, halve, 10);
+  }();
+  EXPECT_EQ(packed.members_of(0, 2).kind, DomainKind::full);
+  EXPECT_EQ(soma_test::vec(packed.members_of(0, 2)), (std::vector<LO>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}));
+  EXPECT_THROW((void)mesh.sets().renumbered(2, halve, 10), std::logic_error);
 }
