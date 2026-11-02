@@ -115,6 +115,34 @@ void sort_unless_sorted(It first, It last, Less less) {
   if (!std::is_sorted(first, last, less)) std::sort(first, last, less);
 }
 
+// Stable LSD radix sort by a 64-bit key, 11 bits a pass; a digit every key
+// shares takes no pass, so equal keys (Ordering::file) cost one scan.
+template <class R, class KeyOf>
+void stable_sort_by_key(std::vector<R>& v, KeyOf key_of) {
+  if (v.size() < 2) return;
+  std::uint64_t all_or = 0;
+  std::uint64_t all_and = ~std::uint64_t{0};
+  for (const R& r : v) {
+    all_or |= key_of(r);
+    all_and &= key_of(r);
+  }
+  const std::uint64_t varying = all_or ^ all_and;
+  constexpr int bits = 11;
+  constexpr std::size_t buckets = std::size_t{1} << bits;
+  std::vector<R> tmp;
+  std::vector<std::size_t> start(buckets);
+  for (int shift = 0; shift < 64; shift += bits) {
+    if (((varying >> shift) & (buckets - 1)) == 0) continue;
+    if (tmp.empty()) tmp.resize(v.size());
+    std::fill(start.begin(), start.end(), std::size_t{0});
+    for (const R& r : v) ++start[(key_of(r) >> shift) & (buckets - 1)];
+    std::size_t sum = 0;
+    for (std::size_t& c : start) sum += std::exchange(c, sum);
+    for (const R& r : v) tmp[start[(key_of(r) >> shift) & (buckets - 1)]++] = r;
+    v.swap(tmp);
+  }
+}
+
 Keys make_keys(Ordering ordering, const std::vector<Real>& xyz) {
   Keys k;
   if (ordering != Ordering::type_major_sfc || xyz.empty()) return k;
@@ -143,26 +171,38 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
 
   // Vertices: (key, gid). With Ordering::file every key is 0, so by gid.
   const std::size_t nv = vertex_gids_.size();
-  std::vector<std::uint64_t> vkey(nv);
-  for (std::size_t i = 0; i < nv; ++i) {
-    vkey[i] = keys(xyz_[3 * i], xyz_[3 * i + 1], xyz_[3 * i + 2]);
-  }
-  std::vector<std::size_t> vorder(nv);
-  std::iota(vorder.begin(), vorder.end(), std::size_t{0});
-  sort_unless_sorted(vorder.begin(), vorder.end(), [&](std::size_t a, std::size_t b) {
-    return std::tuple(vkey[a], vertex_gids_[a]) < std::tuple(vkey[b], vertex_gids_[b]);
-  });
-  std::vector<std::pair<GO, LO>> local_of(nv);
-  mesh.coords_ = CoordView<Kokkos::HostSpace>("soma::mesh::coords", nv);
+  struct VertexRec {
+    std::uint64_t key;
+    GO gid;
+    std::size_t src;
+  };
+  std::vector<VertexRec> vrecs(nv);
+  using HostRange = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>;
+  Kokkos::parallel_for("soma::mesh_builder::vertex_keys", HostRange(0, nv),
+                       [&](const std::size_t i) {
+                         const Real* x = &xyz_[3 * i];
+                         vrecs[i] = {keys(x[0], x[1], x[2]), vertex_gids_[i], i};
+                       });
+  // By gid, then stably by key: by (key, gid).
+  sort_unless_sorted(vrecs.begin(), vrecs.end(),
+                     [](const VertexRec& a, const VertexRec& b) { return a.gid < b.gid; });
+  stable_sort_by_key(vrecs, [](const VertexRec& r) { return r.key; });
+  mesh.coords_ = CoordView<Kokkos::HostSpace>(
+      Kokkos::view_alloc(std::string("soma::mesh::coords"), Kokkos::WithoutInitializing), nv);
   auto& v = mesh.ents_[0];
   v.count = detail::to_lo(nv, "number of vertices");
-  v.gid = View1<GO, Kokkos::HostSpace>("soma::mesh::gid0", nv);
+  v.gid = View1<GO, Kokkos::HostSpace>(
+      Kokkos::view_alloc(std::string("soma::mesh::gid0"), Kokkos::WithoutInitializing), nv);
+  std::vector<LO> rank(nv);  // local id of each input vertex
   for (std::size_t i = 0; i < nv; ++i) {
-    const std::size_t src = vorder[i];
-    v.gid(i) = vertex_gids_[src];
-    local_of[i] = {vertex_gids_[src], static_cast<LO>(i)};
+    const std::size_t src = vrecs[i].src;
+    v.gid(i) = vrecs[i].gid;
+    rank[src] = static_cast<LO>(i);
     for (std::size_t k = 0; k < 3; ++k) mesh.coords_(i, k) = xyz_[3 * src + k];
   }
+  // (gid, local id) by gid; input in gid order needs no sort.
+  std::vector<std::pair<GO, LO>> local_of(nv);
+  for (std::size_t i = 0; i < nv; ++i) local_of[i] = {vertex_gids_[i], rank[i]};
   sort_unless_sorted(local_of.begin(), local_of.end(), std::less<>());
   const auto dup = std::adjacent_find(local_of.begin(), local_of.end(),
                                       [](const auto& a, const auto& b) { return a.first == b.first; });
@@ -214,11 +254,8 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       local[b].resize(blk.vertex_gids.size());
       entries += blk.vertex_gids.size();
       for (std::size_t i = 0; i < blk.gids.size(); ++i) {
-        Real c[3] = {0, 0, 0};
         const Offset first = blk.offsets[i];
         const Offset last = blk.offsets[i + 1];
-        const auto arity = static_cast<std::uint16_t>(last - first);
-        const Real inv = keys.active && arity > 0 ? Real{1} / static_cast<Real>(arity) : Real{0};
         for (Offset k = first; k < last; ++k) {
           const GO g = blk.vertex_gids[static_cast<std::size_t>(k)];
           const LO l = find_vertex(g);
@@ -228,42 +265,71 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
                                         std::to_string(blk.gids[i]));
           }
           local[b][static_cast<std::size_t>(k)] = l;
-          if (!keys.active) continue;
-          const auto src = static_cast<std::size_t>(l);
-          // Summing x / arity, not x, keeps centroids near the largest Real finite.
-          for (std::size_t q = 0; q < 3; ++q) c[q] += mesh.coords_(src, q) * inv;
         }
-        recs.push_back(Rec{blk.topology, arity, blk.gids[i], keys(c[0], c[1], c[2]), b, i});
+        const auto arity = static_cast<std::uint16_t>(last - first);
+        recs.push_back(Rec{blk.topology, arity, blk.gids[i], 0, b, i});
       }
     }
-    {
-      std::vector<std::size_t> by_gid(recs.size());
-      std::iota(by_gid.begin(), by_gid.end(), std::size_t{0});
-      sort_unless_sorted(by_gid.begin(), by_gid.end(), [&](std::size_t x, std::size_t y) {
-        return std::tuple(recs[x].gid, recs[x].t, recs[x].arity) <
-               std::tuple(recs[y].gid, recs[y].t, recs[y].arity);
-      });
-      for (std::size_t i = 1; i < by_gid.size(); ++i) {
-        const Rec& p = recs[by_gid[i - 1]];
-        const Rec& q = recs[by_gid[i]];
-        if (p.gid != q.gid) continue;
-        if (p.t != q.t) {
-          throw std::invalid_argument("element gid " + std::to_string(q.gid) +
-                                      " is used by both " + name(p.t) + " and " + name(q.t) +
-                                      " elements of dimension " + std::to_string(d));
-        }
-        throw std::invalid_argument("duplicate element gid " + std::to_string(q.gid));
-      }
+    if (keys.active) {
+      Kokkos::parallel_for(
+          "soma::mesh_builder::element_keys", HostRange(0, recs.size()), [&](const std::size_t r) {
+            Rec& rec = recs[r];
+            const Block& blk = blocks_[d][rec.block];
+            const std::vector<LO>& ids = local[rec.block];
+            const Real inv = rec.arity > 0 ? Real{1} / static_cast<Real>(rec.arity) : Real{0};
+            Real c[3] = {0, 0, 0};
+            for (Offset k = blk.offsets[rec.index]; k < blk.offsets[rec.index + 1]; ++k) {
+              const auto src = static_cast<std::size_t>(ids[static_cast<std::size_t>(k)]);
+              // Summing x / arity, not x, keeps centroids near the largest Real finite.
+              for (std::size_t q = 0; q < 3; ++q) c[q] += mesh.coords_(src, q) * inv;
+            }
+            rec.key = keys(c[0], c[1], c[2]);
+          });
     }
+    // By (gid, topology, arity), which also finds repeated gids; then stably by
+    // key and by (topology, arity): by (topology, arity, key, gid).
     sort_unless_sorted(recs.begin(), recs.end(), [](const Rec& x, const Rec& y) {
-      return std::tuple(x.t, x.arity, x.key, x.gid) < std::tuple(y.t, y.arity, y.key, y.gid);
+      return std::tuple(x.gid, x.t, x.arity) < std::tuple(y.gid, y.t, y.arity);
     });
+    for (std::size_t i = 1; i < recs.size(); ++i) {
+      const Rec& p = recs[i - 1];
+      const Rec& q = recs[i];
+      if (p.gid != q.gid) continue;
+      if (p.t != q.t) {
+        throw std::invalid_argument("element gid " + std::to_string(q.gid) +
+                                    " is used by both " + name(p.t) + " and " + name(q.t) +
+                                    " elements of dimension " + std::to_string(d));
+      }
+      throw std::invalid_argument("duplicate element gid " + std::to_string(q.gid));
+    }
+    stable_sort_by_key(recs, [](const Rec& r) { return r.key; });
+    {
+      std::vector<std::pair<Topology, std::uint16_t>> groups;
+      for (const Rec& r : recs) {
+        const auto g = std::pair(r.t, r.arity);
+        if (groups.empty() || groups.back() != g) groups.push_back(g);
+      }
+      std::sort(groups.begin(), groups.end());
+      groups.erase(std::unique(groups.begin(), groups.end()), groups.end());
+      if (groups.size() > 1) {
+        const auto group_of = [&](const Rec& r) {
+          const auto it = std::lower_bound(groups.begin(), groups.end(), std::pair(r.t, r.arity));
+          return static_cast<std::uint64_t>(it - groups.begin());
+        };
+        stable_sort_by_key(recs, group_of);
+      }
+    }
     auto& e = mesh.ents_[d];
     e.count = detail::to_lo(recs.size(), "number of elements");
-    e.conn_offsets = View1<Offset, Kokkos::HostSpace>("soma::mesh::offsets", recs.size() + 1);
-    e.topology = View1<std::uint8_t, Kokkos::HostSpace>("soma::mesh::topology", recs.size());
-    e.gid = View1<GO, Kokkos::HostSpace>("soma::mesh::gid", recs.size());
-    e.conn = View1<LO, Kokkos::HostSpace>("soma::mesh::conn", entries);
+    (void)detail::to_offset(entries, "connectivity size");  // so every prefix fits too
+    const auto uninit = [](std::string label) {
+      return Kokkos::view_alloc(std::move(label), Kokkos::WithoutInitializing);
+    };
+    const std::size_t ne = recs.size();
+    e.conn_offsets = View1<Offset, Kokkos::HostSpace>(uninit("soma::mesh::offsets"), ne + 1);
+    e.topology = View1<std::uint8_t, Kokkos::HostSpace>(uninit("soma::mesh::topology"), ne);
+    e.gid = View1<GO, Kokkos::HostSpace>(uninit("soma::mesh::gid"), recs.size());
+    e.conn = View1<LO, Kokkos::HostSpace>(uninit("soma::mesh::conn"), entries);
     std::size_t written = 0;
     std::vector<Ownership> own(recs.size(), Ownership::interior);
     std::vector<Topology> top(recs.size());
@@ -275,7 +341,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       for (Offset k = blk.offsets[recs[r].index]; k < blk.offsets[recs[r].index + 1]; ++k) {
         e.conn(written++) = ids[static_cast<std::size_t>(k)];
       }
-      e.conn_offsets(r + 1) = detail::to_offset(written, "connectivity size");
+      e.conn_offsets(r + 1) = static_cast<Offset>(written);
       e.topology(r) = static_cast<std::uint8_t>(recs[r].t);
       e.gid(r) = recs[r].gid;
       top[r] = recs[r].t;

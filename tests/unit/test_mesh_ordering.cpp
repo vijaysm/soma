@@ -376,3 +376,46 @@ TEST(MeshOrdering, PolygonsFollowTheCentroidKeyWithinEachArity) {
     EXPECT_FALSE(std::is_sorted(g + seg.begin, g + seg.end)) << "arity " << seg.arity;
   }
 }
+
+// Four coincident copies of each vertex of a 4 x 4 grid, and of each quad
+// (copy c on vertex copy c), given in decreasing gid: copies share a key, so
+// they stay together and follow the gid.
+TEST(MeshOrdering, CoincidentEntitiesFollowTheGid) {
+  constexpr int copies = 4;
+  const auto vgid = [](int i, int j, int c) { return static_cast<GO>(1 + c + copies * (i + 4 * j)); };
+  std::vector<GO> vg;
+  std::vector<Real> xyz;
+  for (int j = 3; j >= 0; --j) {
+    for (int i = 3; i >= 0; --i) {
+      for (int c = copies - 1; c >= 0; --c) {
+        vg.push_back(vgid(i, j, c));
+        xyz.insert(xyz.end(), {static_cast<Real>(i), static_cast<Real>(j), 0.0});
+      }
+    }
+  }
+  std::vector<GO> eg;
+  std::vector<GO> conn;
+  for (int j = 2; j >= 0; --j) {
+    for (int i = 2; i >= 0; --i) {
+      for (int c = copies - 1; c >= 0; --c) {
+        eg.push_back(static_cast<GO>(1 + c + copies * (i + 3 * j)));
+        conn.insert(conn.end(), {vgid(i, j, c), vgid(i + 1, j, c), vgid(i + 1, j + 1, c), vgid(i, j + 1, c)});
+      }
+    }
+  }
+  soma::MeshBuilder b(2);
+  b.add_vertices(vg, xyz);
+  b.add_elements(Topology::quad, eg, conn);
+  const auto mesh = std::move(b).build(Ordering::type_major_sfc);
+  // Vertex gids 1 + c + 4 p and quad gids 1 + c + 4 q: each run of four is one
+  // position p (cell q), copies in increasing gid.
+  for (const int d : {0, 2}) {
+    const auto g = mesh.gid(d);
+    for (LO k = 0; k < mesh.count(d); ++k) {
+      EXPECT_EQ((g(k) - 1) % copies, k % copies) << "dimension " << d << ", entity " << k;
+      EXPECT_EQ((g(k) - 1) / copies, (g(k - k % copies) - 1) / copies) << "dimension " << d << ", entity " << k;
+    }
+  }
+  const std::vector<std::tuple<std::uint64_t, GO>> keys = centroid_keys(mesh, mesh.segments(2)[0], 3.0);
+  EXPECT_TRUE(std::is_sorted(keys.begin(), keys.end()));
+}
