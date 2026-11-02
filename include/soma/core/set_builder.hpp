@@ -60,7 +60,8 @@ class SetBuilder {
                                     hex(s.flags) + ", outside " + hex(set_flag_bits));
       }
       if (i > 0 && specs_[i - 1].gid == s.gid) {
-        throw std::invalid_argument("SetBuilder: set gid " + std::to_string(s.gid) + " is repeated");
+        throw std::invalid_argument("SetBuilder: set gid " + std::to_string(s.gid) +
+                                    " is repeated");
       }
     }
     const auto n = static_cast<std::size_t>(detail::to_lo(specs_.size(), "number of sets"));

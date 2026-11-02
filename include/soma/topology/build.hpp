@@ -11,17 +11,20 @@
 // Epoch: deriving a dimension that held explicit entities renumbers them, and
 // deriving one that a live field is defined on changes that field's domain;
 // either bumps the mesh epoch (every field goes stale). Filling an empty
-// dimension no field uses keeps the epoch, so fields stay current.
+// dimension no field uses keeps the epoch, so fields stay current. Entity sets
+// follow the renumbering: their members keep their gids.
 //
 // Strong guarantee: everything is built on an aliasing working copy and
 // installed at the end with non-throwing moves.
 
+#include <algorithm>
 #include <array>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <Kokkos_Core.hpp>
 
@@ -47,6 +50,10 @@ struct TopologyAccess {
   template <class M>
   static void attach_fields(Mesh<M>& m) {
     m.attach_fields();
+  }
+  template <class M>
+  static EntitySets<M>& sets(Mesh<M>& m) {
+    return m.sets_;
   }
 };
 }  // namespace detail
@@ -192,7 +199,29 @@ void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRe
     if (req.has_slot(s) && !conn) made[static_cast<std::size_t>(s)] = builder.get(s);
   }
 
+  // Set members are lids: map each renumbered one through its gid, which
+  // adoption keeps.
+  std::optional<EntitySets<M>> sets;
+  for (int k = 1; k < D; ++k) {
+    if (!derive_k[static_cast<std::size_t>(k)] || mesh.count(k) == 0 || mesh.sets().count() == 0) {
+      continue;
+    }
+    const auto before = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.gid(k));
+    const auto after = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, work.gid(k));
+    std::vector<std::pair<GO, LO>> by_gid(after.extent(0));
+    for (std::size_t i = 0; i < by_gid.size(); ++i) by_gid[i] = {after(i), static_cast<LO>(i)};
+    std::sort(by_gid.begin(), by_gid.end());
+    std::vector<LO> new_lid(before.extent(0), invalid_lo);
+    for (std::size_t i = 0; i < new_lid.size(); ++i) {
+      const std::pair<GO, LO> key{before(i), 0};
+      const auto it = std::lower_bound(by_gid.begin(), by_gid.end(), key);
+      if (it != by_gid.end() && it->first == before(i)) new_lid[i] = it->second;
+    }
+    sets = (sets ? *sets : mesh.sets()).renumbered(k, new_lid);
+  }
+
   // Install; nothing below throws.
+  if (sets) Access::sets(mesh) = std::move(*sets);
   auto& store = Access::store(mesh);
   for (int k = 1; k < D; ++k) {
     if (!derive_k[static_cast<std::size_t>(k)]) continue;

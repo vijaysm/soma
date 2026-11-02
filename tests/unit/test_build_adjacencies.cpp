@@ -13,6 +13,7 @@
 #include "adjacency_check.hpp"
 #include "mesh_fixture.hpp"
 #include "soma/core/mesh.hpp"
+#include "soma/core/set_builder.hpp"
 #include "soma/topology/build.hpp"
 #include "soma/topology/orientation.hpp"
 #include "topology_meshes.hpp"
@@ -202,6 +203,71 @@ TEST(BuildAdjacencies, AdoptingExplicitFacesBumpsTheEpoch) {
   EXPECT_EQ(mesh.epoch(), epoch + 1);
   EXPECT_EQ(mesh.count(2), 36);
   EXPECT_THROW((void)mesh.fields().get<double>("t", 0), soma::StaleField);
+}
+
+namespace soma_test {
+
+std::vector<GO> gids_of(const soma::HostMesh& m, int dim, std::vector<LO> lids) {
+  std::vector<GO> out;
+  for (const LO l : lids) out.push_back(m.gid(dim)(static_cast<std::size_t>(l)));
+  return out;
+}
+
+// Set gid 1 holds quads 0 and 2, vertex 0 and region 0; set gid 2, ordered,
+// holds quads 3, 1, 3.
+void add_quad_sets(soma::HostMesh& mesh) {
+  soma::SetBuilder b;
+  b.add(soma::SetSpec{1, soma::set_unique, {{2, 2}, {0, 0}, {2, 0}, {3, 0}}, {}, {}});
+  b.add(soma::SetSpec{2, soma::set_ordered, {{2, 3}, {2, 1}, {2, 3}}, {}, {}});
+  std::move(b).install(mesh);
+}
+
+}  // namespace soma_test
+
+// Adopting explicit quads renumbers them; the sets keep the same quads. The
+// gids run against the derived order, so renumbered rows must be sorted again.
+TEST(BuildAdjacencies, SetsFollowRenumberedEntities) {
+  const auto g = [](int i, int j) { return GO{1 + i + 3 * j}; };
+  std::vector<GO> quads;
+  for (int j = 1; j >= 0; --j) {
+    for (int i = 1; i >= 0; --i) {
+      quads.insert(quads.end(), {g(i, j), g(i, j + 1), g(i + 1, j + 1), g(i + 1, j)});
+    }
+  }
+  auto mesh = soma_test::box_with_explicit(2, {100, 101, 102, 103}, quads);
+  soma_test::add_quad_sets(mesh);
+  (void)mesh.fields().add_tag<int>("on_sets", soma::set_dim, 1);
+  const auto before = soma_test::gids_of(mesh, 2, {0, 1, 2, 3});
+  ASSERT_EQ(before, (std::vector<GO>{100, 101, 102, 103}));
+  soma::build_adjacencies(mesh, AdjacencyRequest{}.add(3, 2));
+  ASSERT_EQ(mesh.count(2), 36);
+  const auto& s = mesh.sets();
+  const auto faces = s.members_of(0, 2);
+  const std::vector<LO> face_lids(faces.begin(), faces.end());
+  EXPECT_NE(face_lids, (std::vector<LO>{0, 2}));  // the quads did move
+  EXPECT_TRUE(std::is_sorted(face_lids.begin(), face_lids.end()));
+  auto got = soma_test::gids_of(mesh, 2, face_lids);
+  std::sort(got.begin(), got.end());
+  EXPECT_EQ(got, (std::vector<GO>{100, 102}));
+  std::vector<GO> seq;
+  for (const soma::SetEntry& e : s.sequence(1)) {
+    EXPECT_EQ(e.slot, 2);
+    seq.push_back(mesh.gid(2)(static_cast<std::size_t>(e.lid)));
+  }
+  EXPECT_EQ(seq, (std::vector<GO>{103, 101, 103}));
+  EXPECT_EQ(std::vector<LO>(s.members_of(0, 0).begin(), s.members_of(0, 0).end()), std::vector<LO>{0});
+  EXPECT_EQ(std::vector<LO>(s.members_of(0, 3).begin(), s.members_of(0, 3).end()), std::vector<LO>{0});
+  EXPECT_THROW((void)mesh.fields().get<int>("on_sets", soma::set_dim), soma::StaleField);
+}
+
+TEST(BuildAdjacencies, SetsOfAFailedBuildAreUnchanged) {
+  auto bad = soma_test::box_with_explicit(2, {100, 101}, {1, 4, 5, 2, 2, 5, 4, 1});
+  soma::SetBuilder b;
+  b.add(soma::SetSpec{1, soma::set_unique, {{2, 1}}, {}, {}});
+  std::move(b).install(bad);
+  EXPECT_THROW(soma::build_adjacencies(bad, AdjacencyRequest{}.add(3, 2)), std::invalid_argument);
+  EXPECT_EQ(std::vector<LO>(bad.sets().members_of(0, 2).begin(), bad.sets().members_of(0, 2).end()),
+            std::vector<LO>{1});
 }
 
 TEST(BuildAdjacencies, AFailedBuildLeavesTheMeshUnchanged) {

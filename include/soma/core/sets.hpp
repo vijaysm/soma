@@ -163,8 +163,9 @@ class EntitySets {
       throw std::logic_error("EntitySets: set " + std::to_string(set) +
                              " is not ordered and keeps no sequence");
     }
-    const std::span<const SetEntry> out(seq_.data() + seq_offsets_[i],
-                                        static_cast<std::size_t>(seq_offsets_[i + 1] - seq_offsets_[i]));
+    const auto b = static_cast<std::size_t>(seq_offsets_[i]);
+    const auto e = static_cast<std::size_t>(seq_offsets_[i + 1]);
+    const std::span<const SetEntry> out(seq_.data() + b, e - b);
     for (const SetEntry& e : out) (void)held(e.slot);
     return out;
   }
@@ -206,6 +207,58 @@ class EntitySets {
     }
     std::sort(out.begin(), out.end());
     out.erase(std::unique(out.begin(), out.end()), out.end());
+    return out;
+  }
+
+  // The same sets with the members of one dimension renumbered: lid l becomes
+  // new_lid[l]. Rows are sorted again; sequences keep their order. Throws
+  // std::logic_error when a member has no new lid (invalid_lo).
+  EntitySets renumbered(int dim, const std::vector<LO>& new_lid) const {
+    const Slot& s = held(dim);
+    const auto map = [&](LO l) {
+      const auto at = static_cast<std::size_t>(l);
+      const LO m = at < new_lid.size() ? new_lid[at] : invalid_lo;
+      if (m == invalid_lo) {
+        throw std::logic_error("EntitySets: member " + std::to_string(l) + " of dimension " +
+                               std::to_string(dim) + " has no counterpart after renumbering");
+      }
+      return m;
+    };
+    const auto n = static_cast<std::size_t>(count_);
+    View1<Offset, Kokkos::HostSpace> offs("soma::sets::offsets", n + 1);
+    View1<LO, Kokkos::HostSpace> mem("soma::sets::members", s.host_members.extent(0));
+    std::vector<LO> row;
+    for (std::size_t i = 0; i < n; ++i) {
+      row.clear();
+      const auto b = static_cast<std::size_t>(s.host_offsets(i));
+      const auto e = static_cast<std::size_t>(s.host_offsets(i + 1));
+      for (std::size_t k = b; k < e; ++k) row.push_back(map(s.host_members(k)));
+      std::sort(row.begin(), row.end());
+      for (std::size_t k = 0; k < row.size(); ++k) mem(b + k) = row[k];
+      offs(i) = s.host_offsets(i);
+    }
+    offs(n) = s.host_offsets(n);
+    std::vector<SetEntry> seq = seq_;
+    for (SetEntry& e : seq) {
+      if (e.slot == dim) e.lid = map(e.lid);
+    }
+    EntitySets out;
+    out.count_ = count_;
+    out.gid_ = gid_;
+    out.host_gid_ = host_gid_;
+    out.slots_ = slots_;
+    auto& t = out.slots_[static_cast<std::size_t>(dim)];
+    t.offsets = Kokkos::create_mirror_view_and_copy(MemSpace{}, offs);
+    t.members = Kokkos::create_mirror_view_and_copy(MemSpace{}, mem);
+    t.host_offsets = offs;
+    t.host_members = mem;
+    out.flags_ = flags_;
+    out.seq_offsets_ = seq_offsets_;
+    out.seq_ = std::move(seq);
+    out.child_offsets_ = child_offsets_;
+    out.children_ = children_;
+    out.parent_offsets_ = parent_offsets_;
+    out.parents_ = parents_;
     return out;
   }
 
@@ -271,7 +324,8 @@ class EntitySets {
     }
     return static_cast<std::size_t>(set);
   }
-  std::span<const LO> links(const std::vector<Offset>& off, const std::vector<LO>& to, LO set) const {
+  std::span<const LO> links(const std::vector<Offset>& off, const std::vector<LO>& to,
+                            LO set) const {
     const std::size_t i = index(set);
     return {to.data() + off[i], static_cast<std::size_t>(off[i + 1] - off[i])};
   }
