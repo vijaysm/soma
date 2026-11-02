@@ -22,26 +22,34 @@ using soma::SegmentFilter;
 using soma::Topology;
 
 using HostMem = Kokkos::HostSpace;
-using Dom = soma::Domain<HostMem>;
+using DevMem = Kokkos::DefaultExecutionSpace::memory_space;
 
-TEST(MeshDomains, DomainAllIsFullWithTheMeshEpoch) {
-  const auto mesh = soma_test::two_quads_and_a_triangle();
+template <class M>
+class MeshDomainsTyped : public ::testing::Test {};
+using Spaces = ::testing::Types<HostMem, DevMem>;
+TYPED_TEST_SUITE(MeshDomainsTyped, Spaces);
+
+TYPED_TEST(MeshDomainsTyped, DomainAllIsFullWithTheMeshEpoch) {
+  using Dom = soma::Domain<TypeParam>;
+  const auto mesh = soma_test::in_space<TypeParam>(soma_test::two_quads_and_a_triangle());
   const auto d = Dom::all(mesh, 2);
   EXPECT_EQ(d.info(0).kind, DomainKind::full);
   EXPECT_EQ(d.size(), 3);
   EXPECT_EQ(d.epoch(), mesh.epoch());
 }
 
-TEST(MeshDomains, GlobalIdsFeedTheFingerprint) {
-  const auto mesh = soma_test::two_quads_and_a_triangle();
+TYPED_TEST(MeshDomainsTyped, GlobalIdsFeedTheFingerprint) {
+  using Dom = soma::Domain<TypeParam>;
+  const auto mesh = soma_test::in_space<TypeParam>(soma_test::two_quads_and_a_triangle());
   const auto with_gids = Dom::all(mesh, 2);
   const auto lids_only = Dom::all(2, 3, mesh.epoch());
   EXPECT_FALSE(with_gids.fingerprint(0) == lids_only.fingerprint(0));
   EXPECT_EQ(with_gids.fingerprint(0).size, 3);
 }
 
-TEST(MeshDomains, SegmentsFilterByTopologyAndYieldIntervals) {
-  const auto mesh = soma_test::two_quads_and_a_triangle();
+TYPED_TEST(MeshDomainsTyped, SegmentsFilterByTopologyAndYieldIntervals) {
+  using Dom = soma::Domain<TypeParam>;
+  const auto mesh = soma_test::in_space<TypeParam>(soma_test::two_quads_and_a_triangle());
   SegmentFilter quads;
   quads.topology = Topology::quad;
   const auto dq = Dom::segments(mesh, 2, quads);
@@ -63,8 +71,9 @@ TEST(MeshDomains, SegmentsFilterByTopologyAndYieldIntervals) {
   EXPECT_EQ(Dom::segments(mesh, 2, pentagons).size(), 0);
 }
 
-TEST(MeshDomains, SegmentFilterOnOwnership) {
-  const auto mesh = soma_test::two_quads_and_a_triangle();
+TYPED_TEST(MeshDomainsTyped, SegmentFilterOnOwnership) {
+  using Dom = soma::Domain<TypeParam>;
+  const auto mesh = soma_test::in_space<TypeParam>(soma_test::two_quads_and_a_triangle());
   SegmentFilter owned;
   owned.ownership = SegmentFilter::Own::owned;
   EXPECT_EQ(Dom::segments(mesh, 2, owned), Dom::all(mesh, 2));
@@ -74,8 +83,9 @@ TEST(MeshDomains, SegmentFilterOnOwnership) {
 }
 
 // Elements 0 (tri), 1 (quad) and 2 (quad) are interior, shared and ghost.
-TEST(MeshDomains, OwnedSegmentsIncludeSharedAndExcludeGhosts) {
-  const auto mesh = soma_test::mesh_with_shared_and_ghost_elements();
+TYPED_TEST(MeshDomainsTyped, OwnedSegmentsIncludeSharedAndExcludeGhosts) {
+  using Dom = soma::Domain<TypeParam>;
+  const auto mesh = soma_test::in_space<TypeParam>(soma_test::mesh_with_shared_and_ghost_elements());
   SegmentFilter owned;
   owned.ownership = SegmentFilter::Own::owned;
   const auto d = Dom::segments(mesh, 2, owned);
@@ -86,8 +96,9 @@ TEST(MeshDomains, OwnedSegmentsIncludeSharedAndExcludeGhosts) {
   EXPECT_EQ(d, Dom::from_list(mesh, 2, std::vector<LO>{0, 1}));
 }
 
-TEST(MeshDomains, InteriorSegmentsExcludeSharedAndGhosts) {
-  const auto mesh = soma_test::mesh_with_shared_and_ghost_elements();
+TYPED_TEST(MeshDomainsTyped, InteriorSegmentsExcludeSharedAndGhosts) {
+  using Dom = soma::Domain<TypeParam>;
+  const auto mesh = soma_test::in_space<TypeParam>(soma_test::mesh_with_shared_and_ghost_elements());
   SegmentFilter interior;
   interior.ownership = SegmentFilter::Own::interior;
   const auto d = Dom::segments(mesh, 2, interior);
@@ -97,8 +108,9 @@ TEST(MeshDomains, InteriorSegmentsExcludeSharedAndGhosts) {
   EXPECT_EQ(d.row(2, 2), soma::invalid_lo);
 }
 
-TEST(MeshDomains, GhostSegmentsHoldOnlyGhosts) {
-  const auto mesh = soma_test::mesh_with_shared_and_ghost_elements();
+TYPED_TEST(MeshDomainsTyped, GhostSegmentsHoldOnlyGhosts) {
+  using Dom = soma::Domain<TypeParam>;
+  const auto mesh = soma_test::in_space<TypeParam>(soma_test::mesh_with_shared_and_ghost_elements());
   SegmentFilter ghost;
   ghost.ownership = SegmentFilter::Own::ghost;
   const auto d = Dom::segments(mesh, 2, ghost);
@@ -108,8 +120,9 @@ TEST(MeshDomains, GhostSegmentsHoldOnlyGhosts) {
   EXPECT_EQ(d.row(2, 1), soma::invalid_lo);
 }
 
-TEST(MeshDomains, SharedSegmentsTakeBothSharedKinds) {
-  const auto mesh = soma_test::mesh_with_every_vertex_ownership();
+TYPED_TEST(MeshDomainsTyped, SharedSegmentsTakeBothSharedKinds) {
+  using Dom = soma::Domain<TypeParam>;
+  const auto mesh = soma_test::in_space<TypeParam>(soma_test::mesh_with_every_vertex_ownership());
   const auto with = [&](SegmentFilter::Own own) {
     SegmentFilter f;
     f.ownership = own;
@@ -122,8 +135,9 @@ TEST(MeshDomains, SharedSegmentsTakeBothSharedKinds) {
   EXPECT_EQ(with(SegmentFilter::Own::ghost), Dom::from_list(mesh, 0, std::vector<LO>{6}));
 }
 
-TEST(MeshDomains, ArityFilterCombinesWithOwnership) {
-  const auto mesh = soma_test::mesh_with_shared_and_ghost_elements();
+TYPED_TEST(MeshDomainsTyped, ArityFilterCombinesWithOwnership) {
+  using Dom = soma::Domain<TypeParam>;
+  const auto mesh = soma_test::in_space<TypeParam>(soma_test::mesh_with_shared_and_ghost_elements());
   SegmentFilter four;
   four.arity = 4;
   EXPECT_EQ(Dom::segments(mesh, 2, four), Dom::from_list(mesh, 2, std::vector<LO>{1, 2}));
@@ -137,8 +151,9 @@ TEST(MeshDomains, ArityFilterCombinesWithOwnership) {
   EXPECT_EQ(Dom::segments(mesh, 2, five).size(), 0);
 }
 
-TEST(MeshDomains, FromListValidatesAgainstTheMesh) {
-  const auto mesh = soma_test::two_quads_and_a_triangle();
+TYPED_TEST(MeshDomainsTyped, FromListValidatesAgainstTheMesh) {
+  using Dom = soma::Domain<TypeParam>;
+  const auto mesh = soma_test::in_space<TypeParam>(soma_test::two_quads_and_a_triangle());
   const auto d = Dom::from_list(mesh, 2, std::vector<LO>{0, 2});
   EXPECT_EQ(d.size(), 2);
   EXPECT_EQ(d.row(2, 2), 1);
@@ -148,8 +163,9 @@ TEST(MeshDomains, FromListValidatesAgainstTheMesh) {
   EXPECT_THROW(Dom::all(mesh, 5), std::invalid_argument);
 }
 
-TEST(MeshDomains, ElementNodesSpaceUsesTheMeshTopology) {
-  const auto mesh = soma_test::two_quads_and_a_triangle();
+TYPED_TEST(MeshDomainsTyped, ElementNodesSpaceUsesTheMeshTopology) {
+  using Dom = soma::Domain<TypeParam>;
+  const auto mesh = soma_test::in_space<TypeParam>(soma_test::two_quads_and_a_triangle());
   const auto sp = soma::make_space(mesh, Dom::all(mesh, 2),
                                    Layout::element_nodes(NodeFamily::gll, 2));
   EXPECT_EQ(sp.rows(), 9 + 9 + 6);
@@ -157,21 +173,22 @@ TEST(MeshDomains, ElementNodesSpaceUsesTheMeshTopology) {
   EXPECT_EQ(sp.entity_rows(2, 2).begin, 15);
 }
 
-TEST(MeshDomains, DisjointSegmentFieldsShareAFamilyAndOverlapIsRejected) {
-  auto mesh = soma_test::two_quads_and_a_triangle();
+TYPED_TEST(MeshDomainsTyped, DisjointSegmentFieldsShareAFamilyAndOverlapIsRejected) {
+  using Dom = soma::Domain<TypeParam>;
+  auto mesh = soma_test::in_space<TypeParam>(soma_test::two_quads_and_a_triangle());
   SegmentFilter quads;
   quads.topology = Topology::quad;
   SegmentFilter tris;
   tris.topology = Topology::tri;
   auto& reg = mesh.fields();
-  reg.add<double>("T", soma::make_space(mesh, Dom::segments(mesh, 2, quads), Layout::per_entity()),
+  reg.template add<double>("T", soma::make_space(mesh, Dom::segments(mesh, 2, quads), Layout::per_entity()),
                   1);
-  reg.add<double>("T", soma::make_space(mesh, Dom::segments(mesh, 2, tris), Layout::per_entity()),
+  reg.template add<double>("T", soma::make_space(mesh, Dom::segments(mesh, 2, tris), Layout::per_entity()),
                   1);
-  const auto fam = reg.family<double>("T", 1);
+  const auto fam = reg.template family<double>("T", 1);
   EXPECT_EQ(reg.index_kind(fam, 2), soma::DimIndexKind::multi_owner);
   try {
-    reg.add_tag<double>("T", 2, 1);
+    reg.template add_tag<double>("T", 2, 1);
     FAIL() << "expected FieldOverlap";
   } catch (const soma::FieldOverlap& e) {
     EXPECT_NE(std::string(e.what()).find("in dim 2 at entity gid 3"), std::string::npos)
@@ -179,11 +196,12 @@ TEST(MeshDomains, DisjointSegmentFieldsShareAFamilyAndOverlapIsRejected) {
   }
 }
 
-TEST(MeshDomains, BumpedEpochReachesNewDomains) {
-  auto mesh = soma_test::two_quads_and_a_triangle();
+TYPED_TEST(MeshDomainsTyped, BumpedEpochReachesNewDomains) {
+  using Dom = soma::Domain<TypeParam>;
+  auto mesh = soma_test::in_space<TypeParam>(soma_test::two_quads_and_a_triangle());
   mesh.bump_epoch();
   const auto d = Dom::all(mesh, 0);
   EXPECT_EQ(d.epoch(), 2u);
   EXPECT_NO_THROW(
-      mesh.fields().add<double>("t", soma::make_space(mesh, d, Layout::per_entity()), 1));
+      mesh.fields().template add<double>("t", soma::make_space(mesh, d, Layout::per_entity()), 1));
 }

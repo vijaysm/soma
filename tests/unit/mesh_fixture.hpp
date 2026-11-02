@@ -5,10 +5,12 @@
 #define SOMA_TESTS_MESH_FIXTURE_HPP_
 
 #include <cstdint>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
 #include "soma/core/mesh.hpp"
+#include "soma/core/transfer.hpp"
 #include "soma/core/mesh_builder.hpp"
 
 namespace soma {
@@ -34,6 +36,17 @@ struct MeshTestAccess {
 }  // namespace soma
 
 namespace soma_test {
+
+// A host fixture in the memory space a typed test runs in: the mesh itself
+// for the host, a mirror with everything (fields, no graphs) otherwise.
+template <class M>
+soma::Mesh<M> in_space(soma::HostMesh host) {
+  if constexpr (std::is_same_v<M, Kokkos::HostSpace>) {
+    return host;
+  } else {
+    return host.template mirror<M>(soma::TransferOptions::everything());
+  }
+}
 
 // Two quads and one triangle in file-id space with unsorted gids.
 //  v gids:  10(0,0) 20(1,0) 30(2,0) 40(0,1) 50(1,1) 60(2,1) 70(3,0.5)
