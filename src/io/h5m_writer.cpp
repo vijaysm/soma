@@ -107,10 +107,10 @@ constexpr int temporary_attempts = 100;
 [[noreturn]] void reject(const std::string& why) { throw std::invalid_argument("write_h5m: " + why); }
 
 // Local ids of the listed rows in gid order (local id order among equal gids).
+// Rows usually come in gid order already, so that is checked first.
 void sort_by_gid(std::vector<LO>& rows, const View1<const GO, Kokkos::HostSpace>& gid) {
-  std::stable_sort(rows.begin(), rows.end(), [&](LO a, LO b) {
-    return gid(static_cast<std::size_t>(a)) < gid(static_cast<std::size_t>(b));
-  });
+  const auto by_gid = [&](LO a, LO b) { return gid(static_cast<std::size_t>(a)) < gid(static_cast<std::size_t>(b)); };
+  if (!std::is_sorted(rows.begin(), rows.end(), by_gid)) std::stable_sort(rows.begin(), rows.end(), by_gid);
 }
 
 template <class T>
@@ -273,16 +273,21 @@ void collect_family(const HostMesh& mesh, const Plan& p, const std::vector<Field
   };
   std::vector<Entry> order;
   std::vector<T> values;
-  const auto each = [&](const FieldInfo& info, const auto& row) {
-    for (const int slot : info.dims) {
+  // Walks the members of each block of a field's space: their file id and
+  // field row.
+  const auto each = [&](const FieldInfo& info, const Space<Kokkos::HostSpace>& space, const auto& append) {
+    for (int k = 0; k < space.num_blocks(); ++k) {
+      const auto block = space.block(k);
+      const int slot = block.domain.dim;
       const auto& fid = p.fid[static_cast<std::size_t>(slot)];
       const LO n = slot == set_dim ? mesh.sets().count() : mesh.count(slot);
       if (fid.size() != static_cast<std::size_t>(n)) {
         reject("field '" + info.name + "' has values on dimension " + std::to_string(slot) + ", which is not written");
       }
-      for (LO l = 0; l < n; ++l) {
+      for (LO m = 0; m < block.domain.size; ++m) {
         const std::size_t first = values.size();
-        if (row(slot, l)) order.push_back(Entry{fid[static_cast<std::size_t>(l)], first, values.size() - first});
+        append(static_cast<std::size_t>(block.row_begin + block.first(m)));
+        order.push_back(Entry{fid[static_cast<std::size_t>(block.domain.entity(m))], first, values.size() - first});
       }
     }
   };
@@ -291,38 +296,42 @@ void collect_family(const HostMesh& mesh, const Plan& p, const std::vector<Field
       const auto f = mesh.fields().template get_var<T>(info.id);
       defs.push_back(f.default_value());
       globals.push_back(f.global_value());
-      each(info, [&](int slot, LO l) {
-        if (!f.space().entity_rows(slot, l).valid()) return false;
-        const std::span<const T> v = f.value_or_default(slot, l);
-        values.insert(values.end(), v.begin(), v.end());
-        return true;
+      const auto offsets = f.offsets();
+      const auto data = f.values();
+      each(info, f.space(), [&](std::size_t r) {
+        values.insert(values.end(), data.data() + offsets(r), data.data() + offsets(r + 1));
       });
     } else {
       const auto f = mesh.fields().template get<T>(info.id);
       defs.push_back(present(f.default_value()));
       globals.push_back(present(f.global_value()));
-      each(info, [&](int slot, LO l) {
-        const RowRange r = f.space().entity_rows(slot, l);
-        if (!r.valid()) return false;
-        for (int c = 0; c < t.ncomp; ++c) {  // the View is LayoutLeft: a row's components are apart
-          values.push_back(f.view()(static_cast<std::size_t>(r.begin), static_cast<std::size_t>(c)));
-        }
-        return true;
+      const auto view = f.view();
+      each(info, f.space(), [&](std::size_t r) {
+        for (int c = 0; c < t.ncomp; ++c) values.push_back(view(r, static_cast<std::size_t>(c)));  // LayoutLeft
       });
     }
   }
   auto def = agreed(t.name, "default", defs);
   auto global = agreed(t.name, "global", globals);
   t.width = sizeof(T);
-  std::stable_sort(order.begin(), order.end());
+  // Members usually come in file id order already; then the values are too.
   std::vector<T> sorted;
-  sorted.reserve(values.size());
+  if (std::is_sorted(order.begin(), order.end())) {
+    sorted = std::move(values);
+  } else {
+    std::stable_sort(order.begin(), order.end());
+    sorted.reserve(values.size());
+    for (const Entry& e : order) {
+      sorted.insert(sorted.end(), values.begin() + static_cast<std::ptrdiff_t>(e.first),
+                    values.begin() + static_cast<std::ptrdiff_t>(e.first + e.count));
+    }
+  }
   t.ids.reserve(order.size());
+  std::int64_t end = -1;
   for (const Entry& e : order) {
     t.ids.push_back(e.id);
-    sorted.insert(sorted.end(), values.begin() + static_cast<std::ptrdiff_t>(e.first),
-                  values.begin() + static_cast<std::ptrdiff_t>(e.first + e.count));
-    if (t.ncomp == 0) t.ends.push_back(static_cast<std::int64_t>(sorted.size()) - 1);
+    end += static_cast<std::int64_t>(e.count);
+    if (t.ncomp == 0) t.ends.push_back(end);
   }
   if constexpr (std::is_same_v<T, GO>) {
     if (t.handle) {

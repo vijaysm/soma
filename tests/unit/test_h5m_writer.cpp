@@ -393,10 +393,13 @@ TEST(H5mWrite, FieldsBecomeTags) {
   // on a quad is 1; one without values is 1.
   const auto b2 = f.add_tag<std::uint8_t>("B2", 2, 1);
   f.set_tag_format(f.info(b2.id()).family, {-1, Kind::bit, 2});
-  f.add_tag<std::int32_t>("P", 0, 1);
-  f.add<std::int32_t>("P", soma::Space<Kokkos::HostSpace>(soma::Domain<Kokkos::HostSpace>::from_list(in, 2, quad10),
-                                                         soma::Layout::per_entity()),
-                      1);
+  // (The quad first, so that the members do not come in file id order.)
+  const auto pq = f.add<std::int32_t>("P", soma::Space<Kokkos::HostSpace>(soma::Domain<Kokkos::HostSpace>::from_list(in, 2, quad10),
+                                                                         soma::Layout::per_entity()),
+                                      1);
+  const auto pv = f.add_tag<std::int32_t>("P", 0, 1);
+  pq.view()(0, 0) = 77;
+  for (std::size_t r = 0; r < 7; ++r) pv.view()(r, 0) = static_cast<std::int32_t>(r) - 3;
   f.add<std::int32_t>("Z", soma::Space<Kokkos::HostSpace>(soma::Domain<Kokkos::HostSpace>::from_list(in, 0, std::vector<LO>{}),
                                                          soma::Layout::per_entity()),
                       1);
