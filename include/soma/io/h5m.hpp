@@ -118,6 +118,11 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // value and no class was recorded); a field and a mesh value of one name
 // throw.
 //
+// GLOBAL_ID (options.gid_tag): unless a field or mesh value has that name,
+// the gids of the written vertices and elements as MOAB declares the tag
+// (dense i32, class 2, default and global -1); left out when a gid does not
+// fit an i32.
+//
 // The file is written to a new temporary next to `path` (`path` + "." + six
 // random characters, created exclusively) and renamed over `path`, so a
 // failure leaves neither a partial file nor a damaged earlier one. A mesh that
@@ -125,6 +130,7 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // I/O failures throw std::runtime_error naming the path and the cause.
 struct H5mWriteOptions {
   std::optional<std::array<bool, 4>> dims{};
+  bool gid_tag = true;
 };
 
 void write_h5m(const HostMesh& mesh, const std::filesystem::path& path, const H5mWriteOptions& options = {});

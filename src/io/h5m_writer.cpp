@@ -272,10 +272,40 @@ void place(const std::vector<Block>& blocks, TagPlan& t) {
   }
 }
 
+// GLOBAL_ID as MOAB declares it (dense i32, default and global -1) holding
+// the gid of every written vertex and element; none when a gid does not fit.
+std::optional<TagPlan> gid_tag(const HostMesh& mesh, const Plan& p) {
+  std::vector<std::int32_t> gids;
+  const auto add = [&](int d, const std::vector<LO>& rows) {
+    const auto g = mesh.gid(d);
+    for (const LO l : rows) {
+      const GO v = g(static_cast<std::size_t>(l));
+      if (!std::in_range<std::int32_t>(v)) return false;
+      gids.push_back(static_cast<std::int32_t>(v));
+    }
+    return true;
+  };
+  if (!add(0, p.nodes)) return std::nullopt;
+  for (const Group& g : p.groups) {
+    if (!add(g.dim, g.rows)) return std::nullopt;
+  }
+  TagPlan t;
+  t.name = "GLOBAL_ID";
+  t.type = DataType::i32;
+  t.format = {2, TagFormat::Kind::plain, 0};
+  t.def = bytes_of(std::vector<std::int32_t>{-1});
+  t.global = t.def;
+  t.width = sizeof(std::int32_t);
+  t.ids.resize(gids.size());
+  for (std::size_t i = 0; i < gids.size(); ++i) t.ids[i] = i + 1;
+  t.values = bytes_of(gids);
+  return t;
+}
+
 // One tag per field family, checked: one family per name, per_entity
 // layouts, no pending writes, members that agree on their default and
 // global values; and one per mesh value.
-void plan_tags(const HostMesh& mesh, Plan& p) {
+void plan_tags(const HostMesh& mesh, const H5mWriteOptions& options, Plan& p) {
   std::map<std::string, std::vector<FieldInfo>> by_name;
   for (const FieldInfo& info : mesh.fields().list()) by_name[info.name].push_back(info);
   for (const auto& [name, members] : by_name) {
@@ -319,6 +349,12 @@ void plan_tags(const HostMesh& mesh, Plan& p) {
     if (t.format.storage_class < 0 && t.global) t.format.storage_class = 3;
     place(p.blocks, t);
     p.tags.push_back(std::move(t));
+  }
+  if (options.gid_tag && !by_name.contains("GLOBAL_ID") && !mesh.values().contains("GLOBAL_ID")) {
+    if (auto t = gid_tag(mesh, p)) {
+      place(p.blocks, *t);
+      p.tags.push_back(std::move(*t));
+    }
   }
 }
 
@@ -377,7 +413,7 @@ Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
   p.blocks.push_back(Block{"nodes", 1, nv});
   for (const Group& g : p.groups) p.blocks.push_back(Block{"elements/" + g.name(), g.start, g.rows.size()});
   p.blocks.push_back(Block{"sets", p.set_start, p.fid[set_dim].size()});
-  plan_tags(mesh, p);
+  plan_tags(mesh, options, p);
   return p;
 }
 

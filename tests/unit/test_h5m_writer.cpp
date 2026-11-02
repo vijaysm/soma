@@ -317,7 +317,7 @@ TEST_P(H5mWriteBack, ReadsBackTheSameEntitiesUnderTheSameFileIds) {
     SCOPED_TRACE(static_cast<int>(ordering));
     const HostMesh in = soma::read_h5m(data(GetParam()), {.ordering = ordering});
     const fs::path out = scratch() / ("back_" + GetParam());
-    soma::write_h5m(in, out);
+    soma::write_h5m(in, out, {.gid_tag = false});
     const HostMesh back = soma::read_h5m(out);
     ASSERT_EQ(back.dim(), in.dim());
     EXPECT_EQ(coordinates(back), coordinates(in));
@@ -555,7 +555,7 @@ TEST(H5mWrite, FieldsBecomeTags) {
   f32.view()(1, 0) = -2.5f;
 
   const fs::path out = scratch() / "tags.h5m";
-  soma::write_h5m(in, out);
+  soma::write_h5m(in, out, {.gid_tag = false});
   const hid_t file = open_file(out);
   const auto exists = [&](const std::string& p) { return H5Lexists(file, p.c_str(), H5P_DEFAULT) > 0; };
   for (const char* p : {"/tstt/nodes/tags/D2", "/tstt/nodes/tags/B", "/tstt/elements/Tri3/tags/Q",
@@ -709,7 +709,7 @@ TEST(H5mWrite, VariableLengthFieldsBecomeVariableLengthTags) {
   f.set_tag_format(f.info(vo.id()).family, {1, Kind::opaque, 0});
 
   const fs::path out = scratch() / "var.h5m";
-  soma::write_h5m(in, out);
+  soma::write_h5m(in, out, {.gid_tag = false});
   const hid_t file = open_file(out);
   EXPECT_EQ(int_attribute(file, "/tstt/tags/V", "variable_length"), 1);
   EXPECT_EQ(int_attribute(file, "/tstt/tags/V", "class"), 1);
@@ -804,6 +804,63 @@ TEST(H5mWrite, MeshValuesBecomeTagsWithoutValues) {
     EXPECT_STREQ(e.what(), "write_h5m: a field and a mesh value are both named 'MV'");
   }
   EXPECT_TRUE(listing(dir).empty());
+}
+
+// GLOBAL_ID holds the gids of the written vertices and elements, as MOAB
+// declares it, unless the mesh has its own, or a gid does not fit an i32.
+TEST(H5mWrite, GlobalIdHoldsTheGids) {
+  HostMesh in = mixed_2d();
+  soma::SetBuilder b;
+  b.add(soma::SetSpec{1, soma::set_unique, {}, {}, {}});
+  std::move(b).install(in);
+  const fs::path out = scratch() / "gid.h5m";
+  soma::write_h5m(in, out);
+  const hid_t file = open_file(out);
+  EXPECT_EQ(int_attribute(file, "/tstt/tags/GLOBAL_ID", "class"), 2);
+  for (const char* p : {"/tstt/nodes/tags/GLOBAL_ID", "/tstt/elements/Tri3/tags/GLOBAL_ID",
+                        "/tstt/elements/Quad4/tags/GLOBAL_ID"}) {
+    EXPECT_GT(H5Lexists(file, p, H5P_DEFAULT), 0) << p;
+  }
+  EXPECT_EQ(H5Lexists(file, "/tstt/sets/tags/GLOBAL_ID", H5P_DEFAULT), 0);
+  EXPECT_EQ(H5Lexists(file, "/tstt/tags/GLOBAL_ID/id_list", H5P_DEFAULT), 0);
+  for (const char* a : {"default", "global"}) {
+    const hid_t at = H5Aopen_by_name(file, "/tstt/tags/GLOBAL_ID", a, H5P_DEFAULT, H5P_DEFAULT);
+    std::int32_t v = 0;
+    H5Aread(at, H5T_NATIVE_INT32, &v);
+    H5Aclose(at);
+    EXPECT_EQ(v, -1) << a;
+  }
+  H5Fclose(file);
+  const HostMesh back = soma::read_h5m(out);
+  const auto vg = back.fields().get<std::int32_t>("GLOBAL_ID", 0);
+  const auto eg = back.fields().get<std::int32_t>("GLOBAL_ID", 2);
+  // Vertex file id v had gid 10 v; triangle 8 had 7, quads 9 and 10 had 4 and 9.
+  for (LO l = 0; l < back.count(0); ++l) EXPECT_EQ(vg.value_or_default(0, l), 10 * back.gid(0)(static_cast<std::size_t>(l)));
+  const std::map<GO, std::int32_t> elements{{8, 7}, {9, 4}, {10, 9}};
+  for (LO l = 0; l < back.count(2); ++l) EXPECT_EQ(eg.value_or_default(2, l), elements.at(back.gid(2)(static_cast<std::size_t>(l))));
+
+  soma::write_h5m(in, out, {.gid_tag = false});
+  EXPECT_FALSE(soma::read_h5m(out).fields().contains("GLOBAL_ID"));
+
+  // The mesh's own GLOBAL_ID is written instead, a field or a mesh value.
+  HostMesh own = mixed_2d();
+  const auto g = own.fields().add_tag<std::int32_t>("GLOBAL_ID", 0, 1);
+  for (std::size_t r = 0; r < 7; ++r) g.view()(r, 0) = 5;
+  soma::write_h5m(own, out);
+  const HostMesh own_back = soma::read_h5m(out);
+  EXPECT_EQ(own_back.fields().get<std::int32_t>("GLOBAL_ID", 0).value_or_default(0, 3), 5);
+  EXPECT_THROW((void)own_back.fields().get<std::int32_t>("GLOBAL_ID", 2), std::out_of_range);
+  HostMesh value = mixed_2d();
+  value.values().set("GLOBAL_ID", soma::MeshValue{soma::DataType::f64, 1, false, {}, std::nullopt, std::nullopt});
+  soma::write_h5m(value, out);
+  EXPECT_FALSE(soma::read_h5m(out).fields().contains("GLOBAL_ID"));
+
+  // A gid beyond the i32 range: no GLOBAL_ID.
+  soma::MeshBuilder big(1);
+  big.add_vertices(std::vector<GO>{1, GO{1} << 31}, std::vector<soma::Real>{0, 0, 0, 1, 0, 0});
+  big.add_elements(Topology::edge, std::vector<GO>{1}, std::vector<GO>{1, GO{1} << 31});
+  soma::write_h5m(std::move(big).build(), out);
+  EXPECT_FALSE(soma::read_h5m(out).fields().contains("GLOBAL_ID"));
 }
 
 TEST(H5mWrite, PolygonsGetOneGroupPerArity) {
