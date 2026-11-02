@@ -426,6 +426,12 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
 
   for (const Dense& s : dense) {
     if (s.dim < 0) {
+      const std::string where_s = "/tstt/" + s.path;
+      const Id ds = h5::open_dataset(tstt, s.path);
+      const auto ext = h5::extent(ds.get(), where_s);
+      if (ext.size() != 1 || ext[0] != static_cast<hsize_t>(s.count)) {
+        fail(where_s + " must hold one value per entity (" + str(s.count) + ")");
+      }
       on_sets += static_cast<std::uint64_t>(s.count);
       continue;
     }
@@ -615,7 +621,7 @@ HostMesh read(const fs::path& path, const H5mReadOptions& options, H5mReport& re
     std::vector<GO>().swap(g.conn);
   }
   HostMesh mesh = std::move(b).build(options.ordering);
-  if (options.tags && h5::exists(tstt.get(), "tags")) {
+  if (options.tags) {
     const Locator at(mesh, ranges);
     import_tags(mesh, tstt.get(), nodes, groups, names, sets, at, report);
   }

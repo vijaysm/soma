@@ -564,6 +564,24 @@ TEST_F(H5mRead, RejectsTagValuesItCannotPlace) {
   }
   expect_rejected(file("undef.h5m"), {"/tstt/nodes/tags/S", "a tag /tstt/tags does not define"});
   {
+    Writer w(file("notags.h5m"));
+    square(w);
+    w.tag("S", 2, H5T_NATIVE_INT32);
+    const std::int32_t d[] = {1, 2, 3, 4};
+    w.dense("nodes", "S", d, 4);
+    H5Ldelete(w.tstt(), "tags", H5P_DEFAULT);
+  }
+  expect_rejected(file("notags.h5m"), {"/tstt/nodes/tags/S", "a tag /tstt/tags does not define"});
+  {
+    Writer w(file("setrows.h5m"));
+    square(w);
+    w.sets(6, 2);
+    w.tag("S", 2, H5T_NATIVE_INT32);
+    const std::int32_t d[] = {1, 2, 3};
+    w.dense("sets", "S", d, 3);
+  }
+  expect_rejected(file("setrows.h5m"), {"/tstt/sets/tags/S must hold one value per entity (2)"});
+  {
     Writer w(file("rows.h5m"));
     square(w);
     w.tag("S", 2, H5T_NATIVE_INT32);
