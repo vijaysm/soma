@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "hdf5.hpp"
+#include "soma/core/handle_ref.hpp"
 #include "soma/core/sets.hpp"
 #include "soma/core/topology.hpp"
 #include "soma/fields/data_type.hpp"
@@ -74,6 +75,7 @@ struct TagPlan {
   std::string name;
   DataType type = DataType::u8;
   int ncomp = 1;
+  bool handle = false;  // values, default and global are file ids
   TagFormat format{};
   std::optional<std::vector<std::byte>> def, global;
   std::size_t width = 0;  // bytes per component
@@ -96,6 +98,7 @@ struct Plan {
   std::uint64_t max_id = 0;
   std::vector<Block> blocks;  // in file id order
   std::vector<TagPlan> tags;  // families, then mesh values, each in name order
+  std::optional<HandleRef<Kokkos::HostSpace>> handles;  // when the mesh has handle values
 };
 
 // The number of temporary file names write_h5m tries before it gives up.
@@ -110,9 +113,58 @@ void sort_by_gid(std::vector<LO>& rows, const View1<const GO, Kokkos::HostSpace>
   });
 }
 
+template <class T>
+std::optional<std::vector<T>> present(const std::vector<T>& v) {
+  return v.empty() ? std::nullopt : std::optional(v);
+}
+
+// Calls f with every handle the mesh holds: in handle fields (values,
+// defaults and globals) and in handle mesh values.
+template <class F>
+void each_handle(const HostMesh& mesh, F&& f) {
+  const auto all = [&](const auto& v) {
+    if (v) {
+      for (const GO h : *v) f(h);
+    }
+  };
+  for (const FieldInfo& info : mesh.fields().list()) {
+    if (!info.handle) continue;
+    if (info.variable) {
+      const auto v = mesh.fields().get_var<GO>(info.id);
+      for (std::size_t i = 0; i < v.values().extent(0); ++i) f(v.values()(i));
+      all(v.default_value());
+      all(v.global_value());
+    } else {
+      const auto v = mesh.fields().get<GO>(info.id);
+      for (std::size_t r = 0; r < v.view().extent(0); ++r) {
+        for (std::size_t c = 0; c < v.view().extent(1); ++c) f(v.view()(r, c));
+      }
+      all(present(v.default_value()));
+      all(present(v.global_value()));
+    }
+  }
+  for (const std::string& name : mesh.values().names()) {
+    const MeshValue& v = mesh.values().at(name);
+    if (!v.handle) continue;
+    all(v.default_as<GO>());
+    all(v.global_as<GO>());
+  }
+}
+
+// The resolver of the mesh's handles, when it holds any.
+std::optional<HandleRef<Kokkos::HostSpace>> handle_ref(const HostMesh& mesh) {
+  bool any = false;
+  for (const FieldInfo& info : mesh.fields().list()) any = any || info.handle;
+  for (const std::string& name : mesh.values().names()) any = any || mesh.values().at(name).handle;
+  if (!any) return std::nullopt;
+  return HandleRef<Kokkos::HostSpace>::build(mesh);
+}
+
 // options.dims, or else the vertices, mesh.dim(), the dimensions the mesh
-// was built with, and those that fields have values on or sets hold.
-std::array<bool, 4> written_dims(const HostMesh& mesh, const H5mWriteOptions& options) {
+// was built with, and those that fields have values on, sets hold or
+// handles name.
+std::array<bool, 4> written_dims(const HostMesh& mesh, const H5mWriteOptions& options,
+                                 const std::optional<HandleRef<Kokkos::HostSpace>>& handles) {
   std::array<bool, 4> w{};
   if (options.dims) {
     if (!(*options.dims)[0]) reject("the vertices are always written; dims[0] must be true");
@@ -129,6 +181,12 @@ std::array<bool, 4> written_dims(const HostMesh& mesh, const H5mWriteOptions& op
     for (LO s = 0; s < sets.count() && !w[static_cast<std::size_t>(d)] && sets.has_members(d); ++s) {
       w[static_cast<std::size_t>(d)] = !sets.members_of(s, d).empty();
     }
+  }
+  if (handles) {
+    each_handle(mesh, [&](GO h) {
+      const HandleTarget x = handles->resolve(h);
+      if (x.valid() && x.slot < set_dim) w[static_cast<std::size_t>(x.slot)] = true;
+    });
   }
   return w;
 }
@@ -178,10 +236,21 @@ std::vector<std::byte> bytes_of(const std::vector<T>& v) {
   return out;
 }
 
+// The file id of the entity or set a handle names; 0 for the null handle.
+GO handle_fid(const HandleRef<Kokkos::HostSpace>& ref, const Plan& p, GO h, const std::string& where) {
+  if (h == 0) return 0;
+  const HandleTarget x = ref.resolve(h);
+  if (!x.valid()) reject(where + " holds the handle " + std::to_string(h) + ", which names nothing in the mesh");
+  const auto& fid = p.fid[static_cast<std::size_t>(x.slot)];
+  const std::uint64_t id = static_cast<std::size_t>(x.lid) < fid.size() ? fid[static_cast<std::size_t>(x.lid)] : 0;
+  if (id == 0) reject(where + " names an entity of dimension " + std::to_string(x.slot) + ", which is not written");
+  return static_cast<GO>(id);
+}
+
 // The one value a family's members agree on (their defaults, or their global
 // values), or none when no member has one.
 template <class T>
-std::optional<std::vector<std::byte>> agreed(const std::string& name, const char* what,
+std::optional<std::vector<T>> agreed(const std::string& name, const char* what,
                                              const std::vector<std::optional<std::vector<T>>>& values) {
   std::optional<std::vector<T>> one;
   for (const auto& v : values) {
@@ -189,13 +258,7 @@ std::optional<std::vector<std::byte>> agreed(const std::string& name, const char
     if (one && *one != *v) reject("the fields named '" + name + "' have different " + what + " values");
     one = v;
   }
-  if (!one) return std::nullopt;
-  return bytes_of(*one);
-}
-
-template <class T>
-std::optional<std::vector<T>> present(const std::vector<T>& v) {
-  return v.empty() ? std::nullopt : std::optional(v);
+  return one;
 }
 
 // A family's values on every written entity that has one, sorted by file id:
@@ -248,8 +311,8 @@ void collect_family(const HostMesh& mesh, const Plan& p, const std::vector<Field
       });
     }
   }
-  t.def = agreed(t.name, "default", defs);
-  t.global = agreed(t.name, "global", globals);
+  auto def = agreed(t.name, "default", defs);
+  auto global = agreed(t.name, "global", globals);
   t.width = sizeof(T);
   std::stable_sort(order.begin(), order.end());
   std::vector<T> sorted;
@@ -261,6 +324,19 @@ void collect_family(const HostMesh& mesh, const Plan& p, const std::vector<Field
                   values.begin() + static_cast<std::ptrdiff_t>(e.first + e.count));
     if (t.ncomp == 0) t.ends.push_back(static_cast<std::int64_t>(sorted.size()) - 1);
   }
+  if constexpr (std::is_same_v<T, GO>) {
+    if (t.handle) {
+      const std::string where = "field '" + t.name + "'";
+      for (GO& h : sorted) h = handle_fid(*p.handles, p, h, where);
+      for (auto* v : {&def, &global}) {
+        if (*v) {
+          for (GO& h : **v) h = handle_fid(*p.handles, p, h, where);
+        }
+      }
+    }
+  }
+  if (def) t.def = bytes_of(*def);
+  if (global) t.global = bytes_of(*global);
   t.values = bytes_of(sorted);
 }
 
@@ -333,12 +409,12 @@ void plan_tags(const HostMesh& mesh, const H5mWriteOptions& options, Plan& p) {
       if (const std::size_t n = mesh.fields().pending_count(info.id); n != 0) {
         reject("field '" + name + "' has " + std::to_string(n) + " uncommitted writes; commit it before writing");
       }
-      if (info.handle) reject("field '" + name + "' holds handle values, which are not written yet");
     }
     TagPlan t;
     t.name = name;
     t.type = first.type;
     t.ncomp = first.ncomp;
+    t.handle = first.handle;
     t.format = mesh.fields().tag_format(first.family);
     dispatch_data_type(t.type, [&]<class T>() { collect_family<T>(mesh, p, members, t); });
     place(p.blocks, t);
@@ -349,14 +425,24 @@ void plan_tags(const HostMesh& mesh, const H5mWriteOptions& options, Plan& p) {
   for (const std::string& name : mesh.values().names()) {
     if (by_name.contains(name)) reject("a field and a mesh value are both named '" + name + "'");
     const MeshValue& v = mesh.values().at(name);
-    if (v.handle) reject("mesh value '" + name + "' holds handles, which are not written yet");
     TagPlan t;
     t.name = name;
     t.type = v.type;
     t.ncomp = v.ncomp;
+    t.handle = v.handle;
     t.format = v.format;
     t.def = v.default_value;
     t.global = v.global_value;
+    if (v.handle) {
+      const auto mapped = [&](const std::optional<std::vector<GO>>& h) -> std::optional<std::vector<std::byte>> {
+        if (!h) return std::nullopt;
+        std::vector<GO> ids = *h;
+        for (GO& x : ids) x = handle_fid(*p.handles, p, x, "mesh value '" + name + "'");
+        return bytes_of(ids);
+      };
+      t.def = mapped(v.default_as<GO>());
+      t.global = mapped(v.global_as<GO>());
+    }
     dispatch_data_type(t.type, [&]<class T>() { t.width = sizeof(T); });
     if (t.format.storage_class < 0 && t.global) t.format.storage_class = 3;
     place(p.blocks, t);
@@ -372,7 +458,8 @@ void plan_tags(const HostMesh& mesh, const H5mWriteOptions& options, Plan& p) {
 
 Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
   Plan p;
-  p.dims = written_dims(mesh, options);
+  p.handles = handle_ref(mesh);
+  p.dims = written_dims(mesh, options, p.handles);
   const auto nv = static_cast<std::size_t>(mesh.count(0));
   if (mesh.coords().extent(0) != nv || mesh.gid(0).extent(0) != nv) {
     reject("the mesh holds " + std::to_string(nv) + " vertices but not their coordinates and gids");
@@ -500,12 +587,17 @@ TagTypes tag_types(const TagPlan& t) {
     return out;
   }
   hid_t file = -1, mem = -1;
+  if (t.handle) {
+    file = H5T_STD_U64LE;
+    mem = H5T_NATIVE_UINT64;
+  } else {
   dispatch_data_type(t.type, [&]<class T>() {
     mem = h5::native<T>();
     file = std::is_floating_point_v<T> ? (sizeof(T) == 4 ? H5T_IEEE_F32LE : H5T_IEEE_F64LE)
            : std::is_signed_v<T> ? (sizeof(T) == 1 ? H5T_STD_I8LE : sizeof(T) == 4 ? H5T_STD_I32LE : H5T_STD_I64LE)
                                  : (sizeof(T) == 1 ? H5T_STD_U8LE : sizeof(T) == 4 ? H5T_STD_U32LE : H5T_STD_U64LE);
   });
+  }
   if (t.ncomp <= 1) {
     out.file = h5::check(H5Tcopy(file), "copy " + what);
     out.mem = h5::check(H5Tcopy(mem), "copy " + what);
@@ -546,12 +638,20 @@ void write_tag(const File& f, hid_t tstt, const std::vector<Block>& blocks, cons
   f.commit_type(g.get(), "type", types.file.get());
   const std::int32_t cls = t.format.storage_class;
   File::attribute(g.get(), "class", H5T_STD_I32LE, H5T_NATIVE_INT32, &cls);
+  if (t.handle) {
+    const std::int32_t one = 1;
+    File::attribute(g.get(), "is_handle", H5T_STD_I32LE, H5T_NATIVE_INT32, &one);
+  }
   if (t.ncomp == 0) {
     write_var_tag(f, g.get(), types, t);
     return;
   }
-  if (t.def) File::attribute(g.get(), "default", types.file.get(), types.mem.get(), t.def->data());
-  if (t.global) File::attribute(g.get(), "global", types.file.get(), types.mem.get(), t.global->data());
+  // MOAB types the default and global of a handle tag as plain file ids, not
+  // with the committed type.
+  const Id plain = h5::check(H5Tcopy(types.file.get()), "copy the type of tag " + t.name);
+  const hid_t attr = t.handle ? plain.get() : types.file.get();
+  if (t.def) File::attribute(g.get(), "default", attr, types.mem.get(), t.def->data());
+  if (t.global) File::attribute(g.get(), "global", attr, types.mem.get(), t.global->data());
 
   std::vector<std::uint64_t> ids;
   std::vector<std::byte> values;

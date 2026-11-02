@@ -679,10 +679,10 @@ TEST_P(H5mMoab, EveryTagMatchesValueByValue) {
     return std::any_of(compared.begin(), compared.end(), [&](const auto& c) { return c.first == n; });
   };
   if (GetParam() != "hex_2048.h5m" && GetParam() != "written:hex_2048.h5m") EXPECT_FALSE(compared.empty());
-  if (GetParam() == "tag_kinds") {
+  if (GetParam() == "tag_kinds" || GetParam() == "written:tag_kinds") {
     for (const char* n : {"DENSE_D2", "SPARSE_I", "PAIR", "OPAQUE7", "BITS3", "WITH_GLOBAL"}) EXPECT_TRUE(has(n)) << n;
   }
-  if (GetParam() == "sets_kinds") {
+  if (GetParam() == "sets_kinds" || GetParam() == "written:sets_kinds") {
     for (const char* n : {"VARF", "VAROPQ", "QV", "SS", "VH"}) EXPECT_TRUE(has(n)) << n;
     EXPECT_EQ(compared.count({"SETI", soma::set_dim}) + compared.count({"SETI", 0}), 2u);
     EXPECT_EQ(mesh_values, (std::set<std::string>{"DECLARED", "MESHVAL", "VARG"}));
@@ -753,7 +753,7 @@ INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                                            "written:64bricks_1khex.h5m", "written:hex_2048.h5m",
                                            "written:hexes_mixed.h5m", "written:hybrid_3quad_1tri.h5m",
                                            "written:moab_i.h5m", "written:recMeshOcn128.h5m",
-                                           "written:poly_indices"),
+                                           "written:poly_indices", "written:tag_kinds", "written:sets_kinds"),
                          [](const auto& info) {
                            std::string n = info.param;
                            std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');

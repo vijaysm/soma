@@ -86,8 +86,8 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 //
 // Entities: the vertices, the elements of mesh.dim(), of every dimension the
 // mesh was built with (Mesh::input) and of every dimension that fields have
-// values on or sets hold; or the dimensions options.dims names (dims[0] must
-// be true). One group per element type and node count
+// values on, sets hold or handles name; or the dimensions options.dims names
+// (dims[0] must be true). One group per element type and node count
 // (Edge2, Tri3, Quad4, Polygon5, Hex8, ...), in type order and then node
 // count; knives and polyhedra throw. File ids are 1-based and contiguous:
 // the vertices, then the groups, each in gid order. A mesh that read_h5m read
@@ -118,6 +118,12 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // values become tags with no entity values (class 3 when they hold a global
 // value and no class was recorded); a field and a mesh value of one name
 // throw.
+//
+// Handle values (FieldOptions::handle, MeshValue::handle), defaults and
+// globals are written as the file ids of what they name, 0 for the null
+// handle, with is_handle; the dimensions they name are written by default.
+// A handle that names nothing in the mesh, or an entity of a dimension not
+// written, throws std::invalid_argument.
 //
 // GLOBAL_ID (options.gid_tag): unless a field or mesh value has that name,
 // the gids of the written vertices and elements as MOAB declares the tag

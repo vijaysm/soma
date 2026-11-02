@@ -27,6 +27,7 @@
 
 #include <gtest/gtest.h>
 
+#include "soma/core/handle_ref.hpp"
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_values.hpp"
 #include "soma/core/mesh_builder.hpp"
@@ -898,6 +899,105 @@ TEST(H5mWrite, GlobalIdHoldsTheGids) {
   big.add_elements(Topology::edge, std::vector<GO>{1}, std::vector<GO>{1, GO{1} << 31});
   soma::write_h5m(std::move(big).build(), out);
   EXPECT_FALSE(soma::read_h5m(out).fields().contains("GLOBAL_ID"));
+}
+
+// Handle values, defaults and globals are written as the file ids of what
+// they name (0 for the null handle), with is_handle; MOAB types a handle
+// tag's default and global as plain file ids.
+TEST(H5mWrite, HandlesBecomeFileIds) {
+  using soma::make_handle;
+  using HS = Kokkos::HostSpace;
+  constexpr int sd = soma::set_dim;
+  HostMesh in = numbered_2d();
+  auto& f = in.fields();
+  const auto qv = f.add_tag<GO>("QV", 0, 1, {.default_value = std::vector<GO>{make_handle(0, 1)},
+                                            .global_value = std::vector<GO>{make_handle(sd, 12)},
+                                            .handle = true});
+  const GO named[] = {make_handle(2, 9), make_handle(0, 3), make_handle(sd, 11), 0, make_handle(2, 8),
+                      make_handle(0, 7), make_handle(2, 10)};
+  for (std::size_t r = 0; r < 7; ++r) qv.view()(r, 0) = named[r];
+  const std::vector<soma::Offset> off{0, 2, 2};
+  const std::vector<GO> vh{make_handle(0, 7), make_handle(2, 8)};
+  f.add_var<GO>("VH", soma::Space<HS>(soma::Domain<HS>::all(in, sd), soma::Layout::per_entity()), off, vh,
+                {.handle = true});
+  in.values().set("MH", soma::MeshValue{soma::DataType::i64, 1, true, {}, std::nullopt,
+                                        soma::MeshValue::bytes_of(std::span<const GO>(std::vector<GO>{make_handle(0, 2)}))});
+
+  const fs::path out = scratch() / "handles.h5m";
+  soma::write_h5m(in, out, {.gid_tag = false});
+  const hid_t file = open_file(out);
+  for (const char* t : {"/tstt/tags/QV", "/tstt/tags/VH", "/tstt/tags/MH"}) {
+    EXPECT_EQ(int_attribute(file, t, "is_handle"), 1) << t;
+    const hid_t type = H5Topen2(file, (std::string(t) + "/type").c_str(), H5P_DEFAULT);
+    EXPECT_GT(H5Tequal(type, H5T_STD_U64LE), 0) << t;
+    H5Tclose(type);
+  }
+  std::vector<std::uint64_t> dense(7);
+  const hid_t ds = H5Dopen2(file, "/tstt/nodes/tags/QV", H5P_DEFAULT);
+  H5Dread(ds, H5T_NATIVE_UINT64, H5S_ALL, H5S_ALL, H5P_DEFAULT, dense.data());
+  H5Dclose(ds);
+  EXPECT_EQ(dense, (std::vector<std::uint64_t>{9, 3, 11, 0, 8, 7, 10}));
+  for (const auto& [attr, want] : {std::pair{"default", 1}, std::pair{"global", 12}}) {
+    const hid_t a = H5Aopen_by_name(file, "/tstt/tags/QV", attr, H5P_DEFAULT, H5P_DEFAULT);
+    const hid_t t = H5Aget_type(a);
+    EXPECT_EQ(H5Tcommitted(t), 0) << attr;
+    EXPECT_GT(H5Tequal(t, H5T_STD_U64LE), 0) << attr;
+    std::uint64_t v = 0;
+    H5Aread(a, H5T_NATIVE_UINT64, &v);
+    EXPECT_EQ(v, static_cast<std::uint64_t>(want)) << attr;
+    H5Tclose(t);
+    H5Aclose(a);
+  }
+  H5Fclose(file);
+
+  // gid = file id here, so the handles read back unchanged.
+  const HostMesh back = soma::read_h5m(out);
+  EXPECT_EQ(difference(fields_of(back), [&] {
+              auto w = fields_of(in);
+              w.at({"QV", 0}).format = {2, soma::TagFormat::Kind::plain, 0};
+              w.at({"VH", sd}).format = {1, soma::TagFormat::Kind::plain, 0};
+              return w;
+            }()),
+            "");
+  EXPECT_EQ(back.values().at("MH").global_as<GO>(), (std::vector<GO>{make_handle(0, 2)}));
+}
+
+// Handles to edges write the edges; handles to nothing, or to entities left
+// out by options.dims, throw.
+TEST(H5mWrite, HandlesNeedWhatTheyName) {
+  using soma::make_handle;
+  HostMesh in = soma::testing::box_mesh({2, 1, 1});
+  soma::build_adjacencies(in, soma::AdjacencyRequest{}.add(3, 1), Kokkos::DefaultHostExecutionSpace{});
+  const GO edge = in.gid(1)(3);
+  const fs::path dir = scratch() / "handle_dims";
+  fs::create_directory(dir);
+  {
+    HostMesh m = in.clone();
+    m.values().set("E", soma::MeshValue{soma::DataType::i64, 1, true, {}, std::nullopt,
+                                        soma::MeshValue::bytes_of(std::span<const GO>(std::vector<GO>{make_handle(1, edge)}))});
+    soma::write_h5m(m, dir / "m.h5m");
+    EXPECT_EQ(soma::read_h5m(dir / "m.h5m").count(1), in.count(1));
+    fs::remove(dir / "m.h5m");
+    try {
+      soma::write_h5m(m, dir / "m.h5m", {.dims = std::array<bool, 4>{true, false, false, true}});
+      ADD_FAILURE() << "written without the edge";
+    } catch (const std::invalid_argument& e) {
+      EXPECT_STREQ(e.what(), "write_h5m: mesh value 'E' names an entity of dimension 1, which is not written");
+    }
+  }
+  {
+    HostMesh m = in.clone();
+    const auto h = m.fields().add_tag<GO>("H", 3, 1, {.handle = true});
+    h.view()(1, 0) = make_handle(0, 999);
+    try {
+      soma::write_h5m(m, dir / "m.h5m");
+      ADD_FAILURE() << "written with a dangling handle";
+    } catch (const std::invalid_argument& e) {
+      EXPECT_EQ(std::string(e.what()), "write_h5m: field 'H' holds the handle " + std::to_string(make_handle(0, 999)) +
+                                           ", which names nothing in the mesh");
+    }
+  }
+  EXPECT_TRUE(listing(dir).empty());
 }
 
 TEST(H5mWrite, PolygonsGetOneGroupPerArity) {
