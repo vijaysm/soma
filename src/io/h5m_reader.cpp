@@ -70,6 +70,7 @@ Nodes read_nodes(hid_t tstt) {
     fail(where + " holds " + str(std::uint64_t{ext[0]}) +
          " vertices, more than the LO type of this build can number");
   }
+  if (ext[0] > std::numeric_limits<std::size_t>::max() / 3) fail(where + " holds more values than memory can index");
   Nodes n;
   n.count = static_cast<GO>(ext[0]);
   const auto rows = static_cast<std::size_t>(ext[0]);
@@ -107,9 +108,10 @@ std::string element_type(hid_t group, const std::string& where) {
                          "open the element_type of " + where);
   const Id t = h5::check(H5Aget_type(a.get()), "get the type of the element_type of " + where);
   if (H5Tget_class(t.get()) != H5T_ENUM) fail(where + ": element_type is not an enumeration");
+  h5::require_one_value(a.get(), "the element_type of " + where);
   std::vector<unsigned char> value(H5Tget_size(t.get()));
   h5::check(H5Aread(a.get(), t.get(), value.data()), "read the element_type of " + where);
-  std::array<char, 64> name{};
+  std::array<char, 256> name{};
   if (H5Tenum_nameof(t.get(), value.data(), name.data(), name.size()) < 0) {
     fail(where + ": element_type holds a value its enumeration does not name");
   }
@@ -157,14 +159,23 @@ Group read_group(hid_t elements, const std::string& name, const Nodes& nodes) {
     const Id pi = h5::open_dataset(grp.get(), "poly_indices");
     const auto pext = h5::extent(pi.get(), pw);
     if (pext.size() != 1) fail(pw + " must be one-dimensional");
+    if (pext[0] > static_cast<hsize_t>(std::numeric_limits<LO>::max())) {
+      fail(g.where + " holds more elements than the LO type of this build can number");
+    }
+    to_offset(nnz, cw);
     const auto last = h5::read_all<std::int64_t>(pi.get(), static_cast<std::size_t>(pext[0]), pw);
     g.count = static_cast<GO>(last.size());
     g.offsets.assign(last.size() + 1, 0);
     std::int64_t prev = -1;
     for (std::size_t i = 0; i < last.size(); ++i) {
-      if (last[i] - prev < 3) {
+      // prev is in [-1, nnz), so prev + 3 cannot overflow.
+      if (last[i] < prev + 3) {
         fail(pw + ": polygon " + str(std::uint64_t{i}) + " ends at index " + str(last[i]) +
              ", leaving it fewer than 3 vertices");
+      }
+      if (static_cast<std::uint64_t>(last[i]) >= nnz) {
+        fail(pw + ": polygon " + str(std::uint64_t{i}) + " ends at index " + str(last[i]) + ", but " + cw +
+             " has " + str(nnz) + " entries");
       }
       prev = last[i];
       g.offsets[i + 1] = to_offset(static_cast<std::uint64_t>(prev) + 1, cw);
@@ -174,6 +185,13 @@ Group read_group(hid_t elements, const std::string& name, const Nodes& nodes) {
     }
   } else {
     if (ext.size() != 2) fail(cw + " must be two-dimensional (elements by vertices)");
+    if (ext[0] > static_cast<hsize_t>(std::numeric_limits<LO>::max())) {
+      fail(g.where + " holds more elements than the LO type of this build can number");
+    }
+    if (ext[1] != 0 && ext[0] > std::numeric_limits<std::uint64_t>::max() / ext[1]) {
+      fail(cw + " has more entries than an index can count");
+    }
+    to_offset(ext[0] * ext[1], cw);  // so that i * arity below fits too
     g.count = static_cast<GO>(ext[0]);
     arity = ext[1];
     if (g.topology == Topology::polygon) {
@@ -188,12 +206,8 @@ Group read_group(hid_t elements, const std::string& name, const Nodes& nodes) {
            " elements (high-order connectivity is not supported)");
     }
     nnz = ext[0] * ext[1];
-    to_offset(nnz, cw);
   }
   if (g.count == 0) return g;
-  if (static_cast<std::uint64_t>(g.count) > static_cast<std::uint64_t>(std::numeric_limits<LO>::max())) {
-    fail(g.where + " holds more elements than the LO type of this build can number");
-  }
   g.start = start_id(ds.get(), cw);
 
   const auto ids = h5::read_all<std::uint64_t>(ds.get(), static_cast<std::size_t>(nnz), cw);
@@ -206,7 +220,7 @@ Group read_group(hid_t elements, const std::string& name, const Nodes& nodes) {
                                   : static_cast<std::size_t>(std::upper_bound(g.offsets.begin(), g.offsets.end(),
                                                                               static_cast<Offset>(j)) -
                                                              g.offsets.begin() - 1);
-      fail(cw + ": element " + str(g.start + static_cast<GO>(row)) + " refers to file id " + str(ids[j]) +
+      fail(cw + ": element " + str(static_cast<std::uint64_t>(g.start) + row) + " refers to file id " + str(ids[j]) +
            ", which is not a vertex");
     }
     g.conn[j] = static_cast<GO>(ids[j]);
@@ -341,7 +355,9 @@ std::optional<TagKind> tag_kind(hid_t type, std::string& why) {
       }
       k.type = *s;
       k.ncomp = static_cast<int>(n);
-      k.mem = h5::check(H5Tarray_create2(native_of(*s), 1, &n), "create an array type");
+      // HDF5 converts between array types of the same shape only.
+      k.mem = h5::check(H5Tarray_create2(native_of(*s), static_cast<unsigned>(rank), dims.data()),
+                        "create an array type");
       return k;
     }
     case H5T_OPAQUE:
@@ -393,6 +409,7 @@ std::optional<std::vector<T>> read_value_attribute(hid_t tag, const char* name, 
                                                    const std::string& where) {
   if (!h5::has_attribute(tag, name)) return std::nullopt;
   const Id a = h5::check(H5Aopen(tag, name, H5P_DEFAULT), std::string("open the ") + name + " of " + where);
+  h5::require_one_value(a.get(), std::string("the ") + name + " of " + where);
   std::vector<T> v(static_cast<std::size_t>(k.ncomp));
   h5::check(H5Aread(a.get(), k.mem.get(), v.data()), std::string("read the ") + name + " of " + where);
   return v;
@@ -570,6 +587,9 @@ HostMesh read(const fs::path& path, const H5mReadOptions& options, H5mReport& re
     const Id ds = h5::open_dataset(tstt.get(), "sets/list");
     const auto ext = h5::extent(ds.get(), sets.where);
     if (ext.size() != 2 || ext[1] != 4) fail(sets.where + " must have 4 columns");
+    if (ext[0] > static_cast<hsize_t>(std::numeric_limits<LO>::max())) {
+      fail(sets.where + " holds more sets than the LO type of this build can number");
+    }
     sets.count = static_cast<GO>(ext[0]);
     if (sets.count > 0) sets.first = start_id(ds.get(), sets.where);
   }

@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -570,6 +571,100 @@ TEST_F(H5mRead, RejectsTagValuesItCannotPlace) {
     w.dense("nodes", "S", d, 3);
   }
   expect_rejected(file("rows.h5m"), {"/tstt/nodes/tags/S must hold one value per entity (4)"});
+}
+
+// Replaces attribute `name` of the object at `path` (below /tstt) by one of n values.
+void replace_attribute(hid_t tstt, const char* path, const char* name, hid_t type, hsize_t n,
+                       const void* values) {
+  const hid_t o = H5Oopen(tstt, path, H5P_DEFAULT);
+  if (H5Aexists(o, name) > 0) H5Adelete(o, name);
+  const hid_t space = H5Screate_simple(1, &n, nullptr);
+  const hid_t a = H5Acreate2(o, name, type, space, H5P_DEFAULT, H5P_DEFAULT);
+  H5Awrite(a, type, values);
+  H5Aclose(a);
+  H5Sclose(space);
+  H5Oclose(o);
+}
+
+TEST_F(H5mRead, RejectsAttributesOfMoreThanOneValue) {
+  const std::int64_t three[] = {1, 1, 1};
+  {
+    Writer w(file("start.h5m"));
+    square(w);
+    replace_attribute(w.tstt(), "elements/Quad4/connectivity", "start_id", H5T_NATIVE_INT64, 3, three);
+  }
+  expect_rejected(file("start.h5m"), {"start_id", "must hold exactly one value"});
+  {
+    Writer w(file("type.h5m"));
+    square(w);
+    const hid_t types = H5Topen2(w.tstt(), "elemtypes", H5P_DEFAULT);
+    const std::uint8_t quads[] = {3, 3};
+    replace_attribute(w.tstt(), "elements/Quad4", "element_type", types, 2, quads);
+    H5Tclose(types);
+  }
+  expect_rejected(file("type.h5m"), {"element_type", "must hold exactly one value"});
+  {
+    Writer w(file("default.h5m"));
+    square(w);
+    w.tag("T", 2, H5T_NATIVE_INT64);
+    const std::int64_t four[] = {1, 2, 3, 4};
+    w.dense("nodes", "T", four, 4);
+    replace_attribute(w.tstt(), "tags/T", "default", H5T_NATIVE_INT64, 3, three);
+  }
+  expect_rejected(file("default.h5m"), {"default", "must hold exactly one value"});
+}
+
+TEST_F(H5mRead, RejectsPolyIndicesThatLeaveTheConnectivity) {
+  {
+    Writer w(file("min.h5m"));
+    square(w);
+    w.poly_elements("Polygon", "Polygon", 6, {1, 2, 3, 4, 1, 2}, {2, std::numeric_limits<std::int64_t>::min()});
+  }
+  expect_rejected(file("min.h5m"), {"poly_indices", "polygon 1", "fewer than 3"});
+  {
+    Writer w(file("past.h5m"));
+    square(w);
+    w.poly_elements("Polygon", "Polygon", 6, {1, 2, 3, 4}, {9});
+  }
+  expect_rejected(file("past.h5m"), {"polygon 0 ends at index 9", "has 4 entries"});
+}
+
+TEST_F(H5mRead, RejectsASetListOfImpossibleLength) {
+  {
+    Writer w(file("sets.h5m"));
+    square(w);
+    const hid_t g = H5Gcreate2(w.tstt(), "sets", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+    const hsize_t dims[2] = {hsize_t{1} << 40, 4};
+    const hsize_t chunk[2] = {16, 4};
+    const hid_t space = H5Screate_simple(2, dims, nullptr);
+    const hid_t plist = H5Pcreate(H5P_DATASET_CREATE);
+    H5Pset_chunk(plist, 2, chunk);
+    const hid_t ds = H5Dcreate2(g, "list", H5T_STD_I64LE, space, H5P_DEFAULT, plist, H5P_DEFAULT);
+    H5Dclose(ds);
+    H5Pclose(plist);
+    H5Sclose(space);
+    H5Gclose(g);
+  }
+  // More sets than a 32-bit LO numbers; with a 64-bit LO, more file ids than max_id allows.
+  expect_rejected(file("sets.h5m"), {"/tstt/sets/list"});
+}
+
+TEST_F(H5mRead, MultiDimensionalArrayTagsKeepEveryComponent) {
+  {
+    Writer w(file());
+    square(w);
+    const hsize_t dims[2] = {3, 3};
+    const hid_t t = H5Tarray_create2(H5T_NATIVE_INT32, 2, dims);
+    w.tag("M33", 2, t);
+    std::int32_t v[9];
+    for (int i = 0; i < 9; ++i) v[i] = 10 + i;
+    w.dense("elements/Quad4", "M33", v, 1);
+    H5Tclose(t);
+  }
+  HostMesh m = soma::read_h5m(file());
+  const auto f = m.fields().get<std::int32_t>("M33", 2);
+  ASSERT_EQ(f.ncomp(), 9);
+  for (int c = 0; c < 9; ++c) EXPECT_EQ(f.value_or_default(2, 0, c), 10 + c) << c;
 }
 
 TEST_F(H5mRead, FailuresPrintNothing) {

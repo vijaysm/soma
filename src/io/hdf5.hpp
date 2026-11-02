@@ -98,11 +98,17 @@ inline Id open_dataset(hid_t loc, const std::string& path) {
 inline std::vector<std::string> children(hid_t group, const std::string& where) {
   std::vector<std::string> names;
   const auto collect = [](hid_t, const char* name, const H5L_info2_t*, void* out) -> herr_t {
-    static_cast<std::vector<std::string>*>(out)->emplace_back(name);
-    return 0;
+    // No exception may unwind through HDF5's C frames.
+    try {
+      static_cast<std::vector<std::string>*>(out)->emplace_back(name);
+      return 0;
+    } catch (...) {
+      return -1;
+    }
   };
-  check(H5Literate2(group, H5_INDEX_NAME, H5_ITER_INC, nullptr, collect, &names),
-        "list the members of " + where);
+  if (H5Literate2(group, H5_INDEX_NAME, H5_ITER_INC, nullptr, collect, &names) < 0) {
+    throw Error("HDF5 could not list the members of " + where);
+  }
   return names;
 }
 
@@ -128,7 +134,7 @@ hid_t native() {
   else static_assert(sizeof(T) == 0, "no native HDF5 type");
 }
 
-// Reads a whole dataset of `count` elements of memory type `mem` into out.
+// Reads a whole dataset into out, which holds it in memory type `mem`.
 inline void read(hid_t dataset, hid_t mem, void* out, const std::string& where) {
   check(H5Dread(dataset, mem, H5S_ALL, H5S_ALL, H5P_DEFAULT, out), "read " + where);
 }
@@ -140,10 +146,18 @@ std::vector<T> read_all(hid_t dataset, std::size_t count, const std::string& whe
   return out;
 }
 
+// H5Aread fills the whole attribute, so one holding more than a single value
+// would overrun the caller's buffer.
+inline void require_one_value(hid_t attribute, const std::string& what) {
+  const Id space = check(H5Aget_space(attribute), "get the dataspace of " + what);
+  if (H5Sget_simple_extent_npoints(space.get()) != 1) throw Error(what + " must hold exactly one value");
+}
+
 // A scalar attribute converted to T.
 template <class T>
 T read_attribute(hid_t obj, const char* name, const std::string& where) {
   const Id a = check(H5Aopen(obj, name, H5P_DEFAULT), std::string("open the attribute ") + name + " of " + where);
+  require_one_value(a.get(), std::string("the attribute ") + name + " of " + where);
   T value{};
   check(H5Aread(a.get(), native<T>(), &value), std::string("read the attribute ") + name + " of " + where);
   return value;
