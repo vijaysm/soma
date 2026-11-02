@@ -92,6 +92,7 @@ if(SOMA_ENABLE_MPI)
 else()
   list(APPEND SOMA_SOURCES src/parallel/comm_serial.cpp)
 endif()
+list(APPEND SOMA_SOURCES src/io/h5m_unavailable.cpp)
 
 add_library(soma ${SOMA_SOURCES})
 add_library(soma::soma ALIAS soma)
