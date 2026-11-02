@@ -135,6 +135,16 @@ void write_row(const View2<T, MemSpace>& data, std::size_t row, std::span<const 
   write_row_via<write_row_path<MemSpace>(), T, MemSpace>(data, row, values);
 }
 
+// Identity of a family: shared by every FieldRegistry<MemSpace>, so a mirror
+// into another memory space can carry the key over unchanged.
+struct FamilyKey {
+  std::string name;
+  DataType type = DataType::f64;
+  int ncomp = 1;  // 0: variable length
+  bool handle = false;
+  Layout layout{};
+};
+
 }  // namespace detail
 
 template <class MemSpace>
@@ -732,13 +742,7 @@ class FieldRegistry {
     std::size_t pending_count = 0;
   };
 
-  struct FamilyKey {
-    std::string name;
-    DataType type = DataType::f64;
-    int ncomp = 1;  // 0: variable length
-    bool handle = false;
-    Layout layout{};
-  };
+  using FamilyKey = detail::FamilyKey;
 
   struct Family {
     explicit Family(FamilyKey k) : key(std::move(k)) {}
