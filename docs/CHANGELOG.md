@@ -17,6 +17,13 @@ All notable changes to SOMA are recorded here. The format follows
 - `SOMA_KOKKOS_GPU` selects the GPU backend of a fetched Kokkos (`AUTO`, `NONE`, `CUDA`,
   `HIP`, `SYCL`). A request the compiler cannot build is a configure error, never a silent CPU
   fallback.
+- SOMA follows the compile language of the Kokkos it uses. With a Kokkos built as the CMake
+  CUDA or HIP language (`Kokkos_ENABLE_COMPILE_AS_CMAKE_LANGUAGE=ON`, installed or fetched),
+  every SOMA source is compiled as that language with the Kokkos standard and GPU
+  architectures, and the C++ compiler becomes nvcc's host compiler (`CMAKE_CUDA_HOST_COMPILER`,
+  unless set), so MPI wrappers keep working. `nvcc_wrapper` as the C++ compiler is then a
+  configure error. The installed `somaConfig.cmake` does the same for consumers and provides
+  `soma_target_kokkos_sources(<target>)`. The configure summary reports `lang=`.
 - `SOMA_GPU_AWARE_MPI` (`AUTO`, `ON`, `OFF`) sets the compile-time default for passing device
   buffers to MPI. The generated `soma/config.hpp` also honors the environment variable
   `SOMA_GPU_AWARE_MPI=0|1` at run time.
@@ -188,6 +195,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   field registry. Copies are spelled `clone()`, `mirror<Space>()` and `mirror_view<Space>()`;
   accessors reject a dimension outside [0, 3], and `view()` is deleted on temporaries.
 - `soma::MeshView` is the device-copyable kernel handle of unmanaged Views.
+- A field registry mirror across memory spaces compiles: the family key is one type for every
+  memory space (nested in the class template, a host-to-device mirror did not compile).
+- `Layout`'s factories and comparison are device-callable (`KOKKOS_INLINE_FUNCTION`). Without
+  `-expt-relaxed-constexpr` (a Kokkos built with `Kokkos_ENABLE_CUDA_CONSTEXPR=OFF`, the
+  default for the fetched 5.1.0) nvcc only warned about a kernel calling them and the device
+  call returned zeros.
 - `soma::TransferOptions` selects the dimensions, coordinates and fields a mirror copies.
   Keeping elements or coordinates without the vertices is rejected.
 - `soma::MeshBuilder` assembles a mesh from vertex and element blocks given by global ids,
@@ -587,7 +600,18 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   against the host.
 - With `SOMA_ENABLE_MOAB_REFERENCE=ON`, the tables are compared position by position with
   `moab::CN`, and the polygon behavior of MOAB is pinned.
-- A policy test fails if `SOMA_ENABLE_MPI` is tested outside the Comm seam.
+- A policy test fails if `SOMA_ENABLE_MPI` is tested outside the Comm seam. The script sets
+  its policy version, which `IN_LIST` needs under CMake 3.28 in script mode.
+- The suite builds and runs with nvcc (Kokkos 5.2 as the CMake CUDA language): the replaced
+  `operator new` of the exception-safety and move tests is host-only; the device-struct check
+  demands trivial copyability only where the Kokkos build's own unmanaged View has it (nvcc
+  gets a user-provided View copy constructor from Kokkos) and trivial destructibility
+  everywhere; the layout closed-form table is a constexpr function; the write-path assertion
+  follows whether the host can reach the default memory space; the VTK extremes test uses
+  2^24 itself rather than the tie literal 16777217.0f, which nvcc rounds to 16777218.
+- The exception-safety test exports its symbols (`ENABLE_EXPORTS`), so the backtrace rule
+  that skips Kokkos's own deallocation sees Kokkos frames with a statically linked Kokkos on
+  glibc too (they were invisible to `backtrace_symbols`, and the injected failure aborted).
 - `soma::testing::box_mesh` builds structured hex, quad and triangle boxes with closed-form
   counts, gids, coordinates and orientation, so tests do not depend on a file or a mesher.
   A length whose product with its cell count is not finite is rejected, naming the axis.
@@ -743,3 +767,5 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `SOMA_INSTALL` defaults to ON only when SOMA is the top-level project.
 - An out-of-tree packaging test installs to a clean prefix, builds a consumer, and runs it (at
   two ranks for MPI builds). It also works with multi-config generators through `ctest -C`.
+- With `SOMA_ENABLE_MOAB_REFERENCE=ON`, the HDF5 config whose targets MOAB links by name is
+  loaded from the `HDF5_DIR` MOAB records when MOAB's own hard-coded path misses.
