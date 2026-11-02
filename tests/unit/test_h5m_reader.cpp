@@ -7,11 +7,14 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <limits>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -75,6 +78,17 @@ std::vector<GO> vertex_gids(const HostMesh& m, int d, LO lid) {
   for (auto j = off(static_cast<std::size_t>(lid)); j < off(static_cast<std::size_t>(lid) + 1); ++j) {
     out.push_back(g0(static_cast<std::size_t>(conn(static_cast<std::size_t>(j)))));
   }
+  return out;
+}
+
+// The gids of a set's members of slot d, sorted.
+std::vector<GO> member_gids(const HostMesh& m, LO set, int d) {
+  std::vector<GO> out;
+  for (const LO l : m.sets().members_of(set, d)) {
+    const auto i = static_cast<std::size_t>(l);
+    out.push_back(d == soma::set_dim ? m.sets().gid()(i) : m.gid(d)(i));
+  }
+  std::sort(out.begin(), out.end());
   return out;
 }
 
@@ -178,9 +192,30 @@ TEST_F(H5mRead, BricksHaveTheirConnectivityAndTags) {
   EXPECT_EQ(f.get<double>("element_field", 3).rows(), 1728);
   EXPECT_EQ(f.info(f.get<std::int32_t>("GLOBAL_ID", 0).id()).family,
             f.info(f.get<std::int32_t>("GLOBAL_ID", 3).id()).family);
-  EXPECT_TRUE(skipped(report, "GLOBAL_ID", "800 values on entity sets"));
-  EXPECT_TRUE(skipped(report, "MATERIAL_SET", "entity sets"));
-  EXPECT_TRUE(skipped(report, "CATEGORY", "entity sets"));
+  // The file's 1056 sets carry values of their own: 64 material sets, each
+  // holding 27 hexes through the sets it contains, partition the mesh.
+  EXPECT_EQ(m.sets().count(), 1056);
+  const auto set_gid = f.get<std::int32_t>("GLOBAL_ID", soma::set_dim);
+  EXPECT_EQ(set_gid.rows(), 800);
+  EXPECT_EQ(f.info(set_gid.id()).family, f.info(f.get<std::int32_t>("GLOBAL_ID", 0).id()).family);
+  EXPECT_EQ(f.get<std::uint8_t>("CATEGORY", soma::set_dim).rows(), 799);
+  const auto material = f.get<std::int32_t>("MATERIAL_SET", soma::set_dim);
+  ASSERT_EQ(material.rows(), 64);
+  std::vector<LO> hexes;
+  std::set<std::int32_t> ids;
+  for (LO s = 0; s < m.sets().count(); ++s) {
+    const auto r = material.space().entity_rows(soma::set_dim, s);
+    if (!r.valid()) continue;
+    ids.insert(material.view()(r.begin, 0));
+    const auto members = m.sets().members_recursive(s, 3);
+    EXPECT_EQ(members.size(), 27u) << "set gid " << m.sets().gid()(static_cast<std::size_t>(s));
+    hexes.insert(hexes.end(), members.begin(), members.end());
+  }
+  EXPECT_EQ(ids.size(), 64u);
+  std::sort(hexes.begin(), hexes.end());
+  EXPECT_EQ(std::adjacent_find(hexes.begin(), hexes.end()), hexes.end());
+  EXPECT_EQ(hexes.size(), 1728u);
+  for (const auto& sk : report.skipped) EXPECT_EQ(sk.reason.find("entity sets"), std::string::npos) << sk.name;
 }
 
 TEST_F(H5mRead, PolygonGroupsOfSeveralAritiesJoinOneDimension) {
@@ -412,15 +447,16 @@ TEST_F(H5mRead, TagsItCannotReadYetAreReported) {
   HostMesh m = soma::read_h5m(file(), {}, report);
   EXPECT_TRUE(skipped(report, "varlen", "variable-length"));
   EXPECT_TRUE(skipped(report, "handle", "handle-valued"));
-  EXPECT_TRUE(skipped(report, "on_sets", "2 values on entity sets"));
-  EXPECT_TRUE(skipped(report, "dense_sets", "2 values on entity sets"));
-  EXPECT_TRUE(skipped(report, "mesh_only", "no values on vertices or elements"));
+  EXPECT_TRUE(skipped(report, "mesh_only", "no values on entities or sets"));
   EXPECT_TRUE(skipped(report, "short", "16-bit integer"));
   EXPECT_FALSE(skipped(report, "stale", ""));
-  EXPECT_EQ(report.skipped.size(), 6u);
-  for (const char* n : {"varlen", "handle", "on_sets", "dense_sets", "mesh_only", "short"}) {
+  EXPECT_EQ(report.skipped.size(), 4u);
+  for (const char* n : {"varlen", "handle", "mesh_only", "short"}) {
     EXPECT_FALSE(m.fields().contains(n)) << n;
   }
+  // Values on sets are read like any others.
+  EXPECT_EQ(m.fields().get<std::int32_t>("on_sets", soma::set_dim).rows(), 2);
+  EXPECT_EQ(m.fields().get<std::int32_t>("dense_sets", soma::set_dim).rows(), 2);
 }
 
 TEST_F(H5mRead, TagsCanBeLeftOut) {
@@ -430,6 +466,7 @@ TEST_F(H5mRead, TagsCanBeLeftOut) {
   HostMesh m = soma::read_h5m(data("64bricks_1khex.h5m"), o, report);
   EXPECT_FALSE(m.fields().contains("GLOBAL_ID"));
   EXPECT_TRUE(report.skipped.empty());
+  EXPECT_EQ(m.sets().count(), 1056);  // sets are part of the mesh, not tags
 }
 
 TEST_F(H5mRead, OrderingIsTheBuildersOrdering) {
@@ -448,6 +485,12 @@ TEST_F(H5mRead, OrderingIsTheBuildersOrdering) {
 // The space-filling order moves the entities; each value moves with its
 // entity, on full and partial domains alike.
 TEST_F(H5mRead, TagValuesFollowTheirEntitiesInEitherOrdering) {
+  // Entities and sets alike, by slot.
+  const auto count = [](const HostMesh& m, int d) { return d == soma::set_dim ? m.sets().count() : m.count(d); };
+  const auto gid = [](const HostMesh& m, int d, LO l) {
+    const auto i = static_cast<std::size_t>(l);
+    return d == soma::set_dim ? m.sets().gid()(i) : m.gid(d)(i);
+  };
   for (const char* name : {"64bricks_1khex.h5m", "moab_i.h5m", "hybrid_3quad_1tri.h5m", "recMeshOcn128.h5m"}) {
     SCOPED_TRACE(name);
     soma::H5mReadOptions o;
@@ -460,23 +503,23 @@ TEST_F(H5mRead, TagValuesFollowTheirEntitiesInEitherOrdering) {
     for (const soma::FieldInfo& fi : fields) {
       for (const int d : fi.dims) {
         std::map<GO, LO> lid_in_b;
-        for (LO l = 0; l < b.count(d); ++l) lid_in_b[b.gid(d)(static_cast<std::size_t>(l))] = l;
+        for (LO l = 0; l < count(b, d); ++l) lid_in_b[gid(b, d, l)] = l;
         soma::dispatch_data_type(fi.type, [&]<class T>() {
           const auto fa = a.fields().get<T>(fi.name, d);
           const auto fb = b.fields().get<T>(fi.name, d);
           ASSERT_EQ(fa.rows(), fb.rows()) << fi.name;
           ASSERT_EQ(fa.ncomp(), fb.ncomp()) << fi.name;
           EXPECT_EQ(fa.default_value(), fb.default_value()) << fi.name;
-          for (LO la = 0; la < a.count(d); ++la) {
-            const LO lb = lid_in_b.at(a.gid(d)(static_cast<std::size_t>(la)));
+          for (LO la = 0; la < count(a, d); ++la) {
+            const LO lb = lid_in_b.at(gid(a, d, la));
             const auto ra = fa.space().entity_rows(d, la);
             const auto rb = fb.space().entity_rows(d, lb);
-            ASSERT_EQ(ra.valid(), rb.valid()) << fi.name << " on gid " << a.gid(d)(static_cast<std::size_t>(la));
+            ASSERT_EQ(ra.valid(), rb.valid()) << fi.name << " on gid " << gid(a, d, la);
             if (!ra.valid()) continue;
             moved += la != lb ? 1 : 0;
             for (int c = 0; c < fa.ncomp(); ++c) {
               ASSERT_EQ(fa.view()(ra.begin, c), fb.view()(rb.begin, c))
-                  << fi.name << " on gid " << a.gid(d)(static_cast<std::size_t>(la));
+                  << fi.name << " on gid " << gid(a, d, la);
             }
           }
         });
@@ -484,6 +527,143 @@ TEST_F(H5mRead, TagValuesFollowTheirEntitiesInEitherOrdering) {
     }
     EXPECT_GT(moved, 0u);
   }
+}
+
+// Two quads on six vertices (file ids 1..6, quads 7 and 8) and sets 9..12:
+// one listed id by id, one ordered with a repeat and a set among its
+// contents, one ranged over ranges that overlap and cross from vertices to
+// quads, and one empty.
+TEST_F(H5mRead, SetsKeepTheirContentsFlagsAndLinks) {
+  {
+    Writer w(file());
+    w.nodes(1, 2, {0, 0, 1, 0, 2, 0, 0, 1, 1, 1, 2, 1});
+    w.elements("Quad4", "Quad", 7, 4, {1, 2, 5, 4, 2, 3, 6, 5});
+    w.sets(9, {{0x2, {1, 7, 3}, {10}, {}},
+               {0x4, {8, 2, 8, 9}, {}, {9}},
+               {0xA, {3, 6, 1, 1, 2, 3}, {}, {}},
+               {0x3, {}, {}, {}}});
+  }
+  for (const Ordering ordering : {Ordering::file, Ordering::type_major_sfc}) {
+    for (const bool tags : {true, false}) {
+      SCOPED_TRACE(std::string(ordering == Ordering::file ? "file" : "sfc") + (tags ? "" : ", no tags"));
+      soma::H5mReadOptions o;
+      o.ordering = ordering;
+      o.tags = tags;
+      const HostMesh m = soma::read_h5m(file(), o);
+      const auto& sets = m.sets();
+      ASSERT_EQ(sets.count(), 4);
+      for (LO i = 0; i < 4; ++i) EXPECT_EQ(sets.gid()(static_cast<std::size_t>(i)), 9 + i);
+      EXPECT_EQ(sets.flags(0), soma::set_unique);
+      EXPECT_EQ(sets.flags(1), soma::set_ordered);
+      EXPECT_EQ(sets.flags(2), soma::set_unique);  // ranged storage is not kept
+      EXPECT_EQ(sets.flags(3), soma::set_track_owner | soma::set_unique);
+
+      EXPECT_EQ(member_gids(m, 0, 0), (std::vector<GO>{1, 3}));
+      EXPECT_EQ(member_gids(m, 0, 2), (std::vector<GO>{7}));
+      EXPECT_EQ(member_gids(m, 1, 0), (std::vector<GO>{2}));
+      EXPECT_EQ(member_gids(m, 1, 2), (std::vector<GO>{8}));
+      EXPECT_EQ(member_gids(m, 1, soma::set_dim), (std::vector<GO>{9}));
+      std::vector<std::pair<int, GO>> seq;
+      for (const soma::SetEntry& e : sets.sequence(1)) {
+        const auto l = static_cast<std::size_t>(e.lid);
+        seq.emplace_back(e.slot, e.slot == soma::set_dim ? sets.gid()(l) : m.gid(e.slot)(l));
+      }
+      EXPECT_EQ(seq, (std::vector<std::pair<int, GO>>{{2, 8}, {0, 2}, {2, 8}, {soma::set_dim, 9}}));
+      EXPECT_EQ(member_gids(m, 2, 0), (std::vector<GO>{1, 2, 3, 4, 5, 6}));
+      EXPECT_EQ(member_gids(m, 2, 2), (std::vector<GO>{7, 8}));
+      for (const int d : {0, 1, 2, soma::set_dim}) EXPECT_TRUE(member_gids(m, 3, d).empty()) << d;
+
+      EXPECT_EQ(std::vector<LO>(sets.children(0).begin(), sets.children(0).end()), std::vector<LO>{1});
+      EXPECT_EQ(std::vector<LO>(sets.parents(1).begin(), sets.parents(1).end()), std::vector<LO>{0});
+      EXPECT_TRUE(sets.children(1).empty());
+      EXPECT_TRUE(sets.parents(0).empty());
+    }
+  }
+}
+
+// Values on sets, dense and sparse, are fields on the set slot; GLOBAL_ID-like
+// tags on sets and vertices share a family.
+TEST_F(H5mRead, TagValuesOnSetsAreFieldsOnTheSetSlot) {
+  {
+    Writer w(file());
+    square(w);
+    w.sets(6, 3);
+    w.tag("S", 1, H5T_NATIVE_INT32);
+    const std::int32_t sv[] = {5, 6};
+    w.sparse("S", {7, 1}, sv);
+    w.tag("D", 2, H5T_NATIVE_DOUBLE);
+    const double dv[] = {0.5, 1.5, 2.5};
+    w.dense("sets", "D", dv, 3);
+  }
+  const HostMesh m = soma::read_h5m(file());
+  const auto& f = m.fields();
+  const auto s4 = f.get<std::int32_t>("S", soma::set_dim);
+  const auto s0 = f.get<std::int32_t>("S", 0);
+  ASSERT_EQ(s4.rows(), 1);
+  EXPECT_EQ(s4.value_or_default(soma::set_dim, 1), 5);  // set gid 7 is set 1
+  EXPECT_EQ(s0.value_or_default(0, lid_of(m, 0, 1)), 6);
+  EXPECT_EQ(f.info(s4.id()).family, f.info(s0.id()).family);
+  const auto d = f.get<double>("D", soma::set_dim);
+  ASSERT_EQ(d.rows(), 3);
+  for (LO i = 0; i < 3; ++i) EXPECT_EQ(d.value_or_default(soma::set_dim, i), 0.5 + i);
+}
+
+TEST_F(H5mRead, RejectsSetsItCannotPlace) {
+  using Set = Writer::Set;
+  const auto expect = [&](const std::string& name, const std::function<void(Writer&)>& write,
+                          const std::vector<std::string>& needles) {
+    SCOPED_TRACE(name);
+    {
+      Writer w(file(name + ".h5m"));
+      square(w);
+      write(w);
+    }
+    expect_rejected(file(name + ".h5m"), needles);
+  };
+  // Sets from file id 6; square holds vertices 1..4 and quad 5.
+  expect("decreasing", [](Writer& w) {
+    w.set_list(6, {0, -1, -1, 2, -1, -1, -1, 2});
+    w.set_column("contents", {1});
+  }, {"/tstt/sets/list: set 7 ends its contents at index -1; the ends must be at least -1 and never decrease"});
+  expect("below", [](Writer& w) { w.set_list(6, {-1, -2, -1, 2}); },
+         {"/tstt/sets/list: set 6 ends its children at index -2"});
+  expect("nocolumn", [](Writer& w) { w.set_list(6, {-1, -1, 0, 2}); },
+         {"/tstt/sets/list ends parents at index 0, but there is no /tstt/sets/parents"});
+  expect("short", [](Writer& w) {
+    w.set_list(6, {1, -1, -1, 2});
+    w.set_column("contents", {1, 2, 3});
+  }, {"/tstt/sets/contents has 3 entries, but /tstt/sets/list ends contents at index 1"});
+  expect("flags", [](Writer& w) { w.sets(6, {Set{0x12, {}, {}, {}}}); },
+         {"/tstt/sets/list: set 6 has flags 0x12, outside 0x0f"});
+  expect("negative", [](Writer& w) { w.sets(6, {Set{-1, {}, {}, {}}}); }, {"set 6 has flags -0x1, outside 0x0f"});
+  expect("noentity", [](Writer& w) {
+    w.sets(6, {Set{2, {1}, {}, {}}, Set{2, {2, 99}, {}, {}}});
+    w.max_id(100);
+  }, {"/tstt/sets/contents: set 7 lists file id 99, which names no entity"});
+  expect("zero", [](Writer& w) { w.sets(6, {Set{2, {0}, {}, {}}}); }, {"set 6 lists file id 0, which names no entity"});
+  expect("child", [](Writer& w) { w.sets(6, {Set{2, {}, {1}, {}}}); },
+         {"/tstt/sets/children: set 6 lists file id 1, which is not a set"});
+  expect("parent", [](Writer& w) { w.sets(6, {Set{2, {}, {}, {5}}}); },
+         {"/tstt/sets/parents: set 6 lists file id 5, which is not a set"});
+  expect("odd", [](Writer& w) { w.sets(6, {Set{0xA, {1}, {}, {}}}); },
+         {"/tstt/sets/contents: set 6 is ranged but has 1 entries"});
+  expect("emptyrange", [](Writer& w) { w.sets(6, {Set{0xA, {1, 2, 3, 0}, {}, {}}}); },
+         {"set 6 has a range of no entities at 3"});
+  expect("beyond", [](Writer& w) { w.sets(6, {Set{0xA, {2, 6}, {}, {}}}); },
+         {"set 6 has the range of 6 file ids from 2, beyond the max_id 6 of /tstt"});
+  expect("huge", [](Writer& w) { w.sets(6, {Set{0xA, {2, ~std::uint64_t{0}}, {}, {}}}); }, {"beyond the max_id 6"});
+  expect("ordered", [](Writer& w) { w.sets(6, {Set{0xC, {1, 2}, {}, {}}}); },
+         {"set 6 is both ordered and ranged"});
+  // A range may cross datasets but not a file id nothing holds.
+  expect("gap", [](Writer& w) { w.sets(7, {Set{0xA, {4, 4}, {}, {}}}); },
+         {"/tstt/sets/contents: set 7 lists file id 6, which names no entity"});
+  expect("twice", [](Writer& w) {
+    w.sets(6, 1);
+    w.tag("D", 2, H5T_NATIVE_INT32);
+    const std::int32_t v[] = {1};
+    w.dense("sets", "D", v, 1);
+    w.sparse("D", {6}, v);
+  }, {"/tstt/tags/D has two values on file id 6"});
 }
 
 TEST_F(H5mRead, RejectsFilesThatAreNotMoabMeshes) {

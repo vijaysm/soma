@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cstdint>
 #include <functional>
 #include <limits>
@@ -17,6 +18,7 @@
 #include <vector>
 
 #include "hdf5.hpp"
+#include "soma/core/set_builder.hpp"
 #include "soma/fields/domain_mesh.hpp"
 #include "soma/fields/space.hpp"
 #include "soma/io/h5m.hpp"
@@ -38,6 +40,14 @@ class Failure : public std::runtime_error {
 std::string str(std::uint64_t v) { return std::to_string(v); }
 std::string str(std::int64_t v) { return std::to_string(v); }
 
+std::string hex(std::int64_t v) {
+  std::array<char, 24> buf{};
+  const auto end = std::to_chars(buf.data(), buf.data() + buf.size(), v, 16).ptr;
+  std::string digits(buf.data(), end);
+  if (digits.size() < 2) digits.insert(0, 2 - digits.size(), '0');
+  return v < 0 ? "-0x" + digits.substr(1) : "0x" + digits;
+}
+
 GO start_id(hid_t dataset, const std::string& where) {
   if (!h5::has_attribute(dataset, "start_id")) fail(where + " has no start_id attribute");
   const auto s = h5::read_attribute<std::int64_t>(dataset, "start_id", where);
@@ -49,7 +59,7 @@ GO start_id(hid_t dataset, const std::string& where) {
 struct IdRange {
   GO first = 1;
   GO count = 0;
-  int dim = -1;  // -1: entity sets
+  int dim = set_dim;  // set_dim: entity sets
   std::string where;
 };
 
@@ -250,13 +260,17 @@ void check_ranges(std::vector<IdRange> ranges, std::uint64_t max_id) {
   }
 }
 
-// File id -> (dimension, local id) through each dimension's (gid, lid) pairs.
+// File id -> (slot, local id) through each dimension's (gid, lid) pairs; a
+// set's local id is its index, its file id less the first set's.
 class Locator {
  public:
   Locator(const HostMesh& mesh, std::vector<IdRange> ranges) : ranges_(std::move(ranges)) {
     std::erase_if(ranges_, [](const IdRange& r) { return r.count == 0; });
     std::sort(ranges_.begin(), ranges_.end(),
               [](const IdRange& a, const IdRange& b) { return a.first < b.first; });
+    for (const IdRange& r : ranges_) {
+      if (r.dim == set_dim) set_first_ = r.first;
+    }
     for (int d = 0; d <= mesh.dim(); ++d) {
       const auto gid = mesh.gid(d);
       auto& p = pairs_[static_cast<std::size_t>(d)];
@@ -276,6 +290,7 @@ class Locator {
   }
 
   LO lid(int dim, GO id) const {
+    if (dim == set_dim) return static_cast<LO>(id - set_first_);
     const auto& p = pairs_[static_cast<std::size_t>(dim)];
     const auto it = std::lower_bound(p.begin(), p.end(), std::pair<GO, LO>{id, 0});
     return it->second;
@@ -283,6 +298,11 @@ class Locator {
 
   // Local ids of the count entities of dimension dim from file id first on.
   std::vector<LO> lids(int dim, GO first, GO count) const {
+    if (dim == set_dim) {
+      std::vector<LO> out(static_cast<std::size_t>(count));
+      std::iota(out.begin(), out.end(), static_cast<LO>(first - set_first_));
+      return out;
+    }
     const auto& p = pairs_[static_cast<std::size_t>(dim)];
     auto it = std::lower_bound(p.begin(), p.end(), std::pair<GO, LO>{first, 0});
     std::vector<LO> out(static_cast<std::size_t>(count));
@@ -293,7 +313,146 @@ class Locator {
  private:
   std::vector<IdRange> ranges_;
   std::array<std::vector<std::pair<GO, LO>>, 4> pairs_;
+  GO set_first_ = 1;
 };
+
+// The sets of /tstt/sets/list, installed on mesh. A row's contents name
+// entities and sets by file id, one by one or (flag 0x8) as (start, count)
+// ranges; its children and parents name sets.
+void read_sets(HostMesh& mesh, hid_t tstt, const IdRange& sets, std::uint64_t max_id, const Locator& at) {
+  if (sets.count == 0) return;
+  constexpr std::int64_t ranged = 0x8;
+  constexpr std::int64_t known_flags = set_flag_bits | ranged;
+  const auto n = static_cast<std::size_t>(sets.count);
+  const auto list = h5::read_all<std::int64_t>(h5::open_dataset(tstt, "sets/list").get(), 4 * n, sets.where);
+  const auto set_name = [&](std::size_t i) { return "set " + str(sets.first + static_cast<GO>(i)); };
+
+  // Column c of the list ends each set's run of /tstt/sets/<column c>.
+  static constexpr std::array<const char*, 3> column{"contents", "children", "parents"};
+  std::array<std::vector<std::uint64_t>, 3> ids;
+  for (std::size_t c = 0; c < column.size(); ++c) {
+    std::int64_t prev = -1;
+    for (std::size_t i = 0; i < n; ++i) {
+      const std::int64_t end = list[4 * i + c];
+      if (end < prev) {
+        fail(sets.where + ": " + set_name(i) + " ends its " + column[c] + " at index " + str(end) +
+             "; the ends must be at least -1 and never decrease");
+      }
+      prev = end;
+    }
+    const std::string path = std::string("sets/") + column[c];
+    const std::string where = "/tstt/" + path;
+    if (!h5::exists(tstt, path)) {
+      if (prev != -1) fail(sets.where + " ends " + column[c] + " at index " + str(prev) + ", but there is no " + where);
+      continue;
+    }
+    const Id ds = h5::open_dataset(tstt, path);
+    const auto ext = h5::extent(ds.get(), where);
+    if (ext.size() != 1) fail(where + " must be one-dimensional");
+    if (static_cast<std::uint64_t>(prev + 1) != ext[0]) {
+      fail(where + " has " + str(std::uint64_t{ext[0]}) + " entries, but " + sets.where + " ends " + column[c] +
+           " at index " + str(prev));
+    }
+    ids[c] = h5::read_all<std::uint64_t>(ds.get(), static_cast<std::size_t>(ext[0]), where);
+  }
+
+  const auto range_of = [&](std::uint64_t id) {
+    return id <= static_cast<std::uint64_t>(std::numeric_limits<GO>::max()) ? at.range_of(static_cast<GO>(id))
+                                                                           : nullptr;
+  };
+  const auto no_entity = [&](std::size_t i, std::uint64_t id) {
+    fail("/tstt/sets/contents: " + set_name(i) + " lists file id " + str(id) + ", which names no entity");
+  };
+  const auto set_ids = [&](std::size_t i, std::size_t c, std::size_t from, std::size_t to) {
+    std::vector<GO> out;
+    out.reserve(to - from);
+    for (std::size_t j = from; j < to; ++j) {
+      const IdRange* r = range_of(ids[c][j]);
+      if (r == nullptr || r->dim != set_dim) {
+        fail("/tstt/sets/" + std::string(column[c]) + ": " + set_name(i) + " lists file id " + str(ids[c][j]) +
+             ", which is not a set");
+      }
+      out.push_back(static_cast<GO>(ids[c][j]));
+    }
+    return out;
+  };
+
+  SetBuilder b;
+  std::array<std::size_t, 3> from{};
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::int64_t flags = list[4 * i + 3];
+    if (flags < 0 || (flags & ~known_flags) != 0) {
+      fail(sets.where + ": " + set_name(i) + " has flags " + hex(flags) + ", outside " + hex(known_flags));
+    }
+    std::array<std::size_t, 3> to{};
+    for (std::size_t c = 0; c < 3; ++c) to[c] = static_cast<std::size_t>(list[4 * i + c] + 1);
+    SetSpec spec;
+    spec.gid = sets.first + static_cast<GO>(i);
+    spec.flags = static_cast<std::uint8_t>(flags & set_flag_bits);
+    const auto add = [&](const IdRange& r, GO first, GO count) {
+      if (r.dim == set_dim) {
+        for (GO id = first; id < first + count; ++id) spec.contents.push_back({set_dim, id});
+        return;
+      }
+      for (const LO l : at.lids(r.dim, first, count)) spec.contents.push_back({r.dim, l});
+    };
+    const std::span<const std::uint64_t> contents(ids[0].data() + from[0], to[0] - from[0]);
+    if ((flags & ranged) == 0) {
+      spec.contents.reserve(contents.size());
+      for (const std::uint64_t id : contents) {
+        const IdRange* r = range_of(id);
+        if (r == nullptr) no_entity(i, id);
+        const auto g = static_cast<GO>(id);
+        spec.contents.push_back({r->dim, r->dim == set_dim ? g : GO{at.lid(r->dim, g)}});
+      }
+    } else {
+      if ((flags & set_ordered) != 0) {
+        fail(sets.where + ": " + set_name(i) + " is both ordered and ranged, which MOAB does not write");
+      }
+      if (contents.size() % 2 != 0) {
+        fail("/tstt/sets/contents: " + set_name(i) + " is ranged but has " + str(std::uint64_t{contents.size()}) +
+             " entries, not (start, count) pairs");
+      }
+      std::vector<std::pair<std::uint64_t, std::uint64_t>> runs;  // [first, last]
+      for (std::size_t j = 0; j < contents.size(); j += 2) {
+        const std::uint64_t start = contents[j];
+        const std::uint64_t count = contents[j + 1];
+        if (count == 0) fail("/tstt/sets/contents: " + set_name(i) + " has a range of no entities at " + str(start));
+        if (start == 0 || count > max_id || start > max_id - count + 1) {
+          fail("/tstt/sets/contents: " + set_name(i) + " has the range of " + str(count) + " file ids from " +
+               str(start) + ", beyond the max_id " + str(max_id) + " of /tstt");
+        }
+        runs.emplace_back(start, start + count - 1);
+      }
+      // Merged runs are disjoint, so expanding them yields at most max_id ids.
+      std::sort(runs.begin(), runs.end());
+      std::size_t m = 0;
+      for (std::size_t j = 1; j < runs.size(); ++j) {
+        if (runs[j].first - 1 <= runs[m].second) {
+          runs[m].second = std::max(runs[m].second, runs[j].second);
+        } else {
+          runs[++m] = runs[j];
+        }
+      }
+      if (!runs.empty()) runs.resize(m + 1);
+      for (const auto& [first, last] : runs) {
+        // A range may span datasets; each piece must lie in one.
+        for (std::uint64_t id = first; id <= last;) {
+          const IdRange* r = range_of(id);
+          if (r == nullptr) no_entity(i, id);
+          const auto end = std::min(last, static_cast<std::uint64_t>(r->first + r->count - 1));
+          add(*r, static_cast<GO>(id), static_cast<GO>(end - id + 1));
+          id = end + 1;
+        }
+      }
+    }
+    spec.children = set_ids(i, 1, from[1], to[1]);
+    spec.parents = set_ids(i, 2, from[2], to[2]);
+    from = to;
+    b.add(std::move(spec));
+  }
+  std::move(b).install(mesh);
+}
 
 // How a tag's values are held in memory.
 struct TagKind {
@@ -430,7 +589,7 @@ class FullDomains {
 
  private:
   const HostMesh& mesh_;
-  std::array<std::optional<Domain<Kokkos::HostSpace>>, 4> all_;
+  std::array<std::optional<Domain<Kokkos::HostSpace>>, num_field_slots> all_;
 };
 
 template <class T>
@@ -439,21 +598,10 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
                 H5mReport& report) {
   const std::string where = "/tstt/tags/" + name;
   const auto nc = static_cast<std::size_t>(k.ncomp);
-  std::array<std::vector<LO>, 4> lids;
-  std::array<std::vector<T>, 4> values;
-  std::uint64_t on_sets = 0;
+  std::array<std::vector<LO>, num_field_slots> lids;
+  std::array<std::vector<T>, num_field_slots> values;
 
   for (const Dense& s : dense) {
-    if (s.dim < 0) {
-      const std::string where_s = "/tstt/" + s.path;
-      const Id ds = h5::open_dataset(tstt, s.path);
-      const auto ext = h5::extent(ds.get(), where_s);
-      if (ext.size() != 1 || ext[0] != static_cast<hsize_t>(s.count)) {
-        fail(where_s + " must hold one value per entity (" + str(s.count) + ")");
-      }
-      on_sets += static_cast<std::uint64_t>(s.count);
-      continue;
-    }
     std::vector<T> v = read_rows<T>(tstt, s.path, k, s.count);
     const auto d = static_cast<std::size_t>(s.dim);
     std::vector<LO> l = at.lids(s.dim, s.first, s.count);
@@ -481,10 +629,6 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
                              ? at.range_of(static_cast<GO>(ids[i]))
                              : nullptr;
       if (r == nullptr) fail(iw + " lists file id " + str(ids[i]) + ", which names no entity");
-      if (r->dim < 0) {
-        ++on_sets;
-        continue;
-      }
       const auto d = static_cast<std::size_t>(r->dim);
       lids[d].push_back(at.lid(r->dim, static_cast<GO>(ids[i])));
       values[d].insert(values[d].end(), v.begin() + static_cast<std::ptrdiff_t>(i * nc),
@@ -497,7 +641,7 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
   options.global_value = read_value_attribute<T>(tag.get(), "global", k, where);
 
   bool any = false;
-  for (int d = 0; d <= mesh.dim(); ++d) {
+  for (int d = 0; d < num_field_slots; ++d) {
     auto& l = lids[static_cast<std::size_t>(d)];
     if (l.empty()) continue;
     any = true;
@@ -508,7 +652,7 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
     std::span<const LO> sorted(l);
     if (std::adjacent_find(l.begin(), l.end(), std::greater_equal<>()) != l.end()) {
       constexpr auto none = std::numeric_limits<std::size_t>::max();
-      std::vector<std::size_t> at_lid(static_cast<std::size_t>(mesh.count(d)), none);
+      std::vector<std::size_t> at_lid(static_cast<std::size_t>(detail::slot_count(mesh, d)), none);
       LO repeat = std::numeric_limits<LO>::max();
       for (std::size_t i = 0; i < l.size(); ++i) {
         std::size_t& slot = at_lid[static_cast<std::size_t>(l[i])];
@@ -516,7 +660,7 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
         slot = i;
       }
       if (repeat != std::numeric_limits<LO>::max()) {
-        fail(where + " has two values on file id " + str(mesh.gid(d)(static_cast<std::size_t>(repeat))));
+        fail(where + " has two values on file id " + str(detail::slot_gid(mesh, d)(static_cast<std::size_t>(repeat))));
       }
       placed.reserve(l.size());
       order.reserve(l.size());
@@ -528,7 +672,7 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
       sorted = placed;
     }
     // A list of every entity of d is a full domain.
-    const auto domain = sorted.size() == static_cast<std::size_t>(mesh.count(d))
+    const auto domain = sorted.size() == static_cast<std::size_t>(detail::slot_count(mesh, d))
                             ? full.get(d)
                             : Domain<Kokkos::HostSpace>::from_list(mesh, d, sorted);
     const auto f = mesh.fields().add<T>(name, Space<Kokkos::HostSpace>(domain, Layout::per_entity()),
@@ -545,10 +689,8 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
       for (std::size_t c = 0; c < nc; ++c) view(i, c) = src[from + c];
     }
   }
-  if (on_sets > 0) {
-    report.skipped.push_back({name, str(on_sets) + " values on entity sets are not read yet"});
-  } else if (!any) {
-    report.skipped.push_back({name, "it has no values on vertices or elements"});
+  if (!any) {
+    report.skipped.push_back({name, "it has no values on entities or sets"});
   }
 }
 
@@ -567,7 +709,7 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
   for (std::size_t i = 0; i < groups.size(); ++i) {
     collect("elements/" + group_names[i], dimension(groups[i].topology), groups[i].start, groups[i].count);
   }
-  collect("sets", -1, sets.first, sets.count);
+  collect("sets", set_dim, sets.first, sets.count);
 
   std::vector<std::string> names;
   if (h5::exists(tstt, "tags")) {
@@ -634,7 +776,7 @@ HostMesh read(const fs::path& path, const H5mReadOptions& options, H5mReport& re
   }
   if (dim == 0) fail("it has no elements; a mesh needs at least one");
 
-  IdRange sets{1, 0, -1, "/tstt/sets/list"};
+  IdRange sets{1, 0, set_dim, "/tstt/sets/list"};
   if (h5::exists(tstt.get(), "sets/list")) {
     const Id ds = h5::open_dataset(tstt.get(), "sets/list");
     const auto ext = h5::extent(ds.get(), sets.where);
@@ -667,8 +809,9 @@ HostMesh read(const fs::path& path, const H5mReadOptions& options, H5mReport& re
     std::vector<GO>().swap(g.conn);
   }
   HostMesh mesh = std::move(b).build(options.ordering);
+  const Locator at(mesh, ranges);
+  read_sets(mesh, tstt.get(), sets, max_id, at);
   if (options.tags) {
-    const Locator at(mesh, ranges);
     import_tags(mesh, tstt.get(), nodes, groups, names, sets, at, report);
   }
   return mesh;

@@ -166,7 +166,7 @@ class EntitySets {
     const auto b = static_cast<std::size_t>(seq_offsets_[i]);
     const auto e = static_cast<std::size_t>(seq_offsets_[i + 1]);
     const std::span<const SetEntry> out(seq_.data() + b, e - b);
-    for (const SetEntry& e : out) (void)held(e.slot);
+    for (const SetEntry& x : out) (void)held(x.slot);
     return out;
   }
 

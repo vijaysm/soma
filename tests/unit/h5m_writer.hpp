@@ -9,6 +9,7 @@
 // Every call throws std::runtime_error when HDF5 refuses it.
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <stdexcept>
@@ -108,14 +109,56 @@ class Writer {
 
   // n sets with no contents, children or parents.
   void sets(std::int64_t start, std::size_t n) {
-    const hid_t g = group("sets");
-    const hsize_t dims[2] = {n, 4};
-    const hid_t ds = dataset(g, "list", H5T_STD_I64LE, 2, dims);
     std::vector<std::int64_t> rows;
     for (std::size_t i = 0; i < n; ++i) rows.insert(rows.end(), {-1, -1, -1, 2});
+    set_list(start, rows);
+  }
+
+  // One set: its flags and its runs of contents, children and parents.
+  struct Set {
+    std::int64_t flags = 2;
+    std::vector<std::uint64_t> contents;
+    std::vector<std::uint64_t> children;
+    std::vector<std::uint64_t> parents;
+  };
+
+  // Sets with file ids from start on, the list's ends taken from their runs.
+  // A column no set uses gets no dataset.
+  void sets(std::int64_t start, const std::vector<Set>& s) {
+    std::vector<std::int64_t> rows;
+    std::array<std::vector<std::uint64_t>, 3> columns;
+    for (const Set& x : s) {
+      columns[0].insert(columns[0].end(), x.contents.begin(), x.contents.end());
+      columns[1].insert(columns[1].end(), x.children.begin(), x.children.end());
+      columns[2].insert(columns[2].end(), x.parents.begin(), x.parents.end());
+      for (const auto& c : columns) rows.push_back(static_cast<std::int64_t>(c.size()) - 1);
+      rows.push_back(x.flags);
+    }
+    set_list(start, rows);
+    const char* names[] = {"contents", "children", "parents"};
+    for (std::size_t c = 0; c < columns.size(); ++c) {
+      if (!columns[c].empty()) set_column(names[c], columns[c]);
+    }
+  }
+
+  // /tstt/sets/list as given, four values per set.
+  void set_list(std::int64_t start, const std::vector<std::int64_t>& rows) {
+    const hid_t g = group("sets");
+    const hsize_t dims[2] = {rows.size() / 4, 4};
+    const hid_t ds = dataset(g, "list", H5T_STD_I64LE, 2, dims);
     write(ds, H5T_NATIVE_INT64, rows.data(), rows.size());
     scalar_attribute(ds, "start_id", H5T_NATIVE_INT64, &start);
-    note(start, n);
+    note(start, dims[0]);
+    H5Dclose(ds);
+    H5Gclose(g);
+  }
+
+  // /tstt/sets/<name> ("contents", "children", "parents") as given.
+  void set_column(const std::string& name, const std::vector<std::uint64_t>& ids) {
+    const hid_t g = group("sets");
+    const hsize_t n = ids.size();
+    const hid_t ds = dataset(g, name.c_str(), H5T_STD_U64LE, 1, &n);
+    write(ds, H5T_NATIVE_UINT64, ids.data(), ids.size());
     H5Dclose(ds);
     H5Gclose(g);
   }

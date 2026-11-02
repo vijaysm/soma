@@ -379,9 +379,11 @@ TEST_P(H5mMoab, EveryEntityTagMatchesValueByValue) {
           << n;
     }
   }
-  // SOMA holds no field MOAB does not.
+  // SOMA holds no field MOAB does not. Values on sets are not compared here.
   for (const soma::FieldInfo& i : f.mesh.fields().list()) {
-    for (const int d : i.dims) EXPECT_TRUE(compared.count({i.name, d}) == 1) << i.name << " on " << d;
+    for (const int d : i.dims) {
+      if (d != soma::set_dim) EXPECT_TRUE(compared.count({i.name, d}) == 1) << i.name << " on " << d;
+    }
   }
 }
 
