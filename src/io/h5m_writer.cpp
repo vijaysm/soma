@@ -11,9 +11,9 @@
 #include <new>
 #include <optional>
 #include <span>
-#include <type_traits>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -47,7 +47,7 @@ struct Group {
   int arity = 0;
   std::vector<LO> rows;
   std::uint64_t start = 0;
-  std::string name() const { return type_names[static_cast<int>(type)] + std::to_string(arity); }
+  std::string name() const { return type_names[static_cast<std::size_t>(type)] + std::to_string(arity); }
 };
 
 // The set flag of contents stored as (start, count) pairs.
@@ -131,13 +131,15 @@ void each_handle(const HostMesh& mesh, F&& f) {
     if (!info.handle) continue;
     if (info.variable) {
       const auto v = mesh.fields().get_var<GO>(info.id);
-      for (std::size_t i = 0; i < v.values().extent(0); ++i) f(v.values()(i));
+      const auto values = v.values();
+      for (std::size_t i = 0; i < values.extent(0); ++i) f(values(i));
       all(v.default_value());
       all(v.global_value());
     } else {
       const auto v = mesh.fields().get<GO>(info.id);
-      for (std::size_t r = 0; r < v.view().extent(0); ++r) {
-        for (std::size_t c = 0; c < v.view().extent(1); ++c) f(v.view()(r, c));
+      const auto values = v.view();
+      for (std::size_t r = 0; r < values.extent(0); ++r) {
+        for (std::size_t c = 0; c < values.extent(1); ++c) f(values(r, c));
       }
       all(present(v.default_value()));
       all(present(v.global_value()));
@@ -251,7 +253,7 @@ GO handle_fid(const HandleRef<Kokkos::HostSpace>& ref, const Plan& p, GO h, cons
 // values), or none when no member has one.
 template <class T>
 std::optional<std::vector<T>> agreed(const std::string& name, const char* what,
-                                             const std::vector<std::optional<std::vector<T>>>& values) {
+                                     const std::vector<std::optional<std::vector<T>>>& values) {
   std::optional<std::vector<T>> one;
   for (const auto& v : values) {
     if (!v) continue;
