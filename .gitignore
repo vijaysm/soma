@@ -4,3 +4,5 @@ build/
 .vscode/
 *.trace/
 CMakeUserPresets.json
+__pycache__/
+.superpowers/
