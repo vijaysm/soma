@@ -174,7 +174,8 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
   std::vector<LO> dense_local;
   const GO gmin = nv > 0 ? local_of.front().first : 0;
   const GO gmax = nv > 0 ? local_of.back().first : -1;
-  if (nv > 0 && gmax - gmin == static_cast<GO>(nv) - 1) {
+  // Unsigned, since gmax - gmin overflows GO for gids spanning its range.
+  if (nv > 0 && static_cast<std::uint64_t>(gmax) - static_cast<std::uint64_t>(gmin) == nv - 1) {
     dense_local.resize(nv);
     for (const auto& [g, l] : local_of) dense_local[static_cast<std::size_t>(g - gmin)] = l;
   }

@@ -193,6 +193,18 @@ TEST(MeshBuilder, AGidBelowTheSmallestVertexGidIsUnknown) {
   }
 }
 
+TEST(MeshBuilder, GidsSpanningTheWholeRangeAreFound) {
+  constexpr GO lo = std::numeric_limits<GO>::min();
+  constexpr GO hi = std::numeric_limits<GO>::max();
+  soma::MeshBuilder b(1);
+  b.add_vertices(std::vector<GO>{hi, lo}, std::vector<soma::Real>{1, 0, 0, 0, 0, 0});
+  b.add_elements(Topology::edge, std::vector<GO>{1}, std::vector<GO>{lo, hi});
+  const auto m = std::move(b).build(soma::Ordering::file);
+  EXPECT_EQ(m.gid(0)(0), lo);
+  EXPECT_EQ(m.conn(1)(0), 0);
+  EXPECT_EQ(m.conn(1)(1), 1);
+}
+
 // Contiguous vertex gids are looked up by index, others by search; both must
 // give the same mesh.
 TEST(MeshBuilder, ContiguousAndScatteredGidsGiveTheSameConnectivity) {
