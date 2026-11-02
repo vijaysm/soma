@@ -30,6 +30,64 @@ KOKKOS_INLINE_FUNCTION constexpr std::uint32_t max_cell(int n) {
   return static_cast<std::uint32_t>((std::uint64_t{1} << bits_per_axis(n)) - 1);
 }
 
+namespace detail {
+
+// Spreads the low 32 (21) bits of v so that bit b lands on bit 2b (3b).
+KOKKOS_INLINE_FUNCTION std::uint64_t spread2(std::uint64_t v) {
+  v &= 0xFFFFFFFFULL;
+  v = (v | v << 16) & 0x0000FFFF0000FFFFULL;
+  v = (v | v << 8) & 0x00FF00FF00FF00FFULL;
+  v = (v | v << 4) & 0x0F0F0F0F0F0F0F0FULL;
+  v = (v | v << 2) & 0x3333333333333333ULL;
+  return (v | v << 1) & 0x5555555555555555ULL;
+}
+
+KOKKOS_INLINE_FUNCTION std::uint64_t spread3(std::uint64_t v) {
+  v &= 0x1FFFFFULL;
+  v = (v | v << 32) & 0x001F00000000FFFFULL;
+  v = (v | v << 16) & 0x001F0000FF0000FFULL;
+  v = (v | v << 8) & 0x100F00F00F00F00FULL;
+  v = (v | v << 4) & 0x10C30C30C30C30C3ULL;
+  return (v | v << 2) & 0x1249249249249249ULL;
+}
+
+// The transpose steps over N axes known at compile time, so that x stays in
+// registers. They select with masks, not branches: the bits of a cell are
+// close to random, so branches on them mispredict.
+template <int N>
+KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int bits) {
+  std::uint32_t x[N];
+  for (int i = 0; i < N; ++i) x[i] = c[i];
+  const std::uint32_t top = std::uint32_t{1} << (bits - 1);
+  for (std::uint32_t q = top; q > 1; q >>= 1) {
+    const std::uint32_t p = q - 1;
+    for (int i = 0; i < N; ++i) {
+      // set: x[0] ^= p; clear: swap the low bits of x[0] and x[i].
+      const std::uint32_t set = 0U - ((x[i] & q) != 0 ? 1U : 0U);
+      const std::uint32_t t = (x[0] ^ x[i]) & p & ~set;
+      x[0] ^= (p & set) | t;
+      x[i] ^= t;
+    }
+  }
+  for (int i = 1; i < N; ++i) x[i] ^= x[i - 1];
+  std::uint32_t t = 0;
+  for (std::uint32_t q = top; q > 1; q >>= 1) {
+    t ^= (q - 1) & (0U - ((x[N - 1] & q) != 0 ? 1U : 0U));
+  }
+  // Interleave the low `bits` bits, x[0] the most significant of each group.
+  const std::uint64_t low = bits == 32 ? ~std::uint64_t{0} : (std::uint64_t{1} << bits) - 1;
+  if constexpr (N == 1) {
+    return (x[0] ^ t) & low;
+  } else if constexpr (N == 2) {
+    return spread2((x[0] ^ t) & low) << 1 | spread2((x[1] ^ t) & low);
+  } else {
+    return spread3((x[0] ^ t) & low) << 2 | spread3((x[1] ^ t) & low) << 1 |
+           spread3((x[2] ^ t) & low);
+  }
+}
+
+}  // namespace detail
+
 // Index along the Hilbert curve of the cell c[0..n), which has `bits` bits per
 // axis (n in 1..3, bits in 1..32, n * bits <= 64; asserted in debug builds).
 // The curve starts at the origin and consecutive indexes are cells that differ
@@ -38,32 +96,9 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int n
   KOKKOS_ASSERT(n >= 1 && n <= 3);
   KOKKOS_ASSERT(bits >= 1 && bits <= 32);
   KOKKOS_ASSERT(n * bits <= 64);
-  std::uint32_t x[3] = {0, 0, 0};
-  for (int i = 0; i < n; ++i) x[i] = c[i];
-  const std::uint32_t top = std::uint32_t{1} << (bits - 1);
-  for (std::uint32_t q = top; q > 1; q >>= 1) {
-    const std::uint32_t p = q - 1;
-    for (int i = 0; i < n; ++i) {
-      if ((x[i] & q) != 0) {
-        x[0] ^= p;
-      } else {
-        const std::uint32_t t = (x[0] ^ x[i]) & p;
-        x[0] ^= t;
-        x[i] ^= t;
-      }
-    }
-  }
-  for (int i = 1; i < n; ++i) x[i] ^= x[i - 1];
-  std::uint32_t t = 0;
-  for (std::uint32_t q = top; q > 1; q >>= 1) {
-    if ((x[n - 1] & q) != 0) t ^= q - 1;
-  }
-  for (int i = 0; i < n; ++i) x[i] ^= t;
-  std::uint64_t key = 0;
-  for (int bit = bits - 1; bit >= 0; --bit) {
-    for (int i = 0; i < n; ++i) key = (key << 1) | ((x[i] >> bit) & 1U);
-  }
-  return key;
+  if (n == 1) return detail::hilbert_index<1>(c, bits);
+  if (n == 2) return detail::hilbert_index<2>(c, bits);
+  return detail::hilbert_index<3>(c, bits);
 }
 
 // Maps a point of a bounding box to a cell of a grid with bits_per_axis(n)

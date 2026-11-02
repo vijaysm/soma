@@ -30,6 +30,37 @@ std::uint64_t index_3d(std::uint32_t x, std::uint32_t y, std::uint32_t z, int bi
   return soma::sfc::hilbert_index(c, 3, bits);
 }
 
+// The transpose algorithm as first written, with branches and a bit-by-bit
+// interleave: the keys that orderings depend on.
+std::uint64_t transpose_reference(const std::uint32_t* c, int n, int bits) {
+  std::uint32_t x[3] = {0, 0, 0};
+  for (int i = 0; i < n; ++i) x[i] = c[i];
+  const std::uint32_t top = std::uint32_t{1} << (bits - 1);
+  for (std::uint32_t q = top; q > 1; q >>= 1) {
+    const std::uint32_t p = q - 1;
+    for (int i = 0; i < n; ++i) {
+      if ((x[i] & q) != 0) {
+        x[0] ^= p;
+      } else {
+        const std::uint32_t t = (x[0] ^ x[i]) & p;
+        x[0] ^= t;
+        x[i] ^= t;
+      }
+    }
+  }
+  for (int i = 1; i < n; ++i) x[i] ^= x[i - 1];
+  std::uint32_t t = 0;
+  for (std::uint32_t q = top; q > 1; q >>= 1) {
+    if ((x[n - 1] & q) != 0) t ^= q - 1;
+  }
+  for (int i = 0; i < n; ++i) x[i] ^= t;
+  std::uint64_t key = 0;
+  for (int bit = bits - 1; bit >= 0; --bit) {
+    for (int i = 0; i < n; ++i) key = (key << 1) | ((x[i] >> bit) & 1U);
+  }
+  return key;
+}
+
 int manhattan(const std::array<std::uint32_t, 3>& a, const std::array<std::uint32_t, 3>& b) {
   int d = 0;
   for (std::size_t i = 0; i < 3; ++i) {
@@ -88,6 +119,40 @@ TEST(Hilbert, TwoDimensionsMatchTheReferenceAtFullWidth) {
     }
   }
   EXPECT_EQ(index_2d(m, 0, 32), ~std::uint64_t{0});
+}
+
+// Every cell of the small grids and random cells at every width, on one, two
+// and three axes.
+TEST(Hilbert, MatchesTheTransposeReference) {
+  for (int n = 1; n <= 3; ++n) {
+    for (int bits = 1; bits <= 4; ++bits) {
+      const std::uint32_t m = std::uint32_t{1} << bits;
+      const std::uint32_t total = n == 1 ? m : n == 2 ? m * m : m * m * m;
+      for (std::uint32_t k = 0; k < total; ++k) {
+        const std::uint32_t c[3] = {k % m, (k / m) % m, k / m / m};
+        ASSERT_EQ(soma::sfc::hilbert_index(c, n, bits), transpose_reference(c, n, bits))
+            << "n " << n << " bits " << bits << " cell " << k;
+      }
+    }
+  }
+  std::uint64_t s = 0x9E3779B97F4A7C15ULL;
+  const auto next = [&] {
+    s ^= s << 13;
+    s ^= s >> 7;
+    s ^= s << 17;
+    return s;
+  };
+  for (int n = 1; n <= 3; ++n) {
+    for (int bits = 1; n * bits <= 64 && bits <= 32; ++bits) {
+      const std::uint64_t mask = bits == 32 ? 0xFFFFFFFFULL : (std::uint64_t{1} << bits) - 1;
+      for (int r = 0; r < 2000; ++r) {
+        std::uint32_t c[3];
+        for (int i = 0; i < 3; ++i) c[i] = static_cast<std::uint32_t>(next() & mask);
+        ASSERT_EQ(soma::sfc::hilbert_index(c, n, bits), transpose_reference(c, n, bits))
+            << "n " << n << " bits " << bits << " (" << c[0] << "," << c[1] << "," << c[2] << ")";
+      }
+    }
+  }
 }
 
 TEST(Hilbert, KnownValuesOnAnEightByEightGrid) {
