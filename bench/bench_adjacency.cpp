@@ -123,7 +123,11 @@ std::vector<Workflow> workflows(int D) {
 bool run_mesh(const soma::Comm& comm, const std::string& path, int repeats, bool json) {
   const std::string name = std::filesystem::path(path).filename().string();
   soma::bench::Runner runner(comm, soma::bench::make_environment(comm, name, repeats), json);
-  if (!json) soma::bench::print_environment(comm, soma::bench::make_environment(comm, name, repeats));
+  if (!json) {
+    const auto env = soma::bench::make_environment(comm, name, repeats);
+    soma::bench::print_environment(comm, env);
+    soma::bench::print_moab_note(comm, env);
+  }
 
   const soma_test::MoabFile loaded(path);
   const int D = loaded.dim;
@@ -133,16 +137,16 @@ bool run_mesh(const soma::Comm& comm, const std::string& path, int repeats, bool
     std::unique_ptr<soma_test::MoabFile> moab;
     std::int64_t moab_sum = 0;
     const auto tm = runner.run(
-        w.name, "moab", static_cast<std::int64_t>(loaded.ents[static_cast<std::size_t>(D)].size()),
+        w.name, "moab", "moab", static_cast<std::int64_t>(loaded.ents[static_cast<std::size_t>(D)].size()),
         [&] { moab = std::make_unique<soma_test::MoabFile>(path); },
         [&] { moab_sum = w.moab(*moab); });
 
     soma::HostMesh mesh;
     const auto ts = runner.run(
-        w.name, "soma", base.count(D), [&] { mesh = base.mirror_view<Kokkos::HostSpace>(); },
+        w.name, "soma", Kokkos::DefaultHostExecutionSpace::name(), base.count(D), [&] { mesh = base.mirror_view<Kokkos::HostSpace>(); },
         [&] { soma::build_adjacencies(mesh, w.request); });
     const std::int64_t soma_sum = w.soma(mesh);
-    runner.compare(tm, ts);
+    runner.compare(tm, ts, "speedup(moab/soma)");
     if (soma_sum != moab_sum) {
       std::cerr << "[bench] " << name << " " << w.name << ": checksum mismatch, moab " << moab_sum
                 << " soma " << soma_sum << "\n";

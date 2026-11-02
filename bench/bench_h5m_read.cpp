@@ -49,7 +49,11 @@ using soma::bench::write_box;
 bool run_mesh(const soma::Comm& comm, const std::string& path, const fs::path& scratch, int repeats, bool json) {
   const std::string name = fs::path(path).filename().string();
   soma::bench::Runner runner(comm, soma::bench::make_environment(comm, name, repeats), json);
-  if (!json) soma::bench::print_environment(comm, soma::bench::make_environment(comm, name, repeats));
+  if (!json) {
+    const auto env = soma::bench::make_environment(comm, name, repeats);
+    soma::bench::print_environment(comm, env);
+    soma::bench::print_moab_note(comm, env);
+  }
 
   std::unique_ptr<moab::Core> mb;
   int moab_dim = 0;
@@ -67,16 +71,17 @@ bool run_mesh(const soma::Comm& comm, const std::string& path, const fs::path& s
   count_moab();
   const std::int64_t elements = moab_counts[moab_dim];
   const auto tm = runner.run(
-      "read_h5m", "moab", elements, [&] { mb = std::make_unique<moab::Core>(); },
+      "read_h5m", "moab", "moab", elements, [&] { mb = std::make_unique<moab::Core>(); },
       [&] { check(mb->load_file(path.c_str()), "load_file " + path); });
 
+  const std::string host = Kokkos::DefaultHostExecutionSpace::name();
   soma::HostMesh mesh;
-  const auto ts = runner.run("read_h5m", "soma", elements, [&] { mesh = soma::HostMesh(); },
+  const auto ts = runner.run("read_h5m", "soma", host, elements, [&] { mesh = soma::HostMesh(); },
                              [&] { mesh = soma::read_h5m(path); });
-  runner.compare(tm, ts);
+  runner.compare(tm, ts, "speedup(moab/soma)");
   soma::H5mReadOptions sfc;
   sfc.ordering = soma::Ordering::type_major_sfc;
-  runner.run("read_h5m", "soma_sfc", elements, [&] { mesh = soma::HostMesh(); },
+  runner.run("read_h5m", "soma_sfc", host, elements, [&] { mesh = soma::HostMesh(); },
              [&] { mesh = soma::read_h5m(path, sfc); });
   bool ok = mesh.dim() == moab_dim;
   for (int d = 0; d <= mesh.dim(); ++d) ok = ok && mesh.count(d) == moab_counts[d];

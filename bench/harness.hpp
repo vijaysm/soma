@@ -21,6 +21,7 @@
 #include <iomanip>
 #include <iostream>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -90,6 +91,7 @@ SampleStats time_repeats(int repeats, Setup&& setup, Fn&& fn) {
 struct Timing {
   std::string benchmark;
   std::string workflow;
+  std::string space;  // the execution (or, for a copy, memory) space the work ran in
   SampleStats local{};
   double min_rank_sec = 0.0;
   double max_rank_sec = 0.0;
@@ -98,10 +100,12 @@ struct Timing {
 };
 
 inline Timing reduce_timing(const Comm& comm, std::string benchmark, std::string workflow,
-                            const SampleStats& local, std::int64_t ops_per_repeat) {
+                            std::string space, const SampleStats& local,
+                            std::int64_t ops_per_repeat) {
   Timing t;
   t.benchmark = std::move(benchmark);
   t.workflow = std::move(workflow);
+  t.space = std::move(space);
   t.local = local;
   t.min_rank_sec = comm.allreduce(local.median_sec, Op::min);
   t.max_rank_sec = comm.allreduce(local.median_sec, Op::max);
@@ -113,7 +117,9 @@ inline Timing reduce_timing(const Comm& comm, std::string benchmark, std::string
 struct Environment {
   std::string build_type;
   std::string compiler;
-  std::string backend;
+  std::string git;
+  std::string host_backend;
+  std::string device_backend;  // "none" when the default execution space is a host one
   std::string mesh;
   int ranks = 1;
   int threads = 1;
@@ -132,7 +138,16 @@ inline Environment make_environment(const Comm& comm, const std::string& mesh, i
 #else
   env.compiler = "unknown";
 #endif
-  env.backend = Kokkos::DefaultHostExecutionSpace::name();
+#ifdef SOMA_BENCH_GIT
+  env.git = SOMA_BENCH_GIT;
+#else
+  env.git = "unknown";
+#endif
+  env.host_backend = Kokkos::DefaultHostExecutionSpace::name();
+  env.device_backend =
+      std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>
+          ? "none"
+          : Kokkos::DefaultExecutionSpace::name();
   env.mesh = mesh;
   env.ranks = comm.size();
   env.threads = Kokkos::DefaultHostExecutionSpace().concurrency();
@@ -143,19 +158,23 @@ inline Environment make_environment(const Comm& comm, const std::string& mesh, i
 inline void print_environment(const Comm& comm, const Environment& env) {
   if (comm.rank() != 0) return;
   std::cout << "[env] mesh=" << env.mesh << " build_type=" << env.build_type
-            << " compiler=" << env.compiler << " backend=" << env.backend
-            << " ranks=" << env.ranks << " threads=" << env.threads << " repeats=" << env.repeats
+            << " compiler=" << env.compiler << " git=" << env.git << " host=" << env.host_backend
+            << " device=" << env.device_backend << " ranks=" << env.ranks
+            << " threads=" << env.threads << " repeats=" << env.repeats
             << " (plus 1 discarded warmup)\n";
-  if (env.threads > 1) {
-    std::cout << "[env] NOTE: SOMA runs on " << env.threads
-              << " threads and MOAB is serial; threads=1 is the data-structure comparison.\n";
-  }
+}
+
+// For the comparisons against MOAB, which runs serially.
+inline void print_moab_note(const Comm& comm, const Environment& env) {
+  if (comm.rank() != 0 || env.threads <= 1) return;
+  std::cout << "[env] NOTE: SOMA runs on " << env.threads
+            << " threads and MOAB is serial; threads=1 is the data-structure comparison.\n";
 }
 
 inline void print_timing(const Comm& comm, const Timing& t) {
   if (comm.rank() != 0) return;
   std::cout << std::fixed << std::setprecision(6) << "[bench] " << t.benchmark
-            << " workflow=" << t.workflow << " median_sec=" << t.max_rank_sec
+            << " workflow=" << t.workflow << " space=" << t.space << " median_sec=" << t.max_rank_sec
             << " mad_sec=" << t.local.mad_sec << " min_rank_sec=" << t.min_rank_sec
             << std::setprecision(2) << " ns_per_op=" << t.ns_per_op << " ops=" << t.ops_total
             << " repeats=" << t.local.repeats << "\n";
@@ -166,12 +185,15 @@ inline double relative_spread(const Timing& t) {
 }
 
 // A ratio within the measurement spread is not a result, so it is flagged.
-inline void print_comparison(const Comm& comm, const Timing& moab, const Timing& soma) {
+// label names the ratio, e.g. "speedup(moab/soma)" for num = MOAB, den = SOMA.
+inline void print_ratio(const Comm& comm, const Timing& num, const Timing& den,
+                        const std::string& label) {
   if (comm.rank() != 0) return;
-  const double speedup = soma.max_rank_sec > 0.0 ? moab.max_rank_sec / soma.max_rank_sec : 0.0;
-  const double noise = std::max(relative_spread(moab), relative_spread(soma));
-  std::cout << std::fixed << std::setprecision(3) << "[bench] " << moab.benchmark
-            << " speedup(moab/soma)=" << speedup << " noise=" << noise;
+  const double ratio = den.max_rank_sec > 0.0 ? num.max_rank_sec / den.max_rank_sec : 0.0;
+  const double noise = std::max(relative_spread(num), relative_spread(den));
+  std::cout << std::fixed << std::setprecision(3) << "[bench] " << num.benchmark;
+  if (num.workflow == den.workflow) std::cout << " workflow=" << num.workflow;
+  std::cout << " " << label << "=" << ratio << " noise=" << noise;
   if (noise > 0.10) std::cout << " WARNING:high-variance";
   std::cout << "\n";
 }
@@ -180,9 +202,11 @@ inline void print_comparison(const Comm& comm, const Timing& moab, const Timing&
 inline void print_json(const Comm& comm, const Environment& env, const Timing& t) {
   if (comm.rank() != 0) return;
   std::cout << std::fixed << std::setprecision(9) << "{\"benchmark\":\"" << t.benchmark
-            << "\",\"workflow\":\"" << t.workflow << "\",\"mesh\":\"" << env.mesh
-            << "\",\"build_type\":\"" << env.build_type << "\",\"compiler\":\"" << env.compiler
-            << "\",\"backend\":\"" << env.backend << "\",\"ranks\":" << env.ranks
+            << "\",\"workflow\":\"" << t.workflow << "\",\"space\":\"" << t.space
+            << "\",\"mesh\":\"" << env.mesh << "\",\"build_type\":\"" << env.build_type
+            << "\",\"compiler\":\"" << env.compiler << "\",\"git\":\"" << env.git
+            << "\",\"host_backend\":\"" << env.host_backend << "\",\"device_backend\":\""
+            << env.device_backend << "\",\"ranks\":" << env.ranks
             << ",\"threads\":" << env.threads << ",\"repeats\":" << t.local.repeats
             << ",\"median_sec\":" << t.max_rank_sec << ",\"mad_sec\":" << t.local.mad_sec
             << ",\"min_rank_sec\":" << t.min_rank_sec << ",\"ns_per_op\":" << t.ns_per_op
@@ -195,11 +219,11 @@ class Runner {
       : comm_(comm), env_(std::move(env)), json_(json) {}
 
   template <class Setup, class Fn>
-  Timing run(const std::string& benchmark, const std::string& workflow,
+  Timing run(const std::string& benchmark, const std::string& workflow, const std::string& space,
              std::int64_t ops_per_repeat, Setup&& setup, Fn&& fn) {
     const SampleStats local =
         time_repeats(env_.repeats, std::forward<Setup>(setup), std::forward<Fn>(fn));
-    const Timing t = reduce_timing(comm_, benchmark, workflow, local, ops_per_repeat);
+    const Timing t = reduce_timing(comm_, benchmark, workflow, space, local, ops_per_repeat);
     if (json_) {
       print_json(comm_, env_, t);
     } else {
@@ -208,8 +232,8 @@ class Runner {
     return t;
   }
 
-  void compare(const Timing& moab, const Timing& soma) const {
-    if (!json_) print_comparison(comm_, moab, soma);
+  void compare(const Timing& num, const Timing& den, const std::string& label) const {
+    if (!json_) print_ratio(comm_, num, den, label);
   }
 
  private:
