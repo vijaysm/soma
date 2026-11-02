@@ -21,6 +21,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -52,14 +53,25 @@ constexpr moab::EntityType moab_types[] = {moab::MBVERTEX, moab::MBEDGE,    moab
                                            moab::MBQUAD,   moab::MBPOLYGON, moab::MBTET,
                                            moab::MBPYRAMID, moab::MBPRISM,  moab::MBHEX};
 
+// One scratch directory per run, removed when the program ends.
 fs::path scratch_dir() {
-  static const fs::path dir = [] {
-    const char* t = std::getenv("TMPDIR");
-    std::string pattern = ((t != nullptr && *t != '\0') ? fs::path(t) : fs::path("/tmp")) / "soma_h5mm_XXXXXX";
-    if (mkdtemp(pattern.data()) == nullptr) throw std::runtime_error("cannot create " + pattern);
-    return fs::path(pattern);
-  }();
-  return dir;
+  struct Scratch {
+    fs::path dir;
+    Scratch() {
+      const char* t = std::getenv("TMPDIR");
+      std::string pattern = ((t != nullptr && *t != '\0') ? fs::path(t) : fs::path("/tmp")) / "soma_h5mm_XXXXXX";
+      if (mkdtemp(pattern.data()) == nullptr) throw std::runtime_error("cannot create " + pattern);
+      dir = pattern;
+    }
+    Scratch(const Scratch&) = delete;
+    Scratch& operator=(const Scratch&) = delete;
+    ~Scratch() {
+      std::error_code ignored;
+      fs::remove_all(dir, ignored);
+    }
+  };
+  static const Scratch s;
+  return s.dir;
 }
 
 // A file MOAB writes itself, with a tag of every fixed-length kind on entities.
