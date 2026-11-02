@@ -371,7 +371,7 @@ TEST_P(H5mMoab, EveryEntityTagMatchesValueByValue) {
     }
   }
   // Not vacuous: every file but hex_2048 carries entity tags, and the file
-  // MOAB wrote carries one of every kind.
+  // MOAB wrote carries one of every fixed-length kind.
   if (GetParam() != "hex_2048.h5m") EXPECT_FALSE(compared.empty());
   if (GetParam() == "tag_kinds") {
     for (const char* n : {"DENSE_D2", "SPARSE_I", "PAIR", "OPAQUE7", "BITS3", "WITH_GLOBAL"}) {
