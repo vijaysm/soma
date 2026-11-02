@@ -101,6 +101,11 @@ if(SOMA_ENABLE_MOAB_REFERENCE)
   soma_add_test(test_adjacency_moab SOURCES reference/test_adjacency_moab.cpp
     LIBS ${SOMA_MOAB_TARGET})
   target_include_directories(test_adjacency_moab PRIVATE unit)
+  if(SOMA_ENABLE_HDF5)
+    soma_add_test(test_h5m_moab SOURCES reference/test_h5m_moab.cpp
+      LIBS ${SOMA_MOAB_TARGET} HDF5::HDF5)
+    target_include_directories(test_h5m_moab PRIVATE unit)
+  endif()
 endif()
 
 # Set to a parallel HDF5 installation to test that it is refused without MPI.
