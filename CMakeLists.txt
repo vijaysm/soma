@@ -22,6 +22,7 @@ endif()
 # found is a configure error. Nothing is silently disabled.
 # ---------------------------------------------------------------------------
 option(SOMA_ENABLE_MPI "Multi-rank distribution through MPI" OFF)
+option(SOMA_ENABLE_HDF5 "MOAB .h5m input through HDF5 (set HDF5_ROOT)" OFF)
 option(SOMA_ENABLE_TESTS "Build the test suite (requires GoogleTest)" OFF)
 option(SOMA_FETCH_GTEST "Download GoogleTest when no installed copy is found" OFF)
 option(SOMA_FETCH_KOKKOS "Download and build Kokkos when no installed copy is found" OFF)
@@ -50,6 +51,9 @@ soma_find_or_fetch_kokkos()
 
 if(SOMA_ENABLE_MPI)
   find_package(MPI REQUIRED COMPONENTS CXX)
+endif()
+if(SOMA_ENABLE_HDF5)
+  include(SomaHdf5)
 endif()
 
 string(TOUPPER "${SOMA_GPU_AWARE_MPI}" SOMA_GPU_AWARE_MPI_MODE)
@@ -102,6 +106,9 @@ target_link_libraries(soma
 if(SOMA_ENABLE_MPI)
   target_link_libraries(soma PUBLIC MPI::MPI_CXX)
 endif()
+if(SOMA_ENABLE_HDF5)
+  target_link_libraries(soma PRIVATE HDF5::HDF5)
+endif()
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   include(SomaMoab)
@@ -123,7 +130,7 @@ endif()
 message(STATUS "SOMA ${PROJECT_VERSION}: Kokkos ${SOMA_KOKKOS_VERSION_FOUND}"
   " (${SOMA_KOKKOS_SOURCE}) host=${SOMA_KOKKOS_HOST_BACKEND}"
   " gpu=${SOMA_KOKKOS_GPU_BACKEND} [${SOMA_KOKKOS_DEVICES}]"
-  " MPI=${SOMA_ENABLE_MPI} tests=${SOMA_ENABLE_TESTS}"
+  " MPI=${SOMA_ENABLE_MPI} HDF5=${SOMA_ENABLE_HDF5} tests=${SOMA_ENABLE_TESTS}"
   " GPU-aware-MPI=${SOMA_GPU_AWARE_MPI_RESOLVED}"
   " MOAB-reference=${SOMA_ENABLE_MOAB_REFERENCE} LO64=${SOMA_LO_64}"
   " build=${CMAKE_BUILD_TYPE}")

@@ -98,6 +98,19 @@ if(SOMA_ENABLE_MOAB_REFERENCE)
   target_include_directories(test_adjacency_moab PRIVATE unit)
 endif()
 
+# Set to a parallel HDF5 installation to test that it is refused without MPI.
+set(SOMA_TEST_PARALLEL_HDF5_ROOT "" CACHE PATH "Parallel HDF5 for the configure guard test")
+if(SOMA_TEST_PARALLEL_HDF5_ROOT)
+  string(REPLACE ";" "|" SOMA_GUARD_PREFIX_PATH "${CMAKE_PREFIX_PATH}")
+  add_test(NAME policy.hdf5_guard
+    COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+            -DSCRATCH_DIR=${PROJECT_BINARY_DIR}/hdf5_guard_test -DGENERATOR=${CMAKE_GENERATOR}
+            -DPREFIX_PATH=${SOMA_GUARD_PREFIX_PATH}
+            -DPARALLEL_HDF5_ROOT=${SOMA_TEST_PARALLEL_HDF5_ROOT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/policy/check_hdf5_guard.cmake)
+  set_tests_properties(policy.hdf5_guard PROPERTIES TIMEOUT 300)
+endif()
+
 add_test(NAME policy.mpi_seam
   COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
           -P ${CMAKE_CURRENT_SOURCE_DIR}/policy/check_mpi_seam.cmake)
