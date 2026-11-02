@@ -136,20 +136,150 @@ fs::path poly_indices_file() {
   return p;
 }
 
+// A file MOAB writes itself with every kind of set and every tag kind that is
+// not of fixed length on entities: ordered sets with repeats, sets inside
+// sets, a parent-child cycle, an empty set, tags on sets, variable-length,
+// handle and mesh tags.
+fs::path sets_kinds_file() {
+  const fs::path p = scratch_dir() / "sets_kinds.h5m";
+  if (fs::exists(p)) return p;
+  moab::Core mb;
+  std::vector<double> xyz;  // a 3 x 2 grid of quads
+  for (int j = 0; j < 3; ++j) {
+    for (int i = 0; i < 4; ++i) xyz.insert(xyz.end(), {double(i), double(j), 0});
+  }
+  moab::Range verts;
+  check(mb.create_vertices(xyz.data(), 12, verts), "create_vertices");
+  const std::vector<moab::EntityHandle> v(verts.begin(), verts.end());
+  std::vector<moab::EntityHandle> q;
+  for (int j = 0; j < 2; ++j) {
+    for (int i = 0; i < 3; ++i) {
+      const moab::EntityHandle c[4] = {v[i + 4 * j], v[i + 1 + 4 * j], v[i + 1 + 4 * (j + 1)], v[i + 4 * (j + 1)]};
+      moab::EntityHandle h = 0;
+      check(mb.create_element(moab::MBQUAD, c, 4, h), "create quad");
+      q.push_back(h);
+    }
+  }
+  moab::EntityHandle ordered = 0, unordered = 0, contig = 0, empty = 0, parent = 0, child = 0, runs = 0;
+  check(mb.create_meshset(moab::MESHSET_ORDERED, ordered), "ordered");
+  const std::vector<moab::EntityHandle> oc{q[2], v[0], v[1], v[2], v[3], q[2], v[5]};
+  check(mb.add_entities(ordered, oc.data(), static_cast<int>(oc.size())), "fill ordered");
+  check(mb.create_meshset(moab::MESHSET_SET, unordered), "unordered");
+  check(mb.add_entities(unordered, &q[0], 6), "fill unordered");
+  check(mb.add_entities(unordered, &v[0], 12), "fill unordered");
+  check(mb.create_meshset(moab::MESHSET_SET | moab::MESHSET_TRACK_OWNER, contig), "contig");
+  check(mb.add_entities(contig, &v[4], 4), "fill contig");
+  check(mb.create_meshset(moab::MESHSET_SET, empty), "empty");
+  check(mb.create_meshset(moab::MESHSET_ORDERED, parent), "parent");
+  check(mb.create_meshset(moab::MESHSET_SET, child), "child");
+  check(mb.add_entities(parent, &unordered, 1), "fill parent");
+  check(mb.add_entities(parent, &contig, 1), "fill parent");
+  check(mb.add_entities(parent, &q[1], 1), "fill parent");
+  check(mb.add_parent_child(parent, child), "link");
+  check(mb.add_parent_child(child, parent), "link back");  // a cycle
+  check(mb.add_parent_child(parent, contig), "link");
+  check(mb.create_meshset(moab::MESHSET_ORDERED, runs), "runs");
+  check(mb.add_entities(runs, &v[0], 12), "fill runs");
+
+  moab::Tag tag = nullptr;
+  const double vdef[3] = {-1, -2, -3};
+  check(mb.tag_get_handle("VARF", 3, moab::MB_TYPE_DOUBLE, tag,
+                          moab::MB_TAG_VARLEN | moab::MB_TAG_SPARSE | moab::MB_TAG_CREAT, vdef),
+        "VARF");
+  for (int i = 0; i < 4; ++i) {
+    const std::vector<double> val(static_cast<std::size_t>(i + 1), 10.0 * i);
+    const void* ptr = val.data();
+    const int n = i + 1;
+    check(mb.tag_set_by_ptr(tag, &v[static_cast<std::size_t>(i)], 1, &ptr, &n), "set VARF");
+  }
+  check(mb.tag_get_handle("VAROPQ", 0, moab::MB_TYPE_OPAQUE, tag,
+                          moab::MB_TAG_VARLEN | moab::MB_TAG_SPARSE | moab::MB_TAG_CREAT),
+        "VAROPQ");
+  {
+    const char text[] = "hello";
+    const void* ptr = text;
+    const int n = 5;
+    check(mb.tag_set_by_ptr(tag, &ordered, 1, &ptr, &n), "set VAROPQ");
+  }
+  check(mb.tag_get_handle("QV", 1, moab::MB_TYPE_HANDLE, tag, moab::MB_TAG_DENSE | moab::MB_TAG_CREAT), "QV");
+  for (const moab::EntityHandle e : q) {
+    const moab::EntityHandle* c = nullptr;
+    int n = 0;
+    check(mb.get_connectivity(e, c, n), "get_connectivity");
+    check(mb.tag_set_data(tag, &e, 1, &c[0]), "set QV");
+  }
+  check(mb.tag_get_handle("SS", 1, moab::MB_TYPE_HANDLE, tag, moab::MB_TAG_SPARSE | moab::MB_TAG_CREAT), "SS");
+  const moab::EntityHandle none = 0;
+  check(mb.tag_set_data(tag, &parent, 1, &child), "set SS");
+  check(mb.tag_set_data(tag, &unordered, 1, &none), "set SS");
+  check(mb.tag_get_handle("VH", 0, moab::MB_TYPE_HANDLE, tag,
+                          moab::MB_TAG_VARLEN | moab::MB_TAG_SPARSE | moab::MB_TAG_CREAT),
+        "VH");
+  {
+    const moab::EntityHandle hs[3] = {q[0], q[1], v[3]};
+    const void* ptr = hs;
+    const int n = 3;
+    check(mb.tag_set_by_ptr(tag, &v[0], 1, &ptr, &n), "set VH");
+  }
+  check(mb.tag_get_handle("SETI", 1, moab::MB_TYPE_INTEGER, tag, moab::MB_TAG_SPARSE | moab::MB_TAG_CREAT), "SETI");
+  const int seti[] = {5, 6, 7};
+  check(mb.tag_set_data(tag, &contig, 1, &seti[0]), "set SETI");
+  check(mb.tag_set_data(tag, &empty, 1, &seti[1]), "set SETI");
+  check(mb.tag_set_data(tag, &v[7], 1, &seti[2]), "set SETI");
+  const moab::EntityHandle root = 0;
+  check(mb.tag_get_handle("MESHVAL", 2, moab::MB_TYPE_INTEGER, tag, moab::MB_TAG_MESH | moab::MB_TAG_CREAT),
+        "MESHVAL");
+  const int mv[2] = {42, 43};
+  check(mb.tag_set_data(tag, &root, 1, mv), "set MESHVAL");
+  check(mb.tag_get_handle("VARG", 0, moab::MB_TYPE_INTEGER, tag,
+                          moab::MB_TAG_VARLEN | moab::MB_TAG_SPARSE | moab::MB_TAG_CREAT),
+        "VARG");
+  {
+    const int gv[4] = {1, 2, 3, 4};
+    const void* ptr = gv;
+    const int n = 4;
+    check(mb.tag_set_by_ptr(tag, &root, 1, &ptr, &n), "set VARG");
+  }
+  const double ddef = 0.5;
+  check(mb.tag_get_handle("DECLARED", 1, moab::MB_TYPE_DOUBLE, tag, moab::MB_TAG_DENSE | moab::MB_TAG_CREAT, &ddef),
+        "DECLARED");
+  check(mb.write_file(p.c_str()), "write_file");
+  return p;
+}
+
 fs::path path_of(const std::string& name) {
   if (name == "tag_kinds") return tag_kinds_file();
   if (name == "poly_indices") return poly_indices_file();
+  if (name == "sets_kinds") return sets_kinds_file();
   return fs::path(SOMA_TEST_DATA_DIR) / name;
+}
+
+constexpr int slots[] = {0, 1, 2, 3, soma::set_dim};
+
+soma::LO slot_count(const soma::HostMesh& m, int slot) {
+  if (slot == soma::set_dim) return m.sets().count();
+  return slot <= m.dim() ? m.count(slot) : 0;
+}
+
+std::size_t value_size(moab::DataType type) {
+  switch (type) {
+    case moab::MB_TYPE_INTEGER: return sizeof(int);
+    case moab::MB_TYPE_DOUBLE: return sizeof(double);
+    case moab::MB_TYPE_HANDLE: return sizeof(moab::EntityHandle);
+    default: return 1;
+  }
 }
 
 struct Loaded {
   moab::Core mb;
   soma::HostMesh mesh;
   soma::H5mReport report;
-  // Per MOAB type: handles in handle order, and the SOMA (dim, lid) of each.
+  // Per MOAB type: handles in handle order, and the SOMA lid of each.
   std::map<moab::EntityType, std::vector<moab::EntityHandle>> handles;
   std::map<moab::EntityType, std::vector<soma::LO>> lids;
-  std::map<moab::EntityHandle, soma::GO> file_id;  // vertices only
+  // MOAB's sets in handle order, which is the file's order and SOMA's.
+  std::vector<moab::EntityHandle> sets;
+  std::map<moab::EntityHandle, std::pair<int, soma::LO>> where;  // SOMA slot and lid
 
   explicit Loaded(const fs::path& p) {
     check(mb.load_file(p.c_str()), "load_file " + p.string());
@@ -170,138 +300,127 @@ struct Loaded {
       }
       std::sort(mine.begin(), mine.end());
       for (const auto& [g, l] : mine) lids[t].push_back(l);
+      for (std::size_t i = 0; i < handles[t].size() && i < lids[t].size(); ++i) where[handles[t][i]] = {d, lids[t][i]};
     }
-    const auto& v = handles[moab::MBVERTEX];
-    const auto& vl = lids[moab::MBVERTEX];
-    for (std::size_t i = 0; i < v.size() && i < vl.size(); ++i) {
-      file_id[v[i]] = mesh.gid(0)(static_cast<std::size_t>(vl[i]));
-    }
+    moab::Range r;
+    check(mb.get_entities_by_type(0, moab::MBENTITYSET, r), "get_entities_by_type");
+    sets.assign(r.begin(), r.end());
+    for (std::size_t i = 0; i < sets.size(); ++i) where[sets[i]] = {soma::set_dim, static_cast<soma::LO>(i)};
   }
 
-  // True if SOMA reports leaving out the tag's values on vertices and
-  // elements (not just those on sets).
-  bool skipped(const std::string& name) const {
-    return std::any_of(report.skipped.begin(), report.skipped.end(), [&](const auto& s) {
-      return s.name == name && s.reason.find("entity sets") == std::string::npos;
-    });
+  // SOMA's gid of what a MOAB handle names, which is its file id; 0 for none.
+  soma::GO file_id(moab::EntityHandle h) const {
+    if (h == 0) return 0;
+    const auto [slot, lid] = where.at(h);
+    const auto l = static_cast<std::size_t>(lid);
+    return slot == soma::set_dim ? mesh.sets().gid()(l) : mesh.gid(slot)(l);
   }
-};
 
-// The bytes of every value of `name` on dimension d, by lid; empty when
-// SOMA has no field of that name on d. Also the default and global bytes.
-struct SomaValues {
-  bool present = false;
-  std::size_t bytes = 0;  // per entity
-  std::vector<std::vector<unsigned char>> by_lid;  // empty vector: no value
-  std::vector<unsigned char> def, global;
+  // MOAB's holders of the tag on a slot, by SOMA lid.
+  std::map<soma::LO, moab::EntityHandle> holders(moab::Tag tag, int slot) {
+    std::map<soma::LO, moab::EntityHandle> out;
+    for (const moab::EntityType t : moab_types) {
+      if (slot == soma::set_dim || moab::CN::Dimension(t) != slot) continue;
+      moab::Range r;
+      check(mb.get_entities_by_type_and_tag(0, t, &tag, nullptr, 1, r), "get_entities_by_type_and_tag");
+      for (const moab::EntityHandle e : r) out[where.at(e).second] = e;
+    }
+    if (slot == soma::set_dim) {
+      moab::Range r;
+      check(mb.get_entities_by_type_and_tag(0, moab::MBENTITYSET, &tag, nullptr, 1, r), "sets with the tag");
+      for (const moab::EntityHandle e : r) out[where.at(e).second] = e;
+    }
+    return out;
+  }
+
+  // n bytes of MOAB values as SOMA holds them: handles become file ids.
+  std::vector<unsigned char> as_soma(moab::DataType type, const void* p, std::size_t n) const {
+    const auto* c = static_cast<const unsigned char*>(p);
+    if (type != moab::MB_TYPE_HANDLE) return {c, c + n};
+    std::vector<unsigned char> out(n);
+    for (std::size_t i = 0; i < n; i += sizeof(moab::EntityHandle)) {
+      moab::EntityHandle h = 0;
+      std::memcpy(&h, c + i, sizeof h);
+      const soma::GO g = file_id(h);
+      std::memcpy(out.data() + i, &g, sizeof g);
+    }
+    return out;
+  }
 };
 
 template <class T>
-SomaValues values_of(const soma::HostMesh& m, const std::string& name, int d) {
-  SomaValues out;
-  soma::Field<T, Kokkos::HostSpace> f;
-  try {
-    f = m.fields().get<T>(name, d);
-  } catch (const std::out_of_range&) {
-    return out;
-  }
-  out.present = true;
-  const auto nc = static_cast<std::size_t>(f.ncomp());
-  out.bytes = nc * sizeof(T);
-  out.by_lid.resize(static_cast<std::size_t>(m.count(d)));
-  const auto v = f.view();
-  for (soma::LO l = 0; l < m.count(d); ++l) {
-    const auto r = f.space().entity_rows(d, l);
-    if (!r.valid()) continue;
-    auto& b = out.by_lid[static_cast<std::size_t>(l)];
-    b.resize(out.bytes);
-    for (std::size_t c = 0; c < nc; ++c) {
-      const T x = v(static_cast<std::size_t>(r.begin), c);
-      std::memcpy(b.data() + c * sizeof(T), &x, sizeof(T));
-    }
-  }
-  const auto bytes_of = [](const std::vector<T>& x) {
-    std::vector<unsigned char> b(x.size() * sizeof(T));
-    if (!x.empty()) std::memcpy(b.data(), x.data(), b.size());
-    return b;
-  };
-  out.def = bytes_of(f.default_value());
-  out.global = bytes_of(f.global_value());
-  return out;
+std::vector<unsigned char> raw(std::span<const T> x) {
+  std::vector<unsigned char> b(x.size_bytes());
+  if (!x.empty()) std::memcpy(b.data(), x.data(), b.size());
+  return b;
 }
 
-SomaValues values_of(const soma::HostMesh& m, moab::DataType type, const std::string& name, int d) {
-  switch (type) {
-    case moab::MB_TYPE_INTEGER: return values_of<std::int32_t>(m, name, d);
-    case moab::MB_TYPE_DOUBLE: return values_of<double>(m, name, d);
-    default: return values_of<std::uint8_t>(m, name, d);  // opaque and bit
-  }
-}
-
-// A variable-length field's run on each entity of dimension d, by lid (none
-// for a non-member; a member's run may be empty), and its default and global.
-struct SomaRuns {
-  bool present = false;
-  std::vector<std::optional<std::vector<unsigned char>>> by_lid;
-  std::optional<std::vector<unsigned char>> def, global;
-};
-
-template <class T>
-SomaRuns runs_of(const soma::HostMesh& m, const std::string& name, int d) {
-  SomaRuns out;
-  soma::VarField<T, Kokkos::HostSpace> f;
-  try {
-    f = m.fields().get_var<T>(name, d);
-  } catch (const std::out_of_range&) {
-    return out;
-  }
-  out.present = true;
-  const auto bytes_of = [](std::span<const T> x) {
-    std::vector<unsigned char> b(x.size_bytes());
-    if (!x.empty()) std::memcpy(b.data(), x.data(), b.size());
-    return b;
-  };
-  out.by_lid.resize(static_cast<std::size_t>(m.count(d)));
-  for (soma::LO l = 0; l < m.count(d); ++l) {
-    if (f.space().entity_rows(d, l).valid()) out.by_lid[static_cast<std::size_t>(l)] = bytes_of(f.value_or_default(d, l));
-  }
-  if (f.default_value()) out.def = bytes_of(*f.default_value());
-  if (f.global_value()) out.global = bytes_of(*f.global_value());
-  return out;
-}
-
-SomaRuns runs_of(const soma::HostMesh& m, moab::DataType type, const std::string& name, int d) {
-  switch (type) {
-    case moab::MB_TYPE_INTEGER: return runs_of<std::int32_t>(m, name, d);
-    case moab::MB_TYPE_DOUBLE: return runs_of<double>(m, name, d);
-    default: return runs_of<std::uint8_t>(m, name, d);  // opaque
-  }
-}
-
-std::size_t value_size(moab::DataType type) {
-  switch (type) {
-    case moab::MB_TYPE_INTEGER: return sizeof(int);
-    case moab::MB_TYPE_DOUBLE: return sizeof(double);
-    case moab::MB_TYPE_HANDLE: return sizeof(moab::EntityHandle);
-    default: return 1;
-  }
-}
-
-// Rows of the field `name` on the set slot; -1 without one.
-soma::LO set_rows(const soma::HostMesh& m, const std::string& name) {
-  for (const soma::FieldInfo& i : m.fields().list()) {
-    if (i.name == name && i.dims == std::vector<int>{soma::set_dim}) return i.rows;
-  }
-  return -1;
-}
-
-std::vector<unsigned char> bytes_of(const std::vector<std::byte>& b) {
+std::vector<unsigned char> raw(const std::vector<std::byte>& b) {
   std::vector<unsigned char> out(b.size());
   if (!b.empty()) std::memcpy(out.data(), b.data(), b.size());
   return out;
 }
 
-// True for a tag a MOAB instance holds before it reads anything.
+// SOMA's values of `name` on a slot, by lid (none for a non-member), with the
+// default and global; present is false without a field there.
+struct SomaValues {
+  bool present = false;
+  bool handle = false;
+  std::size_t bytes = 0;  // per entity, fixed length only
+  std::vector<std::optional<std::vector<unsigned char>>> by_lid;
+  std::optional<std::vector<unsigned char>> def, global;
+};
+
+template <class T>
+SomaValues values_of(const soma::HostMesh& m, const std::string& name, int slot, bool variable) {
+  SomaValues out;
+  const soma::LO n = slot_count(m, slot);
+  out.by_lid.resize(static_cast<std::size_t>(n));
+  soma::FieldId id = soma::invalid_field;
+  try {
+    if (variable) {
+      const auto f = m.fields().get_var<T>(name, slot);
+      id = f.id();
+      for (soma::LO l = 0; l < n; ++l) {
+        if (f.space().entity_rows(slot, l).valid()) out.by_lid[static_cast<std::size_t>(l)] = raw(f.value_or_default(slot, l));
+      }
+      if (f.default_value()) out.def = raw(std::span<const T>(*f.default_value()));
+      if (f.global_value()) out.global = raw(std::span<const T>(*f.global_value()));
+    } else {
+      const auto f = m.fields().get<T>(name, slot);
+      id = f.id();
+      out.bytes = static_cast<std::size_t>(f.ncomp()) * sizeof(T);
+      for (soma::LO l = 0; l < n; ++l) {
+        const auto r = f.space().entity_rows(slot, l);
+        if (!r.valid()) continue;
+        std::vector<T> row(static_cast<std::size_t>(f.ncomp()));
+        for (int c = 0; c < f.ncomp(); ++c) row[static_cast<std::size_t>(c)] = f.view()(r.begin, c);
+        out.by_lid[static_cast<std::size_t>(l)] = raw(std::span<const T>(row));
+      }
+      if (f.has_default()) out.def = raw(std::span<const T>(f.default_value()));
+      if (f.has_global()) out.global = raw(std::span<const T>(f.global_value()));
+    }
+  } catch (const std::out_of_range&) {
+    return SomaValues{};
+  }
+  out.present = true;
+  out.handle = m.fields().info(id).handle;
+  return out;
+}
+
+SomaValues values_of(const soma::HostMesh& m, moab::DataType type, const std::string& name, int slot, bool variable) {
+  switch (type) {
+    case moab::MB_TYPE_INTEGER: return values_of<std::int32_t>(m, name, slot, variable);
+    case moab::MB_TYPE_DOUBLE: return values_of<double>(m, name, slot, variable);
+    case moab::MB_TYPE_HANDLE: return values_of<soma::GO>(m, name, slot, variable);
+    default: return values_of<std::uint8_t>(m, name, slot, variable);  // opaque and bit
+  }
+}
+
+// True for a tag a MOAB instance holds before it reads anything. MOAB keeps
+// its own default for such a tag (-1 for GLOBAL_ID), not the file's, and
+// reports it on the mesh and on every dense holder without a value; only the
+// stored values of these tags can be compared.
 bool builtin(const std::string& name) {
   static moab::Core fresh;
   moab::Tag t = nullptr;
@@ -315,6 +434,7 @@ TEST_P(H5mMoab, EntityCountsPerTypeMatch) {
   for (const moab::EntityType t : moab_types) {
     EXPECT_EQ(f.lids[t].size(), f.handles[t].size()) << moab::CN::EntityTypeName(t);
   }
+  EXPECT_EQ(f.mesh.sets().count(), static_cast<soma::LO>(f.sets.size()));
 }
 
 TEST_P(H5mMoab, CoordinatesMatchBitwise) {
@@ -349,7 +469,7 @@ TEST_P(H5mMoab, ConnectivityMatches) {
       int n = 0;
       check(f.mb.get_connectivity(h[i], mc, n, true), "get_connectivity");
       std::vector<soma::GO> want, got;
-      for (int j = 0; j < n; ++j) want.push_back(f.file_id.at(mc[j]));
+      for (int j = 0; j < n; ++j) want.push_back(f.file_id(mc[j]));
       const auto e = static_cast<std::size_t>(l[i]);
       for (auto j = off(e); j < off(e + 1); ++j) got.push_back(g0(static_cast<std::size_t>(conn(static_cast<std::size_t>(j)))));
       ASSERT_EQ(got, want) << moab::CN::EntityTypeName(t) << " " << i;
@@ -357,181 +477,194 @@ TEST_P(H5mMoab, ConnectivityMatches) {
   }
 }
 
-TEST_P(H5mMoab, EveryEntityTagMatchesValueByValue) {
+// Every set's flags, members (in order for an ordered set, repeats
+// included), children and parents, by file id.
+TEST_P(H5mMoab, SetsMatch) {
   Loaded f(path_of(GetParam()));
+  const auto& sets = f.mesh.sets();
+  ASSERT_EQ(sets.count(), static_cast<soma::LO>(f.sets.size()));
+  const auto gids = [&](const std::vector<moab::EntityHandle>& hs) {
+    std::vector<soma::GO> out;
+    for (const moab::EntityHandle h : hs) out.push_back(f.file_id(h));
+    return out;
+  };
+  const auto set_gids = [&](std::span<const soma::LO> ls) {
+    std::vector<soma::GO> out;
+    for (const soma::LO l : ls) out.push_back(sets.gid()(static_cast<std::size_t>(l)));
+    return out;
+  };
+  for (soma::LO s = 0; s < sets.count(); ++s) {
+    const moab::EntityHandle h = f.sets[static_cast<std::size_t>(s)];
+    SCOPED_TRACE("set " + std::to_string(sets.gid()(static_cast<std::size_t>(s))));
+    unsigned options = 0;
+    check(f.mb.get_meshset_options(h, options), "get_meshset_options");
+    EXPECT_EQ(sets.flags(s), options & soma::set_flag_bits);
+    std::vector<moab::EntityHandle> contents;
+    check(f.mb.get_entities_by_handle(h, contents), "get_entities_by_handle");
+    if (sets.ordered(s)) {
+      std::vector<soma::GO> got;
+      for (const soma::SetEntry& e : sets.sequence(s)) {
+        const auto l = static_cast<std::size_t>(e.lid);
+        got.push_back(e.slot == soma::set_dim ? sets.gid()(l) : f.mesh.gid(e.slot)(l));
+      }
+      EXPECT_EQ(got, gids(contents));
+    }
+    std::vector<soma::GO> want = gids(contents);
+    std::sort(want.begin(), want.end());
+    want.erase(std::unique(want.begin(), want.end()), want.end());
+    std::vector<soma::GO> got;
+    for (const int slot : slots) {
+      if (slot != soma::set_dim && slot > f.mesh.dim()) continue;
+      for (const soma::LO l : sets.members_of(s, slot)) {
+        const auto i = static_cast<std::size_t>(l);
+        got.push_back(slot == soma::set_dim ? sets.gid()(i) : f.mesh.gid(slot)(i));
+      }
+    }
+    std::sort(got.begin(), got.end());
+    EXPECT_EQ(got, want);
+    std::vector<moab::EntityHandle> links;
+    check(f.mb.get_child_meshsets(h, links), "get_child_meshsets");
+    EXPECT_EQ(set_gids(sets.children(s)), gids(links));
+    links.clear();
+    check(f.mb.get_parent_meshsets(h, links), "get_parent_meshsets");
+    EXPECT_EQ(set_gids(sets.parents(s)), gids(links));
+  }
+  if (GetParam() == "sets_kinds") {
+    EXPECT_EQ(sets.count(), 7);
+    for (soma::LO s = 0; s < sets.count(); ++s) {
+      if (!sets.children(s).empty() && sets.ordered(s)) return;  // the parent of the cycle
+    }
+    ADD_FAILURE() << "no ordered set with children";
+  }
+}
+
+TEST_P(H5mMoab, EveryTagMatchesValueByValue) {
+  Loaded f(path_of(GetParam()));
+  for (const auto& sk : f.report.skipped) ADD_FAILURE() << sk.name << ": " << sk.reason;
   std::vector<moab::Tag> tags;
   check(f.mb.tag_get_tags(tags), "tag_get_tags");
   std::set<std::pair<std::string, int>> compared;
+  std::set<std::string> mesh_values;
   for (moab::Tag tag : tags) {
     std::string name;
     check(f.mb.tag_get_name(tag, name), "tag_get_name");
     moab::DataType type{};
     check(f.mb.tag_get_data_type(tag, type), "tag_get_data_type");
     int bytes = 0;
-    if (f.mb.tag_get_bytes(tag, bytes) == moab::MB_VARIABLE_DATA_LENGTH) {
-      ASSERT_NE(type, moab::MB_TYPE_HANDLE) << name << ": variable-length handles are not compared here";
-      ASSERT_FALSE(f.skipped(name)) << name;
-      const std::size_t size = value_size(type);
-      bool held = false;
-      for (int d = 0; d <= 3; ++d) {
-        SCOPED_TRACE(name + " (variable length) on dimension " + std::to_string(d));
-        std::map<soma::LO, std::vector<unsigned char>> want;
-        for (const moab::EntityType t : moab_types) {
-          if (moab::CN::Dimension(t) != d) continue;
-          moab::Range r;
-          check(f.mb.get_entities_by_type_and_tag(0, t, &tag, nullptr, 1, r), "get_entities_by_type_and_tag");
-          const auto& h = f.handles[t];
-          for (const moab::EntityHandle e : r) {
-            const auto at = std::lower_bound(h.begin(), h.end(), e);
-            ASSERT_TRUE(at != h.end() && *at == e);
-            const void* ptr = nullptr;
-            int len = 0;
-            check(f.mb.tag_get_by_ptr(tag, &e, 1, &ptr, &len), "tag_get_by_ptr " + name);
-            const auto* c = static_cast<const unsigned char*>(ptr);
-            want[f.lids[t][static_cast<std::size_t>(at - h.begin())]].assign(c, c + static_cast<std::size_t>(len) * size);
-          }
-        }
-        const SomaRuns s = runs_of(f.mesh, type, name, d);
-        ASSERT_EQ(s.present, !want.empty());
-        if (want.empty()) continue;
-        held = true;
-        compared.insert({name, d});
-        for (soma::LO l = 0; l < f.mesh.count(d); ++l) {
-          const auto& got = s.by_lid[static_cast<std::size_t>(l)];
-          const auto it = want.find(l);
-          ASSERT_EQ(got.has_value(), it != want.end()) << "lid " << l;
-          if (got) ASSERT_EQ(*got, it->second) << "lid " << l;
-        }
-      }
-      moab::Range on_sets;
-      check(f.mb.get_entities_by_type_and_tag(0, moab::MBENTITYSET, &tag, nullptr, 1, on_sets), "sets with the tag");
-      if (!on_sets.empty()) {
-        EXPECT_EQ(set_rows(f.mesh, name), static_cast<soma::LO>(on_sets.size())) << name;
-        held = true;
-      }
-      if (!held) {
-        // A tag on no entity is a mesh value; MOAB reports its global on the mesh.
-        ASSERT_TRUE(f.mesh.values().contains(name)) << name;
-        const soma::MeshValue& mv = f.mesh.values().at(name);
-        EXPECT_EQ(mv.ncomp, 0);
-        const moab::EntityHandle root = 0;
-        const void* ptr = nullptr;
-        int len = 0;
-        if (f.mb.tag_get_by_ptr(tag, &root, 1, &ptr, &len) == moab::MB_SUCCESS) {
-          const auto* c = static_cast<const unsigned char*>(ptr);
-          const std::vector<unsigned char> m(c, c + static_cast<std::size_t>(len) * size);
-          ASSERT_TRUE(mv.global_value || mv.default_value) << name;
-          EXPECT_EQ(bytes_of(mv.global_value ? *mv.global_value : *mv.default_value), m) << name;
-        } else {
-          EXPECT_FALSE(mv.global_value) << name;
-        }
-      }
-      continue;
-    }
-    check(f.mb.tag_get_bytes(tag, bytes), "tag_get_bytes");
+    const bool variable = f.mb.tag_get_bytes(tag, bytes) == moab::MB_VARIABLE_DATA_LENGTH;
+    const std::size_t size = value_size(type);
     moab::TagType storage{};
     check(f.mb.tag_get_type(tag, storage), "tag_get_type");
-    std::vector<unsigned char> mdef(static_cast<std::size_t>(bytes));
-    const bool has_def = type != moab::MB_TYPE_HANDLE &&
-                         f.mb.tag_get_default_value(tag, mdef.data()) == moab::MB_SUCCESS;
-    for (int d = 0; d <= 3; ++d) {
-      // Entities of dimension d carrying the tag, by SOMA lid.
+    // MOAB's default, and its value on the mesh: the global or, without one,
+    // the default.
+    std::optional<std::vector<unsigned char>> mdef, mroot;
+    const moab::EntityHandle root = 0;
+    if (variable) {
+      const void* ptr = nullptr;
+      int len = 0;
+      if (f.mb.tag_get_default_value(tag, ptr, len) == moab::MB_SUCCESS) {
+        mdef = f.as_soma(type, ptr, static_cast<std::size_t>(len) * size);
+      }
+      if (f.mb.tag_get_by_ptr(tag, &root, 1, &ptr, &len) == moab::MB_SUCCESS) {
+        mroot = f.as_soma(type, ptr, static_cast<std::size_t>(len) * size);
+      }
+    } else {
+      std::vector<unsigned char> b(static_cast<std::size_t>(bytes));
+      if (f.mb.tag_get_default_value(tag, b.data()) == moab::MB_SUCCESS) mdef = f.as_soma(type, b.data(), b.size());
+      if (f.mb.tag_get_data(tag, &root, 1, b.data()) == moab::MB_SUCCESS) mroot = f.as_soma(type, b.data(), b.size());
+    }
+    bool held = false;
+    for (const int slot : slots) {
+      SCOPED_TRACE(name + " on slot " + std::to_string(slot));
       std::map<soma::LO, std::vector<unsigned char>> want;
-      for (const moab::EntityType t : moab_types) {
-        if (moab::CN::Dimension(t) != d) continue;
-        moab::Range r;
-        check(f.mb.get_entities_by_type_and_tag(0, t, &tag, nullptr, 1, r), "get_entities_by_type_and_tag");
-        const auto& h = f.handles[t];
-        for (const moab::EntityHandle e : r) {
-          const auto at = std::lower_bound(h.begin(), h.end(), e);
-          ASSERT_TRUE(at != h.end() && *at == e);
+      for (const auto& [l, e] : f.holders(tag, slot)) {
+        if (variable) {
+          const void* ptr = nullptr;
+          int len = 0;
+          check(f.mb.tag_get_by_ptr(tag, &e, 1, &ptr, &len), "tag_get_by_ptr " + name);
+          want[l] = f.as_soma(type, ptr, static_cast<std::size_t>(len) * size);
+        } else {
           std::vector<unsigned char> b(static_cast<std::size_t>(bytes));
           check(f.mb.tag_get_data(tag, &e, 1, b.data()), "tag_get_data " + name);
-          want[f.lids[t][static_cast<std::size_t>(at - h.begin())]] = std::move(b);
+          want[l] = f.as_soma(type, b.data(), b.size());
         }
       }
-      if (want.empty() && f.skipped(name)) continue;
-      SCOPED_TRACE(name + " on dimension " + std::to_string(d));
-      ASSERT_FALSE(f.skipped(name) && !want.empty()) << "MOAB holds values SOMA reported as not read";
-      const SomaValues s = values_of(f.mesh, type, name, d);
+      const SomaValues s = values_of(f.mesh, type, name, slot, variable);
       if (want.empty()) {
         EXPECT_FALSE(s.present);
         continue;
       }
       ASSERT_TRUE(s.present);
-      compared.insert({name, d});
-      ASSERT_EQ(s.bytes, static_cast<std::size_t>(bytes));
+      held = true;
+      compared.insert({name, slot});
+      EXPECT_EQ(s.handle, type == moab::MB_TYPE_HANDLE);
+      if (!variable) ASSERT_EQ(s.bytes, static_cast<std::size_t>(bytes));
       std::size_t members = 0;
-      for (soma::LO l = 0; l < f.mesh.count(d); ++l) {
+      for (soma::LO l = 0; l < slot_count(f.mesh, slot); ++l) {
         const auto& got = s.by_lid[static_cast<std::size_t>(l)];
         const auto it = want.find(l);
         if (it == want.end()) {
-          EXPECT_TRUE(got.empty()) << "SOMA holds a value MOAB lacks at lid " << l;
+          EXPECT_FALSE(got.has_value()) << "SOMA holds a value MOAB lacks at lid " << l;
           continue;
         }
         ++members;
-        if (got.empty()) {
+        if (!got) {
           // MOAB's dense storage reports the default on every entity of a
           // sequence it allocated; SOMA keeps the file's members and reports
           // the default for the others. Only dense tags can do that.
           ASSERT_EQ(storage, moab::MB_TAG_DENSE) << "lid " << l << " has a value MOAB holds and SOMA does not";
-          ASSERT_EQ(it->second, s.def) << "lid " << l << " has a value MOAB holds and SOMA does not";
+          if (!builtin(name)) {
+            ASSERT_EQ(std::optional(it->second), s.def) << "lid " << l << " has a value MOAB holds and SOMA does not";
+          }
           continue;
         }
-        ASSERT_EQ(got, it->second) << "lid " << l;
+        ASSERT_EQ(*got, it->second) << "lid " << l;
       }
       EXPECT_EQ(members, want.size());
-      // MOAB defines some tags (GLOBAL_ID) before reading, with a default of
-      // its own; the file's default, when it has one, is what SOMA keeps.
-      if (builtin(name) && s.def.empty()) continue;
-      EXPECT_EQ(s.def, has_def ? mdef : std::vector<unsigned char>{});
-      // On the mesh MOAB reports the global value or, without one, the default.
-      std::vector<unsigned char> mglobal(static_cast<std::size_t>(bytes));
-      const moab::EntityHandle root = 0;
-      const bool on_mesh = f.mb.tag_get_data(tag, &root, 1, mglobal.data()) == moab::MB_SUCCESS;
-      EXPECT_EQ(s.global.empty() ? s.def : s.global, on_mesh ? mglobal : std::vector<unsigned char>{});
+      if (builtin(name)) continue;
+      EXPECT_EQ(s.def, mdef);
+      EXPECT_EQ(s.global ? s.global : s.def, mroot);
     }
-    // A tag on no entity or set is a mesh value; on the mesh MOAB reports its
-    // global or, without one, its default. MOAB's own tags (GLOBAL_ID, ...)
-    // need not be in the file at all.
-    const bool on_entities =
-        std::any_of(compared.begin(), compared.end(), [&](const auto& c) { return c.first == name; });
-    if (on_entities || set_rows(f.mesh, name) >= 0) continue;
+    if (held) continue;
+    // A tag on no entity or set is a mesh value. MOAB's own tags need not be
+    // in the file at all.
     if (builtin(name) && !f.mesh.values().contains(name)) continue;
+    if (!builtin(name)) mesh_values.insert(name);
     SCOPED_TRACE(name + " on the mesh");
     ASSERT_TRUE(f.mesh.values().contains(name));
     const soma::MeshValue& mv = f.mesh.values().at(name);
     EXPECT_EQ(mv.handle, type == moab::MB_TYPE_HANDLE);
-    if (builtin(name) && !mv.default_value) continue;
-    std::vector<unsigned char> mval(static_cast<std::size_t>(bytes));
-    const moab::EntityHandle root = 0;
-    const bool on_mesh = f.mb.tag_get_data(tag, &root, 1, mval.data()) == moab::MB_SUCCESS;
-    const std::vector<unsigned char> mine = mv.global_value    ? bytes_of(*mv.global_value)
-                                            : mv.default_value ? bytes_of(*mv.default_value)
-                                                               : std::vector<unsigned char>{};
-    EXPECT_EQ(mine, on_mesh ? mval : std::vector<unsigned char>{});
+    EXPECT_EQ(mv.ncomp == 0, variable);
+    if (builtin(name)) continue;
+    const auto def = mv.default_value ? std::optional(raw(*mv.default_value)) : std::nullopt;
+    const auto global = mv.global_value ? std::optional(raw(*mv.global_value)) : std::nullopt;
+    EXPECT_EQ(def, mdef);
+    EXPECT_EQ(global ? global : def, mroot);
   }
-  // Not vacuous: every file but hex_2048 carries entity tags, and the file
-  // MOAB wrote carries one of every fixed-length kind.
+  // Not vacuous: every file but hex_2048 carries entity tags, and the files
+  // MOAB wrote carry every kind.
+  const auto has = [&](const char* n) {
+    return std::any_of(compared.begin(), compared.end(), [&](const auto& c) { return c.first == n; });
+  };
   if (GetParam() != "hex_2048.h5m") EXPECT_FALSE(compared.empty());
   if (GetParam() == "tag_kinds") {
-    for (const char* n : {"DENSE_D2", "SPARSE_I", "PAIR", "OPAQUE7", "BITS3", "WITH_GLOBAL"}) {
-      EXPECT_TRUE(std::any_of(compared.begin(), compared.end(), [&](const auto& c) { return c.first == n; }))
-          << n;
-    }
+    for (const char* n : {"DENSE_D2", "SPARSE_I", "PAIR", "OPAQUE7", "BITS3", "WITH_GLOBAL"}) EXPECT_TRUE(has(n)) << n;
   }
-  // SOMA holds no field MOAB does not. Values on sets are not compared here.
+  if (GetParam() == "sets_kinds") {
+    for (const char* n : {"VARF", "VAROPQ", "QV", "SS", "VH"}) EXPECT_TRUE(has(n)) << n;
+    EXPECT_EQ(compared.count({"SETI", soma::set_dim}) + compared.count({"SETI", 0}), 2u);
+    EXPECT_EQ(mesh_values, (std::set<std::string>{"DECLARED", "MESHVAL", "VARG"}));
+  }
+  // SOMA holds no field MOAB does not.
   for (const soma::FieldInfo& i : f.mesh.fields().list()) {
-    for (const int d : i.dims) {
-      if (d != soma::set_dim) EXPECT_TRUE(compared.count({i.name, d}) == 1) << i.name << " on " << d;
-    }
+    for (const int d : i.dims) EXPECT_TRUE(compared.count({i.name, d}) == 1) << i.name << " on " << d;
   }
 }
 
 INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                          ::testing::Values("64bricks_1khex.h5m", "hex_2048.h5m", "hexes_mixed.h5m",
                                            "hybrid_3quad_1tri.h5m", "moab_i.h5m", "recMeshOcn128.h5m",
-                                           "tag_kinds", "poly_indices"),
+                                           "tag_kinds", "poly_indices", "sets_kinds"),
                          [](const auto& info) {
                            std::string n = info.param;
                            std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
