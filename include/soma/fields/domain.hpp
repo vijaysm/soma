@@ -130,8 +130,8 @@ struct DomainView {
 
   int num_blocks = 0;
   LO size = 0;
-  Kokkos::Array<DomainBlockView<MemSpace>, 4> blocks{};
-  Kokkos::Array<LO, 4> row_begin{};
+  Kokkos::Array<DomainBlockView<MemSpace>, num_field_slots> blocks{};
+  Kokkos::Array<LO, num_field_slots> row_begin{};
 
   KOKKOS_INLINE_FUNCTION int find_block(int dim) const {
     for (int i = 0; i < num_blocks; ++i) {
@@ -516,8 +516,8 @@ class Domain {
   }
 
   static void check_dim(int dim, LO count) {
-    if (dim < 0 || dim > 3) {
-      throw std::invalid_argument("Domain: dimension " + std::to_string(dim) + " is not in [0, 3]");
+    if (dim < 0 || dim > set_dim) {
+      throw std::invalid_argument("Domain: dimension " + std::to_string(dim) + " is not in [0, 4]");
     }
     if (count < 0) throw std::invalid_argument("Domain: negative entity count");
   }

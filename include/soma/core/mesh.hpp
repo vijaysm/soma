@@ -271,7 +271,8 @@ class Mesh {
         out.adj_.put(s, std::move(c));
       }
     }
-    fields_.template mirror_into<Dst>(out.fields_, o.fields, o.dims, alias);
+    const std::array<bool, num_field_slots> slots{o.dims[0], o.dims[1], o.dims[2], o.dims[3], true};
+    fields_.template mirror_into<Dst>(out.fields_, o.fields, slots, alias);
     out.attach_fields();
     if (o.adj_source == TransferOptions::AdjSource::rebuild && !o.adjacencies.empty()) {
       detail::rebuild_adjacencies(out, o.adjacencies);

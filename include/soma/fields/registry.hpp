@@ -168,14 +168,15 @@ class FieldRegistry {
     for (Family& f : families_) ++f.version;
   }
 
-  // Entity count and optional global ids of one dimension; used by add_tag
-  // and as the identity behind full domains the registry builds itself.
+  // Entity count and optional global ids of one slot (a dimension, or set_dim
+  // for the entity sets); used by add_tag and as the identity behind full
+  // domains the registry builds itself.
   void set_entities(int dim, LO count, GidView gids = {}) {
     check_dim(dim);
     entities_[static_cast<std::size_t>(dim)] = Entities{count, gids, true};
   }
   bool has_entities(int dim) const noexcept {
-    return dim >= 0 && dim < 4 && entities_[static_cast<std::size_t>(dim)].set;
+    return dim >= 0 && dim < num_field_slots && entities_[static_cast<std::size_t>(dim)].set;
   }
   // True if a live field's domain has a block on dimension dim.
   bool uses_dimension(int dim) const noexcept {
@@ -387,8 +388,8 @@ class FieldRegistry {
   // device-copyable lookup. The handle keeps those indexes alive and is not
   // updated by later changes to the family (see FamilyHandle).
   FamilyHandle<MemSpace> family_handle(FamilyId fam) const {
-    std::array<typename FamilyHandle<MemSpace>::Index, 4> index;
-    for (std::size_t d = 0; d < 4; ++d) index[d] = dim_index_ptr(fam, static_cast<int>(d));
+    std::array<typename FamilyHandle<MemSpace>::Index, num_field_slots> index;
+    for (std::size_t d = 0; d < index.size(); ++d) index[d] = dim_index_ptr(fam, static_cast<int>(d));
     return FamilyHandle<MemSpace>(std::move(index));
   }
 
@@ -549,7 +550,7 @@ class FieldRegistry {
   // source always gets its own copy.
   template <class Dst>
   void mirror_into(FieldRegistry<Dst>& dst, const std::vector<std::string>& names,
-                   const std::array<bool, 4>& dims, bool alias) const {
+                   const std::array<bool, num_field_slots>& dims, bool alias) const {
     if (!dst.entries_.empty()) {
       throw std::logic_error("mirror_into: the destination registry must be empty");
     }
@@ -647,13 +648,13 @@ class FieldRegistry {
     FamilyKey key;
     std::vector<FieldId> members;  // live fields, in id order
     std::uint64_t version = 1;     // bumped when the membership or the epoch changes
-    mutable std::array<std::shared_ptr<const detail::FamilyDimData<MemSpace>>, 4> index;
-    mutable std::array<std::uint64_t, 4> built{};
+    mutable std::array<std::shared_ptr<const detail::FamilyDimData<MemSpace>>, num_field_slots> index;
+    mutable std::array<std::uint64_t, num_field_slots> built{};
   };
 
   static void check_dim(int dim) {
-    if (dim < 0 || dim > 3) {
-      throw std::invalid_argument("dimension " + std::to_string(dim) + " is not in [0, 3]");
+    if (dim < 0 || dim > set_dim) {
+      throw std::invalid_argument("dimension " + std::to_string(dim) + " is not in [0, 4]");
     }
   }
 
@@ -866,7 +867,7 @@ class FieldRegistry {
   }
 
   static bool selected(const Entry& e, bool all, const std::vector<std::string>& names,
-                       const std::array<bool, 4>& dims) {
+                       const std::array<bool, num_field_slots>& dims) {
     const bool wanted = all || std::find(names.begin(), names.end(), e.info.name) != names.end();
     const bool dims_on = std::all_of(e.info.dims.begin(), e.info.dims.end(), [&](int d) {
       return dims[static_cast<std::size_t>(d)];
@@ -1000,7 +1001,7 @@ class FieldRegistry {
   // Identifies this registry in the handles it hands out; moves carry it along
   // with the storage. Never 0, which marks a handle that no registry made.
   std::uint64_t serial_ = next_serial();
-  std::array<Entities, 4> entities_{};
+  std::array<Entities, num_field_slots> entities_{};
 };
 
 }  // namespace soma

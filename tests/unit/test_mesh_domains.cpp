@@ -131,7 +131,7 @@ TEST(MeshDomains, FromListValidatesAgainstTheMesh) {
   EXPECT_EQ(d.fingerprint(0), Dom::from_list(2, 3, mesh.epoch(), std::vector<LO>{0, 2},
                                              mesh.gid(2)).fingerprint(0));
   EXPECT_THROW(Dom::from_list(mesh, 2, std::vector<LO>{0, 3}), std::invalid_argument);
-  EXPECT_THROW(Dom::all(mesh, 4), std::invalid_argument);
+  EXPECT_THROW(Dom::all(mesh, 5), std::invalid_argument);
 }
 
 TEST(MeshDomains, ElementNodesSpaceUsesTheMeshTopology) {

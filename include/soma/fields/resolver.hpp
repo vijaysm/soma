@@ -191,10 +191,10 @@ struct FamilyDimView {
 
 template <class MemSpace>
 struct FamilyView {
-  Kokkos::Array<FamilyDimView<MemSpace>, 4> dims{};
+  Kokkos::Array<FamilyDimView<MemSpace>, num_field_slots> dims{};
 
   KOKKOS_INLINE_FUNCTION FamilyHit lookup(int dim, LO lid) const {
-    if (dim < 0 || dim > 3) return FamilyHit{};
+    if (dim < 0 || dim > set_dim) return FamilyHit{};
     return dims[static_cast<std::size_t>(dim)].lookup(lid);
   }
 };
@@ -370,8 +370,8 @@ class FamilyHandle {
  public:
   using Index = std::shared_ptr<const detail::FamilyDimData<MemSpace>>;
 
-  explicit FamilyHandle(std::array<Index, 4> index) : index_(std::move(index)) {
-    for (std::size_t d = 0; d < 4; ++d) view_.dims[d] = index_[d]->view();
+  explicit FamilyHandle(std::array<Index, num_field_slots> index) : index_(std::move(index)) {
+    for (std::size_t d = 0; d < index_.size(); ++d) view_.dims[d] = index_[d]->view();
   }
 
   // The view borrows from this handle: it holds unmanaged Views into the
@@ -396,7 +396,7 @@ class FamilyHandle {
   }
 
  private:
-  std::array<Index, 4> index_;
+  std::array<Index, num_field_slots> index_;
   FamilyView<MemSpace> view_{};
 };
 

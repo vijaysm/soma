@@ -149,7 +149,8 @@ TYPED_TEST(DomainTyped, ConstructionRejectsBadInput) {
                std::invalid_argument);
   EXPECT_THROW(D::from_intervals(1, 10, 1, std::vector<Interval>{{2, 6}, {4, 8}}),
                std::invalid_argument);
-  EXPECT_THROW(D::all(4, 10, 1), std::invalid_argument);
+  EXPECT_THROW(D::all(5, 10, 1), std::invalid_argument);
+  EXPECT_THROW(D::all(-1, 10, 1), std::invalid_argument);
   EXPECT_THROW(D::all(1, -1, 1), std::invalid_argument);
   EXPECT_THROW(D::all(1, 10, 1, soma_test::gid_view<TypeParam>({1, 2, 3})), std::invalid_argument);
 }
@@ -189,6 +190,23 @@ TYPED_TEST(DomainTyped, CombineStacksBlocksByDimension) {
   EXPECT_EQ(ents(2), 12);
   EXPECT_EQ(ents(3), 0);
   EXPECT_EQ(ents(22), 19);
+}
+
+// Every slot, the four dimensions and the entity sets, fits one domain; the
+// sets' rows come last.
+TYPED_TEST(DomainTyped, CombineHoldsEverySlot) {
+  using D = soma::Domain<TypeParam>;
+  auto all = D::from_list(soma::set_dim, 6, 3, std::vector<LO>{1, 4});
+  for (int d = 0; d <= 3; ++d) all = D::combine(all, D::all(d, 2, 3));
+  ASSERT_EQ(all.num_blocks(), soma::num_field_slots);
+  EXPECT_EQ(all.size(), 10);
+  EXPECT_EQ(all.row(soma::set_dim, 4), 9);
+  EXPECT_EQ(all.row(soma::set_dim, 2), soma::invalid_lo);
+  const auto rows = soma_test::rows_on_space<TypeParam>(all.view(), soma::set_dim, 6);
+  for (LO l = 0; l < 6; ++l) EXPECT_EQ(rows(l), all.row(soma::set_dim, l)) << "lid " << l;
+  const auto ents = soma_test::entities_on_space<TypeParam>(all.view(), all.size());
+  EXPECT_EQ(ents(8), 1);
+  EXPECT_EQ(ents(9), 4);
 }
 
 TYPED_TEST(DomainTyped, CombineRejectsSharedDimensionAndMixedEpochs) {

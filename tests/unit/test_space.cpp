@@ -98,6 +98,26 @@ TYPED_TEST(SpaceTyped, PerEntityRowsEqualDomainSize) {
   EXPECT_FALSE(some.entity_rows(3, 9).valid());
 }
 
+// Value points need element topology: vertices and entity sets have none.
+TYPED_TEST(SpaceTyped, ElementNodesNeedElements) {
+  using D = soma::Domain<TypeParam>;
+  const auto info = soma_test::cells<TypeParam>(3, std::vector<Topology>(4, Topology::hex));
+  const auto nodes = Layout::element_nodes(NodeFamily::gll, 2);
+  for (const int slot : {0, soma::set_dim}) {
+    try {
+      soma::Space<TypeParam>(D::all(slot, 4, 1), nodes, info);
+      ADD_FAILURE() << "slot " << slot << " accepted";
+    } catch (const std::invalid_argument& e) {
+      const std::string what = e.what();
+      EXPECT_NE(what.find(slot == 0 ? "dimension 0 has no topology" : "entity sets have no topology"),
+                std::string::npos) << what;
+    }
+  }
+  const soma::Space<TypeParam> per(D::all(soma::set_dim, 4, 1), Layout::per_entity(), info);
+  EXPECT_EQ(per.rows(), 4);
+  EXPECT_EQ(per.entity_rows(soma::set_dim, 3).begin, 3);
+}
+
 TYPED_TEST(SpaceTyped, UniformBlocksUseAConstantStride) {
   using D = soma::Domain<TypeParam>;
   const std::vector<Topology> topo(6, Topology::hex);

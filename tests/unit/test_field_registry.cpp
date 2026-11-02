@@ -107,7 +107,13 @@ TYPED_TEST(RegistryTyped, TypeAndDimensionAreChecked) {
   EXPECT_THROW(this->reg.template get<std::int32_t>("material", 2), std::out_of_range);
   EXPECT_THROW(this->reg.template get<std::int32_t>("missing"), std::out_of_range);
   EXPECT_NO_THROW(this->reg.template get<std::int32_t>("material", 3));
-  EXPECT_THROW(this->reg.template add_tag<std::int32_t>("x", 4, 1), std::invalid_argument);
+  EXPECT_THROW(this->reg.template add_tag<std::int32_t>("x", 5, 1), std::invalid_argument);
+  EXPECT_THROW(this->reg.template add_tag<std::int32_t>("x", -1, 1), std::invalid_argument);
+  EXPECT_THROW(this->reg.template add_tag<std::int32_t>("x", soma::set_dim, 1), std::logic_error);
+  this->reg.set_entities(soma::set_dim, 6);
+  EXPECT_EQ(this->reg.template add_tag<std::int32_t>("x", soma::set_dim, 1).rows(), 6);
+  EXPECT_TRUE(this->reg.has_entities(soma::set_dim));
+  EXPECT_FALSE(this->reg.has_entities(5));
   EXPECT_THROW(this->reg.template add_tag<std::int32_t>("x", 3, 0), std::invalid_argument);
 }
 

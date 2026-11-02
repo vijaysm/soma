@@ -68,7 +68,8 @@ void expect_view_needs_a_live_handle() {
   static_assert(requires(H& h) { h.view(); });
   static_assert(!requires(H&& h) { std::move(h).view(); });
   static_assert(!requires(const H&& h) { std::move(h).view(); });
-  static_assert(!requires { H(std::array<typename H::Index, 4>{}).view(); });
+  static_assert(requires { H(std::array<typename H::Index, soma::num_field_slots>{}); });
+  static_assert(!requires { H(std::array<typename H::Index, soma::num_field_slots>{}).view(); });
 }
 
 template <class M>
@@ -93,6 +94,31 @@ class FamilyTyped : public ::testing::Test {
 };
 using Spaces = ::testing::Types<HostMem, DevMem>;
 TYPED_TEST_SUITE(FamilyTyped, Spaces);
+
+// Values on entity sets are the fifth slot of a family: GLOBAL_ID on vertices
+// and on two of three sets is one family, looked up on the device.
+TYPED_TEST(FamilyTyped, SetsAreTheFifthSlotOfAFamily) {
+  this->reg.set_entities(soma::set_dim, 3, soma_test::gids<TypeParam>(3, 9000));
+  const auto on_faces = this->reg.template add_tag<std::int32_t>("GLOBAL_ID", 2, 1);
+  const auto on_sets = this->reg.template add<std::int32_t>(
+      "GLOBAL_ID", this->space(this->list(soma::set_dim, 3, {0, 2})), 1);
+  const auto fam = this->reg.template family<std::int32_t>("GLOBAL_ID", 1);
+  const auto handle = this->reg.family_handle(fam);
+  EXPECT_EQ(handle.members(2), std::vector<soma::FieldId>{on_faces.id()});
+  EXPECT_EQ(handle.members(soma::set_dim), std::vector<soma::FieldId>{on_sets.id()});
+  const auto hits = soma_test::lookup_on_space<TypeParam>(handle.view(), soma::set_dim, 3);
+  EXPECT_EQ(hits(0), 0);
+  EXPECT_EQ(hits(1), 0);
+  EXPECT_EQ(hits(2), -1);
+  EXPECT_EQ(hits(4), 0);
+  EXPECT_EQ(hits(5), 1);
+  try {
+    this->reg.template add<std::int32_t>("GLOBAL_ID", this->space(this->list(soma::set_dim, 3, {2})), 1);
+    FAIL() << "expected FieldOverlap";
+  } catch (const soma::FieldOverlap& e) {
+    EXPECT_NE(std::string(e.what()).find("in dim 4 at entity gid 9002"), std::string::npos) << e.what();
+  }
+}
 
 TYPED_TEST(FamilyTyped, FullThenSubsetOverlapNamesBothFieldsDimensionAndGid) {
   this->reg.template add_tag<double>("T", 2, 1);

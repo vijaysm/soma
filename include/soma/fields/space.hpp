@@ -85,7 +85,7 @@ struct SpaceView {
 
   int num_blocks = 0;
   LO rows = 0;
-  Kokkos::Array<SpaceBlockView<MemSpace>, 4> blocks{};
+  Kokkos::Array<SpaceBlockView<MemSpace>, num_field_slots> blocks{};
 
   KOKKOS_INLINE_FUNCTION int find_block(int dim) const {
     for (int i = 0; i < num_blocks; ++i) {
@@ -288,6 +288,10 @@ class Space {
     if (bi.dim < 1) {
       throw std::invalid_argument("Space: " + describe(layout) +
                                   " needs elements; dimension 0 has no topology");
+    }
+    if (bi.dim == set_dim) {
+      throw std::invalid_argument("Space: " + describe(layout) +
+                                  " needs elements; entity sets have no topology");
     }
     const auto dim = static_cast<std::size_t>(bi.dim);
     const auto topo = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, info.topology[dim]);

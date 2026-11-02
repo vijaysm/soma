@@ -31,6 +31,10 @@ using GO = std::int64_t;
 using Real = double;
 
 inline constexpr LO invalid_lo = -1;
+
+// Field slots: the entity dimensions 0 to 3, then the entity sets.
+inline constexpr int set_dim = 4;
+inline constexpr int num_field_slots = 5;
 inline constexpr GO invalid_go = -1;
 
 }  // namespace soma
