@@ -18,6 +18,12 @@ endif()
 if(HDF5_VERSION VERSION_LESS 1.10)
   message(FATAL_ERROR "SOMA_ENABLE_HDF5=ON needs HDF5 1.10 or newer (found ${HDF5_VERSION})")
 endif()
-# Recorded in the package config so consumers find the same HDF5.
-list(GET HDF5_C_INCLUDE_DIRS 0 _soma_hdf5_include)
-get_filename_component(SOMA_HDF5_ROOT "${_soma_hdf5_include}/.." ABSOLUTE)
+# Recorded in the package config so consumers find the same HDF5; only a root
+# the user gave, since one guessed from the include directory can be wrong.
+if(HDF5_ROOT)
+  set(SOMA_HDF5_ROOT "${HDF5_ROOT}")
+elseif(DEFINED ENV{HDF5_ROOT})
+  set(SOMA_HDF5_ROOT "$ENV{HDF5_ROOT}")
+else()
+  set(SOMA_HDF5_ROOT "")
+endif()

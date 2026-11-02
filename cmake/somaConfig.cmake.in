@@ -39,7 +39,7 @@ if(SOMA_ENABLE_MPI)
 endif()
 # The static library links HDF5 privately; consumers still link it.
 if(SOMA_ENABLE_HDF5)
-  if(NOT HDF5_ROOT AND NOT DEFINED ENV{HDF5_ROOT})
+  if(NOT HDF5_ROOT AND NOT DEFINED ENV{HDF5_ROOT} AND NOT "@SOMA_HDF5_ROOT@" STREQUAL "")
     set(HDF5_ROOT "@SOMA_HDF5_ROOT@")
   endif()
   find_dependency(HDF5 COMPONENTS C)
