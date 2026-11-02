@@ -184,6 +184,13 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   entities renumbers set members with them.
 - Mirrors and clones copy sets by default (`TransferOptions::sets`); members of a dimension a
   mirror leaves out throw `MissingSetMembers` when asked for.
+- Each set row takes the smallest of the forms of a domain block: every entity of the slot
+  (nothing stored), runs (2 runs + 1 ids) or the sorted list. `SetRow` reads a row in place on
+  the host and in kernels: `r[k]`, `r.size`, `row(lid)`, `contains(lid)` and an iterator over
+  the runs; `members_of` returns it, and `kinds`/`offsets`/`data`/`entities` expose the storage.
+  `SetBuilder::add(spec, runs)` takes `SetRun{slot, first, count}` and packs rows without listing
+  them. `Domain::from_set` takes a row's runs as they are. The forms, their choice and their
+  search (`soma/core/lid_runs.hpp`) are shared with domains.
 - `VarField` is a variable-length field: a CSR over a `per_entity` space whose lengths are
   fixed when `FieldRegistry::add_var` adds it, fetched with `get_var`, mirrored like any field.
   It has a family of its own; `get` and `get_var` refuse each other's kind.
@@ -257,6 +264,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   child, parent or handle that names nothing, a malformed set list or `var_indices`, and an
   ordered set stored as ranges throw. The report now lists only 16-bit integers, bit tags wider
   than 8 bits, variable-length arrays and other HDF5 classes, and is empty on every bundled mesh.
+- `read_h5m` turns a ranged set's ranges into runs of local ids without listing them, so a set
+  over every vertex stores nothing, whatever the file's size.
+- `soma::io::id_runs`, `moab_ranged` and `set_contents` encode a set's contents as MOAB does:
+  (start, count) pairs exactly when the set is unordered, not empty and the pairs are not longer
+  than the list. The rule agrees with every set of the bundled files; MOAB reads a sparse-class
+  tag stored as dense values, which the legacy writer will use.
 - `MeshBuilder::build` looks contiguous vertex gids up by index, skips sorts whose input is
   already sorted, computes centroids only for curve keys, copies in-order blocks whole and builds
   segments from their runs: the same mesh, about 10x faster on file input. Under
