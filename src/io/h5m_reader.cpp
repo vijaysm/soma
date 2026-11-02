@@ -456,9 +456,14 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
     }
     std::vector<T> v = read_rows<T>(tstt, s.path, k, s.count);
     const auto d = static_cast<std::size_t>(s.dim);
-    const auto l = at.lids(s.dim, s.first, s.count);
-    lids[d].insert(lids[d].end(), l.begin(), l.end());
-    values[d].insert(values[d].end(), v.begin(), v.end());
+    std::vector<LO> l = at.lids(s.dim, s.first, s.count);
+    if (lids[d].empty()) {
+      lids[d] = std::move(l);
+      values[d] = std::move(v);
+    } else {
+      lids[d].insert(lids[d].end(), l.begin(), l.end());
+      values[d].insert(values[d].end(), v.begin(), v.end());
+    }
   }
 
   const Id tag = h5::open_group(tstt, "tags/" + name);
@@ -531,6 +536,10 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
     // A per_entity field has one row per member, in member order.
     const auto view = f.view();
     const auto& src = values[static_cast<std::size_t>(d)];
+    if (order.empty() && nc == 1) {  // one column of a LayoutLeft view is contiguous
+      std::copy(src.begin(), src.end(), view.data());
+      continue;
+    }
     for (std::size_t i = 0; i < sorted.size(); ++i) {
       const std::size_t from = (order.empty() ? i : order[i]) * nc;
       for (std::size_t c = 0; c < nc; ++c) view(i, c) = src[from + c];

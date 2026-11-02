@@ -746,6 +746,51 @@ TEST_F(H5mRead, MultiDimensionalArrayTagsKeepEveryComponent) {
   for (int c = 0; c < 9; ++c) EXPECT_EQ(f.value_or_default(2, 0, c), 10 + c) << c;
 }
 
+// Rows of several components, one row per vertex: each vertex keeps its own.
+TEST_F(H5mRead, EachEntityKeepsItsComponents) {
+  {
+    Writer w(file());
+    square(w);
+    const hsize_t dims[1] = {3};
+    const hid_t t = H5Tarray_create2(H5T_NATIVE_DOUBLE, 1, dims);
+    w.tag("V3", 2, t);
+    double v[12];
+    for (int i = 0; i < 12; ++i) v[i] = 10.0 * (i / 3) + (i % 3);
+    w.dense("nodes", "V3", v, 4);
+    H5Tclose(t);
+  }
+  HostMesh m = soma::read_h5m(file());
+  const auto f = m.fields().get<double>("V3", 0);
+  ASSERT_EQ(f.ncomp(), 3);
+  for (GO g = 1; g <= 4; ++g) {
+    for (int c = 0; c < 3; ++c) {
+      EXPECT_EQ(f.value_or_default(0, lid_of(m, 0, g), c), 10.0 * static_cast<double>(g - 1) + c)
+          << "vertex " << g << ", component " << c;
+    }
+  }
+}
+
+// Dense values on two groups of one dimension make one full field.
+TEST_F(H5mRead, DenseValuesOnTwoGroupsOfOneDimensionJoinOneField) {
+  {
+    Writer w(file());
+    w.nodes(1, 3, {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 2, 0, 0});
+    w.elements("Quad4", "Quad", 6, 4, {1, 2, 3, 4});
+    w.elements("Tri3", "Tri", 7, 3, {2, 5, 3});
+    w.tag("D", 2, H5T_NATIVE_INT32);
+    const std::int32_t q[] = {60};
+    const std::int32_t t[] = {70};
+    w.dense("elements/Quad4", "D", q, 1);
+    w.dense("elements/Tri3", "D", t, 1);
+  }
+  HostMesh m = soma::read_h5m(file());
+  const auto f = m.fields().get<std::int32_t>("D", 2);
+  EXPECT_EQ(f.rows(), 2);
+  EXPECT_EQ(f.domain().info(0).kind, soma::DomainKind::full);
+  EXPECT_EQ(f.value_or_default(2, lid_of(m, 2, 6)), 60);
+  EXPECT_EQ(f.value_or_default(2, lid_of(m, 2, 7)), 70);
+}
+
 TEST_F(H5mRead, FailuresPrintNothing) {
   std::ofstream(file("text.h5m")) << "not hdf5\n";
   ::testing::internal::CaptureStderr();
