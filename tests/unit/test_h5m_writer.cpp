@@ -403,6 +403,12 @@ TEST(H5mWrite, FieldsBecomeTags) {
   f.add<std::int32_t>("Z", soma::Space<Kokkos::HostSpace>(soma::Domain<Kokkos::HostSpace>::from_list(in, 0, std::vector<LO>{}),
                                                          soma::Layout::per_entity()),
                       1);
+  // One field over two dimensions: its space has two blocks.
+  using HD = soma::Domain<Kokkos::HostSpace>;
+  const auto mb = f.add<std::int32_t>(
+      "MB", soma::Space<Kokkos::HostSpace>(HD::combine(HD::all(in, 0), HD::from_list(in, 2, quad10)), soma::Layout::per_entity()),
+      1);
+  for (std::size_t r = 0; r < 8; ++r) mb.view()(r, 0) = static_cast<std::int32_t>(1000 + r);
   const auto f32 = f.add_tag<float>("F", soma::set_dim, 1);
   f32.view()(0, 0) = 1.25f;
   f32.view()(1, 0) = -2.5f;
@@ -422,7 +428,7 @@ TEST(H5mWrite, FieldsBecomeTags) {
   }
   const std::map<std::string, std::int64_t> classes{{"D2", 2}, {"Q", 2}, {"S", 1}, {"B", 0}, {"O", 1},
                                                     {"SV", 2}, {"L", 1}, {"B2", 0}, {"P", 1}, {"Z", 1},
-                                                    {"F", 2}};
+                                                    {"F", 2}, {"MB", 1}};
   for (const auto& [name, cls] : classes) {
     const std::string g = "/tstt/tags/" + name;
     EXPECT_EQ(int_attribute(file, g.c_str(), "class"), cls) << name;
@@ -728,6 +734,11 @@ TEST(H5mWrite, GlobalIdHoldsTheGids) {
   big.add_elements(Topology::edge, std::vector<GO>{1}, std::vector<GO>{1, GO{1} << 31});
   soma::write_h5m(std::move(big).build(), out);
   EXPECT_FALSE(soma::read_h5m(out).fields().contains("GLOBAL_ID"));
+  soma::MeshBuilder big_edge(1);
+  big_edge.add_vertices(std::vector<GO>{1, 2}, std::vector<soma::Real>{0, 0, 0, 1, 0, 0});
+  big_edge.add_elements(Topology::edge, std::vector<GO>{GO{1} << 31}, std::vector<GO>{1, 2});
+  soma::write_h5m(std::move(big_edge).build(), out);
+  EXPECT_FALSE(soma::read_h5m(out).fields().contains("GLOBAL_ID"));
 }
 
 // Handle values, defaults and globals are written as the file ids of what
@@ -813,6 +824,27 @@ TEST(H5mWrite, HandlesNeedWhatTheyName) {
     } catch (const std::invalid_argument& e) {
       EXPECT_STREQ(e.what(), "write_h5m: mesh value 'E' names an entity of dimension 1, which is not written");
     }
+  }
+  {
+    // A handle field, or a variable-length one, naming an edge.
+    HostMesh m = in.clone();
+    const auto h = m.fields().add_tag<GO>("H", 3, 1, {.handle = true});
+    h.view()(1, 0) = make_handle(1, edge);
+    soma::write_h5m(m, dir / "m.h5m");
+    EXPECT_EQ(soma::read_h5m(dir / "m.h5m").count(1), in.count(1));
+    fs::remove(dir / "m.h5m");
+  }
+  {
+    HostMesh m = in.clone();
+    soma::SetBuilder b;
+    b.add(soma::SetSpec{1, soma::set_unique, {}, {}, {}});
+    std::move(b).install(m);
+    const std::vector<GO> to_edge{make_handle(1, edge)};
+    m.fields().add_var<GO>("VH", soma::Space<Kokkos::HostSpace>(soma::Domain<Kokkos::HostSpace>::all(m, soma::set_dim), soma::Layout::per_entity()),
+                           std::vector<soma::Offset>{0, 1}, to_edge, {.handle = true});
+    soma::write_h5m(m, dir / "m.h5m");
+    EXPECT_EQ(soma::read_h5m(dir / "m.h5m").count(1), in.count(1));
+    fs::remove(dir / "m.h5m");
   }
   {
     HostMesh m = in.clone();
