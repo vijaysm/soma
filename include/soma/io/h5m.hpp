@@ -99,6 +99,18 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // (io::moab_ranged); an ordered set's are its sequence. A set holding an
 // entity of a dimension not written throws std::invalid_argument.
 //
+// Tags: one per field family (fields of one name), per_entity layouts only.
+// A block (the vertices, an element group, the sets) whose every entity has
+// a value holds them dense in <block>/tags/<NAME>; the other values are
+// sparse (id_list, values). The HDF5 type follows the value type (an array
+// for several components) or the family's TagFormat: a bitfield of nbits
+// for bit tags, opaque of ncomp bytes for opaque ones. The class is the
+// TagFormat's, or else 0 for bit tags, 2 when every value is dense and 1
+// otherwise. The members' default and global value become the default and
+// global attributes. Two families of one name, other layouts, uncommitted
+// writes, members that disagree on their default or global value, and
+// values on a dimension not written throw std::invalid_argument.
+//
 // The file is written to a new temporary next to `path` (`path` + "." + six
 // random characters, created exclusively) and renamed over `path`, so a
 // failure leaves neither a partial file nor a damaged earlier one. A mesh that

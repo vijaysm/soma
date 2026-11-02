@@ -5,8 +5,12 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
+#include <map>
 #include <new>
+#include <optional>
+#include <type_traits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -15,6 +19,9 @@
 #include "hdf5.hpp"
 #include "soma/core/sets.hpp"
 #include "soma/core/topology.hpp"
+#include "soma/fields/data_type.hpp"
+#include "soma/fields/layout.hpp"
+#include "soma/fields/tag_format.hpp"
 #include "soma/io/h5m.hpp"
 #include "soma/io/id_runs.hpp"
 #include "temporary.hpp"
@@ -51,6 +58,28 @@ struct SetTable {
   std::vector<std::uint64_t> contents, children, parents;
 };
 
+// A run of file ids that holds dense tag values under `path`/tags: the
+// vertices, an element group, or the sets.
+struct Block {
+  std::string path;
+  std::uint64_t start = 0;
+  std::uint64_t count = 0;
+};
+
+// One MOAB tag: its values by file id, in id order, each `width` bytes, and
+// the blocks they cover whole (dense; the other values are sparse).
+struct TagPlan {
+  std::string name;
+  DataType type = DataType::u8;
+  int ncomp = 1;
+  TagFormat format{};
+  std::optional<std::vector<std::byte>> def, global;
+  std::size_t width = 0;
+  std::vector<std::uint64_t> ids;
+  std::vector<std::byte> values;
+  std::vector<bool> dense;  // by block
+};
+
 // What is written and under which file ids, settled before the file is
 // touched.
 struct Plan {
@@ -62,6 +91,8 @@ struct Plan {
   std::uint64_t set_start = 0;
   SetTable sets;
   std::uint64_t max_id = 0;
+  std::vector<Block> blocks;  // in file id order
+  std::vector<TagPlan> tags;  // in name order
 };
 
 // The number of temporary file names write_h5m tries before it gives up.
@@ -125,6 +156,123 @@ void plan_sets(const HostMesh& mesh, Plan& p) {
   }
 }
 
+template <class T>
+std::vector<std::byte> bytes_of(const std::vector<T>& v) {
+  std::vector<std::byte> out(v.size() * sizeof(T));
+  if (!v.empty()) std::memcpy(out.data(), v.data(), out.size());
+  return out;
+}
+
+// The one value a family's members agree on (their defaults, or their global
+// values), or none when no member has one.
+template <class T>
+std::optional<std::vector<std::byte>> agreed(const std::string& name, const char* what,
+                                             const std::vector<std::vector<T>>& values) {
+  std::optional<std::vector<T>> one;
+  for (const auto& v : values) {
+    if (v.empty()) continue;
+    if (one && *one != v) reject("the fields named '" + name + "' have different " + what + " values");
+    one = v;
+  }
+  if (!one) return std::nullopt;
+  return bytes_of(*one);
+}
+
+// A family's values on every written entity that has one, sorted by file id.
+template <class T>
+void collect_family(const HostMesh& mesh, const Plan& p, const std::vector<FieldInfo>& members, TagPlan& t) {
+  std::vector<std::vector<T>> defs, globals;
+  std::vector<std::pair<std::uint64_t, std::size_t>> order;  // (file id, value index)
+  std::vector<std::byte> values;
+  t.width = static_cast<std::size_t>(t.ncomp) * sizeof(T);
+  for (const FieldInfo& info : members) {
+    const auto f = mesh.fields().template get<T>(info.id);
+    defs.push_back(f.default_value());
+    globals.push_back(f.global_value());
+    for (const int slot : info.dims) {
+      const auto& fid = p.fid[static_cast<std::size_t>(slot)];
+      const LO n = slot == set_dim ? mesh.sets().count() : mesh.count(slot);
+      if (fid.size() != static_cast<std::size_t>(n)) {
+        reject("field '" + info.name + "' has values on dimension " + std::to_string(slot) + ", which is not written");
+      }
+      for (LO l = 0; l < n; ++l) {
+        const RowRange r = f.space().entity_rows(slot, l);
+        if (!r.valid()) continue;
+        order.emplace_back(fid[static_cast<std::size_t>(l)], values.size() / t.width);
+        for (int c = 0; c < t.ncomp; ++c) {  // the View is LayoutLeft: a row's components are apart
+          const T v = f.view()(static_cast<std::size_t>(r.begin), static_cast<std::size_t>(c));
+          const auto* b = reinterpret_cast<const std::byte*>(&v);
+          values.insert(values.end(), b, b + sizeof(T));
+        }
+      }
+    }
+  }
+  t.def = agreed(t.name, "default", defs);
+  t.global = agreed(t.name, "global", globals);
+  std::sort(order.begin(), order.end());
+  t.ids.reserve(order.size());
+  t.values.resize(values.size());
+  for (std::size_t i = 0; i < order.size(); ++i) {
+    t.ids.push_back(order[i].first);
+    std::memcpy(t.values.data() + i * t.width, values.data() + order[i].second * t.width, t.width);
+  }
+}
+
+// The blocks a tag's values cover whole, and its storage class when the
+// mesh did not record one: 0 for bit tags, 2 when every value is in a covered
+// block, else 1.
+void place(const std::vector<Block>& blocks, TagPlan& t) {
+  t.dense.assign(blocks.size(), false);
+  std::size_t covered = 0;
+  for (std::size_t b = 0; b < blocks.size(); ++b) {
+    const Block& k = blocks[b];
+    const auto lo = std::lower_bound(t.ids.begin(), t.ids.end(), k.start);
+    const auto hi = std::lower_bound(lo, t.ids.end(), k.start + k.count);
+    t.dense[b] = k.count > 0 && static_cast<std::uint64_t>(hi - lo) == k.count;
+    if (t.dense[b]) covered += k.count;
+  }
+  if (t.format.storage_class < 0) {
+    t.format.storage_class = t.format.kind == TagFormat::Kind::bit ? 0
+                             : !t.ids.empty() && covered == t.ids.size() ? 2
+                                                                         : 1;
+  }
+}
+
+// One tag per field family, checked: one family per name, per_entity
+// layouts, no pending writes, members that agree on their default and
+// global values.
+void plan_tags(const HostMesh& mesh, Plan& p) {
+  std::map<std::string, std::vector<FieldInfo>> by_name;
+  for (const FieldInfo& info : mesh.fields().list()) by_name[info.name].push_back(info);
+  for (const auto& [name, members] : by_name) {
+    const FieldInfo& first = members.front();
+    for (const FieldInfo& info : members) {
+      if (info.family != first.family) {
+        reject("the fields named '" + name + "' differ in value type, component count or handle mark; one MOAB tag "
+               "cannot hold them all");
+      }
+      if (info.layout.kind != Layout::Kind::per_entity) {
+        reject("field '" + name + "' has the layout " + describe(info.layout) + "; only per_entity fields are written");
+      }
+      if (const std::size_t n = mesh.fields().pending_count(info.id); n != 0) {
+        reject("field '" + name + "' has " + std::to_string(n) + " uncommitted writes; commit it before writing");
+      }
+      if (info.variable || info.handle) {
+        reject("field '" + name + "' holds " + (info.variable ? "variable-length" : "handle") +
+               " values, which are not written yet");
+      }
+    }
+    TagPlan t;
+    t.name = name;
+    t.type = first.type;
+    t.ncomp = first.ncomp;
+    t.format = mesh.fields().tag_format(first.family);
+    dispatch_data_type(t.type, [&]<class T>() { collect_family<T>(mesh, p, members, t); });
+    place(p.blocks, t);
+    p.tags.push_back(std::move(t));
+  }
+}
+
 Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
   Plan p;
   p.dims = written_dims(mesh, options);
@@ -176,6 +324,11 @@ Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
   for (auto& id : p.fid[set_dim]) id = next++;
   p.max_id = next - 1;
   plan_sets(mesh, p);
+
+  p.blocks.push_back(Block{"nodes", 1, nv});
+  for (const Group& g : p.groups) p.blocks.push_back(Block{"elements/" + g.name(), g.start, g.rows.size()});
+  p.blocks.push_back(Block{"sets", p.set_start, p.fid[set_dim].size()});
+  plan_tags(mesh, p);
   return p;
 }
 
@@ -225,6 +378,80 @@ class File {
  private:
   Id dcpl_, file_;
 };
+
+// The HDF5 types of a tag's values: `file` as committed (an array of ncomp
+// for plain tags of several components, a bitfield of nbits for bit tags,
+// opaque of ncomp bytes for opaque ones) and `mem` as they are in memory.
+struct TagTypes {
+  Id file, mem;
+};
+
+TagTypes tag_types(const TagPlan& t) {
+  TagTypes out;
+  const std::string what = "the type of tag " + t.name;
+  if (t.format.kind == TagFormat::Kind::bit) {
+    out.file = h5::check(H5Tcopy(H5T_STD_B8LE), "copy " + what);
+    h5::check(H5Tset_precision(out.file.get(), static_cast<std::size_t>(t.format.nbits)), "set the bits of " + what);
+    out.mem = h5::check(H5Tcopy(out.file.get()), "copy " + what);
+    return out;
+  }
+  if (t.format.kind == TagFormat::Kind::opaque) {
+    out.file = h5::check(H5Tcreate(H5T_OPAQUE, static_cast<std::size_t>(t.ncomp)), "create " + what);
+    h5::check(H5Tset_tag(out.file.get(), ""), "tag " + what);
+    out.mem = h5::check(H5Tcopy(out.file.get()), "copy " + what);
+    return out;
+  }
+  hid_t file = -1, mem = -1;
+  dispatch_data_type(t.type, [&]<class T>() {
+    mem = h5::native<T>();
+    file = std::is_floating_point_v<T> ? (sizeof(T) == 4 ? H5T_IEEE_F32LE : H5T_IEEE_F64LE)
+           : std::is_signed_v<T> ? (sizeof(T) == 1 ? H5T_STD_I8LE : sizeof(T) == 4 ? H5T_STD_I32LE : H5T_STD_I64LE)
+                                 : (sizeof(T) == 1 ? H5T_STD_U8LE : sizeof(T) == 4 ? H5T_STD_U32LE : H5T_STD_U64LE);
+  });
+  if (t.ncomp == 1) {
+    out.file = h5::check(H5Tcopy(file), "copy " + what);
+    out.mem = h5::check(H5Tcopy(mem), "copy " + what);
+  } else {
+    const hsize_t n = static_cast<hsize_t>(t.ncomp);
+    out.file = h5::check(H5Tarray_create2(file, 1, &n), "create " + what);
+    out.mem = h5::check(H5Tarray_create2(mem, 1, &n), "create " + what);
+  }
+  return out;
+}
+
+// /tstt/tags/<name> with its committed type, class, default and global, and
+// the sparse values; the dense ones go to <block>/tags/<name>.
+void write_tag(const File& f, hid_t tstt, const std::vector<Block>& blocks, const TagPlan& t) {
+  const Id tags = h5::open_group(tstt, "tags");
+  const Id g = f.group(tags.get(), t.name);
+  h5::check(H5Oset_comment(g.get(), t.name.c_str()), "comment the tag " + t.name);
+  const TagTypes types = tag_types(t);
+  f.commit_type(g.get(), "type", types.file.get());
+  const std::int32_t cls = t.format.storage_class;
+  File::attribute(g.get(), "class", H5T_STD_I32LE, H5T_NATIVE_INT32, &cls);
+  if (t.def) File::attribute(g.get(), "default", types.file.get(), types.mem.get(), t.def->data());
+  if (t.global) File::attribute(g.get(), "global", types.file.get(), types.mem.get(), t.global->data());
+
+  std::vector<std::uint64_t> ids;
+  std::vector<std::byte> values;
+  for (std::size_t b = 0; b < blocks.size(); ++b) {
+    const Block& k = blocks[b];
+    const auto lo = static_cast<std::size_t>(std::lower_bound(t.ids.begin(), t.ids.end(), k.start) - t.ids.begin());
+    const auto hi = static_cast<std::size_t>(std::lower_bound(t.ids.begin(), t.ids.end(), k.start + k.count) - t.ids.begin());
+    const std::byte* first = t.values.data() + lo * t.width;
+    if (t.dense[b]) {
+      const Id dir = h5::open_group(tstt, k.path + "/tags");
+      f.dataset(dir.get(), t.name, types.file.get(), {k.count}, types.mem.get(), first);
+    } else {
+      ids.insert(ids.end(), t.ids.begin() + static_cast<std::ptrdiff_t>(lo), t.ids.begin() + static_cast<std::ptrdiff_t>(hi));
+      values.insert(values.end(), first, t.values.data() + hi * t.width);
+    }
+  }
+  if (!ids.empty()) {
+    f.dataset(g.get(), "id_list", H5T_STD_U64LE, {ids.size()}, H5T_NATIVE_UINT64, ids.data());
+    f.dataset(g.get(), "values", types.file.get(), {ids.size()}, types.mem.get(), values.data());
+  }
+}
 
 void write_file(const std::string& name, const HostMesh& mesh, const Plan& p) {
   const File f(name);
@@ -288,6 +515,7 @@ void write_file(const std::string& name, const HostMesh& mesh, const Plan& p) {
     f.group(sets.get(), "tags");
   }
   f.group(tstt.get(), "tags");
+  for (const TagPlan& t : p.tags) write_tag(f, tstt.get(), p.blocks, t);
   File::attribute(tstt.get(), "max_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, &p.max_id);
   f.flush();
 }

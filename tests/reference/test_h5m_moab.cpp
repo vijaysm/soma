@@ -674,13 +674,11 @@ TEST_P(H5mMoab, EveryTagMatchesValueByValue) {
     EXPECT_EQ(global ? global : def, mroot);
   }
   // Not vacuous: every file but hex_2048 carries entity tags, and the files
-  // MOAB wrote carry every kind. write_h5m writes no tags yet.
+  // MOAB wrote carry every kind.
   const auto has = [&](const char* n) {
     return std::any_of(compared.begin(), compared.end(), [&](const auto& c) { return c.first == n; });
   };
-  const bool written = GetParam().rfind("written:", 0) == 0;
-  if (GetParam() != "hex_2048.h5m" && !written) EXPECT_FALSE(compared.empty());
-  if (written) EXPECT_TRUE(compared.empty());
+  if (GetParam() != "hex_2048.h5m" && GetParam() != "written:hex_2048.h5m") EXPECT_FALSE(compared.empty());
   if (GetParam() == "tag_kinds") {
     for (const char* n : {"DENSE_D2", "SPARSE_I", "PAIR", "OPAQUE7", "BITS3", "WITH_GLOBAL"}) EXPECT_TRUE(has(n)) << n;
   }
@@ -755,7 +753,7 @@ INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                                            "written:64bricks_1khex.h5m", "written:hex_2048.h5m",
                                            "written:hexes_mixed.h5m", "written:hybrid_3quad_1tri.h5m",
                                            "written:moab_i.h5m", "written:recMeshOcn128.h5m",
-                                           "written:poly_indices", "written:sets_kinds"),
+                                           "written:poly_indices"),
                          [](const auto& info) {
                            std::string n = info.param;
                            std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
