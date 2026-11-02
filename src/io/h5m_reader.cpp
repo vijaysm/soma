@@ -14,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -544,6 +545,49 @@ std::optional<TagKind> tag_kind(hid_t type, std::string& why) {
   }
 }
 
+// Handle values read as GO: the tag's shape over a native signed 64-bit type.
+// A file id beyond the GO range converts to its largest value, which names
+// nothing and is rejected with the others.
+TagKind handle_kind(hid_t type, const TagKind& k, const std::string& where) {
+  if (k.type != DataType::u64 && k.type != DataType::i64) {
+    fail(where + " holds handles, but its values are " + std::string(name(k.type)) + ", not 64-bit file ids");
+  }
+  TagKind h;
+  h.type = DataType::i64;
+  h.ncomp = k.ncomp;
+  if (H5Tget_class(type) == H5T_ARRAY) {
+    const int rank = H5Tget_array_ndims(type);
+    std::vector<hsize_t> dims(static_cast<std::size_t>(rank));
+    h5::check(H5Tget_array_dims2(type, dims.data()), "get the dimensions of an array type");
+    h.mem = h5::check(H5Tarray_create2(H5T_NATIVE_INT64, static_cast<unsigned>(rank), dims.data()),
+                      "create an array type");
+  } else {
+    h.mem = h5::check(H5Tcopy(H5T_NATIVE_INT64), "copy a native type");
+  }
+  return h;
+}
+
+// Handle values are 0 (no entity) or the file id of an entity or set. owner(i)
+// names the holder of value i.
+template <class T, class Owner>
+void check_handles(std::span<const T> v, const Locator& at, const std::string& where, Owner&& owner) {
+  if constexpr (std::is_same_v<T, GO>) {
+    for (std::size_t i = 0; i < v.size(); ++i) {
+      if (v[i] != 0 && at.range_of(v[i]) == nullptr) {
+        fail(where + ": " + owner(i) + " holds the handle " + str(std::int64_t{v[i]}) +
+             ", which names no entity or set");
+      }
+    }
+  }
+}
+
+template <class T>
+void check_handle_options(const FieldOptions<T>& o, const Locator& at, const std::string& where) {
+  const auto named = [](const char* what) { return [what](std::size_t) { return std::string("the ") + what; }; };
+  if (o.default_value) check_handles<T>(*o.default_value, at, where, named("default"));
+  if (o.global_value) check_handles<T>(*o.global_value, at, where, named("global"));
+}
+
 // A dense tag dataset: one row per entity of the group whose file ids start at first.
 struct Dense {
   std::string path;  // below /tstt
@@ -595,7 +639,7 @@ class FullDomains {
 template <class T>
 void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKind& k,
                 const std::vector<Dense>& dense, const Locator& at, FullDomains& full,
-                H5mReport& report) {
+                H5mReport& report, bool handle) {
   const std::string where = "/tstt/tags/" + name;
   const auto nc = static_cast<std::size_t>(k.ncomp);
   std::array<std::vector<LO>, num_field_slots> lids;
@@ -639,6 +683,17 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
   FieldOptions<T> options;
   options.default_value = read_value_attribute<T>(tag.get(), "default", k, where);
   options.global_value = read_value_attribute<T>(tag.get(), "global", k, where);
+  options.handle = handle;
+  if (handle) {
+    check_handle_options(options, at, where);
+    for (int d = 0; d < num_field_slots; ++d) {
+      const auto& l = lids[static_cast<std::size_t>(d)];
+      const auto gid = detail::slot_gid(mesh, d);
+      check_handles<T>(values[static_cast<std::size_t>(d)], at, where, [&](std::size_t i) {
+        return "file id " + str(gid(static_cast<std::size_t>(l[i / nc])));
+      });
+    }
+  }
 
   bool any = false;
   for (int d = 0; d < num_field_slots; ++d) {
@@ -722,7 +777,8 @@ std::optional<std::vector<T>> read_var_attribute(hid_t tag, const char* name, co
 // holds the last index of each one's run of values.
 template <class T>
 void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKind& k,
-                    const std::vector<Dense>& dense, const Locator& at, FullDomains& full, H5mReport& report) {
+                    const std::vector<Dense>& dense, const Locator& at, FullDomains& full, H5mReport& report,
+                    bool handle) {
   const std::string where = "/tstt/tags/" + name;
   if (!dense.empty()) {
     fail("/tstt/" + dense.front().path + " holds dense values of a variable-length tag, which MOAB does not write");
@@ -758,6 +814,13 @@ void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const T
     }
     if (!h5::exists(tag.get(), "values")) fail(where + " has an id_list but no values");
     values = read_rows<T>(tstt, "tags/" + name + "/values", k, static_cast<GO>(prev + 1));
+    if (handle) {
+      check_handles<T>(values, at, where, [&](std::size_t i) {
+        const auto j = static_cast<std::size_t>(
+            std::lower_bound(last.begin(), last.end(), static_cast<std::int64_t>(i)) - last.begin());
+        return "file id " + str(ids[j]);
+      });
+    }
     std::size_t begin = 0;
     for (std::size_t i = 0; i < n; ++i) {
       const IdRange* r = ids[i] <= static_cast<std::uint64_t>(std::numeric_limits<GO>::max())
@@ -773,6 +836,8 @@ void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const T
   FieldOptions<T> options;
   options.default_value = read_var_attribute<T>(tag.get(), "default", k, where);
   options.global_value = read_var_attribute<T>(tag.get(), "global", k, where);
+  options.handle = handle;
+  if (handle) check_handle_options(options, at, where);
   bool any = false;
   for (int d = 0; d < num_field_slots; ++d) {
     auto& rs = runs[static_cast<std::size_t>(d)];
@@ -836,19 +901,17 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
     const Id tag = h5::open_group(tstt, "tags/" + name);
     const bool variable = h5::has_attribute(tag.get(), "variable_length") &&
                           h5::read_attribute<std::int32_t>(tag.get(), "variable_length", where) != 0;
-    if (h5::has_attribute(tag.get(), "is_handle") &&
-        h5::read_attribute<std::int32_t>(tag.get(), "is_handle", where) != 0) {
-      report.skipped.push_back({name, "handle-valued tags are not read yet"});
-      continue;
-    }
+    const bool handle = h5::has_attribute(tag.get(), "is_handle") &&
+                        h5::read_attribute<std::int32_t>(tag.get(), "is_handle", where) != 0;
     if (!h5::exists(tag.get(), "type")) fail(where + " has no type");
     const Id type = h5::check(H5Topen2(tag.get(), "type", H5P_DEFAULT), "open the type of " + where);
     std::string why;
-    const auto kind = tag_kind(type.get(), why);
+    auto kind = tag_kind(type.get(), why);
     if (!kind) {
       report.skipped.push_back({name, why});
       continue;
     }
+    if (handle) kind = handle_kind(type.get(), *kind, where);
     const auto it = dense.find(name);
     const std::vector<Dense> none;
     const std::vector<Dense>& sources = it != dense.end() ? it->second : none;
@@ -859,12 +922,12 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
         continue;
       }
       dispatch_data_type(kind->type, [&]<class T>() {
-        import_var_tag<T>(mesh, tstt, name, *kind, sources, at, full, report);
+        import_var_tag<T>(mesh, tstt, name, *kind, sources, at, full, report, handle);
       });
       continue;
     }
     dispatch_data_type(kind->type, [&]<class T>() {
-      import_tag<T>(mesh, tstt, name, *kind, sources, at, full, report);
+      import_tag<T>(mesh, tstt, name, *kind, sources, at, full, report, handle);
     });
   }
 }

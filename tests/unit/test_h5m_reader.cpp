@@ -23,6 +23,7 @@
 #include <gtest/gtest.h>
 
 #include "h5m_writer.hpp"
+#include "soma/core/handle_ref.hpp"
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/fields/data_type.hpp"
@@ -447,7 +448,7 @@ TEST_F(H5mRead, TagsItCannotReadYetAreReported) {
   report.skipped.push_back({"stale", "left from before"});
   HostMesh m = soma::read_h5m(file(), {}, report);
   EXPECT_TRUE(skipped(report, "varlen", "no values on entities or sets"));
-  EXPECT_TRUE(skipped(report, "handle", "handle-valued"));
+  EXPECT_TRUE(skipped(report, "handle", "no values on entities or sets"));
   EXPECT_TRUE(skipped(report, "mesh_only", "no values on entities or sets"));
   EXPECT_TRUE(skipped(report, "short", "16-bit integer"));
   EXPECT_FALSE(skipped(report, "stale", ""));
@@ -677,6 +678,121 @@ TEST_F(H5mRead, RejectsVariableLengthValuesItCannotPlace) {
   }, {"/tstt/tags/VL/id_list lists file id 9, which names no entity"});
   expect("twice", [&](Writer& w) { w.var_sparse("VL", {4, 2, 4}, {0, 1, 2}, v, 3); },
          {"/tstt/tags/VL has two values on file id 4"});
+}
+
+// Handle tags of every storage: dense on vertices, sparse on a quad and a
+// set, variable-length, and two per entity. Values stay file ids, 0 is null,
+// and HandleRef resolves them.
+TEST_F(H5mRead, HandleTagsAreHandleFields) {
+  {
+    Writer w(file());
+    square(w);
+    w.sets(6, 2);
+    const std::uint64_t zero = 0;
+    w.tag("H", 2, H5T_NATIVE_UINT64, &zero);
+    w.int_attribute("tags/H", "is_handle", 1);
+    const std::uint64_t hv[] = {5, 0, 6, 1};
+    w.dense("nodes", "H", hv, 4);
+    w.tag("SH", 1, H5T_NATIVE_UINT64);
+    w.int_attribute("tags/SH", "is_handle", 1);
+    const std::uint64_t sv[] = {2, 6};
+    w.sparse("SH", {5, 7}, sv);
+    w.tag("VH", 1, H5T_NATIVE_UINT64);
+    w.int_attribute("tags/VH", "is_handle", 1);
+    w.int_attribute("tags/VH", "variable_length", 1);
+    const std::uint64_t vv[] = {1, 5, 7};
+    w.var_sparse("VH", {6}, {2}, vv, 3);
+    const hsize_t two = 2;
+    const hid_t pair = H5Tarray_create2(H5T_NATIVE_UINT64, 1, &two);
+    w.tag("AH", 1, pair);
+    H5Tclose(pair);
+    w.int_attribute("tags/AH", "is_handle", 1);
+    const std::uint64_t av[] = {5, 6};
+    w.sparse("AH", {1}, av);
+  }
+  soma::H5mReport report;
+  const HostMesh m = soma::read_h5m(file(), {}, report);
+  EXPECT_TRUE(report.skipped.empty());
+  const auto& f = m.fields();
+  const auto h = f.get<GO>("H", 0);
+  EXPECT_TRUE(f.info(h.id()).handle);
+  EXPECT_EQ(h.default_value(), std::vector<GO>{0});
+  EXPECT_EQ(f.family<GO>("H", 1, soma::Layout::per_entity(), true), f.info(h.id()).family);
+  const auto ref = soma::HandleRef<Kokkos::HostSpace>::build(m);
+  for (const auto& [v, target] : std::vector<std::pair<GO, GO>>{{1, 5}, {2, 0}, {3, 6}, {4, 1}}) {
+    const GO got = h.value_or_default(0, lid_of(m, 0, v));
+    EXPECT_EQ(got, target) << v;
+    const soma::HandleTarget t = ref.resolve(got);
+    EXPECT_EQ(t.valid(), target != 0) << v;
+  }
+  EXPECT_EQ(ref.resolve(5).slot, 2);
+  EXPECT_EQ(ref.resolve(6).slot, soma::set_dim);
+  EXPECT_EQ(f.get<GO>("SH", 2).value_or_default(2, 0), 2);
+  EXPECT_EQ(f.get<GO>("SH", soma::set_dim).value_or_default(soma::set_dim, 1), 6);
+  const auto vh = f.get_var<GO>("VH", soma::set_dim);
+  EXPECT_TRUE(f.info(vh.id()).handle);
+  const auto run = vh.value_or_default(soma::set_dim, 0);
+  EXPECT_EQ(std::vector<GO>(run.begin(), run.end()), (std::vector<GO>{1, 5, 7}));
+  const auto ah = f.get<GO>("AH", 0);
+  EXPECT_EQ(ah.ncomp(), 2);
+  EXPECT_EQ(ah.value_or_default(0, lid_of(m, 0, 1), 1), 6);
+}
+
+TEST_F(H5mRead, RejectsHandlesThatNameNothing) {
+  const auto expect = [&](const std::string& name, const std::function<void(Writer&)>& write,
+                          const std::vector<std::string>& needles) {
+    SCOPED_TRACE(name);
+    {
+      Writer w(file(name + ".h5m"));
+      square(w);
+      write(w);
+      w.int_attribute("tags/H", "is_handle", 1);
+    }
+    expect_rejected(file(name + ".h5m"), needles);
+  };
+  expect("dense", [](Writer& w) {
+    w.tag("H", 2, H5T_NATIVE_UINT64);
+    const std::uint64_t v[] = {5, 0, 9, 1};
+    w.dense("nodes", "H", v, 4);
+  }, {"/tstt/tags/H: file id 3 holds the handle 9, which names no entity or set"});
+  expect("sparse", [](Writer& w) {
+    w.tag("H", 1, H5T_NATIVE_UINT64);
+    const std::uint64_t v[] = {1, 2, 8};
+    w.sparse("H", {4, 5, 2}, v);
+  }, {"/tstt/tags/H: file id 2 holds the handle 8"});
+  // Two handles per entity: value 2 is the first of file id 4's.
+  expect("pairs", [](Writer& w) {
+    const hsize_t two = 2;
+    const hid_t pair = H5Tarray_create2(H5T_NATIVE_UINT64, 1, &two);
+    w.tag("H", 1, pair);
+    H5Tclose(pair);
+    const std::uint64_t v[] = {5, 1, 9, 1, 2, 3};
+    w.sparse("H", {2, 4, 1}, v);
+  }, {"/tstt/tags/H: file id 4 holds the handle 9"});
+  expect("default", [](Writer& w) {
+    const std::uint64_t d = 7;
+    w.tag("H", 1, H5T_NATIVE_UINT64, &d);
+  }, {"/tstt/tags/H: the default holds the handle 7"});
+  expect("global", [](Writer& w) {
+    const std::uint64_t g = 7;
+    w.tag("H", 1, H5T_NATIVE_UINT64, nullptr, &g);
+  }, {"/tstt/tags/H: the global holds the handle 7"});
+  expect("variable", [](Writer& w) {
+    w.tag("H", 1, H5T_NATIVE_UINT64);
+    w.int_attribute("tags/H", "variable_length", 1);
+    const std::uint64_t v[] = {1, 2, 3, 70};
+    w.var_sparse("H", {5, 1}, {1, 3}, v, 4);
+  }, {"/tstt/tags/H: file id 1 holds the handle 70"});
+  expect("huge", [](Writer& w) {
+    w.tag("H", 1, H5T_NATIVE_UINT64);
+    const std::uint64_t v[] = {(std::uint64_t{1} << 63) + 1};
+    w.sparse("H", {1}, v);
+  }, {"holds the handle 9223372036854775807, which names no entity or set"});
+  expect("real", [](Writer& w) {
+    w.tag("H", 1, H5T_NATIVE_DOUBLE);
+    const double v[] = {1};
+    w.sparse("H", {1}, v);
+  }, {"/tstt/tags/H holds handles, but its values are f64, not 64-bit file ids"});
 }
 
 TEST_F(H5mRead, RejectsSetsItCannotPlace) {
