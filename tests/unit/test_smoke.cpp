@@ -27,17 +27,26 @@ TEST(Smoke, ParallelReduceOnDefaultExecutionSpace) {
   EXPECT_EQ(soma_test::triangular_sum_on_default_space(n), n * (n - 1) / 2);
 }
 
-TEST(Smoke, DefaultExecutionSpaceIsTheParallelHostBackend) {
+TEST(Smoke, DefaultExecutionSpaceIsTheMostParallelBackend) {
   using Default = Kokkos::DefaultExecutionSpace;
-#if defined(KOKKOS_ENABLE_CUDA) || defined(KOKKOS_ENABLE_HIP) || defined(KOKKOS_ENABLE_SYCL)
-  GTEST_SKIP() << "device backend enabled";
-#elif defined(KOKKOS_ENABLE_OPENMP)
-  EXPECT_TRUE((std::is_same_v<Default, Kokkos::OpenMP>));
-#elif defined(KOKKOS_ENABLE_THREADS)
-  EXPECT_TRUE((std::is_same_v<Default, Kokkos::Threads>));
+  using Host = Kokkos::DefaultHostExecutionSpace;
+#if defined(KOKKOS_ENABLE_CUDA)
+  EXPECT_TRUE((std::is_same_v<Default, Kokkos::Cuda>));
+#elif defined(KOKKOS_ENABLE_HIP)
+  EXPECT_TRUE((std::is_same_v<Default, Kokkos::HIP>));
+#elif defined(KOKKOS_ENABLE_SYCL)
+  EXPECT_TRUE((std::is_same_v<Default, Kokkos::SYCL>));
 #else
-  EXPECT_TRUE((std::is_same_v<Default, Kokkos::Serial>));
+  EXPECT_TRUE((std::is_same_v<Default, Host>));
 #endif
-  std::printf("default execution space: %s, concurrency %d\n", Default::name(),
-              static_cast<int>(Default().concurrency()));
+#if defined(KOKKOS_ENABLE_OPENMP)
+  EXPECT_TRUE((std::is_same_v<Host, Kokkos::OpenMP>));
+#elif defined(KOKKOS_ENABLE_THREADS)
+  EXPECT_TRUE((std::is_same_v<Host, Kokkos::Threads>));
+#else
+  EXPECT_TRUE((std::is_same_v<Host, Kokkos::Serial>));
+#endif
+  std::printf("default execution space: %s, concurrency %d; host: %s, concurrency %d\n",
+              Default::name(), static_cast<int>(Default().concurrency()), Host::name(),
+              static_cast<int>(Host().concurrency()));
 }
