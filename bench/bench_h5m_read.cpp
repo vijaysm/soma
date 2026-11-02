@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
-// Reading a .h5m file: SOMA read_h5m against MOAB load_file, both serial and
-// both reading every tag. Each read is checked to have found the same
+// Reading a .h5m file: SOMA read_h5m against MOAB load_file, both serial.
+// MOAB reads everything; SOMA every fixed-length tag on vertices and elements,
+// not sets or the other tag kinds yet. Each read is checked to have found the same
 // vertex and element counts; a mismatch exits with status 2.
 //
 //   bench_h5m_read [--json] [--repeats N] [--box N] [mesh.h5m ...]
