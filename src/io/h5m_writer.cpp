@@ -95,7 +95,7 @@ struct Plan {
   SetTable sets;
   std::uint64_t max_id = 0;
   std::vector<Block> blocks;  // in file id order
-  std::vector<TagPlan> tags;  // in name order
+  std::vector<TagPlan> tags;  // families, then mesh values, each in name order
 };
 
 // The number of temporary file names write_h5m tries before it gives up.
@@ -274,7 +274,7 @@ void place(const std::vector<Block>& blocks, TagPlan& t) {
 
 // One tag per field family, checked: one family per name, per_entity
 // layouts, no pending writes, members that agree on their default and
-// global values.
+// global values; and one per mesh value.
 void plan_tags(const HostMesh& mesh, Plan& p) {
   std::map<std::string, std::vector<FieldInfo>> by_name;
   for (const FieldInfo& info : mesh.fields().list()) by_name[info.name].push_back(info);
@@ -299,6 +299,24 @@ void plan_tags(const HostMesh& mesh, Plan& p) {
     t.ncomp = first.ncomp;
     t.format = mesh.fields().tag_format(first.family);
     dispatch_data_type(t.type, [&]<class T>() { collect_family<T>(mesh, p, members, t); });
+    place(p.blocks, t);
+    p.tags.push_back(std::move(t));
+  }
+  // Mesh values: tags with no entity values; class 3 (mesh) when they hold a
+  // global value and the mesh recorded no class.
+  for (const std::string& name : mesh.values().names()) {
+    if (by_name.contains(name)) reject("a field and a mesh value are both named '" + name + "'");
+    const MeshValue& v = mesh.values().at(name);
+    if (v.handle) reject("mesh value '" + name + "' holds handles, which are not written yet");
+    TagPlan t;
+    t.name = name;
+    t.type = v.type;
+    t.ncomp = v.ncomp;
+    t.format = v.format;
+    t.def = v.default_value;
+    t.global = v.global_value;
+    dispatch_data_type(t.type, [&]<class T>() { t.width = sizeof(T); });
+    if (t.format.storage_class < 0 && t.global) t.format.storage_class = 3;
     place(p.blocks, t);
     p.tags.push_back(std::move(t));
   }

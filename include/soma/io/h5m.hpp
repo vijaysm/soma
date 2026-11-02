@@ -113,7 +113,10 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // left out, as HDF5 has no empty array. Two families of one name, other
 // layouts, uncommitted
 // writes, members that disagree on their default or global value, and
-// values on a dimension not written throw std::invalid_argument.
+// values on a dimension not written throw std::invalid_argument. Mesh
+// values become tags with no entity values (class 3 when they hold a global
+// value and no class was recorded); a field and a mesh value of one name
+// throw.
 //
 // The file is written to a new temporary next to `path` (`path` + "." + six
 // random characters, created exclusively) and renamed over `path`, so a

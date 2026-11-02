@@ -28,6 +28,7 @@
 #include <gtest/gtest.h>
 
 #include "soma/core/mesh.hpp"
+#include "soma/core/mesh_values.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/set_builder.hpp"
 #include "soma/core/transfer.hpp"
@@ -326,6 +327,14 @@ TEST_P(H5mWriteBack, ReadsBackTheSameEntitiesUnderTheSameFileIds) {
     }
     EXPECT_EQ(sets_of(back), sets_of(in));
     EXPECT_EQ(difference(fields_of(back), fields_of(in)), "");
+    ASSERT_EQ(back.values().names(), in.values().names());
+    for (const std::string& n : in.values().names()) {
+      const soma::MeshValue& a = in.values().at(n);
+      const soma::MeshValue& b = back.values().at(n);
+      EXPECT_TRUE(a.type == b.type && a.ncomp == b.ncomp && a.handle == b.handle && a.format == b.format &&
+                  a.default_value == b.default_value && a.global_value == b.global_value)
+          << n;
+    }
   }
 }
 
@@ -743,6 +752,58 @@ TEST(H5mWrite, VariableLengthFieldsBecomeVariableLengthTags) {
   want.at({"VO", soma::set_dim}).def.reset();
   const HostMesh back = soma::read_h5m(out);
   EXPECT_EQ(difference(fields_of(back), want), "");
+}
+
+// Mesh values become tags with no entity values: class 3 when they hold a
+// global value and no class was recorded, else their recorded class or 1.
+TEST(H5mWrite, MeshValuesBecomeTagsWithoutValues) {
+  using Kind = soma::TagFormat::Kind;
+  using soma::MeshValue;
+  HostMesh in = mixed_2d();
+  const auto bytes = [](auto... v) {
+    const std::vector w{v...};
+    return MeshValue::bytes_of(std::span<const typename decltype(w)::value_type>(w));
+  };
+  in.values().set("MV", MeshValue{soma::DataType::i32, 2, false, {}, std::nullopt, bytes(std::int32_t{42}, std::int32_t{43})});
+  in.values().set("DECL", MeshValue{soma::DataType::f64, 1, false, {}, bytes(1.5), std::nullopt});
+  in.values().set("VG", MeshValue{soma::DataType::i32, 0, false, {}, std::nullopt, bytes(std::int32_t{1}, std::int32_t{2}, std::int32_t{3}, std::int32_t{4})});
+  in.values().set("KEEP", MeshValue{soma::DataType::u8, 3, false, {2, Kind::opaque, 0}, bytes(std::uint8_t{7}, std::uint8_t{8}, std::uint8_t{9}), std::nullopt});
+  const fs::path out = scratch() / "mesh_values.h5m";
+  soma::write_h5m(in, out);
+  const hid_t file = open_file(out);
+  EXPECT_EQ(int_attribute(file, "/tstt/tags/MV", "class"), 3);
+  EXPECT_EQ(int_attribute(file, "/tstt/tags/DECL", "class"), 1);
+  EXPECT_EQ(int_attribute(file, "/tstt/tags/VG", "class"), 3);
+  EXPECT_EQ(int_attribute(file, "/tstt/tags/VG", "variable_length"), 1);
+  EXPECT_EQ(int_attribute(file, "/tstt/tags/KEEP", "class"), 2);
+  EXPECT_EQ(H5Aexists_by_name(file, "/tstt/tags/MV", "default", H5P_DEFAULT), 0);
+  EXPECT_EQ(H5Lexists(file, "/tstt/tags/MV/id_list", H5P_DEFAULT), 0);
+  H5Fclose(file);
+
+  const HostMesh back = soma::read_h5m(out);
+  EXPECT_EQ(back.values().names(), (std::vector<std::string>{"DECL", "KEEP", "MV", "VG"}));
+  const std::map<std::string, int> classes{{"MV", 3}, {"DECL", 1}, {"VG", 3}, {"KEEP", 2}};
+  for (const std::string& n : in.values().names()) {
+    const MeshValue& a = in.values().at(n);
+    const MeshValue& b = back.values().at(n);
+    EXPECT_EQ(b.type, a.type) << n;
+    EXPECT_EQ(b.ncomp, a.ncomp) << n;
+    EXPECT_EQ(b.handle, a.handle) << n;
+    EXPECT_EQ(b.default_value, a.default_value) << n;
+    EXPECT_EQ(b.global_value, a.global_value) << n;
+    EXPECT_EQ(b.format, (soma::TagFormat{classes.at(n), a.format.kind, a.format.nbits})) << n;
+  }
+
+  in.fields().add_tag<double>("MV", 0, 1);
+  const fs::path dir = scratch() / "clash";
+  fs::create_directory(dir);
+  try {
+    soma::write_h5m(in, dir / "m.h5m");
+    ADD_FAILURE() << "written with a clash";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_STREQ(e.what(), "write_h5m: a field and a mesh value are both named 'MV'");
+  }
+  EXPECT_TRUE(listing(dir).empty());
 }
 
 TEST(H5mWrite, PolygonsGetOneGroupPerArity) {
