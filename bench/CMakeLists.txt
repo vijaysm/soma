@@ -19,4 +19,11 @@ if(SOMA_ENABLE_HDF5)
     SOMA_BENCH_LARGE_DATA_DIR="${SOMA_LARGE_DATA_DIR}"
     SOMA_BENCH_BUILD_TYPE="$<IF:$<CONFIG:>,unset,$<CONFIG>>"
     SOMA_BENCH_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+  add_executable(bench_h5m_write bench_h5m_write.cpp)
+  target_link_libraries(bench_h5m_write PRIVATE soma soma_warnings ${SOMA_MOAB_TARGET})
+  target_compile_definitions(bench_h5m_write PRIVATE
+    SOMA_BENCH_DATA_DIR="${PROJECT_SOURCE_DIR}/data"
+    SOMA_BENCH_LARGE_DATA_DIR="${SOMA_LARGE_DATA_DIR}"
+    SOMA_BENCH_BUILD_TYPE="$<IF:$<CONFIG:>,unset,$<CONFIG>>"
+    SOMA_BENCH_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 endif()
