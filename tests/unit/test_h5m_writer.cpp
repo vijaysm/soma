@@ -14,6 +14,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <span>
 #include <set>
 #include <stdexcept>
@@ -148,9 +149,8 @@ struct FieldText {
   int ncomp = 0;
   bool handle = false;
   soma::TagFormat format{};
-  std::vector<std::byte> def, global;
+  std::optional<std::vector<std::byte>> def, global;
   std::map<GO, std::vector<std::byte>> values;
-  friend bool operator==(const FieldText&, const FieldText&) = default;
 };
 
 template <class T>
@@ -165,18 +165,31 @@ std::map<std::pair<std::string, int>, FieldText> fields_of(const HostMesh& m) {
   const auto gid_of = [&](int slot, LO l) {
     return slot == soma::set_dim ? m.sets().gid()(static_cast<std::size_t>(l)) : m.gid(slot)(static_cast<std::size_t>(l));
   };
+  const auto opt = [](const auto& v) -> std::optional<std::vector<std::byte>> {
+    if (!v) return std::nullopt;
+    return raw(std::span(*v));
+  };
   for (const soma::FieldInfo& info : m.fields().list()) {
     soma::dispatch_data_type(info.type, [&]<class T>() {
-      const auto f = m.fields().get<T>(info.id);
       for (const int slot : info.dims) {
         FieldText& t = out[{info.name, slot}];
         t.type = info.type;
         t.ncomp = info.ncomp;
         t.handle = info.handle;
         t.format = m.fields().tag_format(info.family);
-        t.def = raw(std::span<const T>(f.default_value()));
-        t.global = raw(std::span<const T>(f.global_value()));
         const LO n = slot == soma::set_dim ? m.sets().count() : m.count(slot);
+        if (info.variable) {
+          const auto f = m.fields().get_var<T>(info.id);
+          t.def = opt(f.default_value());
+          t.global = opt(f.global_value());
+          for (LO l = 0; l < n; ++l) {
+            if (f.space().entity_rows(slot, l).valid()) t.values[gid_of(slot, l)] = raw(f.value_or_default(slot, l));
+          }
+          continue;
+        }
+        const auto f = m.fields().get<T>(info.id);
+        if (f.has_default()) t.def = raw(std::span<const T>(f.default_value()));
+        if (f.has_global()) t.global = raw(std::span<const T>(f.global_value()));
         for (LO l = 0; l < n; ++l) {
           const auto r = f.space().entity_rows(slot, l);
           if (!r.valid()) continue;
@@ -263,7 +276,7 @@ HostMesh numbered_2d() {
                  std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 1, 0, 1, 1, 0, 2, 1, 0, 3, 0, 0});
   b.add_elements(Topology::quad, std::vector<GO>{9, 10}, std::vector<GO>{1, 2, 5, 4, 2, 3, 6, 5});
   b.add_elements(Topology::tri, std::vector<GO>{8}, std::vector<GO>{3, 7, 6});
-  HostMesh m = std::move(b).build();
+  HostMesh m = std::move(b).build(soma::Ordering::file);  // local id = gid - 1 among the vertices
   soma::SetBuilder s;
   s.add(soma::SetSpec{11, soma::set_unique, {{0, 0}, {0, 1}, {0, 2}}, {}, {}});
   s.add(soma::SetSpec{12, soma::set_unique, {}, {}, {}});
@@ -666,6 +679,70 @@ TEST(H5mWrite, RejectsFieldsItCannotWrite) {
     expect(m, "field 'E' has values on dimension 2, which is not written",
            {.dims = std::array<bool, 4>{true, false, false, false}});
   }
+}
+
+// Variable-length fields: always sparse, var_indices the last index of each
+// entity's values, default and global as arrays of their own lengths.
+TEST(H5mWrite, VariableLengthFieldsBecomeVariableLengthTags) {
+  using Kind = soma::TagFormat::Kind;
+  using HS = Kokkos::HostSpace;
+  HostMesh in = numbered_2d();
+  auto& f = in.fields();
+  const std::vector<LO> some{0, 2, 4};
+  const std::vector<soma::Offset> off{0, 0, 2, 5};
+  const std::vector<double> vals{1, 2, 3, 4, 5};
+  f.add_var<double>("V", soma::Space<HS>(soma::Domain<HS>::from_list(in, 0, some), soma::Layout::per_entity()), off,
+                    vals, {.default_value = std::vector<double>{9, 8}, .global_value = std::vector<double>{7}});
+  const std::vector<soma::Offset> off2{0, 3, 3};
+  const std::vector<std::uint8_t> bytes{5, 6, 7};
+  const auto vo = f.add_var<std::uint8_t>("VO", soma::Space<HS>(soma::Domain<HS>::all(in, soma::set_dim), soma::Layout::per_entity()),
+                                          off2, bytes, {.default_value = std::vector<std::uint8_t>{}});
+  f.set_tag_format(f.info(vo.id()).family, {1, Kind::opaque, 0});
+
+  const fs::path out = scratch() / "var.h5m";
+  soma::write_h5m(in, out);
+  const hid_t file = open_file(out);
+  EXPECT_EQ(int_attribute(file, "/tstt/tags/V", "variable_length"), 1);
+  EXPECT_EQ(int_attribute(file, "/tstt/tags/V", "class"), 1);
+  EXPECT_EQ(H5Lexists(file, "/tstt/nodes/tags/V", H5P_DEFAULT), 0);
+  EXPECT_EQ(H5Lexists(file, "/tstt/sets/tags/VO", H5P_DEFAULT), 0);
+  const auto read = [&](const char* path, hid_t mem, auto zero) {
+    std::vector<decltype(zero)> v(extent(file, path).at(0));
+    const hid_t ds = H5Dopen2(file, path, H5P_DEFAULT);
+    H5Dread(ds, mem, H5S_ALL, H5S_ALL, H5P_DEFAULT, v.data());
+    H5Dclose(ds);
+    return v;
+  };
+  EXPECT_EQ(read("/tstt/tags/V/id_list", H5T_NATIVE_UINT64, std::uint64_t{}), (std::vector<std::uint64_t>{1, 3, 5}));
+  EXPECT_EQ(read("/tstt/tags/V/var_indices", H5T_NATIVE_INT64, std::int64_t{}), (std::vector<std::int64_t>{-1, 1, 4}));
+  EXPECT_EQ(read("/tstt/tags/V/values", H5T_NATIVE_DOUBLE, double{}), vals);
+  EXPECT_EQ(read("/tstt/tags/VO/var_indices", H5T_NATIVE_INT64, std::int64_t{}), (std::vector<std::int64_t>{2, 2}));
+  {
+    const hid_t t = H5Topen2(file, "/tstt/tags/V/type", H5P_DEFAULT);
+    EXPECT_GT(H5Tequal(t, H5T_IEEE_F64LE), 0);
+    H5Tclose(t);
+    const hid_t o = H5Topen2(file, "/tstt/tags/VO/type", H5P_DEFAULT);
+    EXPECT_EQ(H5Tget_class(o), H5T_OPAQUE);
+    EXPECT_EQ(H5Tget_size(o), 1u);
+    H5Tclose(o);
+    const hid_t a = H5Aopen_by_name(file, "/tstt/tags/V", "default", H5P_DEFAULT, H5P_DEFAULT);
+    const hid_t at = H5Aget_type(a);
+    ASSERT_EQ(H5Tget_class(at), H5T_ARRAY);
+    hsize_t n = 0;
+    H5Tget_array_dims2(at, &n);
+    EXPECT_EQ(n, 2u);
+    H5Tclose(at);
+    H5Aclose(a);
+  }
+  // An empty default cannot be typed and is left out.
+  EXPECT_EQ(H5Aexists_by_name(file, "/tstt/tags/VO", "default", H5P_DEFAULT), 0);
+  H5Fclose(file);
+
+  auto want = fields_of(in);
+  want.at({"V", 0}).format = {1, Kind::plain, 0};
+  want.at({"VO", soma::set_dim}).def.reset();
+  const HostMesh back = soma::read_h5m(out);
+  EXPECT_EQ(difference(fields_of(back), want), "");
 }
 
 TEST(H5mWrite, PolygonsGetOneGroupPerArity) {

@@ -107,7 +107,11 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // for bit tags, opaque of ncomp bytes for opaque ones. The class is the
 // TagFormat's, or else 0 for bit tags, 2 when every value is dense and 1
 // otherwise. The members' default and global value become the default and
-// global attributes. Two families of one name, other layouts, uncommitted
+// global attributes. Variable-length fields are always sparse, with
+// var_indices (the last index of each entity's values) and a default and
+// global typed as arrays of their own lengths; an empty default or global is
+// left out, as HDF5 has no empty array. Two families of one name, other
+// layouts, uncommitted
 // writes, members that disagree on their default or global value, and
 // values on a dimension not written throw std::invalid_argument.
 //

@@ -10,6 +10,7 @@
 #include <map>
 #include <new>
 #include <optional>
+#include <span>
 #include <type_traits>
 #include <stdexcept>
 #include <string>
@@ -66,17 +67,19 @@ struct Block {
   std::uint64_t count = 0;
 };
 
-// One MOAB tag: its values by file id, in id order, each `width` bytes, and
-// the blocks they cover whole (dense; the other values are sparse).
+// One MOAB tag: its values by file id, in id order, and the blocks they
+// cover whole (dense; the other values, and all variable-length ones, are
+// sparse). ncomp 0: variable length.
 struct TagPlan {
   std::string name;
   DataType type = DataType::u8;
   int ncomp = 1;
   TagFormat format{};
   std::optional<std::vector<std::byte>> def, global;
-  std::size_t width = 0;
+  std::size_t width = 0;  // bytes per component
   std::vector<std::uint64_t> ids;
   std::vector<std::byte> values;
+  std::vector<std::int64_t> ends;  // variable length: the last index of each id's values
   std::vector<bool> dense;  // by block
 };
 
@@ -167,28 +170,35 @@ std::vector<std::byte> bytes_of(const std::vector<T>& v) {
 // values), or none when no member has one.
 template <class T>
 std::optional<std::vector<std::byte>> agreed(const std::string& name, const char* what,
-                                             const std::vector<std::vector<T>>& values) {
+                                             const std::vector<std::optional<std::vector<T>>>& values) {
   std::optional<std::vector<T>> one;
   for (const auto& v : values) {
-    if (v.empty()) continue;
-    if (one && *one != v) reject("the fields named '" + name + "' have different " + what + " values");
+    if (!v) continue;
+    if (one && *one != *v) reject("the fields named '" + name + "' have different " + what + " values");
     one = v;
   }
   if (!one) return std::nullopt;
   return bytes_of(*one);
 }
 
-// A family's values on every written entity that has one, sorted by file id.
+template <class T>
+std::optional<std::vector<T>> present(const std::vector<T>& v) {
+  return v.empty() ? std::nullopt : std::optional(v);
+}
+
+// A family's values on every written entity that has one, sorted by file id:
+// ncomp values each, or any number for a variable-length family.
 template <class T>
 void collect_family(const HostMesh& mesh, const Plan& p, const std::vector<FieldInfo>& members, TagPlan& t) {
-  std::vector<std::vector<T>> defs, globals;
-  std::vector<std::pair<std::uint64_t, std::size_t>> order;  // (file id, value index)
-  std::vector<std::byte> values;
-  t.width = static_cast<std::size_t>(t.ncomp) * sizeof(T);
-  for (const FieldInfo& info : members) {
-    const auto f = mesh.fields().template get<T>(info.id);
-    defs.push_back(f.default_value());
-    globals.push_back(f.global_value());
+  std::vector<std::optional<std::vector<T>>> defs, globals;
+  struct Entry {
+    std::uint64_t id = 0;
+    std::size_t first = 0, count = 0;  // in values
+    bool operator<(const Entry& o) const { return id < o.id; }
+  };
+  std::vector<Entry> order;
+  std::vector<T> values;
+  const auto each = [&](const FieldInfo& info, const auto& row) {
     for (const int slot : info.dims) {
       const auto& fid = p.fid[static_cast<std::size_t>(slot)];
       const LO n = slot == set_dim ? mesh.sets().count() : mesh.count(slot);
@@ -196,31 +206,55 @@ void collect_family(const HostMesh& mesh, const Plan& p, const std::vector<Field
         reject("field '" + info.name + "' has values on dimension " + std::to_string(slot) + ", which is not written");
       }
       for (LO l = 0; l < n; ++l) {
-        const RowRange r = f.space().entity_rows(slot, l);
-        if (!r.valid()) continue;
-        order.emplace_back(fid[static_cast<std::size_t>(l)], values.size() / t.width);
-        for (int c = 0; c < t.ncomp; ++c) {  // the View is LayoutLeft: a row's components are apart
-          const T v = f.view()(static_cast<std::size_t>(r.begin), static_cast<std::size_t>(c));
-          const auto* b = reinterpret_cast<const std::byte*>(&v);
-          values.insert(values.end(), b, b + sizeof(T));
-        }
+        const std::size_t first = values.size();
+        if (row(slot, l)) order.push_back(Entry{fid[static_cast<std::size_t>(l)], first, values.size() - first});
       }
+    }
+  };
+  for (const FieldInfo& info : members) {
+    if (info.variable) {
+      const auto f = mesh.fields().template get_var<T>(info.id);
+      defs.push_back(f.default_value());
+      globals.push_back(f.global_value());
+      each(info, [&](int slot, LO l) {
+        if (!f.space().entity_rows(slot, l).valid()) return false;
+        const std::span<const T> v = f.value_or_default(slot, l);
+        values.insert(values.end(), v.begin(), v.end());
+        return true;
+      });
+    } else {
+      const auto f = mesh.fields().template get<T>(info.id);
+      defs.push_back(present(f.default_value()));
+      globals.push_back(present(f.global_value()));
+      each(info, [&](int slot, LO l) {
+        const RowRange r = f.space().entity_rows(slot, l);
+        if (!r.valid()) return false;
+        for (int c = 0; c < t.ncomp; ++c) {  // the View is LayoutLeft: a row's components are apart
+          values.push_back(f.view()(static_cast<std::size_t>(r.begin), static_cast<std::size_t>(c)));
+        }
+        return true;
+      });
     }
   }
   t.def = agreed(t.name, "default", defs);
   t.global = agreed(t.name, "global", globals);
-  std::sort(order.begin(), order.end());
+  t.width = sizeof(T);
+  std::stable_sort(order.begin(), order.end());
+  std::vector<T> sorted;
+  sorted.reserve(values.size());
   t.ids.reserve(order.size());
-  t.values.resize(values.size());
-  for (std::size_t i = 0; i < order.size(); ++i) {
-    t.ids.push_back(order[i].first);
-    std::memcpy(t.values.data() + i * t.width, values.data() + order[i].second * t.width, t.width);
+  for (const Entry& e : order) {
+    t.ids.push_back(e.id);
+    sorted.insert(sorted.end(), values.begin() + static_cast<std::ptrdiff_t>(e.first),
+                  values.begin() + static_cast<std::ptrdiff_t>(e.first + e.count));
+    if (t.ncomp == 0) t.ends.push_back(static_cast<std::int64_t>(sorted.size()) - 1);
   }
+  t.values = bytes_of(sorted);
 }
 
-// The blocks a tag's values cover whole, and its storage class when the
-// mesh did not record one: 0 for bit tags, 2 when every value is in a covered
-// block, else 1.
+// The blocks a fixed-length tag's values cover whole, and the tag's storage
+// class when the mesh did not record one: 0 for bit tags, 2 when every value
+// is in a covered block, else 1.
 void place(const std::vector<Block>& blocks, TagPlan& t) {
   t.dense.assign(blocks.size(), false);
   std::size_t covered = 0;
@@ -228,7 +262,7 @@ void place(const std::vector<Block>& blocks, TagPlan& t) {
     const Block& k = blocks[b];
     const auto lo = std::lower_bound(t.ids.begin(), t.ids.end(), k.start);
     const auto hi = std::lower_bound(lo, t.ids.end(), k.start + k.count);
-    t.dense[b] = k.count > 0 && static_cast<std::uint64_t>(hi - lo) == k.count;
+    t.dense[b] = t.ncomp > 0 && k.count > 0 && static_cast<std::uint64_t>(hi - lo) == k.count;
     if (t.dense[b]) covered += k.count;
   }
   if (t.format.storage_class < 0) {
@@ -257,10 +291,7 @@ void plan_tags(const HostMesh& mesh, Plan& p) {
       if (const std::size_t n = mesh.fields().pending_count(info.id); n != 0) {
         reject("field '" + name + "' has " + std::to_string(n) + " uncommitted writes; commit it before writing");
       }
-      if (info.variable || info.handle) {
-        reject("field '" + name + "' holds " + (info.variable ? "variable-length" : "handle") +
-               " values, which are not written yet");
-      }
+      if (info.handle) reject("field '" + name + "' holds handle values, which are not written yet");
     }
     TagPlan t;
     t.name = name;
@@ -381,7 +412,8 @@ class File {
 
 // The HDF5 types of a tag's values: `file` as committed (an array of ncomp
 // for plain tags of several components, a bitfield of nbits for bit tags,
-// opaque of ncomp bytes for opaque ones) and `mem` as they are in memory.
+// opaque of ncomp bytes for opaque ones; one component for variable-length
+// tags) and `mem` as they are in memory.
 struct TagTypes {
   Id file, mem;
 };
@@ -396,7 +428,7 @@ TagTypes tag_types(const TagPlan& t) {
     return out;
   }
   if (t.format.kind == TagFormat::Kind::opaque) {
-    out.file = h5::check(H5Tcreate(H5T_OPAQUE, static_cast<std::size_t>(t.ncomp)), "create " + what);
+    out.file = h5::check(H5Tcreate(H5T_OPAQUE, static_cast<std::size_t>(std::max(t.ncomp, 1))), "create " + what);
     h5::check(H5Tset_tag(out.file.get(), ""), "tag " + what);
     out.mem = h5::check(H5Tcopy(out.file.get()), "copy " + what);
     return out;
@@ -408,7 +440,7 @@ TagTypes tag_types(const TagPlan& t) {
            : std::is_signed_v<T> ? (sizeof(T) == 1 ? H5T_STD_I8LE : sizeof(T) == 4 ? H5T_STD_I32LE : H5T_STD_I64LE)
                                  : (sizeof(T) == 1 ? H5T_STD_U8LE : sizeof(T) == 4 ? H5T_STD_U32LE : H5T_STD_U64LE);
   });
-  if (t.ncomp == 1) {
+  if (t.ncomp <= 1) {
     out.file = h5::check(H5Tcopy(file), "copy " + what);
     out.mem = h5::check(H5Tcopy(mem), "copy " + what);
   } else {
@@ -417,6 +449,25 @@ TagTypes tag_types(const TagPlan& t) {
     out.mem = h5::check(H5Tarray_create2(mem, 1, &n), "create " + what);
   }
   return out;
+}
+
+// A variable-length tag: its default and global as arrays of their own
+// lengths (none for an empty one, which HDF5 cannot type), and every value
+// sparse, var_indices holding the last index of each entity's values.
+void write_var_tag(const File& f, hid_t g, const TagTypes& types, const TagPlan& t) {
+  const std::int32_t one = 1;
+  File::attribute(g, "variable_length", H5T_STD_I32LE, H5T_NATIVE_INT32, &one);
+  for (const auto& [attr, value] : {std::pair{"default", &t.def}, std::pair{"global", &t.global}}) {
+    if (!*value || (*value)->empty()) continue;
+    const hsize_t n = (*value)->size() / t.width;
+    const Id file = h5::check(H5Tarray_create2(types.file.get(), 1, &n), std::string("type the ") + attr);
+    const Id mem = h5::check(H5Tarray_create2(types.mem.get(), 1, &n), std::string("type the ") + attr);
+    File::attribute(g, attr, file.get(), mem.get(), (*value)->data());
+  }
+  if (t.ids.empty()) return;
+  f.dataset(g, "id_list", H5T_STD_U64LE, {t.ids.size()}, H5T_NATIVE_UINT64, t.ids.data());
+  f.dataset(g, "var_indices", H5T_STD_I64LE, {t.ends.size()}, H5T_NATIVE_INT64, t.ends.data());
+  f.dataset(g, "values", types.file.get(), {t.values.size() / t.width}, types.mem.get(), t.values.data());
 }
 
 // /tstt/tags/<name> with its committed type, class, default and global, and
@@ -429,6 +480,10 @@ void write_tag(const File& f, hid_t tstt, const std::vector<Block>& blocks, cons
   f.commit_type(g.get(), "type", types.file.get());
   const std::int32_t cls = t.format.storage_class;
   File::attribute(g.get(), "class", H5T_STD_I32LE, H5T_NATIVE_INT32, &cls);
+  if (t.ncomp == 0) {
+    write_var_tag(f, g.get(), types, t);
+    return;
+  }
   if (t.def) File::attribute(g.get(), "default", types.file.get(), types.mem.get(), t.def->data());
   if (t.global) File::attribute(g.get(), "global", types.file.get(), types.mem.get(), t.global->data());
 
@@ -438,13 +493,14 @@ void write_tag(const File& f, hid_t tstt, const std::vector<Block>& blocks, cons
     const Block& k = blocks[b];
     const auto lo = static_cast<std::size_t>(std::lower_bound(t.ids.begin(), t.ids.end(), k.start) - t.ids.begin());
     const auto hi = static_cast<std::size_t>(std::lower_bound(t.ids.begin(), t.ids.end(), k.start + k.count) - t.ids.begin());
-    const std::byte* first = t.values.data() + lo * t.width;
+    const std::size_t size = static_cast<std::size_t>(t.ncomp) * t.width;
+    const std::byte* first = t.values.data() + lo * size;
     if (t.dense[b]) {
       const Id dir = h5::open_group(tstt, k.path + "/tags");
       f.dataset(dir.get(), t.name, types.file.get(), {k.count}, types.mem.get(), first);
     } else {
       ids.insert(ids.end(), t.ids.begin() + static_cast<std::ptrdiff_t>(lo), t.ids.begin() + static_cast<std::ptrdiff_t>(hi));
-      values.insert(values.end(), first, t.values.data() + hi * t.width);
+      values.insert(values.end(), first, t.values.data() + hi * size);
     }
   }
   if (!ids.empty()) {
