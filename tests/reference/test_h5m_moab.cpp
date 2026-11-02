@@ -90,6 +90,8 @@ fs::path tag_kinds_file() {
   const int iv[] = {3, 4};
   check(mb.tag_set_data(tag, &v[3], 1, &iv[0]), "set SPARSE_I");
   check(mb.tag_set_data(tag, &t1, 1, &iv[1]), "set SPARSE_I");
+  // A sparse value equal to the default is still a value.
+  check(mb.tag_set_data(tag, &v[5], 1, &idef), "set SPARSE_I");
   const int pair[] = {5, 6};
   check(mb.tag_get_handle("PAIR", 2, moab::MB_TYPE_INTEGER, tag, moab::MB_TAG_DENSE | moab::MB_TAG_CREAT),
         "PAIR");
