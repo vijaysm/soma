@@ -49,7 +49,9 @@ std::int64_t gid_sum(const Exec& exec, MeshView<typename Exec::memory_space> v, 
   return total;
 }
 
-// Sum of the targets of the pair (a, b), or of the bridge (a via b).
+// Checksum of the pair (a, b), or of the bridge (a via b): every target
+// weighted by its row, plus the row lengths, so a target in the wrong row or
+// a row of the wrong length changes it.
 template <class Exec>
 std::int64_t target_sum(const Exec& exec, MeshView<typename Exec::memory_space> v, int a, int b,
                         bool bridge) {
@@ -58,10 +60,25 @@ std::int64_t target_sum(const Exec& exec, MeshView<typename Exec::memory_space> 
       "soma::bench::target_sum", Kokkos::RangePolicy<Exec>(exec, 0, v.count(a)),
       KOKKOS_LAMBDA(const LO e, std::int64_t& acc) {
         const Row<const LO> row = bridge ? v.bridge(a, b, e) : v.adj(a, b, e);
-        for (LO k = 0; k < row.size; ++k) acc += row[k];
+        acc += row.size;
+        for (LO k = 0; k < row.size; ++k) acc += (static_cast<std::int64_t>(e) + 1) * row[k];
       },
       total);
   exec.fence();
+  return total;
+}
+
+// Every derived dimension and every (D, k) graph of a derivation; a graph
+// that was not built counts as -1 instead of aborting on an empty view.
+template <class Exec>
+std::int64_t derive_sum(const Exec& exec, const Mesh<typename Exec::memory_space>& m) {
+  const int D = m.dim();
+  std::int64_t total = 0;
+  for (int k = 1; k < D; ++k) {
+    total += 1000003 * static_cast<std::int64_t>(m.count(k));
+    total += gid_sum(exec, m.view(), k);
+    total += m.has_adjacency(D, k) ? target_sum(exec, m.view(), D, k, false) : -1;
+  }
   return total;
 }
 
@@ -149,7 +166,7 @@ void run_space(Runner& runner, const HostMesh& host, const Exec& exec, bool copi
     Result r{"derive", space, 0, 0, {}};
     r.timing = runner.run("backends", r.workflow, r.space, ne, lean, build(downward(D)));
     r.checksum_a = m.count(D - 1);
-    r.checksum_b = gid_sum(exec, m.view(), D - 1);
+    r.checksum_b = derive_sum(exec, m);
     results.push_back(r);
   }
   {
@@ -249,19 +266,22 @@ bool run_mesh(const Comm& comm, const std::string& name, const HostMesh& host, i
   std::vector<Result> results;
   using HostExec = Kokkos::DefaultHostExecutionSpace;
   using DevExec = Kokkos::DefaultExecutionSpace;
-  constexpr bool serial_is_host = std::is_same_v<HostExec, Kokkos::Serial>;
   std::string base = HostExec::name();
+  bool serial_ran = false;
 #ifdef KOKKOS_ENABLE_SERIAL
+  constexpr bool serial_is_host = std::is_same_v<HostExec, Kokkos::Serial>;
   if (!no_serial) {
     run_space(runner, host, Kokkos::Serial{}, serial_is_host, results);
     base = Kokkos::Serial::name();
+    serial_ran = true;
   }
 #else
+  constexpr bool serial_is_host = false;
   (void)no_serial;
 #endif
-  if constexpr (!serial_is_host) run_space(runner, host, HostExec{}, true, results);
-  if constexpr (!Kokkos::SpaceAccessibility<Kokkos::HostSpace,
-                                            typename DevExec::memory_space>::accessible) {
+  // The host backend row is the Serial one when Serial is the host backend.
+  if (!serial_is_host || !serial_ran) run_space(runner, host, HostExec{}, true, results);
+  if constexpr (!std::is_same_v<DevExec, HostExec>) {
     run_space(runner, host, DevExec{}, true, results);
   }
   return report(comm, name, results, base, runner, json);
