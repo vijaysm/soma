@@ -344,6 +344,8 @@ class Domain {
   static Domain all(const Mesh<MemSpace>& mesh, int dim);
   static Domain segments(const Mesh<MemSpace>& mesh, int dim, const SegmentFilter& filter);
   static Domain from_list(const Mesh<MemSpace>& mesh, int dim, std::span<const LO> sorted_lids);
+  // The members of one slot of set `set`: a list domain over that slot.
+  static Domain from_set(const Mesh<MemSpace>& mesh, LO set, int slot);
 
   int num_blocks() const noexcept { return static_cast<int>(data_->blocks.size()); }
   LO size() const noexcept { return data_->size; }

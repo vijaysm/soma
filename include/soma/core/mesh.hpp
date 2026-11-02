@@ -15,6 +15,7 @@
 
 #include "soma/core/mesh_view.hpp"
 #include "soma/core/segments.hpp"
+#include "soma/core/sets.hpp"
 #include "soma/core/transfer.hpp"
 #include "soma/core/types.hpp"
 #include "soma/core/view_types.hpp"
@@ -27,6 +28,7 @@ template <class MemSpace>
 using CoordView = Kokkos::View<Real* [3], Kokkos::LayoutLeft, MemSpace>;
 
 class MeshBuilder;
+class SetBuilder;
 struct MeshTestAccess;
 
 template <class MemSpace>
@@ -127,6 +129,9 @@ class Mesh {
   // The graphs held, as a request.
   AdjacencyRequest adjacencies() const { return AdjacencyRequest::from_bits(adj_.present); }
 
+  // Entity sets; none until SetBuilder installs them.
+  const EntitySets<MemSpace>& sets() const noexcept { return sets_; }
+
   FieldRegistry<MemSpace>& fields() noexcept { return fields_; }
   const FieldRegistry<MemSpace>& fields() const noexcept { return fields_; }
 
@@ -189,6 +194,7 @@ class Mesh {
     std::swap(coords_, o.coords_);
     std::swap(epoch_, o.epoch_);
     adj_.swap(o.adj_);
+    sets_.swap(o.sets_);
     fields_.swap(o.fields_);
   }
 
@@ -196,6 +202,7 @@ class Mesh {
   template <class>
   friend class Mesh;
   friend class MeshBuilder;
+  friend class SetBuilder;
   friend struct MeshTestAccess;
   friend struct detail::TopologyAccess;
 
@@ -230,6 +237,7 @@ class Mesh {
       const auto& e = ents_[static_cast<std::size_t>(d)];
       fields_.set_entities(d, e.count, e.gid);
     }
+    fields_.set_entities(set_dim, sets_.count(), sets_.gid());
     fields_.set_epoch(epoch_);
   }
 
@@ -271,7 +279,8 @@ class Mesh {
         out.adj_.put(s, std::move(c));
       }
     }
-    const std::array<bool, num_field_slots> slots{o.dims[0], o.dims[1], o.dims[2], o.dims[3], true};
+    if (o.sets) out.sets_ = sets_.template mirror<Dst>(o.dims, alias);
+    const std::array<bool, num_field_slots> slots{o.dims[0], o.dims[1], o.dims[2], o.dims[3], o.sets};
     fields_.template mirror_into<Dst>(out.fields_, o.fields, slots, alias);
     out.attach_fields();
     if (o.adj_source == TransferOptions::AdjSource::rebuild && !o.adjacencies.empty()) {
@@ -300,6 +309,7 @@ class Mesh {
   CoordView<MemSpace> coords_;
   std::uint64_t epoch_ = 1;
   AdjacencyStore<MemSpace> adj_;
+  EntitySets<MemSpace> sets_;
   FieldRegistry<MemSpace> fields_;
 };
 

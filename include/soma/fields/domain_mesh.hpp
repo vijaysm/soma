@@ -6,7 +6,7 @@
 
 // Mesh-aware construction of domains and spaces. The mesh supplies the entity
 // counts, the global ids that feed the fingerprint, the topology of each
-// entity, and its epoch.
+// entity, and its epoch. Slot set_dim is the mesh's entity sets.
 
 #include <cstdint>
 #include <optional>
@@ -40,16 +40,31 @@ struct SegmentFilter {
   }
 };
 
+namespace detail {
+
+template <class MemSpace>
+LO slot_count(const Mesh<MemSpace>& mesh, int slot) {
+  return slot == set_dim ? mesh.sets().count() : mesh.count(slot);
+}
+
+template <class MemSpace>
+View1<const GO, MemSpace> slot_gid(const Mesh<MemSpace>& mesh, int slot) {
+  return slot == set_dim ? mesh.sets().gid() : mesh.gid(slot);
+}
+
+}  // namespace detail
+
 template <class MemSpace>
 Domain<MemSpace> Domain<MemSpace>::all(const Mesh<MemSpace>& mesh, int dim) {
   check_dim(dim, 0);
-  return all(dim, mesh.count(dim), mesh.epoch(), mesh.gid(dim));
+  return all(dim, detail::slot_count(mesh, dim), mesh.epoch(), detail::slot_gid(mesh, dim));
 }
 
 template <class MemSpace>
 Domain<MemSpace> Domain<MemSpace>::segments(const Mesh<MemSpace>& mesh, int dim,
                                             const SegmentFilter& filter) {
   check_dim(dim, 0);
+  if (dim == set_dim) throw std::invalid_argument("Domain::segments: entity sets have no segments");
   std::vector<Interval> runs;
   for (const Segment& s : mesh.segments(dim)) {
     if (filter.matches(s)) runs.push_back(Interval{s.begin, s.end});
@@ -61,7 +76,14 @@ template <class MemSpace>
 Domain<MemSpace> Domain<MemSpace>::from_list(const Mesh<MemSpace>& mesh, int dim,
                                              std::span<const LO> sorted_lids) {
   check_dim(dim, 0);
-  return from_list(dim, mesh.count(dim), mesh.epoch(), sorted_lids, mesh.gid(dim));
+  return from_list(dim, detail::slot_count(mesh, dim), mesh.epoch(), sorted_lids,
+                   detail::slot_gid(mesh, dim));
+}
+
+template <class MemSpace>
+Domain<MemSpace> Domain<MemSpace>::from_set(const Mesh<MemSpace>& mesh, LO set, int slot) {
+  check_dim(slot, 0);
+  return from_list(mesh, slot, mesh.sets().members_of(set, slot));
 }
 
 // Per-dimension topology and polygon connectivity offsets of the mesh, the
