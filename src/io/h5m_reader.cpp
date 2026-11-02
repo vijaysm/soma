@@ -19,6 +19,7 @@
 #include <vector>
 
 #include "hdf5.hpp"
+#include "soma/core/handle_ref.hpp"
 #include "soma/core/set_builder.hpp"
 #include "soma/fields/domain_mesh.hpp"
 #include "soma/fields/space.hpp"
@@ -567,25 +568,34 @@ TagKind handle_kind(hid_t type, const TagKind& k, const std::string& where) {
   return h;
 }
 
-// Handle values are 0 (no entity) or the file id of an entity or set. owner(i)
-// names the holder of value i.
+// Handle values in the file are 0 (no entity) or the file id of an entity or
+// set; each becomes make_handle(slot, file id), the file id being the gid.
+// owner(i) names the holder of value i.
 template <class T, class Owner>
-void check_handles(std::span<const T> v, const Locator& at, const std::string& where, Owner&& owner) {
+void to_handles(std::span<T> v, const Locator& at, const std::string& where, Owner&& owner) {
   if constexpr (std::is_same_v<T, GO>) {
     for (std::size_t i = 0; i < v.size(); ++i) {
-      if (v[i] != 0 && at.range_of(v[i]) == nullptr) {
+      if (v[i] == 0) continue;
+      const IdRange* r = at.range_of(v[i]);
+      if (r == nullptr) {
         fail(where + ": " + owner(i) + " holds the handle " + str(std::int64_t{v[i]}) +
              ", which names no entity or set");
       }
+      const GO h = make_handle(r->dim, v[i]);
+      if (h == 0) {
+        fail(where + ": " + owner(i) + " holds the handle " + str(std::int64_t{v[i]}) +
+             ", a file id beyond the gids a handle can hold");
+      }
+      v[i] = h;
     }
   }
 }
 
 template <class T>
-void check_handle_options(const FieldOptions<T>& o, const Locator& at, const std::string& where) {
+void to_handle_options(FieldOptions<T>& o, const Locator& at, const std::string& where) {
   const auto named = [](const char* what) { return [what](std::size_t) { return std::string("the ") + what; }; };
-  if (o.default_value) check_handles<T>(*o.default_value, at, where, named("default"));
-  if (o.global_value) check_handles<T>(*o.global_value, at, where, named("global"));
+  if (o.default_value) to_handles<T>(*o.default_value, at, where, named("default"));
+  if (o.global_value) to_handles<T>(*o.global_value, at, where, named("global"));
 }
 
 // A tag with values on no entity, kept with the mesh.
@@ -698,11 +708,11 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
   options.global_value = read_value_attribute<T>(tag.get(), "global", k, where);
   options.handle = handle;
   if (handle) {
-    check_handle_options(options, at, where);
+    to_handle_options(options, at, where);
     for (int d = 0; d < num_field_slots; ++d) {
       const auto& l = lids[static_cast<std::size_t>(d)];
       const auto gid = detail::slot_gid(mesh, d);
-      check_handles<T>(values[static_cast<std::size_t>(d)], at, where, [&](std::size_t i) {
+      to_handles<T>(values[static_cast<std::size_t>(d)], at, where, [&](std::size_t i) {
         return "file id " + str(gid(static_cast<std::size_t>(l[i / nc])));
       });
     }
@@ -830,7 +840,7 @@ void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const T
     }
     values = read_rows<T>(tstt, "tags/" + name + "/values", k, static_cast<GO>(held_values));
     if (handle) {
-      check_handles<T>(values, at, where, [&](std::size_t i) {
+      to_handles<T>(values, at, where, [&](std::size_t i) {
         const auto j = static_cast<std::size_t>(
             std::lower_bound(last.begin(), last.end(), static_cast<std::int64_t>(i)) - last.begin());
         return "file id " + str(ids[j]);
@@ -852,7 +862,7 @@ void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const T
   options.default_value = read_var_attribute<T>(tag.get(), "default", k, where);
   options.global_value = read_var_attribute<T>(tag.get(), "global", k, where);
   options.handle = handle;
-  if (handle) check_handle_options(options, at, where);
+  if (handle) to_handle_options(options, at, where);
   bool any = false;
   for (int d = 0; d < num_field_slots; ++d) {
     auto& rs = runs[static_cast<std::size_t>(d)];

@@ -671,7 +671,7 @@ class FieldRegistry {
   template <class T>
   static void check_handle(const std::string& name, bool handle) {
     if (handle && !std::is_same_v<T, GO>) {
-      throw std::invalid_argument("field '" + name + "': handle values are gids and need the GO value type");
+      throw std::invalid_argument("field '" + name + "': handle values need the GO value type");
     }
   }
 

@@ -472,7 +472,9 @@ TEST_F(H5mRead, TagsWithoutEntityValuesAreMeshValues) {
     w.int_attribute("tags/varlen", "variable_length", 1);
     const double vg[] = {1, 2, 3};
     w.array_attribute("varlen", "global", vg, 3);
-    w.tag("handle", 1, H5T_NATIVE_UINT64);
+    const std::uint64_t hd = 5;
+    const std::uint64_t hg = 2;
+    w.tag("handle", 1, H5T_NATIVE_UINT64, &hd, &hg);
     w.int_attribute("tags/handle", "is_handle", 1);
   }
   soma::H5mReport report;
@@ -492,6 +494,8 @@ TEST_F(H5mRead, TagsWithoutEntityValuesAreMeshValues) {
   EXPECT_EQ(v.at("varlen").global_as<double>(), (std::vector<double>{1, 2, 3}));
   EXPECT_TRUE(v.at("handle").handle);
   EXPECT_EQ(v.at("handle").type, soma::DataType::i64);
+  EXPECT_EQ(v.at("handle").default_as<GO>(), std::vector<GO>{soma::make_handle(2, 5)});
+  EXPECT_EQ(v.at("handle").global_as<GO>(), std::vector<GO>{soma::make_handle(0, 2)});
   EXPECT_THROW(mo.global_as<double>(), std::invalid_argument);
   for (const auto& n : v.names()) EXPECT_FALSE(m.fields().contains(n)) << n;
   // Mirrors keep them.
@@ -731,8 +735,8 @@ TEST_F(H5mRead, RejectsVariableLengthValuesItCannotPlace) {
 }
 
 // Handle tags of every storage: dense on vertices, sparse on a quad and a
-// set, variable-length, and two per entity. Values stay file ids, 0 is null,
-// and HandleRef resolves them.
+// set, variable-length, and two per entity. Each file id becomes the handle
+// of its slot and gid, 0 stays null, and HandleRef resolves them.
 TEST_F(H5mRead, HandleTagsAreHandleFields) {
   {
     Writer w(file());
@@ -768,24 +772,31 @@ TEST_F(H5mRead, HandleTagsAreHandleFields) {
   EXPECT_TRUE(f.info(h.id()).handle);
   EXPECT_EQ(h.default_value(), std::vector<GO>{0});
   EXPECT_EQ(f.family<GO>("H", 1, soma::Layout::per_entity(), true), f.info(h.id()).family);
+  using soma::make_handle;
+  using soma::set_dim;
   const auto ref = soma::HandleRef<Kokkos::HostSpace>::build(m);
-  for (const auto& [v, target] : std::vector<std::pair<GO, GO>>{{1, 5}, {2, 0}, {3, 6}, {4, 1}}) {
+  const std::vector<std::pair<GO, GO>> held{
+      {1, make_handle(2, 5)}, {2, 0}, {3, make_handle(set_dim, 6)}, {4, make_handle(0, 1)}};
+  for (const auto& [v, target] : held) {
     const GO got = h.value_or_default(0, lid_of(m, 0, v));
     EXPECT_EQ(got, target) << v;
     const soma::HandleTarget t = ref.resolve(got);
     EXPECT_EQ(t.valid(), target != 0) << v;
   }
-  EXPECT_EQ(ref.resolve(5).slot, 2);
-  EXPECT_EQ(ref.resolve(6).slot, soma::set_dim);
-  EXPECT_EQ(f.get<GO>("SH", 2).value_or_default(2, 0), 2);
-  EXPECT_EQ(f.get<GO>("SH", soma::set_dim).value_or_default(soma::set_dim, 1), 6);
+  EXPECT_EQ(ref.resolve(make_handle(2, 5)).slot, 2);
+  EXPECT_EQ(ref.resolve(make_handle(set_dim, 6)).slot, set_dim);
+  EXPECT_EQ(ref.resolve(make_handle(0, 1)).lid, lid_of(m, 0, 1));
+  EXPECT_EQ(f.get<GO>("SH", 2).value_or_default(2, 0), make_handle(0, 2));
+  EXPECT_EQ(f.get<GO>("SH", set_dim).value_or_default(set_dim, 1), make_handle(set_dim, 6));
   const auto vh = f.get_var<GO>("VH", soma::set_dim);
   EXPECT_TRUE(f.info(vh.id()).handle);
   const auto run = vh.value_or_default(soma::set_dim, 0);
-  EXPECT_EQ(std::vector<GO>(run.begin(), run.end()), (std::vector<GO>{1, 5, 7}));
+  EXPECT_EQ(std::vector<GO>(run.begin(), run.end()),
+            (std::vector<GO>{make_handle(0, 1), make_handle(2, 5), make_handle(set_dim, 7)}));
   const auto ah = f.get<GO>("AH", 0);
   EXPECT_EQ(ah.ncomp(), 2);
-  EXPECT_EQ(ah.value_or_default(0, lid_of(m, 0, 1), 1), 6);
+  EXPECT_EQ(ah.value_or_default(0, lid_of(m, 0, 1), 0), make_handle(2, 5));
+  EXPECT_EQ(ah.value_or_default(0, lid_of(m, 0, 1), 1), make_handle(set_dim, 6));
 }
 
 TEST_F(H5mRead, RejectsHandlesThatNameNothing) {
@@ -838,6 +849,13 @@ TEST_F(H5mRead, RejectsHandlesThatNameNothing) {
     const std::uint64_t v[] = {(std::uint64_t{1} << 63) + 1};
     w.sparse("H", {1}, v);
   }, {"holds the handle 9223372036854775807, which names no entity or set"});
+  // A set at file id 2^60 is read, but no handle can name it.
+  expect("beyond", [](Writer& w) {
+    w.sets(std::int64_t{1} << 60, 1);
+    w.tag("H", 1, H5T_NATIVE_UINT64);
+    const std::uint64_t v[] = {std::uint64_t{1} << 60};
+    w.sparse("H", {2}, v);
+  }, {"/tstt/tags/H: file id 2 holds the handle 1152921504606846976, a file id beyond the gids a handle can hold"});
   expect("real", [](Writer& w) {
     w.tag("H", 1, H5T_NATIVE_DOUBLE);
     const double v[] = {1};

@@ -27,7 +27,7 @@ namespace soma {
 struct MeshValue {
   DataType type = DataType::u8;
   int ncomp = 1;           // 0: variable length
-  bool handle = false;     // values are gids (FieldOptions::handle)
+  bool handle = false;     // values are handles (FieldOptions::handle)
   int storage_class = -1;  // MOAB's: 0 bit, 1 sparse, 2 dense, 3 mesh; -1 unknown
   std::optional<std::vector<std::byte>> default_value;
   std::optional<std::vector<std::byte>> global_value;

@@ -87,36 +87,44 @@ TEST(HandleRef, HandlesHoldASlotAndAGid) {
 }
 
 TEST(HandleRef, ResolvesEntitiesAndSetsOnTheHost) {
+  using soma::make_handle;
   const auto mesh = mesh_with_two_sets();
   const auto ref = soma::HandleRef<HostMem>::build(mesh);
   EXPECT_EQ(ref.size(), 7u + 3u + 2u);
   for (const GO g : {10, 40, 70}) {
-    const auto t = ref.resolve(g);
+    const auto t = ref.resolve(make_handle(0, g));
     EXPECT_EQ(t.slot, 0) << g;
     EXPECT_EQ(t.lid, lid_of(mesh, 0, g)) << g;
   }
   for (const GO g : {3, 5, 7}) {
-    const auto t = ref.resolve(g);
+    const auto t = ref.resolve(make_handle(2, g));
     EXPECT_EQ(t.slot, 2) << g;
     EXPECT_EQ(t.lid, lid_of(mesh, 2, g)) << g;
   }
-  EXPECT_EQ(ref.resolve(100).slot, set_dim);
-  EXPECT_EQ(ref.resolve(100).lid, 0);
-  EXPECT_EQ(ref.resolve(200).lid, 1);
-  for (const GO g : {GO{0}, GO{-10}, GO{1}, GO{99}, GO{300}}) EXPECT_FALSE(ref.resolve(g).valid()) << g;
+  EXPECT_EQ(ref.resolve(make_handle(set_dim, 100)).slot, set_dim);
+  EXPECT_EQ(ref.resolve(make_handle(set_dim, 100)).lid, 0);
+  EXPECT_EQ(ref.resolve(make_handle(set_dim, 200)).lid, 1);
+  // Bare gids, gids of another slot, and gids no entity has name nothing.
+  for (const GO h : {GO{0}, GO{-10}, GO{10}, GO{100}, make_handle(2, 10), make_handle(0, 7), make_handle(1, 7),
+                     make_handle(3, 7), make_handle(set_dim, 7), make_handle(0, 1), make_handle(0, 99),
+                     make_handle(set_dim, 300)}) {
+    EXPECT_FALSE(ref.resolve(h).valid()) << h;
+  }
 }
 
 TEST(HandleRef, ResolvesInKernels) {
+  using soma::make_handle;
   const auto host = mesh_with_two_sets();
   const auto dev = host.mirror<DevMem>();
   const auto ref = soma::HandleRef<DevMem>::build(dev);
-  const std::vector<GO> gids{70, 3, 200, 0, 99};
+  const std::vector<GO> handles{make_handle(0, 70), make_handle(2, 3), make_handle(set_dim, 200), 0,
+                                make_handle(0, 99), make_handle(2, 70)};
   const auto in = Kokkos::create_mirror_view_and_copy(
-      DevMem{}, soma::View1<const GO, HostMem>(gids.data(), gids.size()));
-  Kokkos::View<int*, DevMem> slot("soma::test::slot", gids.size());
-  Kokkos::View<LO*, DevMem> lid("soma::test::lid", gids.size());
+      DevMem{}, soma::View1<const GO, HostMem>(handles.data(), handles.size()));
+  Kokkos::View<int*, DevMem> slot("soma::test::slot", handles.size());
+  Kokkos::View<LO*, DevMem> lid("soma::test::lid", handles.size());
   Kokkos::parallel_for(
-      "soma::test::resolve", Kokkos::RangePolicy<DevMem::execution_space>(0, gids.size()),
+      "soma::test::resolve", Kokkos::RangePolicy<DevMem::execution_space>(0, handles.size()),
       KOKKOS_LAMBDA(const std::size_t i) {
         const soma::HandleTarget t = ref.resolve(in(i));
         slot(i) = t.slot;
@@ -124,47 +132,92 @@ TEST(HandleRef, ResolvesInKernels) {
       });
   const auto hs = Kokkos::create_mirror_view_and_copy(HostMem{}, slot);
   const auto hl = Kokkos::create_mirror_view_and_copy(HostMem{}, lid);
-  EXPECT_EQ((std::vector<int>{hs(0), hs(1), hs(2), hs(3), hs(4)}), (std::vector<int>{0, 2, set_dim, -1, -1}));
+  EXPECT_EQ((std::vector<int>{hs(0), hs(1), hs(2), hs(3), hs(4), hs(5)}),
+            (std::vector<int>{0, 2, set_dim, -1, -1, -1}));
   EXPECT_EQ(hl(0), lid_of(host, 0, 70));
   EXPECT_EQ(hl(1), lid_of(host, 2, 3));
   EXPECT_EQ(hl(2), 1);
   EXPECT_EQ(hl(3), soma::invalid_lo);
 }
 
-// box_mesh numbers vertices and elements from 1 alike.
-TEST(HandleRef, GidsSharedBySlotsAreRejected) {
+// box_mesh numbers vertices and elements from 1 alike; a set may share a gid
+// with a vertex. The slot tells them apart.
+TEST(HandleRef, GidsRepeatAcrossSlots) {
+  using soma::make_handle;
   const auto box = soma::testing::box_mesh({2, 2, 1, soma::Topology::quad});
-  const std::string what = what_of([&] { soma::HandleRef<HostMem>::build(box); });
-  EXPECT_NE(what.find("HandleRef: gid 1 names entities of dimension 0 and dimension 2; handles need gids unique"),
-            std::string::npos)
-      << what;
+  const auto ref = soma::HandleRef<HostMem>::build(box);
+  EXPECT_EQ(ref.size(), static_cast<std::size_t>(box.count(0) + box.count(2)));
+  for (const int d : {0, 2}) {
+    for (LO l = 0; l < box.count(d); ++l) {
+      const GO g = box.gid(d)(static_cast<std::size_t>(l));
+      const auto t = ref.resolve(make_handle(d, g));
+      EXPECT_EQ(t.slot, d) << g;
+      EXPECT_EQ(t.lid, l) << g;
+    }
+  }
   soma::HostMesh mesh = soma_test::two_quads_and_a_triangle();
   soma::SetBuilder b;
   b.add(soma::SetSpec{70, soma::set_unique, {}, {}, {}});
   std::move(b).install(mesh);
-  EXPECT_NE(what_of([&] { soma::HandleRef<HostMem>::build(mesh); })
-                .find("gid 70 names entities of dimension 0 and the entity sets"),
-            std::string::npos);
+  const auto r = soma::HandleRef<HostMem>::build(mesh);
+  EXPECT_EQ(r.resolve(make_handle(0, 70)).slot, 0);
+  EXPECT_EQ(r.resolve(make_handle(0, 70)).lid, lid_of(mesh, 0, 70));
+  EXPECT_EQ(r.resolve(make_handle(set_dim, 70)).slot, set_dim);
+  EXPECT_EQ(r.resolve(make_handle(set_dim, 70)).lid, 0);
 }
 
-// Derived edges are numbered within their dimension, so their gids meet the
-// vertex and element gids of the fixture and handles cannot tell them apart.
-TEST(HandleRef, DerivedEntitiesRepeatGids) {
+// Derived edges are numbered within their dimension; their gids meet the
+// vertex and element gids of the fixture, and each still has its own handle.
+TEST(HandleRef, ResolvesDerivedEntities) {
+  using soma::make_handle;
   soma::HostMesh mesh = soma_test::two_quads_and_a_triangle();
-  EXPECT_NO_THROW(soma::HandleRef<HostMem>::build(mesh));
   soma::build_adjacencies(mesh, soma::AdjacencyRequest{}.add(2, 1));
   ASSERT_GT(mesh.count(1), 0);
-  const std::string what = what_of([&] { soma::HandleRef<HostMem>::build(mesh); });
-  EXPECT_NE(what.find("names entities of dimension 1 and dimension 2"), std::string::npos) << what;
+  const auto ref = soma::HandleRef<HostMem>::build(mesh);
+  EXPECT_EQ(ref.size(), static_cast<std::size_t>(7 + mesh.count(1) + 3));
+  bool shared = false;
+  for (int d = 0; d <= 2; ++d) {
+    for (LO l = 0; l < mesh.count(d); ++l) {
+      const GO g = mesh.gid(d)(static_cast<std::size_t>(l));
+      if (d == 1 && (lid_of(mesh, 0, g) != soma::invalid_lo || lid_of(mesh, 2, g) != soma::invalid_lo)) {
+        shared = true;
+      }
+      const auto t = ref.resolve(make_handle(d, g));
+      EXPECT_EQ(t.slot, d) << g;
+      EXPECT_EQ(t.lid, l) << g;
+    }
+  }
+  EXPECT_TRUE(shared);
 }
 
-TEST(HandleRef, GidZeroIsTheNullHandle) {
+// Gid 0 is a gid like any other; the null handle is 0.
+TEST(HandleRef, GidZeroHasAHandle) {
   soma::MeshBuilder b(2);
   b.add_vertices(std::vector<GO>{0, 1, 2}, std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 0, 1, 0});
   b.add_elements(soma::Topology::tri, std::vector<GO>{5}, std::vector<GO>{0, 1, 2});
   const auto mesh = std::move(b).build(soma::Ordering::file);
+  const auto ref = soma::HandleRef<HostMem>::build(mesh);
+  EXPECT_EQ(ref.resolve(soma::make_handle(0, 0)).slot, 0);
+  EXPECT_EQ(ref.resolve(soma::make_handle(0, 0)).lid, lid_of(mesh, 0, 0));
+  EXPECT_FALSE(ref.resolve(0).valid());
+}
+
+TEST(HandleRef, RejectsGidsNoHandleCanHold) {
+  for (const GO bad : {GO{-3}, soma::max_handle_gid + 1}) {
+    soma::HostMesh mesh = soma_test::two_quads_and_a_triangle();
+    soma::MeshTestAccess::set_gid(mesh, 2, lid_of(mesh, 2, 3), bad);
+    const std::string what = what_of([&] { soma::HandleRef<HostMem>::build(mesh); });
+    EXPECT_NE(what.find("HandleRef: dimension 2 has the gid " + std::to_string(bad) + ", which no handle can hold"),
+              std::string::npos)
+        << what;
+  }
+}
+
+TEST(HandleRef, RejectsAGidRepeatedWithinASlot) {
+  soma::HostMesh mesh = soma_test::two_quads_and_a_triangle();
+  soma::MeshTestAccess::set_gid(mesh, 0, lid_of(mesh, 0, 40), 20);
   const std::string what = what_of([&] { soma::HandleRef<HostMem>::build(mesh); });
-  EXPECT_NE(what.find("HandleRef: dimension 0 has an entity of gid 0, the null handle"), std::string::npos) << what;
+  EXPECT_NE(what.find("HandleRef: dimension 0 has two entities of gid 20"), std::string::npos) << what;
 }
 
 // Handle fields hold gids; their family is apart from plain GO fields.
@@ -185,7 +238,7 @@ TEST(HandleFields, AreGidFieldsOfTheirOwnFamily) {
   soma::FieldOptions<double> wrong;
   wrong.handle = true;
   EXPECT_NE(what_of([&] { reg.add_tag<double>("X", 0, 1, wrong); })
-                .find("field 'X': handle values are gids and need the GO value type"),
+                .find("field 'X': handle values need the GO value type"),
             std::string::npos);
   const soma::Space<HostMem> sp(soma::Domain<HostMem>::all(0, 4, 1), Layout::per_entity());
   const std::vector<soma::Offset> off{0, 1, 1, 1, 3};

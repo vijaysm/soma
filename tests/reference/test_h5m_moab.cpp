@@ -32,6 +32,7 @@
 #include "moab/CN.hpp"
 #include "moab/Core.hpp"
 #include "moab/Range.hpp"
+#include "soma/core/handle_ref.hpp"
 #include "soma/core/mesh.hpp"
 #include "soma/fields/space.hpp"
 #include "soma/fields/var_field.hpp"
@@ -316,6 +317,11 @@ struct Loaded {
     return slot == soma::set_dim ? mesh.sets().gid()(l) : mesh.gid(slot)(l);
   }
 
+  // SOMA's handle of what a MOAB handle names: its slot and gid; 0 for none.
+  soma::GO soma_handle(moab::EntityHandle h) const {
+    return h == 0 ? 0 : soma::make_handle(where.at(h).first, file_id(h));
+  }
+
   // MOAB's holders of the tag on a slot, by SOMA lid.
   std::map<soma::LO, moab::EntityHandle> holders(moab::Tag tag, int slot) {
     std::map<soma::LO, moab::EntityHandle> out;
@@ -333,7 +339,7 @@ struct Loaded {
     return out;
   }
 
-  // n bytes of MOAB values as SOMA holds them: handles become file ids.
+  // n bytes of MOAB values as SOMA holds them: handles become SOMA's.
   std::vector<unsigned char> as_soma(moab::DataType type, const void* p, std::size_t n) const {
     const auto* c = static_cast<const unsigned char*>(p);
     if (type != moab::MB_TYPE_HANDLE) return {c, c + n};
@@ -341,7 +347,7 @@ struct Loaded {
     for (std::size_t i = 0; i < n; i += sizeof(moab::EntityHandle)) {
       moab::EntityHandle h = 0;
       std::memcpy(&h, c + i, sizeof h);
-      const soma::GO g = file_id(h);
+      const soma::GO g = soma_handle(h);
       std::memcpy(out.data() + i, &g, sizeof g);
     }
     return out;

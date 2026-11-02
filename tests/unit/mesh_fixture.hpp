@@ -25,6 +25,10 @@ struct MeshTestAccess {
   static void put_adjacency(Mesh<M>& mesh, int slot, Adjacency<M> graph) {
     mesh.adj_.put(slot, std::move(graph));
   }
+  // Overwrites one gid of a host mesh, past the builder's checks.
+  static void set_gid(Mesh<Kokkos::HostSpace>& mesh, int dim, LO lid, GO gid) {
+    mesh.ents_[static_cast<std::size_t>(dim)].gid(static_cast<std::size_t>(lid)) = gid;
+  }
 };
 
 }  // namespace soma

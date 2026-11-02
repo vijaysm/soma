@@ -30,8 +30,8 @@ inline constexpr FamilyId invalid_family = std::numeric_limits<FamilyId>::max();
 // also the initial fill; without one, fields start zeroed and has_default() is
 // false. global_value is the one value per mesh that MOAB tags can carry. For
 // a variable-length field either may have any length. A handle field holds
-// gids of entities or sets (0 for none) and needs T = GO; it has a family of
-// its own, apart from plain GO fields of the same name.
+// handles of entities or sets (make_handle; 0 for none) and needs T = GO; it
+// has a family of its own, apart from plain GO fields of the same name.
 template <class T>
 struct FieldOptions {
   std::optional<std::vector<T>> default_value;
@@ -46,7 +46,7 @@ struct FieldInfo {
   DataType type = DataType::f64;
   int ncomp = 1;  // 0 for a variable-length field
   bool variable = false;  // a VarField, fetched with get_var
-  bool handle = false;    // values are gids (FieldOptions::handle)
+  bool handle = false;    // values are handles (FieldOptions::handle)
   Layout layout{};
   LO rows = 0;
   std::vector<int> dims;  // dimensions the domain has members on
