@@ -260,7 +260,7 @@ class Locator {
       auto& p = pairs_[static_cast<std::size_t>(d)];
       p.resize(gid.extent(0));
       for (std::size_t l = 0; l < p.size(); ++l) p[l] = {gid(l), static_cast<LO>(l)};
-      std::sort(p.begin(), p.end());
+      if (!std::is_sorted(p.begin(), p.end())) std::sort(p.begin(), p.end());
     }
   }
 
@@ -425,11 +425,11 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
   std::uint64_t on_sets = 0;
 
   for (const Dense& s : dense) {
-    std::vector<T> v = read_rows<T>(tstt, s.path, k, s.count);
     if (s.dim < 0) {
       on_sets += static_cast<std::uint64_t>(s.count);
       continue;
     }
+    std::vector<T> v = read_rows<T>(tstt, s.path, k, s.count);
     const auto d = static_cast<std::size_t>(s.dim);
     const auto l = at.lids(s.dim, s.first, s.count);
     lids[d].insert(lids[d].end(), l.begin(), l.end());
@@ -615,7 +615,7 @@ HostMesh read(const fs::path& path, const H5mReadOptions& options, H5mReport& re
     std::vector<GO>().swap(g.conn);
   }
   HostMesh mesh = std::move(b).build(options.ordering);
-  if (options.tags) {
+  if (options.tags && h5::exists(tstt.get(), "tags")) {
     const Locator at(mesh, ranges);
     import_tags(mesh, tstt.get(), nodes, groups, names, sets, at, report);
   }
