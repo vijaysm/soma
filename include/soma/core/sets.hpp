@@ -336,11 +336,13 @@ class EntitySets {
       }
       return m;
     };
-    std::vector<std::vector<LO>> rows(static_cast<std::size_t>(count_));
+    std::vector<std::vector<Interval>> rows(static_cast<std::size_t>(count_));
+    std::vector<LO> row;
     for (LO i = 0; i < count_; ++i) {
-      auto& row = rows[static_cast<std::size_t>(i)];
+      row.clear();
       for (const LO l : members_of(i, dim)) row.push_back(map(l));
       std::sort(row.begin(), row.end());
+      rows[static_cast<std::size_t>(i)] = detail::runs_of(row);
     }
     std::vector<SetEntry> seq = seq_;
     for (SetEntry& e : seq) {
@@ -408,15 +410,18 @@ class EntitySets {
     View1<Offset, Kokkos::HostSpace> host_offsets;
     View1<LO, Kokkos::HostSpace> host_data;
 
-    // Rows of sorted, unique ids out of count, each in its smallest form.
-    static Slot packed(const std::vector<std::vector<LO>>& rows, LO count) {
+    // Rows given as sorted, disjoint, merged runs of ids out of count, each
+    // held in its smallest form.
+    static Slot packed(const std::vector<std::vector<Interval>>& rows, LO count) {
       const std::size_t n = rows.size();
       std::vector<std::uint8_t> kinds(n);
       std::vector<Offset> offsets(n + 1, 0);
       std::vector<LO> data;
       for (std::size_t i = 0; i < n; ++i) {
-        const auto runs = detail::runs_of(rows[i]);
-        const DomainKind k = detail::form_of(static_cast<LO>(rows[i].size()), count, static_cast<LO>(runs.size()));
+        const auto& runs = rows[i];
+        std::size_t size = 0;
+        for (const Interval& r : runs) size += static_cast<std::size_t>(r.end - r.begin);
+        const DomainKind k = detail::form_of(static_cast<LO>(size), count, static_cast<LO>(runs.size()));
         kinds[i] = static_cast<std::uint8_t>(k);
         const std::vector<LO> packed = detail::pack_runs(runs, k);
         data.insert(data.end(), packed.begin(), packed.end());

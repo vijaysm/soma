@@ -401,3 +401,60 @@ TEST(EntitySets, RenumberedRowsTakeTheirFormAgain) {
   EXPECT_EQ(soma_test::vec(packed.members_of(0, 2)), (std::vector<LO>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}));
   EXPECT_THROW((void)mesh.sets().renumbered(2, halve, 10), std::logic_error);
 }
+
+// Runs build rows without listing their members, merge with the contents
+// (face 7 lies inside the run 5..14), and name sets by consecutive gids.
+TEST(EntitySets, RunsBuildRowsWithoutListingThem) {
+  using soma::DomainKind;
+  using soma::SetRun;
+  soma::HostMesh mesh = soma::testing::box_mesh({10, 10, 1, soma::Topology::quad});
+  soma::SetBuilder b;
+  b.add(SetSpec{1, soma::set_unique, {}, {}, {}}, {{2, 0, 100}});
+  b.add(SetSpec{2, soma::set_unique, {}, {}, {}}, {{2, 50, 10}, {2, 0, 10}});
+  b.add(SetSpec{3, soma::set_unique, {{2, 3}, {2, 15}, {2, 40}, {2, 7}}, {}, {}}, {{2, 5, 10}, {2, 4, 2}});
+  b.add(SetSpec{4, soma::set_unique, {}, {}, {}}, {{set_dim, 1, 3}, {0, 0, 121}});
+  b.add(SetSpec{7, soma::set_unique, {}, {}, {}});
+  std::move(b).install(mesh);
+  const auto& s = mesh.sets();
+  EXPECT_EQ(s.members_of(0, 2).kind, DomainKind::full);
+  EXPECT_EQ(s.members_of(1, 2).kind, DomainKind::intervals);
+  EXPECT_EQ(s.members_of(1, 2).size, 20);
+  std::vector<LO> merged;
+  for (LO f = 3; f < 16; ++f) merged.push_back(f);
+  merged.push_back(40);
+  EXPECT_EQ(soma_test::vec(s.members_of(2, 2)), merged);
+  EXPECT_EQ(s.members_of(2, 2).kind, DomainKind::intervals);  // 2 runs, 14 members
+  EXPECT_EQ(soma_test::vec(s.members_of(3, set_dim)), (std::vector<LO>{0, 1, 2}));
+  EXPECT_EQ(s.members_of(3, 0).kind, DomainKind::full);
+  EXPECT_EQ(s.data(2).extent(0), 5u + 5u);  // two intervals rows of 2 runs each
+  EXPECT_EQ(s.data(0).extent(0), 0u);
+}
+
+TEST(EntitySets, InstallRejectsBadRuns) {
+  using soma::SetRun;
+  const auto rejected = [](const std::vector<SetRun>& runs, std::uint8_t flags, const std::string& needle) {
+    soma::HostMesh mesh = soma::testing::box_mesh({2, 2, 1, soma::Topology::quad});
+    soma::SetBuilder b;
+    b.add(SetSpec{1, flags, {}, {}, {}}, runs);
+    b.add(SetSpec{2, soma::set_unique, {}, {}, {}});
+    b.add(SetSpec{3, soma::set_unique, {}, {}, {}});
+    b.add(SetSpec{5, soma::set_unique, {}, {}, {}});
+    try {
+      std::move(b).install(mesh);
+    } catch (const std::invalid_argument& e) {
+      EXPECT_NE(std::string(e.what()).find(needle), std::string::npos) << e.what();
+      EXPECT_EQ(mesh.sets().count(), 0);
+      return;
+    }
+    ADD_FAILURE() << "accepted: " << needle;
+  };
+  rejected({{2, 2, 3}}, soma::set_unique, "set gid 1 lists the 3 entities from 2 of dimension 2, which has 4 entities");
+  rejected({{2, -1, 2}}, soma::set_unique, "lists the 2 entities from -1 of dimension 2");
+  rejected({{0, 9, 1}}, soma::set_unique, "lists the 1 entities from 9 of dimension 0, which has 9 entities");
+  rejected({{2, 0, 0}}, soma::set_unique, "set gid 1 has a run of 0 members");
+  rejected({{5, 0, 1}}, soma::set_unique, "set gid 1 has a run of slot 5, not in [0, 4]");
+  rejected({{set_dim, 2, 3}}, soma::set_unique, "set gid 1 contains the 3 gids from 2, which are not all sets");
+  rejected({{set_dim, 3, 3}}, soma::set_unique, "contains the 3 gids from 3, which are not all sets");
+  rejected({{set_dim, 4, 1}}, soma::set_unique, "set gid 1 contains gid 4, which is not a set");
+  rejected({{2, 0, 1}}, soma::set_ordered, "set gid 1 is ordered and takes no runs");
+}
