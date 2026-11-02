@@ -201,6 +201,27 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `get_adjacencies(create_if_missing)`: sub-entities, downward sense and offset
   (`CN::SideNumber`), upward graphs, bridges and ring neighbourhoods match exactly.
 
+### MOAB files
+
+- `SOMA_ENABLE_HDF5` (default OFF; point `HDF5_ROOT` at the installation) builds `read_h5m`,
+  which reads a MOAB `.h5m` file on one process with the HDF5 C API, no MOAB involved. A
+  parallel HDF5 with `SOMA_ENABLE_MPI=OFF` is a configure error; the package config records the
+  HDF5 used. Without HDF5, `read_h5m` throws a `std::runtime_error` saying how to enable it, and
+  `h5m_available()` is false.
+- `read_h5m` reads vertices (1 to 3 coordinate columns), every Edge, Tri, Quad, Polygon (fixed
+  arity groups and `poly_indices` lists), Tet, Pyramid, Prism and Hex group, with file ids as
+  gids and lower-dimensional groups kept as explicit entities. Every fixed-length tag on vertices
+  and elements becomes one per_entity field per dimension (full when every entity has a value),
+  with the file's default and global values: 8-, 32- and 64-bit integers, f32, f64, arrays,
+  opaque tags (`u8`, one component per byte) and bit tags (one `u8`). Values on sets,
+  variable-length, handle-valued and mesh-only tags are listed in an `H5mReport` instead. Files
+  that are not MOAB meshes, element types it does not read (Polyhedron, Knife, high-order
+  connectivity), out-of-range or overlapping ids, malformed `poly_indices` and duplicate tag
+  values throw `std::runtime_error` naming the file and the dataset; HDF5 prints nothing.
+- `MeshBuilder::build` looks contiguous vertex gids up by index, skips sorts whose input is
+  already sorted, and computes centroids only for curve keys: the same mesh, about 7x faster on
+  file input.
+
 ### Benchmarks
 
 - `bench/bench_adjacency` times derivation and adjacency queries for SOMA on host threads
@@ -208,6 +229,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   disclosure, JSON lines, and a checksum comparison that fails the run on a mismatch.
   `bench/run_adjacency.sh` repeats it at threads = 1, 2, 4, ..., N. Results are in
   `docs/benchmarks.md`.
+- `bench/bench_h5m_read` times `read_h5m` against MOAB `load_file` on the bundled meshes, the
+  large ones when present, and a MOAB-written box of N^3 hexes (`--box N`, default 64).
 
 ### Packaging
 
