@@ -85,7 +85,9 @@ inline void expect_box_invariants(const soma::HostMesh& mesh, const soma::testin
   ASSERT_EQ(mesh.count(0), b.vertices);
   ASSERT_EQ(mesh.count(b.dim), b.elements);
   for (int d = 1; d <= 3; ++d) {
-    if (d != b.dim) EXPECT_EQ(mesh.count(d), 0) << "dimension " << d;
+    if (d != b.dim) {
+      EXPECT_EQ(mesh.count(d), 0) << "dimension " << d;
+    }
   }
 
   std::vector<char> gid_seen(static_cast<std::size_t>(b.vertices) + 1, 0);

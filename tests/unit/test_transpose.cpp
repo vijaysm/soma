@@ -52,7 +52,9 @@ TEST(Transpose, BoxVertexValenceIsClosedForm) {
         const auto codes = g.row_codes(v);
         ASSERT_EQ(static_cast<int>(row.size()), expected) << "vertex " << v;
         for (std::size_t q = 0; q < row.size(); ++q) {
-          if (q > 0) ASSERT_LT(row[q - 1], row[q]);
+          if (q > 0) {
+            ASSERT_LT(row[q - 1], row[q]);
+          }
           ASSERT_EQ(conn[static_cast<std::size_t>(8 * row[q] + codes[q])], v);
         }
         corners += expected == 1;

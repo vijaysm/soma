@@ -64,7 +64,9 @@ void expect_sorted_unique_without_self(const HostGraph& g) {
     const auto row = g.row(r);
     for (std::size_t q = 0; q < row.size(); ++q) {
       ASSERT_NE(row[q], r);
-      if (q > 0) ASSERT_LT(row[q - 1], row[q]);
+      if (q > 0) {
+        ASSERT_LT(row[q - 1], row[q]);
+      }
     }
   }
 }

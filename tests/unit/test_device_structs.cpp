@@ -71,7 +71,9 @@ TEST(DeviceStructs, ViewsSurviveAByteCopy) {
   alignas(soma::SpaceView<M>) unsigned char raw[sizeof(soma::SpaceView<M>)];
   std::memcpy(raw, &view, sizeof(view));
   soma::SpaceView<M> copy;
-  std::memcpy(&copy, raw, sizeof(copy));
+  // void*: under nvcc the struct is not trivially copyable (see above) and GCC
+  // would warn about memcpy into it; the byte copy is the point of this test.
+  std::memcpy(static_cast<void*>(&copy), raw, sizeof(copy));
   EXPECT_EQ(copy.rows, 3);
   EXPECT_EQ(copy.num_blocks, 1);
 }

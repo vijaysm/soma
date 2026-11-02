@@ -55,6 +55,8 @@ TEST(DataType, NamesAreStable) {
 }
 
 TEST(DataType, InvalidValueThrows) {
-  EXPECT_THROW(soma::dispatch_data_type(static_cast<DataType>(200), []<class T>() {}),
+  // [&] rather than []: a captureless template lambda converts to a function
+  // pointer through a conversion template nvcc warns about (#445-D).
+  EXPECT_THROW(soma::dispatch_data_type(static_cast<DataType>(200), [&]<class T>() {}),
                std::invalid_argument);
 }

@@ -35,7 +35,14 @@ Key make_key(std::span<const LO> vertices) noexcept {
   key.fill(-1);
   const std::size_t n = std::min(vertices.size(), max_side_vertices);
   for (std::size_t i = 0; i < n; ++i) key[i] = vertices[i];
-  std::sort(key.begin(), key.begin() + static_cast<std::ptrdiff_t>(n));
+  // Insertion sort of at most four values. std::sort here makes GCC 13 report
+  // an out-of-bounds subscript from its inlined 16-element threshold path.
+  for (std::size_t i = 1; i < n; ++i) {
+    const LO v = key[i];
+    std::size_t j = i;
+    for (; j > 0 && key[j - 1] > v; --j) key[j] = key[j - 1];
+    key[j] = v;
+  }
   return key;
 }
 

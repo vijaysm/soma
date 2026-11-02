@@ -592,7 +592,9 @@ TEST_F(VtkFiles, TheDefaultLayoutIsVersion51) {
     EXPECT_EQ(f.version_line, "# vtk DataFile Version 5.1") << k;
     EXPECT_EQ(f.cells_declared, 4u) << k;
     EXPECT_EQ(f.cells_size_declared, 11u) << k;
-    if (k > 0) EXPECT_EQ(f.point_data.find("i")->type, "vtktypeint64") << k;
+    if (k > 0) {
+      EXPECT_EQ(f.point_data.find("i")->type, "vtktypeint64") << k;
+    }
   }
   EXPECT_EQ(soma::VtkWriteOptions{}.version, soma::VtkLegacyVersion::v5_1);
 }

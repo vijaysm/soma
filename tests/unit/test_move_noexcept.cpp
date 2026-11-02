@@ -39,6 +39,13 @@ struct ArmedScope {
 
 }  // namespace soma_test
 
+// GCC pairs the replaced operator new with the free() in the replaced operator
+// delete and reports a mismatch at every inlined delete; the pairing is the
+// intended one (malloc in new, free in delete).
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 11
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmismatched-new-delete"
+#endif
 // nvcc compiles a replaced global operator new for the device too, where
 // throwing is not allowed: the host body is host-only, the device gets malloc.
 void* operator new(std::size_t n) {
@@ -51,6 +58,9 @@ void* operator new(std::size_t n) {
 }
 void operator delete(void* p) noexcept { std::free(p); }
 void operator delete(void* p, std::size_t) noexcept { std::free(p); }
+#if defined(__GNUC__) && !defined(__clang__) && __GNUC__ >= 11
+#pragma GCC diagnostic pop
+#endif
 
 using HostMem = Kokkos::HostSpace;
 

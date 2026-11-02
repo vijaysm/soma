@@ -268,27 +268,33 @@ struct LuSolver {
   }
 };
 
+// Sum of |Lagrange basis values| at x. A function, not a lambda inside
+// lebesgue(): nvcc inspects lambda bodies in its device pass and warns that
+// long double is treated as double there (#20208-D), host-only or not.
+Wide lebesgue_sum(const LuSolver& solver, Topology t, int p, const Point& x) {
+  std::vector<Wide> psi = basis_values(t, p, x);
+  solver.solve(psi);
+  Wide sum = 0;
+  for (const Wide c : psi) sum += std::fabs(c);
+  return sum;
+}
+
 double lebesgue(Topology t, int p, const std::vector<Point>& nodes) {
   std::vector<std::vector<Wide>> v;
   for (const Point& x : nodes) v.push_back(basis_values(t, p, x));
   const LuSolver solver(v);
   const int res = (t == Topology::tri ? 12 : 4) * p;
   Wide best = 0;
-  const auto sample = [&](const Point& x) {
-    std::vector<Wide> psi = basis_values(t, p, x);
-    solver.solve(psi);
-    Wide sum = 0;
-    for (const Wide c : psi) sum += std::fabs(c);
-    best = std::max(best, sum);
-  };
   const double h = 2.0 / res;
   if (t == Topology::tri) {
     for (int j = 0; j <= res; ++j)
-      for (int i = 0; i <= res - j; ++i) sample({-1 + h * i, -1 + h * j, 0});
+      for (int i = 0; i <= res - j; ++i)
+        best = std::max(best, lebesgue_sum(solver, t, p, {-1 + h * i, -1 + h * j, 0}));
   } else {
     for (int k = 0; k <= res; ++k)
       for (int j = 0; j <= res - k; ++j)
-        for (int i = 0; i <= res - j - k; ++i) sample({-1 + h * i, -1 + h * j, -1 + h * k});
+        for (int i = 0; i <= res - j - k; ++i)
+          best = std::max(best, lebesgue_sum(solver, t, p, {-1 + h * i, -1 + h * j, -1 + h * k}));
   }
   return static_cast<double>(best);
 }

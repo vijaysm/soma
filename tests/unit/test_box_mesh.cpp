@@ -357,9 +357,15 @@ TEST(BoxMesh, CoordinatesAreBitwiseLengthTimesIndexOverCount) {
     const int i = static_cast<int>(v) % px;
     const int j = (static_cast<int>(v) / px) % py;
     const int k = static_cast<int>(v) / (px * py);
-    if (i < 5) EXPECT_EQ(mesh.coords()(v, 0), 0.1 * i / 5) << "vertex " << v;
-    if (j < 6) EXPECT_EQ(mesh.coords()(v, 1), 0.3 * j / 6) << "vertex " << v;
-    if (k < 7) EXPECT_EQ(mesh.coords()(v, 2), 0.7 * k / 7) << "vertex " << v;
+    if (i < 5) {
+      EXPECT_EQ(mesh.coords()(v, 0), 0.1 * i / 5) << "vertex " << v;
+    }
+    if (j < 6) {
+      EXPECT_EQ(mesh.coords()(v, 1), 0.3 * j / 6) << "vertex " << v;
+    }
+    if (k < 7) {
+      EXPECT_EQ(mesh.coords()(v, 2), 0.7 * k / 7) << "vertex " << v;
+    }
   }
   // Vertex 3 tells the rule apart from i * (lx / nx), which differs in the last bit.
   EXPECT_NE(mesh.coords()(3, 0), 3 * (0.1 / 5));
