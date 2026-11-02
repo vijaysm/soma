@@ -31,6 +31,8 @@ set(SOMA_KOKKOS_GPU "AUTO" CACHE STRING
   "GPU backend of a fetched Kokkos: AUTO, NONE, CUDA, HIP, SYCL")
 set_property(CACHE SOMA_KOKKOS_GPU PROPERTY STRINGS AUTO NONE CUDA HIP SYCL)
 option(SOMA_ENABLE_MOAB_REFERENCE "Build MOAB reference tests and benchmarks" OFF)
+option(SOMA_ENABLE_BENCHMARKS
+  "Build the benchmarks (the MOAB comparisons also need SOMA_ENABLE_MOAB_REFERENCE)" OFF)
 option(SOMA_ENABLE_EXAMPLES "Build the example programs (requires SOMA_ENABLE_HDF5)" OFF)
 option(SOMA_ENABLE_MOAB_COMPAT "MOAB's API over SOMA meshes (soma::compat)" OFF)
 option(SOMA_ENABLE_KOKKOSKERNELS "KokkosSparse views of SOMA matrices (set KokkosKernels_ROOT)" OFF)
@@ -196,7 +198,7 @@ if(SOMA_ENABLE_TESTS)
   add_subdirectory(tests)
 endif()
 
-if(SOMA_ENABLE_MOAB_REFERENCE)
+if(SOMA_ENABLE_BENCHMARKS OR SOMA_ENABLE_MOAB_REFERENCE)
   add_subdirectory(bench)
 endif()
 
@@ -219,5 +221,5 @@ message(STATUS "SOMA ${PROJECT_VERSION}: Kokkos ${SOMA_KOKKOS_VERSION_FOUND}"
   " GPU-aware-MPI=${SOMA_GPU_AWARE_MPI_RESOLVED}"
   " MOAB-reference=${SOMA_ENABLE_MOAB_REFERENCE} MOAB-compat=${SOMA_ENABLE_MOAB_COMPAT}"
   " KokkosKernels=${SOMA_ENABLE_KOKKOSKERNELS} PETSc=${SOMA_ENABLE_PETSC}"
-  " LO64=${SOMA_LO_64}"
+  " bench=${SOMA_ENABLE_BENCHMARKS} LO64=${SOMA_LO_64}"
   " build=${CMAKE_BUILD_TYPE}")
