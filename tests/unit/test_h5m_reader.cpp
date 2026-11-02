@@ -32,6 +32,7 @@
 
 namespace fs = std::filesystem;
 
+using soma::FieldId;
 using soma::GO;
 using soma::HostMesh;
 using soma::LO;
@@ -422,6 +423,22 @@ TEST_F(H5mRead, EveryFixedValueTypeIsRead) {
   EXPECT_EQ(bits.ncomp(), 1);
   EXPECT_EQ(bits.default_value(), std::vector<std::uint8_t>{2});
   EXPECT_EQ(bits.value_or_default(0, lid_of(m, 0, 3)), 7);
+  // Each family keeps how the file stored it.
+  using Kind = soma::TagFormat::Kind;
+  const auto format = [&](FieldId id) { return f.tag_format(f.info(id).family); };
+  EXPECT_EQ(format(bits.id()), (soma::TagFormat{0, Kind::bit, 3}));
+  EXPECT_EQ(format(bytes.id()), (soma::TagFormat{1, Kind::opaque, 0}));
+  EXPECT_EQ(format(vec.id()), (soma::TagFormat{2, Kind::plain, 0}));
+  EXPECT_EQ(format(f.get<std::uint8_t>("u8").id()), (soma::TagFormat{2, Kind::plain, 0}));
+}
+
+TEST_F(H5mRead, RejectsATagClassMoabDoesNotHave) {
+  {
+    Writer w(file());
+    square(w);
+    w.tag("odd", 4, H5T_NATIVE_INT32);
+  }
+  expect_rejected(file(), {"/tstt/tags/odd has class 4, not 0 (bit), 1 (sparse), 2 (dense) or 3 (mesh)"});
 }
 
 TEST_F(H5mRead, TagsItCannotReadAreReported) {
@@ -485,11 +502,11 @@ TEST_F(H5mRead, TagsWithoutEntityValuesAreMeshValues) {
   const auto& mo = v.at("mesh_only");
   EXPECT_EQ(mo.type, soma::DataType::i32);
   EXPECT_EQ(mo.ncomp, 2);
-  EXPECT_EQ(mo.storage_class, 3);
+  EXPECT_EQ(mo.format.storage_class, 3);
   EXPECT_FALSE(mo.default_value.has_value());
   EXPECT_EQ(mo.global_as<std::int32_t>(), (std::vector<std::int32_t>{3, 4}));
   EXPECT_EQ(v.at("declared").default_as<double>(), std::vector<double>{0.5});
-  EXPECT_EQ(v.at("declared").storage_class, 2);
+  EXPECT_EQ(v.at("declared").format.storage_class, 2);
   EXPECT_EQ(v.at("varlen").ncomp, 0);
   EXPECT_EQ(v.at("varlen").global_as<double>(), (std::vector<double>{1, 2, 3}));
   EXPECT_TRUE(v.at("handle").handle);
@@ -762,6 +779,7 @@ TEST_F(H5mRead, VariableLengthTagsAreVarFields) {
     EXPECT_EQ(values(v4.value_or_default(soma::set_dim, 1)), (std::vector<double>{3, 4, 5}));
     EXPECT_EQ(f.info(v0.id()).family, f.info(v4.id()).family);
     EXPECT_TRUE(f.info(v0.id()).variable);
+    EXPECT_EQ(f.tag_format(f.info(v0.id()).family), (soma::TagFormat{1, soma::TagFormat::Kind::plain, 0}));
   }
 }
 

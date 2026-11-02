@@ -560,3 +560,44 @@ TEST(FamilyHost, MirroredRegistryResolvesLikeTheSource) {
   EXPECT_THROW(dev.add<double>("T", soma::Space<DevMem>(D::all(2, 50, 1).mirror<DevMem>(), Layout::per_entity()), 1),
                soma::FieldOverlap);
 }
+
+// A family's legacy file format: none until set, checked against the value
+// type, and carried by mirrors.
+TEST(FamilyHost, TagFormatIsKeptAndChecked) {
+  using Kind = soma::TagFormat::Kind;
+  soma::FieldRegistry<Kokkos::HostSpace> reg;
+  reg.set_entities(0, 4);
+  const auto bits = reg.add_tag<std::uint8_t>("b", 0, 1);
+  const auto opq = reg.add_tag<std::uint8_t>("o", 0, 7);
+  const auto real = reg.add_tag<double>("d", 0, 1);
+  const auto fam = [&](soma::FieldId id) { return reg.info(id).family; };
+  EXPECT_EQ(reg.tag_format(fam(real.id())), soma::TagFormat{});
+  reg.set_tag_format(fam(bits.id()), {0, Kind::bit, 3});
+  reg.set_tag_format(fam(opq.id()), {1, Kind::opaque, 0});
+  reg.set_tag_format(fam(real.id()), {3, Kind::plain, 0});
+  EXPECT_EQ(reg.tag_format(fam(bits.id())), (soma::TagFormat{0, Kind::bit, 3}));
+  const auto rejected = [&](soma::FieldId id, soma::TagFormat f, const std::string& needle) {
+    try {
+      reg.set_tag_format(fam(id), f);
+      ADD_FAILURE() << "accepted: " << needle;
+    } catch (const std::invalid_argument& e) {
+      EXPECT_NE(std::string(e.what()).find(needle), std::string::npos) << e.what();
+    }
+  };
+  rejected(real.id(), {4, Kind::plain, 0}, "family 'd' (f64x1): storage class 4 is not in [-1, 3]");
+  rejected(real.id(), {-2, Kind::plain, 0}, "storage class -2 is not in [-1, 3]");
+  rejected(real.id(), {0, Kind::bit, 1}, "family 'd' (f64x1): bit and opaque values are u8");
+  rejected(real.id(), {1, Kind::opaque, 0}, "bit and opaque values are u8");
+  rejected(opq.id(), {0, Kind::bit, 1}, "family 'o' (u8x7): a bit tag has one component of 1 to 8 bits, not 1");
+  rejected(bits.id(), {0, Kind::bit, 9}, "a bit tag has one component of 1 to 8 bits, not 9");
+  rejected(bits.id(), {0, Kind::bit, 0}, "of 1 to 8 bits, not 0");
+  rejected(opq.id(), {1, Kind::opaque, 2}, "only bit tags have a bit count");
+  EXPECT_EQ(reg.tag_format(fam(bits.id())), (soma::TagFormat{0, Kind::bit, 3}));  // unchanged
+  EXPECT_THROW((void)reg.tag_format(soma::FamilyId{99}), std::out_of_range);
+  EXPECT_THROW(reg.set_tag_format(soma::FamilyId{99}, {}), std::out_of_range);
+
+  soma::FieldRegistry<Kokkos::HostSpace> copy;
+  reg.mirror_into<Kokkos::HostSpace>(copy, {"*"}, {true, true, true, true, true}, false);
+  EXPECT_EQ(copy.tag_format(copy.info(bits.id()).family), (soma::TagFormat{0, Kind::bit, 3}));
+  EXPECT_EQ(copy.tag_format(copy.info(real.id()).family), (soma::TagFormat{3, Kind::plain, 0}));
+}

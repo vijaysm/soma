@@ -498,6 +498,8 @@ struct TagKind {
   DataType type = DataType::u8;
   int ncomp = 1;
   Id mem;
+  TagFormat::Kind kind = TagFormat::Kind::plain;
+  int nbits = 0;
 };
 
 std::optional<DataType> scalar_type(hid_t t, std::string& why) {
@@ -568,6 +570,7 @@ std::optional<TagKind> tag_kind(hid_t type, std::string& why) {
       k.type = DataType::u8;
       k.ncomp = static_cast<int>(size);
       k.mem = h5::check(H5Tcopy(type), "copy an opaque type");
+      k.kind = TagFormat::Kind::opaque;
       return k;
     case H5T_BITFIELD:
       if (size != 1) {
@@ -576,6 +579,8 @@ std::optional<TagKind> tag_kind(hid_t type, std::string& why) {
       }
       k.type = DataType::u8;
       k.mem = h5::check(H5Tcopy(H5T_NATIVE_B8), "copy the bitfield type");
+      k.kind = TagFormat::Kind::bit;
+      k.nbits = static_cast<int>(H5Tget_precision(type));  // 1 to 8 in one byte
       return k;
     default:
       why = "values of this HDF5 type class are not read";
@@ -637,12 +642,12 @@ void to_handle_options(FieldOptions<T>& o, const Locator& at, const std::string&
 
 // A tag with values on no entity, kept with the mesh.
 template <class T>
-MeshValue mesh_value(const FieldOptions<T>& o, int ncomp, int storage_class) {
+MeshValue mesh_value(const FieldOptions<T>& o, int ncomp, const TagFormat& format) {
   MeshValue v;
   v.type = data_type_of<T>();
   v.ncomp = ncomp;
   v.handle = o.handle;
-  v.storage_class = storage_class;
+  v.format = format;
   if (o.default_value) v.default_value = MeshValue::bytes_of<T>(*o.default_value);
   if (o.global_value) v.global_value = MeshValue::bytes_of<T>(*o.global_value);
   return v;
@@ -699,7 +704,7 @@ class FullDomains {
 template <class T>
 void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKind& k,
                 const std::vector<Dense>& dense, const Locator& at, FullDomains& full,
-                bool handle, int storage_class) {
+                bool handle, const TagFormat& format) {
   const std::string where = "/tstt/tags/" + name;
   const auto nc = static_cast<std::size_t>(k.ncomp);
   std::array<std::vector<LO>, num_field_slots> lids;
@@ -804,7 +809,11 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
       for (std::size_t c = 0; c < nc; ++c) view(i, c) = src[from + c];
     }
   }
-  if (!any) mesh.values().set(name, mesh_value(options, k.ncomp, storage_class));
+  if (any) {
+    mesh.fields().set_tag_format(mesh.fields().family<T>(name, k.ncomp, Layout::per_entity(), handle), format);
+  } else {
+    mesh.values().set(name, mesh_value(options, k.ncomp, format));
+  }
 }
 
 // The default or global of a variable-length tag: one value of an array type
@@ -836,7 +845,7 @@ std::optional<std::vector<T>> read_var_attribute(hid_t tag, const char* name, co
 template <class T>
 void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKind& k,
                     const std::vector<Dense>& dense, const Locator& at, FullDomains& full, bool handle,
-                    int storage_class) {
+                    const TagFormat& format) {
   const std::string where = "/tstt/tags/" + name;
   if (!dense.empty()) {
     fail("/tstt/" + dense.front().path + " holds dense values of a variable-length tag, which MOAB does not write");
@@ -926,7 +935,11 @@ void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const T
                             : Domain<Kokkos::HostSpace>::from_list(mesh, d, lids);
     mesh.fields().add_var<T>(name, Space<Kokkos::HostSpace>(domain, Layout::per_entity()), offsets, held, options);
   }
-  if (!any) mesh.values().set(name, mesh_value(options, 0, storage_class));
+  if (any) {
+    mesh.fields().set_tag_format(mesh.fields().family<T>(name, 0, Layout::per_entity(), handle), format);
+  } else {
+    mesh.values().set(name, mesh_value(options, 0, format));
+  }
 }
 
 void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vector<Group>& groups,
@@ -976,6 +989,10 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
       continue;
     }
     if (handle) kind = handle_kind(type.get(), *kind, where);
+    if (storage_class < -1 || storage_class > 3) {
+      fail(where + " has class " + std::to_string(storage_class) + ", not 0 (bit), 1 (sparse), 2 (dense) or 3 (mesh)");
+    }
+    const TagFormat format{storage_class, kind->kind, kind->nbits};
     const auto it = dense.find(name);
     const std::vector<Dense> none;
     const std::vector<Dense>& sources = it != dense.end() ? it->second : none;
@@ -986,12 +1003,12 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
         continue;
       }
       dispatch_data_type(kind->type, [&]<class T>() {
-        import_var_tag<T>(mesh, tstt, name, *kind, sources, at, full, handle, storage_class);
+        import_var_tag<T>(mesh, tstt, name, *kind, sources, at, full, handle, format);
       });
       continue;
     }
     dispatch_data_type(kind->type, [&]<class T>() {
-      import_tag<T>(mesh, tstt, name, *kind, sources, at, full, handle, storage_class);
+      import_tag<T>(mesh, tstt, name, *kind, sources, at, full, handle, format);
     });
   }
 }

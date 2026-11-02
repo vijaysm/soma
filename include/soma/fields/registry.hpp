@@ -364,6 +364,31 @@ class FieldRegistry {
     return id;
   }
 
+  // The legacy file format of a family's tag (TagFormat). set_tag_format
+  // throws std::invalid_argument for a storage class outside [-1, 3], bit or
+  // opaque values that are not u8 (bit: one component, nbits in [1, 8]), or
+  // nbits on a plain tag; both throw std::out_of_range for an unknown family.
+  const TagFormat& tag_format(FamilyId fam) const { return family_at(fam).format; }
+  void set_tag_format(FamilyId fam, TagFormat f) {
+    const Family& family = family_at(fam);
+    const FamilyKey& k = family.key;
+    const std::string what = "family '" + k.name + "' (" + type_text(k.type, k.ncomp) + "): ";
+    if (f.storage_class < -1 || f.storage_class > 3) {
+      throw std::invalid_argument(what + "storage class " + std::to_string(f.storage_class) + " is not in [-1, 3]");
+    }
+    if (f.kind != TagFormat::Kind::plain && k.type != DataType::u8) {
+      throw std::invalid_argument(what + "bit and opaque values are u8");
+    }
+    if (f.kind == TagFormat::Kind::bit && (k.ncomp != 1 || f.nbits < 1 || f.nbits > 8)) {
+      throw std::invalid_argument(what + "a bit tag has one component of 1 to 8 bits, not " +
+                                  std::to_string(f.nbits));
+    }
+    if (f.kind != TagFormat::Kind::bit && f.nbits != 0) {
+      throw std::invalid_argument(what + "only bit tags have a bit count");
+    }
+    families_[fam].format = f;
+  }
+
   // Fields of a family that have members on `dim`, in lookup slot order (the
   // slot that FamilyHit reports). Builds the index if needed.
   std::vector<FieldId> family_members(FamilyId fam, int dim) const {
@@ -566,6 +591,7 @@ class FieldRegistry {
     built.epoch_ = epoch_;
     for (const Family& f : families_) {
       built.families_.push_back(typename FieldRegistry<Dst>::Family{f.key});
+      built.families_.back().format = f.format;
     }
 
     std::map<const void*, Domain<Dst>> domains;
@@ -642,11 +668,17 @@ class FieldRegistry {
   struct Family {
     explicit Family(FamilyKey k) : key(std::move(k)) {}
     FamilyKey key;
+    TagFormat format{};
     std::vector<FieldId> members;  // live fields, in id order
     std::uint64_t version = 1;     // bumped when the membership or the epoch changes
     mutable std::array<std::shared_ptr<const detail::FamilyDimData<MemSpace>>, num_field_slots> index;
     mutable std::array<std::uint64_t, num_field_slots> built{};
   };
+
+  const Family& family_at(FamilyId fam) const {
+    if (fam >= families_.size()) throw std::out_of_range("no family with id " + std::to_string(fam));
+    return families_[fam];
+  }
 
   static void check_dim(int dim) {
     if (dim < 0 || dim > set_dim) {

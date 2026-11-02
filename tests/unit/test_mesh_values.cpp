@@ -22,7 +22,7 @@ soma::MeshValue ints(std::vector<std::int32_t> global) {
   soma::MeshValue v;
   v.type = soma::DataType::i32;
   v.ncomp = static_cast<int>(global.size());
-  v.storage_class = 3;
+  v.format.storage_class = 3;
   v.global_value = soma::MeshValue::bytes_of<std::int32_t>(global);
   return v;
 }

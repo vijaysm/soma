@@ -17,6 +17,7 @@
 #include "soma/core/types.hpp"
 #include "soma/core/view_types.hpp"
 #include "soma/fields/data_type.hpp"
+#include "soma/fields/tag_format.hpp"
 #include "soma/fields/space.hpp"
 
 namespace soma {
