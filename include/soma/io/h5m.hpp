@@ -84,9 +84,10 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 
 // write_h5m writes a file that MOAB's load_file and read_h5m read.
 //
-// Entities: the vertices, the elements of mesh.dim() and of every dimension
-// the mesh was built with (Mesh::input), or the dimensions options.dims
-// names (dims[0] must be true). One group per element type and node count
+// Entities: the vertices, the elements of mesh.dim(), of every dimension the
+// mesh was built with (Mesh::input) and of every dimension that fields have
+// values on or sets hold; or the dimensions options.dims names (dims[0] must
+// be true). One group per element type and node count
 // (Edge2, Tri3, Quad4, Polygon5, Hex8, ...), in type order and then node
 // count; knives and polyhedra throw. File ids are 1-based and contiguous:
 // the vertices, then the groups, each in gid order. A mesh that read_h5m read

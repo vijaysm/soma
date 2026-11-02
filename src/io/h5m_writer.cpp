@@ -110,13 +110,25 @@ void sort_by_gid(std::vector<LO>& rows, const View1<const GO, Kokkos::HostSpace>
   });
 }
 
+// options.dims, or else the vertices, mesh.dim(), the dimensions the mesh
+// was built with, and those that fields have values on or sets hold.
 std::array<bool, 4> written_dims(const HostMesh& mesh, const H5mWriteOptions& options) {
   std::array<bool, 4> w{};
   if (options.dims) {
     if (!(*options.dims)[0]) reject("the vertices are always written; dims[0] must be true");
-    w = *options.dims;
-  } else {
-    for (int d = 0; d <= mesh.dim(); ++d) w[static_cast<std::size_t>(d)] = d == 0 || d == mesh.dim() || mesh.input(d);
+    return *options.dims;
+  }
+  for (int d = 0; d <= mesh.dim(); ++d) w[static_cast<std::size_t>(d)] = d == 0 || d == mesh.dim() || mesh.input(d);
+  for (const FieldInfo& info : mesh.fields().list()) {
+    for (const int d : info.dims) {
+      if (d < set_dim) w[static_cast<std::size_t>(d)] = true;
+    }
+  }
+  const auto& sets = mesh.sets();
+  for (int d = 1; d < mesh.dim(); ++d) {
+    for (LO s = 0; s < sets.count() && !w[static_cast<std::size_t>(d)] && sets.has_members(d); ++s) {
+      w[static_cast<std::size_t>(d)] = !sets.members_of(s, d).empty();
+    }
   }
   return w;
 }

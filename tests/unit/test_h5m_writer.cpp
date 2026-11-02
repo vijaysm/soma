@@ -492,14 +492,51 @@ TEST(H5mWrite, RejectsSetsHoldingEntitiesNotWritten) {
   const fs::path dir = scratch() / "edge_set";
   fs::create_directory(dir);
   try {
-    soma::write_h5m(in, dir / "m.h5m");
+    soma::write_h5m(in, dir / "m.h5m", {.dims = std::array<bool, 4>{true, false, false, true}});
     ADD_FAILURE() << "written without its members";
   } catch (const std::invalid_argument& e) {
     EXPECT_STREQ(e.what(), "write_h5m: set 3 holds an entity of dimension 1, which is not written");
   }
   EXPECT_TRUE(listing(dir).empty());
-  soma::write_h5m(in, dir / "m.h5m", {.dims = std::array<bool, 4>{true, true, false, true}});
-  EXPECT_EQ(sets_of(soma::read_h5m(dir / "m.h5m")).size(), 1u);
+}
+
+// By default the dimensions that fields have values on or sets hold are
+// written too.
+TEST(H5mWrite, WritesTheDimensionsFieldsAndSetsUse) {
+  HostMesh in = soma::testing::box_mesh({2, 1, 1});
+  soma::build_adjacencies(in, soma::AdjacencyRequest{}.add(3, 1).add(3, 2), Kokkos::DefaultHostExecutionSpace{});
+  const fs::path out = scratch() / "used.h5m";
+  {
+    HostMesh m = in.clone();
+    m.fields().add_tag<double>("FACE", 2, 1);
+    soma::write_h5m(m, out);
+    const HostMesh back = soma::read_h5m(out);
+    EXPECT_EQ(back.count(1), 0);
+    EXPECT_EQ(back.count(2), in.count(2));
+  }
+  {
+    HostMesh m = in.clone();
+    soma::SetBuilder b;
+    b.add(soma::SetSpec{3, soma::set_unique, {{1, 4}}, {}, {}});
+    b.add(soma::SetSpec{4, soma::set_ordered, {{0, 1}}, {}, {}});
+    std::move(b).install(m);
+    soma::write_h5m(m, out);
+    const HostMesh back = soma::read_h5m(out);
+    EXPECT_EQ(back.count(1), in.count(1));
+    EXPECT_EQ(back.count(2), 0);
+    EXPECT_EQ(sets_of(back).size(), 2u);
+  }
+  {
+    HostMesh m = in.clone();
+    soma::SetBuilder b;
+    b.add(soma::SetSpec{3, soma::set_unique, {}, {}, {}});
+    b.add(soma::SetSpec{4, soma::set_ordered, {{2, 0}, {2, 0}}, {}, {}});
+    std::move(b).install(m);
+    soma::write_h5m(m, out);
+    const HostMesh back = soma::read_h5m(out);
+    EXPECT_EQ(back.count(1), 0);
+    EXPECT_EQ(back.count(2), in.count(2));
+  }
 }
 
 // One tag per family: dense on the blocks it covers whole, sparse elsewhere;
