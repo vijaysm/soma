@@ -210,6 +210,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       Kokkos::view_alloc(std::string("soma::mesh::coords"), Kokkos::WithoutInitializing), nv);
   auto& v = mesh.ents_[0];
   v.count = detail::to_lo(nv, "number of vertices");
+  v.input = true;
   v.gid = View1<GO, Kokkos::HostSpace>(
       Kokkos::view_alloc(std::string("soma::mesh::gid0"), Kokkos::WithoutInitializing), nv);
   std::vector<LO> rank(nv);  // local id of each input vertex
@@ -361,6 +362,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     }
     auto& e = mesh.ents_[d];
     e.count = detail::to_lo(recs.size(), "number of elements");
+    e.input = !recs.empty();
     (void)detail::to_offset(entries, "connectivity size");  // so every prefix fits too
     const auto uninit = [](std::string label) {
       return Kokkos::view_alloc(std::move(label), Kokkos::WithoutInitializing);

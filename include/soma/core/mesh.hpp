@@ -41,6 +41,7 @@ struct EntityBlock {
   View1<GO, MemSpace> gid;
   SegmentTable segments;
   bool derived = false;  // complete: built from the elements, explicit input adopted
+  bool input = false;    // given to MeshBuilder; kept when derivation adopts the entities
 };
 
 template <class MemSpace>
@@ -94,6 +95,9 @@ class Mesh {
   View1<const LO, MemSpace> conn(int d) const { return block(d).conn; }
   View1<const std::uint8_t, MemSpace> topology(int d) const { return block(d).topology; }
   View1<const GO, MemSpace> gid(int d) const { return block(d).gid; }
+  // True for the dimensions MeshBuilder was given entities of (vertices
+  // always), also after derivation adopts them; false for derived-only ones.
+  bool input(int d) const { return block(d).input; }
   CoordView<MemSpace> coords() const noexcept { return coords_; }  // writable geometry
 
   // has_adjacency(d, 0) is true for 1 <= d <= dim() when the mesh holds that
@@ -265,6 +269,7 @@ class Mesh {
       t.count = s.count;
       t.segments = s.segments;
       t.derived = s.derived;
+      t.input = s.input;
       transfer(t.conn_offsets, s.conn_offsets, alias);
       transfer(t.conn, s.conn, alias);
       transfer(t.topology, s.topology, alias);

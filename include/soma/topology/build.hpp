@@ -225,7 +225,9 @@ void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRe
   auto& store = Access::store(mesh);
   for (int k = 1; k < D; ++k) {
     if (!derive_k[static_cast<std::size_t>(k)]) continue;
+    const bool input = Access::block(mesh, k).input;
     Access::block(mesh, k) = std::move(Access::block(work, k));
+    Access::block(mesh, k).input = input;
     for (int s = 0; s < adjacency_slots; ++s) {
       if (topology::detail::touches(s, k)) store.drop(s);
     }

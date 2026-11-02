@@ -205,6 +205,23 @@ TEST(BuildAdjacencies, AdoptingExplicitFacesBumpsTheEpoch) {
   EXPECT_THROW((void)mesh.fields().get<double>("t", 0), soma::StaleField);
 }
 
+// A dimension given to the builder stays an input one when derivation adopts
+// its entities; a dimension SOMA derives alone is not one. Mirrors keep both.
+TEST(BuildAdjacencies, InputDimensionsSurviveDerivation) {
+  auto mesh = soma_test::box_with_bottom_quads();
+  const auto flags = [](const soma::HostMesh& m) {
+    return std::vector<bool>{m.input(0), m.input(1), m.input(2), m.input(3)};
+  };
+  EXPECT_EQ(flags(mesh), (std::vector<bool>{true, false, true, true}));
+  soma::build_adjacencies(mesh, AdjacencyRequest{}.add(3, 2).add(3, 1));
+  EXPECT_EQ(mesh.count(2), 36);
+  EXPECT_GT(mesh.count(1), 0);
+  EXPECT_EQ(flags(mesh), (std::vector<bool>{true, false, true, true}));
+  EXPECT_EQ(flags(mesh.mirror<Kokkos::HostSpace>()), flags(mesh));
+  const auto two_d = soma_test::two_quads_and_a_triangle();
+  EXPECT_EQ(flags(two_d), (std::vector<bool>{true, false, true, false}));
+}
+
 namespace soma_test {
 
 std::vector<GO> gids_of(const soma::HostMesh& m, int dim, std::vector<LO> lids) {
