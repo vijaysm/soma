@@ -11,6 +11,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -445,7 +446,7 @@ TEST_F(H5mRead, TagsItCannotReadYetAreReported) {
   soma::H5mReport report;
   report.skipped.push_back({"stale", "left from before"});
   HostMesh m = soma::read_h5m(file(), {}, report);
-  EXPECT_TRUE(skipped(report, "varlen", "variable-length"));
+  EXPECT_TRUE(skipped(report, "varlen", "no values on entities or sets"));
   EXPECT_TRUE(skipped(report, "handle", "handle-valued"));
   EXPECT_TRUE(skipped(report, "mesh_only", "no values on entities or sets"));
   EXPECT_TRUE(skipped(report, "short", "16-bit integer"));
@@ -606,6 +607,76 @@ TEST_F(H5mRead, TagValuesOnSetsAreFieldsOnTheSetSlot) {
   const auto d = f.get<double>("D", soma::set_dim);
   ASSERT_EQ(d.rows(), 3);
   for (LO i = 0; i < 3; ++i) EXPECT_EQ(d.value_or_default(soma::set_dim, i), 0.5 + i);
+}
+
+// A variable-length tag on vertices, a quad and a set: each holds its own
+// number of values, 0 included; the default and global are arrays of their own
+// lengths.
+TEST_F(H5mRead, VariableLengthTagsAreVarFields) {
+  {
+    Writer w(file());
+    square(w);
+    w.sets(6, 2);
+    w.tag("VL", 1, H5T_NATIVE_DOUBLE);
+    w.int_attribute("tags/VL", "variable_length", 1);
+    const double v[] = {1, 2, 3, 4, 5, 6};
+    w.var_sparse("VL", {3, 1, 7, 5}, {1, 1, 4, 5}, v, 6);
+    const double def[] = {9, 8};
+    w.array_attribute("VL", "default", def, 2);
+    const double g = 7;
+    w.array_attribute("VL", "global", &g, 1);
+  }
+  for (const Ordering ordering : {Ordering::file, Ordering::type_major_sfc}) {
+    soma::H5mReadOptions o;
+    o.ordering = ordering;
+    const HostMesh m = soma::read_h5m(file(), o);
+    const auto& f = m.fields();
+    const auto values = [](std::span<const double> s) { return std::vector<double>(s.begin(), s.end()); };
+    const auto v0 = f.get_var<double>("VL", 0);
+    EXPECT_EQ(v0.rows(), 2);
+    EXPECT_TRUE(v0.value_or_default(0, lid_of(m, 0, 1)).empty());
+    EXPECT_EQ(values(v0.value_or_default(0, lid_of(m, 0, 3))), (std::vector<double>{1, 2}));
+    EXPECT_EQ(values(v0.value_or_default(0, lid_of(m, 0, 2))), (std::vector<double>{9, 8}));
+    EXPECT_EQ(v0.global_value(), (std::vector<double>{7}));
+    const auto v2 = f.get_var<double>("VL", 2);
+    EXPECT_EQ(values(v2.value_or_default(2, lid_of(m, 2, 5))), (std::vector<double>{6}));
+    const auto v4 = f.get_var<double>("VL", soma::set_dim);
+    EXPECT_EQ(v4.rows(), 1);
+    EXPECT_EQ(values(v4.value_or_default(soma::set_dim, 1)), (std::vector<double>{3, 4, 5}));
+    EXPECT_EQ(f.info(v0.id()).family, f.info(v4.id()).family);
+    EXPECT_TRUE(f.info(v0.id()).variable);
+  }
+}
+
+TEST_F(H5mRead, RejectsVariableLengthValuesItCannotPlace) {
+  const auto expect = [&](const std::string& name, const std::function<void(Writer&)>& write,
+                          const std::vector<std::string>& needles) {
+    SCOPED_TRACE(name);
+    {
+      Writer w(file(name + ".h5m"));
+      square(w);
+      w.tag("VL", 1, H5T_NATIVE_INT32);
+      w.int_attribute("tags/VL", "variable_length", 1);
+      write(w);
+    }
+    expect_rejected(file(name + ".h5m"), needles);
+  };
+  const std::int32_t v[] = {1, 2, 3};
+  expect("dense", [&](Writer& w) { w.dense("nodes", "VL", v, 4); },
+         {"/tstt/nodes/tags/VL holds dense values of a variable-length tag, which MOAB does not write"});
+  expect("noindices", [&](Writer& w) { w.sparse("VL", {1}, v); },
+         {"/tstt/tags/VL is variable-length but has no var_indices"});
+  expect("indices", [&](Writer& w) { w.var_sparse("VL", {1, 2}, {0}, v, 1); },
+         {"/tstt/tags/VL/var_indices must hold one index per entry of /tstt/tags/VL/id_list"});
+  expect("decreasing", [&](Writer& w) { w.var_sparse("VL", {1, 2}, {1, 0}, v, 2); },
+         {"/tstt/tags/VL/var_indices: file id 2 ends its values at index 0; the ends must be at least -1"});
+  expect("count", [&](Writer& w) { w.var_sparse("VL", {1, 2}, {0, 1}, v, 3); }, {"/tstt/tags/VL/values must hold"});
+  expect("noentity", [&](Writer& w) {
+    w.var_sparse("VL", {1, 9}, {0, 1}, v, 2);
+    w.max_id(9);
+  }, {"/tstt/tags/VL/id_list lists file id 9, which names no entity"});
+  expect("twice", [&](Writer& w) { w.var_sparse("VL", {4, 2, 4}, {0, 1, 2}, v, 3); },
+         {"/tstt/tags/VL has two values on file id 4"});
 }
 
 TEST_F(H5mRead, RejectsSetsItCannotPlace) {

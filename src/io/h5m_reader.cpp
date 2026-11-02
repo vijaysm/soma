@@ -694,6 +694,114 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
   }
 }
 
+// The default or global of a variable-length tag: one value of an array type
+// of any length, or a single value of the tag's type.
+template <class T>
+std::optional<std::vector<T>> read_var_attribute(hid_t tag, const char* name, const TagKind& k,
+                                                 const std::string& where) {
+  if (!h5::has_attribute(tag, name)) return std::nullopt;
+  const std::string what = std::string("the ") + name + " of " + where;
+  const Id a = h5::check(H5Aopen(tag, name, H5P_DEFAULT), "open " + what);
+  h5::require_one_value(a.get(), what);
+  const Id t = h5::check(H5Aget_type(a.get()), "get the type of " + what);
+  if (H5Tget_class(t.get()) != H5T_ARRAY) {
+    std::vector<T> v(1);
+    h5::check(H5Aread(a.get(), k.mem.get(), v.data()), "read " + what);
+    return v;
+  }
+  if (H5Tget_array_ndims(t.get()) != 1) fail(what + " is an array of more than one dimension");
+  hsize_t n = 0;
+  H5Tget_array_dims2(t.get(), &n);
+  const Id mem = h5::check(H5Tarray_create2(k.mem.get(), 1, &n), "make the memory type of " + what);
+  std::vector<T> v(static_cast<std::size_t>(n));
+  h5::check(H5Aread(a.get(), mem.get(), v.data()), "read " + what);
+  return v;
+}
+
+// A variable-length tag: id_list names the entities and sets, var_indices
+// holds the last index of each one's run of values.
+template <class T>
+void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKind& k,
+                    const std::vector<Dense>& dense, const Locator& at, FullDomains& full, H5mReport& report) {
+  const std::string where = "/tstt/tags/" + name;
+  if (!dense.empty()) {
+    fail("/tstt/" + dense.front().path + " holds dense values of a variable-length tag, which MOAB does not write");
+  }
+  struct Run {
+    LO lid;
+    std::size_t begin;
+    std::size_t end;
+  };
+  std::array<std::vector<Run>, num_field_slots> runs;
+  std::vector<T> values;
+  const Id tag = h5::open_group(tstt, "tags/" + name);
+  if (h5::exists(tag.get(), "id_list")) {
+    const std::string iw = where + "/id_list";
+    const Id ids_ds = h5::open_dataset(tag.get(), "id_list");
+    const auto ext = h5::extent(ids_ds.get(), iw);
+    if (ext.size() != 1) fail(iw + " must be one-dimensional");
+    const auto n = static_cast<std::size_t>(ext[0]);
+    const auto ids = h5::read_all<std::uint64_t>(ids_ds.get(), n, iw);
+    const std::string xw = where + "/var_indices";
+    if (!h5::exists(tag.get(), "var_indices")) fail(where + " is variable-length but has no var_indices");
+    const Id x_ds = h5::open_dataset(tag.get(), "var_indices");
+    const auto xext = h5::extent(x_ds.get(), xw);
+    if (xext.size() != 1 || xext[0] != ext[0]) fail(xw + " must hold one index per entry of " + iw);
+    const auto last = h5::read_all<std::int64_t>(x_ds.get(), n, xw);
+    std::int64_t prev = -1;
+    for (std::size_t i = 0; i < n; ++i) {
+      if (last[i] < prev) {
+        fail(xw + ": file id " + str(ids[i]) + " ends its values at index " + str(last[i]) +
+             "; the ends must be at least -1 and never decrease");
+      }
+      prev = last[i];
+    }
+    if (!h5::exists(tag.get(), "values")) fail(where + " has an id_list but no values");
+    values = read_rows<T>(tstt, "tags/" + name + "/values", k, static_cast<GO>(prev + 1));
+    std::size_t begin = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+      const IdRange* r = ids[i] <= static_cast<std::uint64_t>(std::numeric_limits<GO>::max())
+                             ? at.range_of(static_cast<GO>(ids[i]))
+                             : nullptr;
+      if (r == nullptr) fail(iw + " lists file id " + str(ids[i]) + ", which names no entity");
+      const auto end = static_cast<std::size_t>(last[i] + 1);
+      runs[static_cast<std::size_t>(r->dim)].push_back({at.lid(r->dim, static_cast<GO>(ids[i])), begin, end});
+      begin = end;
+    }
+  }
+
+  FieldOptions<T> options;
+  options.default_value = read_var_attribute<T>(tag.get(), "default", k, where);
+  options.global_value = read_var_attribute<T>(tag.get(), "global", k, where);
+  bool any = false;
+  for (int d = 0; d < num_field_slots; ++d) {
+    auto& rs = runs[static_cast<std::size_t>(d)];
+    if (rs.empty()) continue;
+    any = true;
+    std::sort(rs.begin(), rs.end(), [](const Run& a, const Run& b) { return a.lid < b.lid; });
+    const auto twice =
+        std::adjacent_find(rs.begin(), rs.end(), [](const Run& a, const Run& b) { return a.lid == b.lid; });
+    if (twice != rs.end()) {
+      fail(where + " has two values on file id " +
+           str(detail::slot_gid(mesh, d)(static_cast<std::size_t>(twice->lid))));
+    }
+    std::vector<LO> lids(rs.size());
+    std::vector<Offset> offsets(rs.size() + 1, 0);
+    std::vector<T> held;
+    for (std::size_t i = 0; i < rs.size(); ++i) {
+      lids[i] = rs[i].lid;
+      held.insert(held.end(), values.begin() + static_cast<std::ptrdiff_t>(rs[i].begin),
+                  values.begin() + static_cast<std::ptrdiff_t>(rs[i].end));
+      offsets[i + 1] = to_offset(held.size(), where + "/values");
+    }
+    const auto domain = lids.size() == static_cast<std::size_t>(detail::slot_count(mesh, d))
+                            ? full.get(d)
+                            : Domain<Kokkos::HostSpace>::from_list(mesh, d, lids);
+    mesh.fields().add_var<T>(name, Space<Kokkos::HostSpace>(domain, Layout::per_entity()), offsets, held, options);
+  }
+  if (!any) report.skipped.push_back({name, "it has no values on entities or sets"});
+}
+
 void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vector<Group>& groups,
                  const std::vector<std::string>& group_names, const IdRange& sets,
                  const Locator& at, H5mReport& report) {
@@ -726,11 +834,8 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
   for (const std::string& name : names) {
     const std::string where = "/tstt/tags/" + name;
     const Id tag = h5::open_group(tstt, "tags/" + name);
-    if (h5::has_attribute(tag.get(), "variable_length") &&
-        h5::read_attribute<std::int32_t>(tag.get(), "variable_length", where) != 0) {
-      report.skipped.push_back({name, "variable-length tags are not read yet"});
-      continue;
-    }
+    const bool variable = h5::has_attribute(tag.get(), "variable_length") &&
+                          h5::read_attribute<std::int32_t>(tag.get(), "variable_length", where) != 0;
     if (h5::has_attribute(tag.get(), "is_handle") &&
         h5::read_attribute<std::int32_t>(tag.get(), "is_handle", where) != 0) {
       report.skipped.push_back({name, "handle-valued tags are not read yet"});
@@ -747,6 +852,17 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
     const auto it = dense.find(name);
     const std::vector<Dense> none;
     const std::vector<Dense>& sources = it != dense.end() ? it->second : none;
+    if (variable) {
+      if (kind->ncomp != 1) {
+        report.skipped.push_back({name, "variable-length tags of " + std::to_string(kind->ncomp) +
+                                            "-component values are not read"});
+        continue;
+      }
+      dispatch_data_type(kind->type, [&]<class T>() {
+        import_var_tag<T>(mesh, tstt, name, *kind, sources, at, full, report);
+      });
+      continue;
+    }
     dispatch_data_type(kind->type, [&]<class T>() {
       import_tag<T>(mesh, tstt, name, *kind, sources, at, full, report);
     });

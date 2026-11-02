@@ -210,6 +210,40 @@ class Writer {
     H5Tclose(t);
   }
 
+  // A variable-length tag's values: file id ids[i] holds the run of values
+  // that ends at index last[i] of `values` (n of them, of the tag's type).
+  void var_sparse(const std::string& name, const std::vector<std::uint64_t>& ids,
+                  const std::vector<std::int64_t>& last, const void* values, std::size_t n) {
+    const hid_t t = tag_type(name);
+    const hid_t g = group("tags/" + name);
+    const hsize_t ni = ids.size();
+    const hid_t il = dataset(g, "id_list", H5T_STD_U64LE, 1, &ni);
+    write(il, H5T_NATIVE_UINT64, ids.data(), ids.size());
+    const hsize_t nx = last.size();
+    const hid_t vi = dataset(g, "var_indices", H5T_STD_I64LE, 1, &nx);
+    write(vi, H5T_NATIVE_INT64, last.data(), last.size());
+    const hsize_t nv = n;
+    const hid_t vs = dataset(g, "values", t, 1, &nv);
+    if (n > 0) check(H5Dwrite(vs, t, H5S_ALL, H5S_ALL, H5P_DEFAULT, values), "write variable-length values");
+    H5Dclose(vs);
+    H5Dclose(vi);
+    H5Dclose(il);
+    H5Gclose(g);
+    H5Tclose(t);
+  }
+
+  // Attribute `name` of tag `tag`: one value of an array of n of the tag's type.
+  void array_attribute(const std::string& tag, const char* name, const void* values, std::size_t n) {
+    const hid_t t = tag_type(tag);
+    const hsize_t dims = n;
+    const hid_t a = ok(H5Tarray_create2(t, 1, &dims), "make an array type");
+    const hid_t g = group("tags/" + tag);
+    scalar_attribute(g, name, a, values);
+    H5Gclose(g);
+    H5Tclose(a);
+    H5Tclose(t);
+  }
+
  private:
   // Opens path below /tstt, creating the groups on the way.
   hid_t group(const std::string& path) {
