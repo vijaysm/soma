@@ -17,6 +17,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "soma/core/mesh_builder.hpp"
+#include "soma/core/set_builder.hpp"
 #include "soma/core/types.hpp"
 #include "soma/fields/domain.hpp"
 #include "soma/fields/errors.hpp"
@@ -410,6 +411,31 @@ TEST(ExceptionSafety, AFailedVariableLengthAddOrMirrorChangesNothing) {
           [&](long n) { EXPECT_TRUE(dst.list().empty()) << n; });
     EXPECT_EQ(dst.list().size(), static_cast<std::size_t>(existing) + 1);
   }
+}
+
+// A failed install of entity sets leaves the mesh without sets, its registry
+// with no set entities; a retry then installs them all.
+TEST(ExceptionSafety, AFailedSetInstallChangesNothing) {
+  soma::MeshBuilder mb(2);
+  mb.add_vertices(std::vector<soma::GO>{1, 2, 3, 4}, std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0});
+  mb.add_elements(soma::Topology::quad, std::vector<soma::GO>{5}, std::vector<soma::GO>{1, 2, 3, 4});
+  soma::HostMesh mesh = std::move(mb).build(soma::Ordering::file);
+  const auto install = [&] {
+    soma::SetBuilder b;
+    b.add(soma::SetSpec{20, soma::set_ordered, {{0, 1}, {2, 0}, {0, 1}, {soma::set_dim, 10}}, {10}, {}});
+    b.add(soma::SetSpec{10, soma::set_unique, {{0, 0}, {0, 3}}, {}, {20}});
+    std::move(b).install(mesh);
+  };
+  const long failures = sweep(install, [&](long n) {
+    EXPECT_EQ(mesh.sets().count(), 0) << n;
+    const auto probe = mesh.fields().add_tag<double>("probe", soma::set_dim, 1);
+    EXPECT_EQ(probe.rows(), 0) << n;
+    mesh.fields().remove(probe.id());
+  });
+  EXPECT_GT(failures, 0);
+  ASSERT_EQ(mesh.sets().count(), 2);
+  EXPECT_EQ(mesh.sets().sequence(1).size(), 4u);
+  EXPECT_EQ(mesh.fields().add_tag<double>("probe", soma::set_dim, 1).rows(), 2);
 }
 
 // The same sweep for a mirror into the default memory space and into the host.
