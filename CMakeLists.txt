@@ -50,8 +50,13 @@ set(SOMA_LARGE_DATA_DIR "" CACHE PATH "Directory of large meshes for scale tests
 
 include(GNUInstallDirs)
 include(SomaKokkos)
+include(SomaKokkosLanguage)
 
 soma_find_or_fetch_kokkos()
+# A Kokkos built as the CMake CUDA/HIP language needs SOMA's sources compiled
+# as that language too (cmake/SomaKokkosLanguage.cmake). Before find_package(MPI):
+# the CUDA host compiler is the C++ compiler, so an MPI wrapper keeps working.
+soma_kokkos_language_setup()
 
 if(SOMA_ENABLE_MPI)
   find_package(MPI REQUIRED COMPONENTS CXX)
@@ -103,7 +108,9 @@ configure_file(cmake/config.hpp.in
 
 add_library(soma_warnings INTERFACE)
 target_compile_options(soma_warnings INTERFACE
-  "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang,IntelLLVM,NVHPC>:-Wall;-Wextra>")
+  "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang,IntelLLVM,NVHPC>:-Wall;-Wextra>"
+  "$<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-Xcompiler=-Wall,-Wextra>"
+  "$<$<COMPILE_LANG_AND_ID:HIP,Clang>:-Wall;-Wextra>")
 
 set(SOMA_SOURCES src/runtime/scope_guard.cpp src/runtime/options.cpp src/core/segments.cpp src/fields/node_tables.cpp src/core/mesh_builder.cpp src/core/mesh_edit.cpp src/core/permute.cpp src/testing/box_mesh.cpp src/io/vtk_writer.cpp src/io/vtk_reader.cpp src/amr/box_list.cpp src/amr/box_array.cpp src/amr/halo.cpp src/amr/copy.cpp src/amr/interlevel.cpp src/amr/flux_register.cpp src/amr/cluster.cpp src/amr/hierarchy.cpp src/amr/vtk_amr.cpp src/parallel/transport/route.cpp src/parallel/transport/comm_plan.cpp src/parallel/transport/sort.cpp src/parallel/comm_counts.cpp src/parallel/partition.cpp src/parallel/sharing.cpp src/parallel/distributed.cpp src/parallel/migrate.cpp src/parallel/ghosts.cpp
                  src/algorithms/smoothing_graph.cpp src/algorithms/vertex_graph.cpp
@@ -123,6 +130,7 @@ endif()
 
 add_library(soma ${SOMA_SOURCES})
 add_library(soma::soma ALIAS soma)
+soma_target_kokkos_sources(soma)
 target_compile_features(soma PUBLIC cxx_std_20)
 target_include_directories(soma PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -206,6 +214,7 @@ endif()
 message(STATUS "SOMA ${PROJECT_VERSION}: Kokkos ${SOMA_KOKKOS_VERSION_FOUND}"
   " (${SOMA_KOKKOS_SOURCE}) host=${SOMA_KOKKOS_HOST_BACKEND}"
   " gpu=${SOMA_KOKKOS_GPU_BACKEND} [${SOMA_KOKKOS_DEVICES}]"
+  " lang=${SOMA_KOKKOS_COMPILE_LANGUAGE}"
   " MPI=${SOMA_ENABLE_MPI} HDF5=${SOMA_ENABLE_HDF5} tests=${SOMA_ENABLE_TESTS}"
   " GPU-aware-MPI=${SOMA_GPU_AWARE_MPI_RESOLVED}"
   " MOAB-reference=${SOMA_ENABLE_MOAB_REFERENCE} MOAB-compat=${SOMA_ENABLE_MOAB_COMPAT}"

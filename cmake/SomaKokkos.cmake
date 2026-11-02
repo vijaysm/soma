@@ -8,9 +8,13 @@
 #   SOMA_KOKKOS_VERSION_FOUND, SOMA_KOKKOS_DEVICES
 #   SOMA_KOKKOS_HOST_BACKEND (OpenMP, Threads, HPX or Serial)
 #   SOMA_KOKKOS_GPU_BACKEND (CUDA, HIP, SYCL or none), SOMA_KOKKOS_HAS_GPU
+# A fetched Kokkos also gets the variables an installed one exports for its
+# compile language (Kokkos_COMPILE_LANGUAGE, Kokkos_CXX_STANDARD,
+# Kokkos_CUDA_ARCHITECTURES, Kokkos_HIP_ARCHITECTURES), see SomaKokkosLanguage.
 
 include_guard(GLOBAL)
 include(SomaAppleOpenMP)
+include(SomaKokkosLanguage)
 
 # Name=value pairs of the Kokkos options as they stood after the last fetch
 # configure. An option that is defined and differs from this record (or is
@@ -88,13 +92,23 @@ function(_soma_gpu_decide out out_reason)
 endfunction()
 
 # Sets <out> to a message when the C++ compiler cannot drive the backend, and
-# to "" when it can.
+# to "" when it can. AS_LANGUAGE: Kokkos compiles CUDA as the CMake language,
+# so nvcc is driven directly and the C++ compiler must be a host compiler
+# (IS_NVCC says it is nvcc or nvcc_wrapper, also behind an MPI wrapper).
 function(_soma_gpu_compiler_problem out)
-  cmake_parse_arguments(A "AS_LANGUAGE" "BACKEND;COMPILER;COMPILER_ID" "" ${ARGN})
+  cmake_parse_arguments(A "AS_LANGUAGE;IS_NVCC" "BACKEND;COMPILER;COMPILER_ID" "" ${ARGN})
   get_filename_component(_cc "${A_COMPILER}" NAME)
   set(_ok FALSE)
   if(A_BACKEND STREQUAL "CUDA")
-    if(A_AS_LANGUAGE OR A_COMPILER_ID STREQUAL "Clang" OR _cc MATCHES "^nvcc")
+    if(A_AS_LANGUAGE)
+      if(A_IS_NVCC)
+        set(_fix "use a host C++ compiler (g++, clang++, or an MPI wrapper around one; set \
+OMPI_CXX or MPICH_CXX for the wrapper). With Kokkos_ENABLE_COMPILE_AS_CMAKE_LANGUAGE=ON \
+nvcc is driven as the CUDA language, and nvcc_wrapper must not be the C++ compiler")
+      else()
+        set(_ok TRUE)
+      endif()
+    elseif(A_COMPILER_ID STREQUAL "Clang" OR _cc MATCHES "^nvcc")
       set(_ok TRUE)
     else()
       set(_fix "use a CUDA-capable clang++ (-DCMAKE_CXX_COMPILER=/path/to/clang++) or the \
@@ -236,6 +250,12 @@ function(_soma_fetch_kokkos)
     set(_lang_args)
     if(Kokkos_ENABLE_COMPILE_AS_CMAKE_LANGUAGE)
       list(APPEND _lang_args AS_LANGUAGE)
+      if(_gpu STREQUAL "CUDA")
+        soma_compiler_is_nvcc(_is_nvcc "${CMAKE_CXX_COMPILER}")
+        if(_is_nvcc)
+          list(APPEND _lang_args IS_NVCC)
+        endif()
+      endif()
     endif()
     _soma_gpu_compiler_problem(_problem BACKEND ${_gpu} COMPILER "${CMAKE_CXX_COMPILER}"
       COMPILER_ID "${CMAKE_CXX_COMPILER_ID}" ${_lang_args})
@@ -245,6 +265,11 @@ function(_soma_fetch_kokkos)
         "For a CPU-only build pass -DSOMA_KOKKOS_GPU=NONE.")
     endif()
     _soma_kokkos_force(Kokkos_ENABLE_${_gpu} ON)
+    if(_gpu STREQUAL "CUDA" AND Kokkos_ENABLE_COMPILE_AS_CMAKE_LANGUAGE)
+      # Kokkos's project() enables the CUDA language; the host compiler must be
+      # decided first.
+      soma_kokkos_default_cuda_host_compiler()
+    endif()
   endif()
   if((_gpu MATCHES "^(CUDA|HIP|SYCL)$" OR _gpu_user_on) AND NOT _user_arch)
     message(STATUS "SOMA: Kokkos detects the GPU architecture only when a GPU is "
@@ -287,6 +312,23 @@ function(_soma_fetch_kokkos)
   endforeach()
   set(SOMA_KOKKOS_VERSION_FOUND "${_version}" PARENT_SCOPE)
   set(SOMA_KOKKOS_DEVICES "${_devices}" PARENT_SCOPE)
+
+  # What an installed Kokkos exports in KokkosConfig.cmake, read from the
+  # in-tree Kokkos directory scope.
+  get_directory_property(_lang DIRECTORY "${Kokkos_SOURCE_DIR}" DEFINITION KOKKOS_COMPILE_LANGUAGE)
+  if(NOT _lang)
+    set(_lang CXX)
+  endif()
+  get_directory_property(_std DIRECTORY "${Kokkos_SOURCE_DIR}" DEFINITION KOKKOS_CXX_STANDARD)
+  if(NOT _std)
+    set(_std 20)
+  endif()
+  get_directory_property(_cuda_arch DIRECTORY "${Kokkos_SOURCE_DIR}" DEFINITION CMAKE_CUDA_ARCHITECTURES)
+  get_directory_property(_hip_arch DIRECTORY "${Kokkos_SOURCE_DIR}" DEFINITION KOKKOS_HIP_ARCHITECTURES)
+  set(Kokkos_COMPILE_LANGUAGE "${_lang}" PARENT_SCOPE)
+  set(Kokkos_CXX_STANDARD "${_std}" PARENT_SCOPE)
+  set(Kokkos_CUDA_ARCHITECTURES "${_cuda_arch}" PARENT_SCOPE)
+  set(Kokkos_HIP_ARCHITECTURES "${_hip_arch}" PARENT_SCOPE)
 endfunction()
 
 function(soma_find_or_fetch_kokkos)
@@ -321,6 +363,13 @@ function(soma_find_or_fetch_kokkos)
     set(_version "${SOMA_KOKKOS_VERSION_FOUND}")
     set(_devices "${SOMA_KOKKOS_DEVICES}")
   endif()
+  # find_package() ran in this function's scope: hand the compile-language
+  # variables (from KokkosConfig.cmake, or set above for a fetched Kokkos) to
+  # the caller for soma_kokkos_language_setup().
+  foreach(_v Kokkos_COMPILE_LANGUAGE Kokkos_CXX_STANDARD Kokkos_CUDA_ARCHITECTURES
+      Kokkos_HIP_ARCHITECTURES)
+    set(${_v} "${${_v}}" PARENT_SCOPE)
+  endforeach()
   soma_patch_apple_openmp_target()
 
   set(_host Serial)

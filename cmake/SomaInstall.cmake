@@ -36,4 +36,5 @@ write_basic_package_version_file("${PROJECT_BINARY_DIR}/somaConfigVersion.cmake"
   VERSION ${PROJECT_VERSION} COMPATIBILITY SameMinorVersion)
 
 install(FILES "${PROJECT_BINARY_DIR}/somaConfig.cmake" "${PROJECT_BINARY_DIR}/somaConfigVersion.cmake"
+  "${PROJECT_SOURCE_DIR}/cmake/SomaKokkosLanguage.cmake"
   DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/soma)

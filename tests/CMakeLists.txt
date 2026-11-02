@@ -22,6 +22,7 @@ endif()
 
 add_library(soma_test_main OBJECT soma_test_main.cpp)
 target_link_libraries(soma_test_main PUBLIC soma GTest::gtest PRIVATE soma_warnings)
+soma_target_kokkos_sources(soma_test_main)
 
 # soma_add_test(<name> SOURCES ... [RANKS 1 2 4] [LIBS ...])
 # Without MPI (or without RANKS) tests are discovered individually. With MPI
@@ -29,6 +30,7 @@ target_link_libraries(soma_test_main PUBLIC soma GTest::gtest PRIVATE soma_warni
 function(soma_add_test name)
   cmake_parse_arguments(T "" "" "SOURCES;RANKS;LIBS" ${ARGN})
   add_executable(${name} ${T_SOURCES})
+  soma_target_kokkos_sources(${name})
   target_link_libraries(${name} PRIVATE soma_test_main soma GTest::gtest soma_warnings ${T_LIBS})
   target_compile_definitions(${name} PRIVATE
     SOMA_TEST_DATA_DIR="${PROJECT_SOURCE_DIR}/data"
@@ -120,6 +122,7 @@ else()
 endif()
 if(UNIX)
   add_executable(vtk_limit_child unit/vtk_limit_child.cpp)
+  soma_target_kokkos_sources(vtk_limit_child)
   target_include_directories(vtk_limit_child PRIVATE unit)
   target_link_libraries(vtk_limit_child PRIVATE soma soma_warnings)
   add_dependencies(test_vtk_writer vtk_limit_child)

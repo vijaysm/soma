@@ -46,7 +46,8 @@ set(expected
   include/soma/config.hpp
   lib/cmake/soma/somaConfig.cmake
   lib/cmake/soma/somaConfigVersion.cmake
-  lib/cmake/soma/somaTargets.cmake)
+  lib/cmake/soma/somaTargets.cmake
+  lib/cmake/soma/SomaKokkosLanguage.cmake)
 file(GLOB_RECURSE headers RELATIVE "${SOMA_SOURCE_DIR}/include"
   "${SOMA_SOURCE_DIR}/include/soma/*.hpp")
 foreach(h IN LISTS headers)

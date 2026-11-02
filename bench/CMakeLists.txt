@@ -3,6 +3,7 @@
 
 # Benchmarks against MOAB, the only baseline. Built with SOMA_ENABLE_MOAB_REFERENCE.
 add_executable(bench_adjacency bench_adjacency.cpp)
+soma_target_kokkos_sources(bench_adjacency)
 target_include_directories(bench_adjacency PRIVATE ${PROJECT_SOURCE_DIR}/tests/reference)
 target_link_libraries(bench_adjacency PRIVATE soma soma_warnings ${SOMA_MOAB_TARGET})
 target_compile_definitions(bench_adjacency PRIVATE
@@ -13,6 +14,7 @@ target_compile_definitions(bench_adjacency PRIVATE
 
 if(SOMA_ENABLE_HDF5)
   add_executable(bench_h5m_read bench_h5m_read.cpp)
+  soma_target_kokkos_sources(bench_h5m_read)
   target_link_libraries(bench_h5m_read PRIVATE soma soma_warnings ${SOMA_MOAB_TARGET})
   target_compile_definitions(bench_h5m_read PRIVATE
     SOMA_BENCH_DATA_DIR="${PROJECT_SOURCE_DIR}/data"
