@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -58,6 +59,32 @@ std::string what_of(const std::function<void()>& f) {
 }
 
 }  // namespace
+
+TEST(HandleRef, HandlesHoldASlotAndAGid) {
+  using soma::handle_gid;
+  using soma::handle_slot;
+  using soma::make_handle;
+  using soma::max_handle_gid;
+  for (const int slot : {0, 1, 2, 3, set_dim}) {
+    for (const GO gid : {GO{0}, GO{1}, GO{70}, max_handle_gid}) {
+      const GO h = make_handle(slot, gid);
+      EXPECT_GT(h, 0) << slot << " " << gid;
+      EXPECT_EQ(handle_slot(h), slot) << gid;
+      EXPECT_EQ(handle_gid(h), gid) << slot;
+    }
+  }
+  // One gid in two slots: two handles.
+  EXPECT_NE(make_handle(0, 1), make_handle(1, 1));
+  EXPECT_NE(make_handle(2, 1), make_handle(set_dim, 1));
+  for (const auto& [slot, gid] : std::vector<std::pair<int, GO>>{
+           {-1, 1}, {set_dim + 1, 1}, {0, -1}, {2, max_handle_gid + 1}, {0, std::numeric_limits<GO>::max()}}) {
+    EXPECT_EQ(make_handle(slot, gid), 0) << slot << " " << gid;
+  }
+  for (const GO h : {GO{0}, GO{-1}, GO{70}, max_handle_gid, std::numeric_limits<GO>::min(),
+                     std::numeric_limits<GO>::max(), GO{set_dim + 2} << soma::handle_gid_bits}) {
+    EXPECT_EQ(handle_slot(h), -1) << h;
+  }
+}
 
 TEST(HandleRef, ResolvesEntitiesAndSetsOnTheHost) {
   const auto mesh = mesh_with_two_sets();

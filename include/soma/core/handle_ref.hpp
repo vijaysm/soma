@@ -20,6 +20,32 @@
 
 namespace soma {
 
+// A handle names an entity or set by its slot (a dimension, or set_dim for the
+// entity sets) and its gid, as a MOAB handle names one by type and id: gids
+// are unique within a slot only, so vertex 1 and edge 1 are two handles. The
+// slot + 1 is kept in the bits above handle_gid_bits and the gid below them,
+// so 0 is the null handle and any gid in [0, max_handle_gid] has one.
+inline constexpr int handle_gid_bits = 60;
+inline constexpr GO max_handle_gid = (GO{1} << handle_gid_bits) - 1;
+
+// The handle of (slot, gid), or 0 when no handle can hold them: a slot outside
+// [0, set_dim] or a gid outside [0, max_handle_gid].
+KOKKOS_INLINE_FUNCTION constexpr GO make_handle(int slot, GO gid) {
+  if (slot < 0 || slot > set_dim || gid < 0 || gid > max_handle_gid) return 0;
+  return (static_cast<GO>(slot + 1) << handle_gid_bits) | gid;
+}
+
+// The slot a handle names, or -1 for the null handle and values no
+// make_handle gives.
+KOKKOS_INLINE_FUNCTION constexpr int handle_slot(GO h) {
+  if (h <= 0) return -1;
+  const auto s = static_cast<int>(h >> handle_gid_bits) - 1;
+  return s <= set_dim ? s : -1;
+}
+
+// The gid a handle names; meaningful when handle_slot(h) >= 0.
+KOKKOS_INLINE_FUNCTION constexpr GO handle_gid(GO h) { return h & max_handle_gid; }
+
 // What a handle names: a slot (a dimension, or set_dim for the entity sets)
 // and a local id there. A default target names nothing.
 struct HandleTarget {
