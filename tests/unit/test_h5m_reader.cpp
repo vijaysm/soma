@@ -655,7 +655,7 @@ TEST_F(H5mRead, TagValuesOnSetsAreFieldsOnTheSetSlot) {
   EXPECT_EQ(f.info(s4.id()).family, f.info(s0.id()).family);
   const auto d = f.get<double>("D", soma::set_dim);
   ASSERT_EQ(d.rows(), 3);
-  for (LO i = 0; i < 3; ++i) EXPECT_EQ(d.value_or_default(soma::set_dim, i), 0.5 + i);
+  for (LO i = 0; i < 3; ++i) EXPECT_EQ(d.value_or_default(soma::set_dim, i), 0.5 + static_cast<double>(i));
 }
 
 // A variable-length tag on vertices, a quad and a set: each holds its own
@@ -710,7 +710,7 @@ TEST_F(H5mRead, RejectsVariableLengthValuesItCannotPlace) {
     }
     expect_rejected(file(name + ".h5m"), needles);
   };
-  const std::int32_t v[] = {1, 2, 3};
+  const std::int32_t v[] = {1, 2, 3, 4};
   expect("dense", [&](Writer& w) { w.dense("nodes", "VL", v, 4); },
          {"/tstt/nodes/tags/VL holds dense values of a variable-length tag, which MOAB does not write"});
   expect("noindices", [&](Writer& w) { w.sparse("VL", {1}, v); },
