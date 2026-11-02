@@ -37,16 +37,19 @@
 // A tag with values on no entity (class 3, or declared only) becomes a
 // MeshValue in mesh.values().
 //
-// Not read, and listed in the report instead: 16-bit integers, bit tags wider
-// than 8 bits, variable-length arrays and other HDF5 type classes.
+// Not read, and listed in the report instead: 16-bit integers, reals other
+// than f32 and f64, bit tags wider than 8 bits, arrays and opaque values of an
+// unusable size, variable-length tags of several components per value, and
+// other HDF5 type classes.
 //
 // Failures throw std::runtime_error naming the file: a file that is not
 // HDF5 or has no /tstt, no nodes or no elements, element types SOMA does not
 // read (Polyhedron, Knife, high-order connectivity), a connectivity entry
 // that is not a vertex file id, file id ranges that overlap or pass max_id,
-// a malformed poly_indices list or set list, a set member, child, parent,
-// tag entity or handle that names nothing, and two values of one tag on one
-// entity.
+// a malformed poly_indices list, set list or var_indices list, a set member,
+// child, parent, tag entity or handle that names nothing, an ordered set
+// stored as ranges, dense values of a variable-length tag, a handle tag whose
+// values are not 64-bit integers, and two values of one tag on one entity.
 
 #include <filesystem>
 #include <string>

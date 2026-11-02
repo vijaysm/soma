@@ -123,8 +123,8 @@ class EntitySets {
     check_slot(slot);
     return slots_[static_cast<std::size_t>(slot)].present;
   }
-  // CSR of one slot: count + 1 offsets into members. Throws MissingSetMembers
-  // for a slot the sets do not hold.
+  // CSR of one slot: count + 1 offsets into members, none at all when there
+  // are no sets. Throws MissingSetMembers for a slot the sets do not hold.
   View1<const Offset, MemSpace> offsets(int slot) const { return held(slot).offsets; }
   View1<const LO, MemSpace> members(int slot) const { return held(slot).members; }
 
