@@ -187,11 +187,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `VarField` is a variable-length field: a CSR over a `per_entity` space whose lengths are
   fixed when `FieldRegistry::add_var` adds it, fetched with `get_var`, mirrored like any field.
   It has a family of its own; `get` and `get_var` refuse each other's kind.
-- `FieldOptions::handle` marks a `GO` field (fixed or variable-length) whose values are gids of
-  entities or sets, 0 for none; the mark is part of the family key. `HandleRef` resolves gids to
-  (slot, local id) on the host and in kernels, and refuses meshes whose gids repeat across
-  slots or include 0; derived edges and faces are numbered within their dimension, so after
-  `build_adjacencies` derives entities it usually refuses `.h5m` meshes too.
+- `FieldOptions::handle` marks a `GO` field (fixed or variable-length) whose values are handles
+  of entities or sets, 0 for none; the mark is part of the family key. A handle is
+  `make_handle(slot, gid)`, the slot above bit 60 and the gid below, split by `handle_slot` and
+  `handle_gid`: gids are unique within a slot only, as MOAB ids are within a type. `HandleRef`
+  resolves handles to (slot, local id) on the host and in kernels, on every mesh, derived edges
+  and faces included; it refuses a gid repeated within a slot or outside [0, 2^60).
 - `FieldRegistry::get<T>(name, space)` returns only fixed-length fields and throws when several
   of one name and type, differing by component count or handle mark, share the space.
 - `Mesh::values()` holds `MeshValue`s, values of the mesh as a whole with their type,
@@ -252,7 +253,7 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `read_h5m` reads entity sets, with or without tags: contents id by id or as ranges that may
   cross groups, children, parents and flags; a set's gid is its file id. Tag values on sets
   become fields on the set slot, variable-length tags `VarField`s, handle tags handle fields
-  whose values stay file ids, and tags with values on no entity `MeshValue`s. A set member,
+  whose values are the handles of the file ids' slots, and tags with values on no entity `MeshValue`s. A set member,
   child, parent or handle that names nothing, a malformed set list or `var_indices`, and an
   ordered set stored as ranges throw. The report now lists only 16-bit integers, bit tags wider
   than 8 bits, variable-length arrays and other HDF5 classes, and is empty on every bundled mesh.
