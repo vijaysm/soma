@@ -211,7 +211,7 @@ std::string difference(const std::map<std::pair<std::string, int>, FieldText>& a
   for (const auto& [k, x] : a) {
     const std::string at = k.first + " on " + std::to_string(k.second) + ": ";
     const auto it = b.find(k);
-    if (it == b.end()) return at + "missing";
+    if (it == b.end()) return at + "not in the second";
     const FieldText& y = it->second;
     if (x.type != y.type || x.ncomp != y.ncomp || x.handle != y.handle) return at + "type";
     if (!(x.format == y.format)) {
@@ -238,7 +238,7 @@ std::string difference(const std::map<std::pair<std::string, int>, FieldText>& a
     }
   }
   for (const auto& [k, x] : b) {
-    if (!a.contains(k)) return k.first + " on " + std::to_string(k.second) + ": extra";
+    if (!a.contains(k)) return k.first + " on " + std::to_string(k.second) + ": not in the first";
   }
   return "";
 }
@@ -745,6 +745,13 @@ TEST(H5mWrite, VariableLengthFieldsBecomeVariableLengthTags) {
   const auto vo = f.add_var<std::uint8_t>("VO", soma::Space<HS>(soma::Domain<HS>::all(in, soma::set_dim), soma::Layout::per_entity()),
                                           off2, bytes, {.default_value = std::vector<std::uint8_t>{}});
   f.set_tag_format(f.info(vo.id()).family, {1, Kind::opaque, 0});
+  // On every quad and on nothing: still sparse and class 1, and no lists for
+  // the empty one.
+  const std::vector<soma::Offset> off3{0, 1, 1, 2};
+  f.add_var<std::int32_t>("VQ", soma::Space<HS>(soma::Domain<HS>::all(in, 2), soma::Layout::per_entity()), off3,
+                          std::vector<std::int32_t>{4, 5});
+  f.add_var<std::int32_t>("VE", soma::Space<HS>(soma::Domain<HS>::from_list(in, 0, std::vector<LO>{}), soma::Layout::per_entity()),
+                          std::vector<soma::Offset>{0}, std::vector<std::int32_t>{});
 
   const fs::path out = scratch() / "var.h5m";
   soma::write_h5m(in, out, {.gid_tag = false});
@@ -753,6 +760,10 @@ TEST(H5mWrite, VariableLengthFieldsBecomeVariableLengthTags) {
   EXPECT_EQ(int_attribute(file, "/tstt/tags/V", "class"), 1);
   EXPECT_EQ(H5Lexists(file, "/tstt/nodes/tags/V", H5P_DEFAULT), 0);
   EXPECT_EQ(H5Lexists(file, "/tstt/sets/tags/VO", H5P_DEFAULT), 0);
+  EXPECT_EQ(H5Lexists(file, "/tstt/elements/Quad4/tags/VQ", H5P_DEFAULT), 0);
+  EXPECT_EQ(int_attribute(file, "/tstt/tags/VQ", "class"), 1);
+  EXPECT_EQ(H5Lexists(file, "/tstt/tags/VE/id_list", H5P_DEFAULT), 0);
+  EXPECT_EQ(H5Lexists(file, "/tstt/tags/VE/var_indices", H5P_DEFAULT), 0);
   const auto read = [&](const char* path, hid_t mem, auto zero) {
     std::vector<decltype(zero)> v(extent(file, path).at(0));
     const hid_t ds = H5Dopen2(file, path, H5P_DEFAULT);
@@ -788,8 +799,11 @@ TEST(H5mWrite, VariableLengthFieldsBecomeVariableLengthTags) {
   auto want = fields_of(in);
   want.at({"V", 0}).format = {1, Kind::plain, 0};
   want.at({"VO", soma::set_dim}).def.reset();
+  want.at({"VQ", 2}).format = {1, Kind::plain, 0};
+  want.erase({"VE", 0});  // no values: read back as a mesh value
   const HostMesh back = soma::read_h5m(out);
   EXPECT_EQ(difference(fields_of(back), want), "");
+  EXPECT_TRUE(back.values().contains("VE"));
 }
 
 // Mesh values become tags with no entity values: class 3 when they hold a
