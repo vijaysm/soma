@@ -32,29 +32,33 @@ struct Layout {
   bool serendipity = false;  // Quad8, Hex20, Prism15, Pyramid13
   int quad_rule = 0;
 
-  static constexpr Layout per_entity() noexcept { return Layout{}; }
+  // Factories and the comparison are device-callable: kernels build and
+  // compare layouts, and without -expt-relaxed-constexpr nvcc would otherwise
+  // only warn and leave the device call undefined.
+  static KOKKOS_INLINE_FUNCTION constexpr Layout per_entity() noexcept { return Layout{}; }
 
-  static constexpr Layout element_nodes(
+  static KOKKOS_INLINE_FUNCTION constexpr Layout element_nodes(
       NodeFamily family, int order,
       NodeOrdering ordering = NodeOrdering::tensor_lexicographic,
       bool serendipity = false) noexcept {
     return Layout{Kind::element_nodes, family, order, ordering, serendipity, 0};
   }
 
-  static constexpr Layout shared_nodes(
+  static KOKKOS_INLINE_FUNCTION constexpr Layout shared_nodes(
       NodeFamily family, int order,
       NodeOrdering ordering = NodeOrdering::hierarchical,
       bool serendipity = false) noexcept {
     return Layout{Kind::shared_nodes, family, order, ordering, serendipity, 0};
   }
 
-  static constexpr Layout quadrature(int rule) noexcept {
+  static KOKKOS_INLINE_FUNCTION constexpr Layout quadrature(int rule) noexcept {
     return Layout{Kind::quadrature, NodeFamily::gauss, 1, NodeOrdering::tensor_lexicographic,
                   false, rule};
   }
 
   // Compares only the members that the kind uses.
-  friend constexpr bool operator==(const Layout& a, const Layout& b) noexcept {
+  friend KOKKOS_INLINE_FUNCTION constexpr bool operator==(const Layout& a,
+                                                          const Layout& b) noexcept {
     if (a.kind != b.kind) return false;
     switch (a.kind) {
       case Kind::per_entity: return true;

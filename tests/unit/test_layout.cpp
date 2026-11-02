@@ -36,9 +36,9 @@ struct Case {
 
 constexpr int case_count = 19;
 
-// A function rather than a namespace-scope array: device compilers (nvcc)
-// admit only scalar constexpr variables in device code, but a local constexpr
-// table inside a constexpr function is fine for host and device alike.
+// A function rather than a namespace-scope array: nvcc admits only scalar
+// constexpr variables in device code, but a local constexpr table inside a
+// device-callable constexpr function is fine for host and device alike.
 KOKKOS_INLINE_FUNCTION constexpr Case closed_form(int k) {
   constexpr Case table[] = {
       {Topology::edge, 1, 2},    {Topology::edge, 4, 5},    {Topology::tri, 1, 3},
