@@ -667,6 +667,59 @@ TEST_P(H5mMoab, EveryTagMatchesValueByValue) {
   }
 }
 
+// The legacy writer stores a tag dense on every group the tag covers,
+// whatever its storage class. MOAB reads a sparse-class tag stored that way
+// (S: dense on the vertices), also when it is dense on one group and listed
+// on another (M: dense on the vertices, id_list for the quad); the tag stays
+// sparse and only the holders are tagged.
+TEST(H5mMoabFormat, ReadsASparseTagStoredDense) {
+  const fs::path p = scratch_dir() / "sparse_dense.h5m";
+  {
+    h5m::Writer w(p);
+    w.nodes(1, 3, {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0});
+    w.elements("Quad4", "Quad", 5, 4, {1, 2, 3, 4});
+    w.sets(6, 1);
+    const int def = -7;
+    w.tag("S", 1, H5T_NATIVE_INT32, &def);
+    const int sv[] = {10, 20, 30, 40};
+    w.dense("nodes", "S", sv, 4);
+    w.tag("M", 1, H5T_NATIVE_INT32);
+    const int mv[] = {1, 2, 3, 4};
+    w.dense("nodes", "M", mv, 4);
+    const int qv[] = {9};
+    w.sparse("M", {5}, qv);
+  }
+  moab::Core mb;
+  check(mb.load_file(p.c_str()), "load_file");
+  moab::Range verts;
+  moab::Range quads;
+  check(mb.get_entities_by_type(0, moab::MBVERTEX, verts), "vertices");
+  check(mb.get_entities_by_type(0, moab::MBQUAD, quads), "quads");
+  ASSERT_EQ(verts.size(), 4u);
+  ASSERT_EQ(quads.size(), 1u);
+  const auto values = [&](const char* name, const moab::Range& r) {
+    moab::Tag t;
+    check(mb.tag_get_handle(name, t), name);
+    moab::TagType type;
+    check(mb.tag_get_type(t, type), "tag_get_type");
+    EXPECT_EQ(type, moab::MB_TAG_SPARSE) << name;
+    std::vector<int> v(r.size());
+    check(mb.tag_get_data(t, r, v.data()), name);
+    return v;
+  };
+  EXPECT_EQ(values("S", verts), (std::vector<int>{10, 20, 30, 40}));
+  EXPECT_EQ(values("S", quads), std::vector<int>{-7});  // the default
+  EXPECT_EQ(values("M", verts), (std::vector<int>{1, 2, 3, 4}));
+  EXPECT_EQ(values("M", quads), std::vector<int>{9});
+  for (const auto& [name, held] : {std::pair<const char*, std::size_t>{"S", 4}, {"M", 5}}) {
+    moab::Tag t;
+    check(mb.tag_get_handle(name, t), name);
+    moab::Range tagged;
+    check(mb.get_entities_by_type_and_tag(0, moab::MBMAXTYPE, &t, nullptr, 1, tagged), name);
+    EXPECT_EQ(tagged.size(), held) << name;
+  }
+}
+
 INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                          ::testing::Values("64bricks_1khex.h5m", "hex_2048.h5m", "hexes_mixed.h5m",
                                            "hybrid_3quad_1tri.h5m", "moab_i.h5m", "recMeshOcn128.h5m",
