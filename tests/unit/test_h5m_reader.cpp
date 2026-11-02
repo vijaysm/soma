@@ -573,16 +573,21 @@ TEST_F(H5mRead, RejectsTagValuesItCannotPlace) {
   expect_rejected(file("rows.h5m"), {"/tstt/nodes/tags/S must hold one value per entity (4)"});
 }
 
-// Replaces attribute `name` of the object at `path` (below /tstt) by one of n values.
-void replace_attribute(hid_t tstt, const char* path, const char* name, hid_t type, hsize_t n,
-                       const void* values) {
-  const hid_t o = H5Oopen(tstt, path, H5P_DEFAULT);
+// Replaces attribute `name` of object o by one of n values.
+void replace_attribute_on(hid_t o, const char* name, hid_t type, hsize_t n, const void* values) {
   if (H5Aexists(o, name) > 0) H5Adelete(o, name);
   const hid_t space = H5Screate_simple(1, &n, nullptr);
   const hid_t a = H5Acreate2(o, name, type, space, H5P_DEFAULT, H5P_DEFAULT);
   H5Awrite(a, type, values);
   H5Aclose(a);
   H5Sclose(space);
+}
+
+// The same for the object at `path` below /tstt.
+void replace_attribute(hid_t tstt, const char* path, const char* name, hid_t type, hsize_t n,
+                       const void* values) {
+  const hid_t o = H5Oopen(tstt, path, H5P_DEFAULT);
+  replace_attribute_on(o, name, type, n, values);
   H5Oclose(o);
 }
 
@@ -640,13 +645,16 @@ TEST_F(H5mRead, RejectsASetListOfImpossibleLength) {
     const hid_t plist = H5Pcreate(H5P_DATASET_CREATE);
     H5Pset_chunk(plist, 2, chunk);
     const hid_t ds = H5Dcreate2(g, "list", H5T_STD_I64LE, space, H5P_DEFAULT, plist, H5P_DEFAULT);
+    const std::int64_t start = 6;
+    const hsize_t one = 1;
+    replace_attribute_on(ds, "start_id", H5T_NATIVE_INT64, one, &start);
     H5Dclose(ds);
     H5Pclose(plist);
     H5Sclose(space);
     H5Gclose(g);
   }
   // More sets than a 32-bit LO numbers; with a 64-bit LO, more file ids than max_id allows.
-  expect_rejected(file("sets.h5m"), {"/tstt/sets/list"});
+  expect_rejected(file("sets.h5m"), {"/tstt/sets/list", sizeof(LO) == 4 ? "more sets than the LO type" : "beyond the max_id"});
 }
 
 TEST_F(H5mRead, MultiDimensionalArrayTagsKeepEveryComponent) {
