@@ -11,17 +11,15 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
-#include <random>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <system_error>
 #include <type_traits>
 #include <vector>
 
-#include <fcntl.h>
 #include <unistd.h>
 
+#include "temporary.hpp"
 #include "soma/core/topology.hpp"
 #include "soma/fields/data_type.hpp"
 #include "soma/fields/layout.hpp"
@@ -31,12 +29,11 @@ namespace {
 
 namespace fs = std::filesystem;
 
-std::string cannot_write(const fs::path& path, const std::string& why) {
-  return "write_vtk: cannot write " + path.string() + ": " + why;
-}
+using io::error_text;
 
-// The text of an errno value; unlike strerror, safe to call from any thread.
-std::string error_text(int e) { return std::system_category().message(e); }
+std::string cannot_write(const fs::path& path, const std::string& why) {
+  return io::cannot_write("write_vtk", path, why);
+}
 
 // Buffered writes to a file descriptor; a failed write throws naming `path`.
 class Sink {
@@ -529,74 +526,11 @@ void emit(Sink& out, const HostMesh& mesh, const Contents& contents, VtkLegacyVe
   out.finish();
 }
 
-// A new file next to `path`, created exclusively (O_EXCL, O_NOFOLLOW) under
-// the first name from `candidate` that is free, so that it never opens an
-// existing file or follows a symlink. Unlike mkstemp, which forces mode 0600,
-// it is created with 0666 so that the umask decides the mode of the result.
-class Temporary {
- public:
-  Temporary(const fs::path& path, const std::function<std::string(int)>& candidate) : path_(path) {
-    for (int attempt = 0; attempt < detail::vtk_temporary_attempts; ++attempt) {
-      std::string name = candidate(attempt);
-      fd_ = ::open(name.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0666);
-      if (fd_ >= 0) {
-        name_ = std::move(name);
-        return;
-      }
-      const int e = errno;
-      if (e != EEXIST && e != EINTR) {
-        throw std::runtime_error(
-            cannot_write(path, "cannot create a temporary file: " + error_text(e)));
-      }
-    }
-    throw std::runtime_error(cannot_write(path, "no unused temporary file name was found"));
-  }
-  Temporary(const Temporary&) = delete;
-  Temporary& operator=(const Temporary&) = delete;
-  ~Temporary() {
-    if (fd_ >= 0) ::close(fd_);
-    if (!name_.empty()) ::unlink(name_.c_str());
-  }
-
-  int fd() const noexcept { return fd_; }
-
-  void close() {
-    const int fd = fd_;
-    fd_ = -1;
-    if (::close(fd) != 0) {
-      const int e = errno;
-      throw std::runtime_error(cannot_write(path_, "closing the file failed: " + error_text(e)));
-    }
-  }
-
-  // Moves the file over `path`; afterwards there is nothing left to remove.
-  void commit() {
-    if (::rename(name_.c_str(), path_.c_str()) != 0) {
-      const int e = errno;
-      throw std::runtime_error(cannot_write(path_, error_text(e)));
-    }
-    name_.clear();
-  }
-
- private:
-  const fs::path& path_;
-  std::string name_;
-  int fd_ = -1;
-};
-
 }  // namespace
 
 void write_vtk(const HostMesh& mesh, const fs::path& path, std::span<const VtkField> fields,
                const VtkWriteOptions& options) {
-  static constexpr char letters[] =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  std::random_device random;
-  const auto random_name = [&](int) {
-    std::string name = path.string() + ".";
-    for (int k = 0; k < 6; ++k) name += letters[random() % (sizeof letters - 1)];
-    return name;
-  };
-  detail::write_vtk_with_temporary_names(mesh, path, fields, random_name, options);
+  detail::write_vtk_with_temporary_names(mesh, path, fields, io::random_names(path), options);
 }
 
 void detail::write_vtk_with_temporary_names(const HostMesh& mesh, const fs::path& path,
@@ -607,7 +541,7 @@ void detail::write_vtk_with_temporary_names(const HostMesh& mesh, const fs::path
   check_ids(mesh, contents, options.version);
   check_values(mesh, contents);
 
-  Temporary file(path, candidate);
+  io::Temporary file("write_vtk", path, candidate, detail::vtk_temporary_attempts);
   Sink out(file.fd(), path);
   emit(out, mesh, contents, options.version);
   file.close();
