@@ -58,7 +58,7 @@ fs::path scratch_dir() {
   return dir;
 }
 
-// A file MOAB writes itself, with a tag of every kind it can carry.
+// A file MOAB writes itself, with a tag of every fixed-length kind on entities.
 fs::path tag_kinds_file() {
   const fs::path p = scratch_dir() / "tag_kinds.h5m";
   if (fs::exists(p)) return p;
@@ -349,7 +349,8 @@ TEST_P(H5mMoab, EveryEntityTagMatchesValueByValue) {
         if (got.empty()) {
           // MOAB's dense storage reports the default on every entity of a
           // sequence it allocated; SOMA keeps the file's members and reports
-          // the default for the others.
+          // the default for the others. Only dense tags can do that.
+          ASSERT_EQ(storage, moab::MB_TAG_DENSE) << "lid " << l << " has a value MOAB holds and SOMA does not";
           ASSERT_EQ(it->second, s.def) << "lid " << l << " has a value MOAB holds and SOMA does not";
           continue;
         }
