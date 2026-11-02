@@ -16,7 +16,8 @@
 // 1-component and a 3-component field of one name stay apart. A
 // variable-length field (VarField, added with add_var and fetched with
 // get_var) has component count 0 in its key, so it shares a family only with
-// variable-length fields; it takes no pending writes.
+// variable-length fields; it takes no pending writes. Whether a field holds
+// handles (FieldOptions::handle) is part of the key too.
 // Members of a family must be disjoint: add() throws FieldOverlap otherwise
 // (the check is exact and only compares members that share a dimension). A
 // family resolves an entity to (member, row) through a per-dimension index that
@@ -199,7 +200,8 @@ class FieldRegistry {
     if (ncomp < 1) throw std::invalid_argument("field '" + name + "': ncomp must be positive");
     check_values(name, options.default_value, ncomp, "default");
     check_values(name, options.global_value, ncomp, "global");
-    check_new(name, data_type_of<T>(), ncomp, space);
+    check_handle<T>(name, options.handle);
+    check_new(name, data_type_of<T>(), ncomp, options.handle, space);
 
     View2<T, MemSpace> data(
         Kokkos::view_alloc("soma::field::" + name, Kokkos::WithoutInitializing),
@@ -208,7 +210,7 @@ class FieldRegistry {
     Field<T, MemSpace> f(static_cast<FieldId>(entries_.size()), space, data,
                          options.default_value.value_or(std::vector<T>{}),
                          options.global_value.value_or(std::vector<T>{}), 0, serial_);
-    insert(std::move(name), data_type_of<T>(), ncomp, space, std::any(f));
+    insert(std::move(name), data_type_of<T>(), ncomp, options.handle, space, std::any(f));
     return f;
   }
 
@@ -222,7 +224,8 @@ class FieldRegistry {
     if (space.layout().kind != Layout::Kind::per_entity) {
       throw std::invalid_argument("field '" + name + "': a variable-length field needs a per_entity layout");
     }
-    check_new(name, data_type_of<T>(), 0, space);
+    check_handle<T>(name, options.handle);
+    check_new(name, data_type_of<T>(), 0, options.handle, space);
     const auto rows = static_cast<std::size_t>(space.rows());
     if (offsets.size() != rows + 1) {
       throw std::invalid_argument("field '" + name + "': " + std::to_string(offsets.size()) + " offsets for " +
@@ -240,11 +243,12 @@ class FieldRegistry {
     View1<T, Kokkos::HostSpace> hv(Kokkos::view_alloc("soma::field::" + name, Kokkos::WithoutInitializing),
                                    values.size());
     std::copy(values.begin(), values.end(), hv.data());
+    const bool handle = options.handle;
     VarField<T, MemSpace> f(static_cast<FieldId>(entries_.size()), space,
                             Kokkos::create_mirror_view_and_copy(MemSpace{}, ho),
                             Kokkos::create_mirror_view_and_copy(MemSpace{}, hv), std::move(options.default_value),
                             std::move(options.global_value), 0, serial_);
-    insert(std::move(name), data_type_of<T>(), 0, space, std::any(f));
+    insert(std::move(name), data_type_of<T>(), 0, handle, space, std::any(f));
     return f;
   }
 
@@ -344,11 +348,13 @@ class FieldRegistry {
 
   // ---- families -----------------------------------------------------------
 
-  // The family of fields called `name` with value type T, `ncomp` components,
-  // and `layout`. Throws std::out_of_range when no field ever created one.
+  // The family of fields called `name` with value type T, `ncomp` components
+  // (0: variable length), `layout`, and handle values or not. Throws
+  // std::out_of_range when no field ever created one.
   template <class T>
-  FamilyId family(std::string_view name, int ncomp, const Layout& layout = Layout::per_entity()) const {
-    const FamilyId id = find_family(name, data_type_of<T>(), ncomp, layout);
+  FamilyId family(std::string_view name, int ncomp, const Layout& layout = Layout::per_entity(),
+                  bool handle = false) const {
+    const FamilyId id = find_family(name, data_type_of<T>(), ncomp, handle, layout);
     if (id == invalid_family) {
       throw std::out_of_range("no family '" + std::string(name) + "' (" +
                               type_text(data_type_of<T>(), ncomp) + ")");
@@ -626,7 +632,8 @@ class FieldRegistry {
   struct FamilyKey {
     std::string name;
     DataType type = DataType::f64;
-    int ncomp = 1;
+    int ncomp = 1;  // 0: variable length
+    bool handle = false;
     Layout layout{};
   };
 
@@ -659,30 +666,39 @@ class FieldRegistry {
     return out;
   }
 
+  template <class T>
+  static void check_handle(const std::string& name, bool handle) {
+    if (handle && !std::is_same_v<T, GO>) {
+      throw std::invalid_argument("field '" + name + "': handle values are gids and need the GO value type");
+    }
+  }
+
   // Throws what add() and add_var() throw for a field that cannot join the
   // registry: no blocks, a stale domain, a clash, an overlap with its family,
   // or too many members. Nothing is modified.
-  void check_new(const std::string& name, DataType type, int ncomp, const Space<MemSpace>& space) const {
+  void check_new(const std::string& name, DataType type, int ncomp, bool handle,
+                 const Space<MemSpace>& space) const {
     if (space.domain().empty()) {
       throw std::invalid_argument("field '" + name + "': the domain has no blocks");
     }
     if (space.domain().epoch() != epoch_) throw StaleField(stale_message(name, space.domain()));
     for (const Entry& e : entries_) {
       if (e.alive && e.info.name == name && e.info.type == type && e.info.ncomp == ncomp &&
-          e.space == space) {
+          e.info.handle == handle && e.space == space) {
         throw FieldClash("field '" + name + "' (" + type_text(type, ncomp) + ") on " +
                          describe(space.layout()) + " with this domain already exists");
       }
     }
-    check_disjoint(name, type, ncomp, space);
-    check_pending(name, type, ncomp, space);
-    check_member_limit(name, type, ncomp, space);
+    check_disjoint(name, type, ncomp, handle, space);
+    check_pending(name, type, ncomp, handle, space);
+    check_member_limit(name, type, ncomp, handle, space);
   }
 
   // Adds the checked field f (a Field or VarField with the next id), joining
   // or creating its family. Nothing changes when it throws.
-  void insert(std::string name, DataType type, int ncomp, const Space<MemSpace>& space, std::any f) {
-    const FamilyId existing = find_family(name, type, ncomp, space.layout());
+  void insert(std::string name, DataType type, int ncomp, bool handle, const Space<MemSpace>& space,
+              std::any f) {
+    const FamilyId existing = find_family(name, type, ncomp, handle, space.layout());
     FieldInfo info;
     info.id = static_cast<FieldId>(entries_.size());
     info.family = existing != invalid_family ? existing : static_cast<FamilyId>(families_.size());
@@ -690,6 +706,7 @@ class FieldRegistry {
     info.type = type;
     info.ncomp = ncomp;
     info.variable = ncomp == 0;
+    info.handle = handle;
     info.layout = space.layout();
     info.rows = space.rows();
     for (int b = 0; b < space.domain().num_blocks(); ++b) {
@@ -697,7 +714,7 @@ class FieldRegistry {
     }
     std::optional<Family> created;
     if (existing == invalid_family) {
-      created.emplace(FamilyKey{info.name, type, ncomp, space.layout()});
+      created.emplace(FamilyKey{info.name, type, ncomp, handle, space.layout()});
       created->members.reserve(1);
     }
     Entry entry{std::move(info), space, std::move(f), true};
@@ -784,11 +801,11 @@ class FieldRegistry {
     }
   }
 
-  FamilyId find_family(std::string_view name, DataType type, int ncomp,
+  FamilyId find_family(std::string_view name, DataType type, int ncomp, bool handle,
                        const Layout& layout) const noexcept {
     for (std::size_t i = 0; i < families_.size(); ++i) {
       const FamilyKey& k = families_[i].key;
-      if (k.name == name && k.type == type && k.ncomp == ncomp && k.layout == layout) {
+      if (k.name == name && k.type == type && k.ncomp == ncomp && k.handle == handle && k.layout == layout) {
         return static_cast<FamilyId>(i);
       }
     }
@@ -811,9 +828,9 @@ class FieldRegistry {
 
   // Throws FieldOverlap when `space` shares an entity with a live member of the
   // family it would join. Nothing is modified.
-  void check_disjoint(const std::string& name, DataType type, int ncomp,
+  void check_disjoint(const std::string& name, DataType type, int ncomp, bool handle,
                       const Space<MemSpace>& space, FieldId skip = invalid_field) const {
-    const FamilyId fid = find_family(name, type, ncomp, space.layout());
+    const FamilyId fid = find_family(name, type, ncomp, handle, space.layout());
     if (fid == invalid_family) return;
     for (const FieldId other : families_[fid].members) {
       if (other == skip) continue;
@@ -838,9 +855,9 @@ class FieldRegistry {
   // family it would join has a pending write for: that write could then never
   // be committed. Cost: one inverse-map lookup per pending entity. Nothing is
   // modified.
-  void check_pending(const std::string& name, DataType type, int ncomp,
+  void check_pending(const std::string& name, DataType type, int ncomp, bool handle,
                      const Space<MemSpace>& space) const {
-    const FamilyId fid = find_family(name, type, ncomp, space.layout());
+    const FamilyId fid = find_family(name, type, ncomp, handle, space.layout());
     if (fid == invalid_family) return;
     for (const FieldId other : families_[fid].members) {
       const Entry& e = entries_[other];
@@ -866,9 +883,9 @@ class FieldRegistry {
   // Throws std::length_error when `space` would give its family more members on
   // one dimension than the resolver can name (max_family_members). Nothing is
   // modified.
-  void check_member_limit(const std::string& name, DataType type, int ncomp,
+  void check_member_limit(const std::string& name, DataType type, int ncomp, bool handle,
                           const Space<MemSpace>& space) const {
-    const FamilyId fid = find_family(name, type, ncomp, space.layout());
+    const FamilyId fid = find_family(name, type, ncomp, handle, space.layout());
     if (fid == invalid_family) return;
     for (int b = 0; b < space.domain().num_blocks(); ++b) {
       const int dim = space.domain().info(b).dim;
@@ -1030,7 +1047,7 @@ class FieldRegistry {
     // this cannot fire through the public API today. It stays a thrown
     // FieldOverlap rather than an assert so that a broken family invariant
     // cannot corrupt a release build silently.
-    check_disjoint(e.info.name, e.info.type, ncomp, space, e.info.id);
+    check_disjoint(e.info.name, e.info.type, ncomp, e.info.handle, space, e.info.id);
 
     const auto old_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, old_field.view());
     View2<T, Kokkos::HostSpace> merged(
