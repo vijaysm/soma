@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -20,6 +21,7 @@
 #include "h5m_writer.hpp"
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/fields/data_type.hpp"
 #include "soma/fields/space.hpp"
 #include "soma/io/h5m.hpp"
 
@@ -443,6 +445,47 @@ TEST_F(H5mRead, OrderingIsTheBuildersOrdering) {
   EXPECT_EQ(vertex_gids(a, 2, lid_of(a, 2, e)), vertex_gids(b, 2, 0));
 }
 
+// The space-filling order moves the entities; each value moves with its
+// entity, on full and partial domains alike.
+TEST_F(H5mRead, TagValuesFollowTheirEntitiesInEitherOrdering) {
+  for (const char* name : {"64bricks_1khex.h5m", "moab_i.h5m", "hybrid_3quad_1tri.h5m", "recMeshOcn128.h5m"}) {
+    SCOPED_TRACE(name);
+    soma::H5mReadOptions o;
+    o.ordering = Ordering::type_major_sfc;
+    HostMesh a = soma::read_h5m(data(name));
+    HostMesh b = soma::read_h5m(data(name), o);
+    const auto fields = a.fields().list();
+    ASSERT_FALSE(fields.empty());
+    std::size_t moved = 0;
+    for (const soma::FieldInfo& fi : fields) {
+      for (const int d : fi.dims) {
+        std::map<GO, LO> lid_in_b;
+        for (LO l = 0; l < b.count(d); ++l) lid_in_b[b.gid(d)(static_cast<std::size_t>(l))] = l;
+        soma::dispatch_data_type(fi.type, [&]<class T>() {
+          const auto fa = a.fields().get<T>(fi.name, d);
+          const auto fb = b.fields().get<T>(fi.name, d);
+          ASSERT_EQ(fa.rows(), fb.rows()) << fi.name;
+          ASSERT_EQ(fa.ncomp(), fb.ncomp()) << fi.name;
+          EXPECT_EQ(fa.default_value(), fb.default_value()) << fi.name;
+          for (LO la = 0; la < a.count(d); ++la) {
+            const LO lb = lid_in_b.at(a.gid(d)(static_cast<std::size_t>(la)));
+            const auto ra = fa.space().entity_rows(d, la);
+            const auto rb = fb.space().entity_rows(d, lb);
+            ASSERT_EQ(ra.valid(), rb.valid()) << fi.name << " on gid " << a.gid(d)(static_cast<std::size_t>(la));
+            if (!ra.valid()) continue;
+            moved += la != lb ? 1 : 0;
+            for (int c = 0; c < fa.ncomp(); ++c) {
+              ASSERT_EQ(fa.view()(ra.begin, c), fb.view()(rb.begin, c))
+                  << fi.name << " on gid " << a.gid(d)(static_cast<std::size_t>(la));
+            }
+          }
+        });
+      }
+    }
+    EXPECT_GT(moved, 0u);
+  }
+}
+
 TEST_F(H5mRead, RejectsFilesThatAreNotMoabMeshes) {
   std::ofstream(file("text.h5m")) << "not hdf5\n";
   expect_rejected(file("text.h5m"), {"not an HDF5 file"});
@@ -554,6 +597,16 @@ TEST_F(H5mRead, RejectsTagValuesItCannotPlace) {
     w.sparse("S", {2}, d);
   }
   expect_rejected(file("twice.h5m"), {"/tstt/tags/S has two values on file id 2"});
+  {
+    Writer w(file("twice2.h5m"));
+    square(w);
+    w.tag("S", 2, H5T_NATIVE_INT32);
+    const std::int32_t d[] = {1, 2, 3, 4};
+    w.dense("nodes", "S", d, 4);
+    w.sparse("S", {2, 4}, d);
+  }
+  // Of several repeated ids, the smallest.
+  expect_rejected(file("twice2.h5m"), {"/tstt/tags/S has two values on file id 2"});
   {
     Writer w(file("undef.h5m"));
     square(w);

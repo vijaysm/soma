@@ -4,10 +4,12 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <map>
 #include <numeric>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -415,9 +417,26 @@ std::optional<std::vector<T>> read_value_attribute(hid_t tag, const char* name, 
   return v;
 }
 
+// The domain of every entity of a dimension, built (and fingerprinted) once
+// for all the tags that cover it.
+class FullDomains {
+ public:
+  explicit FullDomains(const HostMesh& mesh) : mesh_(mesh) {}
+  const Domain<Kokkos::HostSpace>& get(int d) {
+    auto& slot = all_[static_cast<std::size_t>(d)];
+    if (!slot) slot = Domain<Kokkos::HostSpace>::all(mesh_, d);
+    return *slot;
+  }
+
+ private:
+  const HostMesh& mesh_;
+  std::array<std::optional<Domain<Kokkos::HostSpace>>, 4> all_;
+};
+
 template <class T>
 void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKind& k,
-                const std::vector<Dense>& dense, const Locator& at, H5mReport& report) {
+                const std::vector<Dense>& dense, const Locator& at, FullDomains& full,
+                H5mReport& report) {
   const std::string where = "/tstt/tags/" + name;
   const auto nc = static_cast<std::size_t>(k.ncomp);
   std::array<std::vector<LO>, 4> lids;
@@ -477,27 +496,44 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
     auto& l = lids[static_cast<std::size_t>(d)];
     if (l.empty()) continue;
     any = true;
-    std::vector<std::size_t> order(l.size());
-    std::iota(order.begin(), order.end(), std::size_t{0});
-    if (!std::is_sorted(l.begin(), l.end())) {
-      std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return l[a] < l[b]; });
-    }
-    std::vector<LO> sorted(l.size());
-    for (std::size_t i = 0; i < order.size(); ++i) sorted[i] = l[order[i]];
-    for (std::size_t i = 1; i < sorted.size(); ++i) {
-      if (sorted[i] == sorted[i - 1]) {
-        fail(where + " has two values on file id " + str(mesh.gid(d)(static_cast<std::size_t>(sorted[i]))));
+    // Values by lid. Input in lid order (Ordering::file) keeps its order;
+    // otherwise each value is placed at its lid, which also finds repeats.
+    std::vector<std::size_t> order;  // value index of each member; empty: in order
+    std::vector<LO> placed;
+    std::span<const LO> sorted(l);
+    if (std::adjacent_find(l.begin(), l.end(), std::greater_equal<>()) != l.end()) {
+      constexpr auto none = std::numeric_limits<std::size_t>::max();
+      std::vector<std::size_t> at_lid(static_cast<std::size_t>(mesh.count(d)), none);
+      LO repeat = std::numeric_limits<LO>::max();
+      for (std::size_t i = 0; i < l.size(); ++i) {
+        std::size_t& slot = at_lid[static_cast<std::size_t>(l[i])];
+        if (slot != none) repeat = std::min(repeat, l[i]);
+        slot = i;
       }
+      if (repeat != std::numeric_limits<LO>::max()) {
+        fail(where + " has two values on file id " + str(mesh.gid(d)(static_cast<std::size_t>(repeat))));
+      }
+      placed.reserve(l.size());
+      order.reserve(l.size());
+      for (std::size_t lid = 0; lid < at_lid.size(); ++lid) {
+        if (at_lid[lid] == none) continue;
+        placed.push_back(static_cast<LO>(lid));
+        order.push_back(at_lid[lid]);
+      }
+      sorted = placed;
     }
     // A list of every entity of d is a full domain.
-    const auto domain = Domain<Kokkos::HostSpace>::from_list(mesh, d, sorted);
+    const auto domain = sorted.size() == static_cast<std::size_t>(mesh.count(d))
+                            ? full.get(d)
+                            : Domain<Kokkos::HostSpace>::from_list(mesh, d, sorted);
     const auto f = mesh.fields().add<T>(name, Space<Kokkos::HostSpace>(domain, Layout::per_entity()),
                                         k.ncomp, options);
     // A per_entity field has one row per member, in member order.
     const auto view = f.view();
     const auto& src = values[static_cast<std::size_t>(d)];
-    for (std::size_t i = 0; i < order.size(); ++i) {
-      for (std::size_t c = 0; c < nc; ++c) view(i, c) = src[order[i] * nc + c];
+    for (std::size_t i = 0; i < sorted.size(); ++i) {
+      const std::size_t from = (order.empty() ? i : order[i]) * nc;
+      for (std::size_t c = 0; c < nc; ++c) view(i, c) = src[from + c];
     }
   }
   if (on_sets > 0) {
@@ -535,6 +571,7 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
     }
   }
 
+  FullDomains full(mesh);
   for (const std::string& name : names) {
     const std::string where = "/tstt/tags/" + name;
     const Id tag = h5::open_group(tstt, "tags/" + name);
@@ -560,7 +597,7 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
     const std::vector<Dense> none;
     const std::vector<Dense>& sources = it != dense.end() ? it->second : none;
     dispatch_data_type(kind->type, [&]<class T>() {
-      import_tag<T>(mesh, tstt, name, *kind, sources, at, report);
+      import_tag<T>(mesh, tstt, name, *kind, sources, at, full, report);
     });
   }
 }
