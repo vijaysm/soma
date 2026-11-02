@@ -172,6 +172,33 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   needs both of its dimensions in `dims`. `clone()` copies every held graph. A memory space
   without a default execution space compiles, and asking it to rebuild throws.
 
+### Entity sets and value kinds
+
+- `soma::EntitySets` holds a mesh's sets: per-slot sorted members (entities of dimensions 0 to
+  3 and other sets), MOAB flags (`set_track_owner`, `set_unique`, `set_ordered`), the
+  sequence of an ordered set with its repeats, children and parents. `members_recursive`
+  follows contained sets, cycles included, once. `SetsView::contains` is a binary search in
+  kernels. `SetBuilder` validates and installs sets with the strong guarantee.
+- Sets are the fifth field slot (`set_dim = 4`): one tag stays one family across entities and
+  sets, and `Domain::all`, `from_list` and the new `Domain::from_set` work on it. Deriving
+  entities renumbers set members with them.
+- Mirrors and clones copy sets by default (`TransferOptions::sets`); members of a dimension a
+  mirror leaves out throw `MissingSetMembers` when asked for.
+- `VarField` is a variable-length field: a CSR over a `per_entity` space whose lengths are
+  fixed when `FieldRegistry::add_var` adds it, fetched with `get_var`, mirrored like any field.
+  It has a family of its own; `get` and `get_var` refuse each other's kind.
+- `FieldOptions::handle` marks a `GO` field (fixed or variable-length) whose values are gids of
+  entities or sets, 0 for none; the mark is part of the family key. `HandleRef` resolves gids to
+  (slot, local id) on the host and in kernels, and refuses meshes whose gids repeat across
+  slots or include 0; derived edges and faces are numbered within their dimension, so after
+  `build_adjacencies` derives entities it usually refuses `.h5m` meshes too.
+- `FieldRegistry::get<T>(name, space)` returns only fixed-length fields and throws when several
+  of one name and type, differing by component count or handle mark, share the space.
+- `Mesh::values()` holds `MeshValue`s, values of the mesh as a whole with their type,
+  component count, handle mark, MOAB storage class, default and global bytes. Every mirror
+  copies them.
+- `write_vtk` rejects variable-length fields.
+
 ### Testing
 
 - GoogleTest harness with a shared `main` that creates the runtime scope first and agrees on
@@ -200,6 +227,10 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - With `SOMA_ENABLE_MOAB_REFERENCE=ON`, every bundled `.h5m` mesh is checked against MOAB
   `get_adjacencies(create_if_missing)`: sub-entities, downward sense and offset
   (`CN::SideNumber`), upward graphs, bridges and ring neighbourhoods match exactly.
+- With `SOMA_ENABLE_MOAB_REFERENCE=ON`, `read_h5m` is checked against MOAB `load_file` on
+  every bundled mesh and on two files MOAB writes at test time: every set's flags, members,
+  sequence, children and parents, and every tag value on entities, sets and the mesh,
+  variable-length and handle values included.
 
 ### MOAB files
 
@@ -213,11 +244,18 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   gids and lower-dimensional groups kept as explicit entities. Every fixed-length tag on vertices
   and elements becomes one per_entity field per dimension (full when every entity has a value),
   with the file's default and global values: 8-, 32- and 64-bit integers, f32, f64, arrays,
-  opaque tags (`u8`, one component per byte) and bit tags (one `u8`). Values on sets,
-  variable-length, handle-valued and mesh-only tags are listed in an `H5mReport` instead. Files
+  opaque tags (`u8`, one component per byte) and bit tags (one `u8`). Value types it does not
+  read are listed in an `H5mReport` instead. Files
   that are not MOAB meshes, element types it does not read (Polyhedron, Knife, high-order
   connectivity), out-of-range or overlapping ids, malformed `poly_indices` and duplicate tag
   values throw `std::runtime_error` naming the file and the dataset; HDF5 prints nothing.
+- `read_h5m` reads entity sets, with or without tags: contents id by id or as ranges that may
+  cross groups, children, parents and flags; a set's gid is its file id. Tag values on sets
+  become fields on the set slot, variable-length tags `VarField`s, handle tags handle fields
+  whose values stay file ids, and tags with values on no entity `MeshValue`s. A set member,
+  child, parent or handle that names nothing, a malformed set list or `var_indices`, and an
+  ordered set stored as ranges throw. The report now lists only 16-bit integers, bit tags wider
+  than 8 bits, variable-length arrays and other HDF5 classes, and is empty on every bundled mesh.
 - `MeshBuilder::build` looks contiguous vertex gids up by index, skips sorts whose input is
   already sorted, computes centroids only for curve keys, copies in-order blocks whole and builds
   segments from their runs: the same mesh, about 10x faster on file input. Under
