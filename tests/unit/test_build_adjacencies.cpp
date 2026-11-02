@@ -12,6 +12,7 @@
 
 #include "adjacency_check.hpp"
 #include "mesh_fixture.hpp"
+#include "mirror_check.hpp"
 #include "soma/core/mesh.hpp"
 #include "soma/core/set_builder.hpp"
 #include "soma/topology/build.hpp"
@@ -46,18 +47,6 @@ AdjacencyRequest everything_3d() {
   return r;
 }
 
-template <class M>
-std::vector<HostGraph> all_graphs(const soma::Mesh<M>& mesh) {
-  std::vector<HostGraph> out;
-  for (int a = 0; a < 4; ++a) {
-    for (int b = 0; b < 4; ++b) {
-      if (a == b) continue;
-      if (mesh.has_adjacency(a, b)) out.push_back(to_host(mesh.adjacency(a, b)));
-      if (mesh.has_bridge(a, b)) out.push_back(to_host(mesh.bridge(a, b)));
-    }
-  }
-  return out;
-}
 
 // The quads of the 2 x 2 x 2 box at z = 0, outward, with gids 100..103; the
 // box gid of vertex (i, j, 0) is 1 + i + 3 j.
