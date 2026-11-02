@@ -17,25 +17,36 @@
 // largest element dimension; elements of lower dimensions (the Edge2 and
 // Quad4 groups beside Hex8, say) are kept as explicit entities.
 //
-// Tags (options.tags): every tag of /tstt/tags whose values are on vertices
-// or elements becomes, per dimension, one per_entity field named after the
-// tag: over all entities of that dimension when each has a value, over the
-// listed ones otherwise. Dense rows (<group>/tags/<NAME>) and sparse ones
-// (/tstt/tags/<NAME>/id_list and values) of one dimension join one field.
+// Entity sets (read with or without tags): /tstt/sets/list with its
+// contents, children and parents, contents id by id or (flag 0x8) as
+// (start, count) ranges, which may cross from one group to the next. A set's
+// gid is its file id; flag 0x8 is not kept.
+//
+// Tags (options.tags): every tag of /tstt/tags whose values are on vertices,
+// elements or sets becomes, per dimension and on the set slot (set_dim), one
+// per_entity field named after the tag: over all entities of that dimension
+// when each has a value, over the listed ones otherwise. Dense rows
+// (<group>/tags/<NAME>, sets/tags/<NAME>) and sparse ones
+// (/tstt/tags/<NAME>/id_list and values) of one slot join one field.
 // Values: integers of 8, 32 and 64 bits, signed or not, f32 and f64, arrays
 // of those (ncomp = the array size), opaque tags as u8 with ncomp = their
 // byte size, and bit tags as one u8 per entity. The default and global
-// attributes become the field's default and global values.
+// attributes become the field's default and global values. Variable-length
+// tags (var_indices, sparse only) become VarFields, and handle tags
+// (is_handle) GO fields with FieldOptions::handle whose values stay file ids.
+// A tag with values on no entity (class 3, or declared only) becomes a
+// MeshValue in mesh.values().
 //
-// Not read yet, and listed in the report instead: values on entity sets,
-// variable-length tags, handle-valued tags, tags with no values on vertices
-// or elements, and value types other than those above.
+// Not read, and listed in the report instead: 16-bit integers, bit tags wider
+// than 8 bits, variable-length arrays and other HDF5 type classes.
 //
 // Failures throw std::runtime_error naming the file: a file that is not
 // HDF5 or has no /tstt, no nodes or no elements, element types SOMA does not
 // read (Polyhedron, Knife, high-order connectivity), a connectivity entry
 // that is not a vertex file id, file id ranges that overlap or pass max_id,
-// a malformed poly_indices list, and two values of one tag on one entity.
+// a malformed poly_indices list or set list, a set member, child, parent,
+// tag entity or handle that names nothing, and two values of one tag on one
+// entity.
 
 #include <filesystem>
 #include <string>

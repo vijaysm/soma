@@ -15,6 +15,7 @@
 
 #include "soma/core/mesh_view.hpp"
 #include "soma/core/segments.hpp"
+#include "soma/core/mesh_values.hpp"
 #include "soma/core/sets.hpp"
 #include "soma/core/transfer.hpp"
 #include "soma/core/types.hpp"
@@ -135,6 +136,11 @@ class Mesh {
   FieldRegistry<MemSpace>& fields() noexcept { return fields_; }
   const FieldRegistry<MemSpace>& fields() const noexcept { return fields_; }
 
+  // Values of the mesh as a whole (MOAB tags of class 3 or without entity
+  // values); every mirror copies them.
+  MeshValues& values() noexcept { return values_; }
+  const MeshValues& values() const noexcept { return values_; }
+
   // Topology version. MeshBuilder::build starts it at 1, and every operation
   // that changes topology must call bump_epoch(), the one place that also tells
   // the field registry. Fields defined at an older epoch are then stale.
@@ -196,6 +202,7 @@ class Mesh {
     adj_.swap(o.adj_);
     sets_.swap(o.sets_);
     fields_.swap(o.fields_);
+    values_.swap(o.values_);
   }
 
  private:
@@ -283,6 +290,7 @@ class Mesh {
     const std::array<bool, num_field_slots> slots{o.dims[0], o.dims[1], o.dims[2], o.dims[3], o.sets};
     fields_.template mirror_into<Dst>(out.fields_, o.fields, slots, alias);
     out.attach_fields();
+    out.values_ = values_;
     if (o.adj_source == TransferOptions::AdjSource::rebuild && !o.adjacencies.empty()) {
       detail::rebuild_adjacencies(out, o.adjacencies);
     }
@@ -311,6 +319,7 @@ class Mesh {
   AdjacencyStore<MemSpace> adj_;
   EntitySets<MemSpace> sets_;
   FieldRegistry<MemSpace> fields_;
+  MeshValues values_;
 };
 
 using HostMesh = Mesh<Kokkos::HostSpace>;

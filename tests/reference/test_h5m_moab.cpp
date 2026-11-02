@@ -16,7 +16,9 @@
 #include <cstring>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -32,6 +34,7 @@
 #include "moab/Range.hpp"
 #include "soma/core/mesh.hpp"
 #include "soma/fields/space.hpp"
+#include "soma/fields/var_field.hpp"
 #include "soma/io/h5m.hpp"
 
 namespace fs = std::filesystem;
@@ -235,6 +238,69 @@ SomaValues values_of(const soma::HostMesh& m, moab::DataType type, const std::st
   }
 }
 
+// A variable-length field's run on each entity of dimension d, by lid (none
+// for a non-member; a member's run may be empty), and its default and global.
+struct SomaRuns {
+  bool present = false;
+  std::vector<std::optional<std::vector<unsigned char>>> by_lid;
+  std::optional<std::vector<unsigned char>> def, global;
+};
+
+template <class T>
+SomaRuns runs_of(const soma::HostMesh& m, const std::string& name, int d) {
+  SomaRuns out;
+  soma::VarField<T, Kokkos::HostSpace> f;
+  try {
+    f = m.fields().get_var<T>(name, d);
+  } catch (const std::out_of_range&) {
+    return out;
+  }
+  out.present = true;
+  const auto bytes_of = [](std::span<const T> x) {
+    std::vector<unsigned char> b(x.size_bytes());
+    if (!x.empty()) std::memcpy(b.data(), x.data(), b.size());
+    return b;
+  };
+  out.by_lid.resize(static_cast<std::size_t>(m.count(d)));
+  for (soma::LO l = 0; l < m.count(d); ++l) {
+    if (f.space().entity_rows(d, l).valid()) out.by_lid[static_cast<std::size_t>(l)] = bytes_of(f.value_or_default(d, l));
+  }
+  if (f.default_value()) out.def = bytes_of(*f.default_value());
+  if (f.global_value()) out.global = bytes_of(*f.global_value());
+  return out;
+}
+
+SomaRuns runs_of(const soma::HostMesh& m, moab::DataType type, const std::string& name, int d) {
+  switch (type) {
+    case moab::MB_TYPE_INTEGER: return runs_of<std::int32_t>(m, name, d);
+    case moab::MB_TYPE_DOUBLE: return runs_of<double>(m, name, d);
+    default: return runs_of<std::uint8_t>(m, name, d);  // opaque
+  }
+}
+
+std::size_t value_size(moab::DataType type) {
+  switch (type) {
+    case moab::MB_TYPE_INTEGER: return sizeof(int);
+    case moab::MB_TYPE_DOUBLE: return sizeof(double);
+    case moab::MB_TYPE_HANDLE: return sizeof(moab::EntityHandle);
+    default: return 1;
+  }
+}
+
+// Rows of the field `name` on the set slot; -1 without one.
+soma::LO set_rows(const soma::HostMesh& m, const std::string& name) {
+  for (const soma::FieldInfo& i : m.fields().list()) {
+    if (i.name == name && i.dims == std::vector<int>{soma::set_dim}) return i.rows;
+  }
+  return -1;
+}
+
+std::vector<unsigned char> bytes_of(const std::vector<std::byte>& b) {
+  std::vector<unsigned char> out(b.size());
+  if (!b.empty()) std::memcpy(out.data(), b.data(), b.size());
+  return out;
+}
+
 // True for a tag a MOAB instance holds before it reads anything.
 bool builtin(const std::string& name) {
   static moab::Core fresh;
@@ -303,7 +369,63 @@ TEST_P(H5mMoab, EveryEntityTagMatchesValueByValue) {
     check(f.mb.tag_get_data_type(tag, type), "tag_get_data_type");
     int bytes = 0;
     if (f.mb.tag_get_bytes(tag, bytes) == moab::MB_VARIABLE_DATA_LENGTH) {
-      EXPECT_TRUE(f.skipped(name)) << name << " is variable-length";
+      ASSERT_NE(type, moab::MB_TYPE_HANDLE) << name << ": variable-length handles are not compared here";
+      ASSERT_FALSE(f.skipped(name)) << name;
+      const std::size_t size = value_size(type);
+      bool held = false;
+      for (int d = 0; d <= 3; ++d) {
+        SCOPED_TRACE(name + " (variable length) on dimension " + std::to_string(d));
+        std::map<soma::LO, std::vector<unsigned char>> want;
+        for (const moab::EntityType t : moab_types) {
+          if (moab::CN::Dimension(t) != d) continue;
+          moab::Range r;
+          check(f.mb.get_entities_by_type_and_tag(0, t, &tag, nullptr, 1, r), "get_entities_by_type_and_tag");
+          const auto& h = f.handles[t];
+          for (const moab::EntityHandle e : r) {
+            const auto at = std::lower_bound(h.begin(), h.end(), e);
+            ASSERT_TRUE(at != h.end() && *at == e);
+            const void* ptr = nullptr;
+            int len = 0;
+            check(f.mb.tag_get_by_ptr(tag, &e, 1, &ptr, &len), "tag_get_by_ptr " + name);
+            const auto* c = static_cast<const unsigned char*>(ptr);
+            want[f.lids[t][static_cast<std::size_t>(at - h.begin())]].assign(c, c + static_cast<std::size_t>(len) * size);
+          }
+        }
+        const SomaRuns s = runs_of(f.mesh, type, name, d);
+        ASSERT_EQ(s.present, !want.empty());
+        if (want.empty()) continue;
+        held = true;
+        compared.insert({name, d});
+        for (soma::LO l = 0; l < f.mesh.count(d); ++l) {
+          const auto& got = s.by_lid[static_cast<std::size_t>(l)];
+          const auto it = want.find(l);
+          ASSERT_EQ(got.has_value(), it != want.end()) << "lid " << l;
+          if (got) ASSERT_EQ(*got, it->second) << "lid " << l;
+        }
+      }
+      moab::Range on_sets;
+      check(f.mb.get_entities_by_type_and_tag(0, moab::MBENTITYSET, &tag, nullptr, 1, on_sets), "sets with the tag");
+      if (!on_sets.empty()) {
+        EXPECT_EQ(set_rows(f.mesh, name), static_cast<soma::LO>(on_sets.size())) << name;
+        held = true;
+      }
+      if (!held) {
+        // A tag on no entity is a mesh value; MOAB reports its global on the mesh.
+        ASSERT_TRUE(f.mesh.values().contains(name)) << name;
+        const soma::MeshValue& mv = f.mesh.values().at(name);
+        EXPECT_EQ(mv.ncomp, 0);
+        const moab::EntityHandle root = 0;
+        const void* ptr = nullptr;
+        int len = 0;
+        if (f.mb.tag_get_by_ptr(tag, &root, 1, &ptr, &len) == moab::MB_SUCCESS) {
+          const auto* c = static_cast<const unsigned char*>(ptr);
+          const std::vector<unsigned char> m(c, c + static_cast<std::size_t>(len) * size);
+          ASSERT_TRUE(mv.global_value || mv.default_value) << name;
+          EXPECT_EQ(bytes_of(mv.global_value ? *mv.global_value : *mv.default_value), m) << name;
+        } else {
+          EXPECT_FALSE(mv.global_value) << name;
+        }
+      }
       continue;
     }
     check(f.mb.tag_get_bytes(tag, bytes), "tag_get_bytes");
@@ -369,6 +491,25 @@ TEST_P(H5mMoab, EveryEntityTagMatchesValueByValue) {
       const bool on_mesh = f.mb.tag_get_data(tag, &root, 1, mglobal.data()) == moab::MB_SUCCESS;
       EXPECT_EQ(s.global.empty() ? s.def : s.global, on_mesh ? mglobal : std::vector<unsigned char>{});
     }
+    // A tag on no entity or set is a mesh value; on the mesh MOAB reports its
+    // global or, without one, its default. MOAB's own tags (GLOBAL_ID, ...)
+    // need not be in the file at all.
+    const bool on_entities =
+        std::any_of(compared.begin(), compared.end(), [&](const auto& c) { return c.first == name; });
+    if (on_entities || set_rows(f.mesh, name) >= 0) continue;
+    if (builtin(name) && !f.mesh.values().contains(name)) continue;
+    SCOPED_TRACE(name + " on the mesh");
+    ASSERT_TRUE(f.mesh.values().contains(name));
+    const soma::MeshValue& mv = f.mesh.values().at(name);
+    EXPECT_EQ(mv.handle, type == moab::MB_TYPE_HANDLE);
+    if (builtin(name) && !mv.default_value) continue;
+    std::vector<unsigned char> mval(static_cast<std::size_t>(bytes));
+    const moab::EntityHandle root = 0;
+    const bool on_mesh = f.mb.tag_get_data(tag, &root, 1, mval.data()) == moab::MB_SUCCESS;
+    const std::vector<unsigned char> mine = mv.global_value    ? bytes_of(*mv.global_value)
+                                            : mv.default_value ? bytes_of(*mv.default_value)
+                                                               : std::vector<unsigned char>{};
+    EXPECT_EQ(mine, on_mesh ? mval : std::vector<unsigned char>{});
   }
   // Not vacuous: every file but hex_2048 carries entity tags, and the file
   // MOAB wrote carries one of every fixed-length kind.

@@ -424,41 +424,89 @@ TEST_F(H5mRead, EveryFixedValueTypeIsRead) {
   EXPECT_EQ(bits.value_or_default(0, lid_of(m, 0, 3)), 7);
 }
 
-TEST_F(H5mRead, TagsItCannotReadYetAreReported) {
+TEST_F(H5mRead, TagsItCannotReadAreReported) {
   {
     Writer w(file());
     square(w);
-    w.sets(6, 2);
-    w.tag("varlen", 1, H5T_NATIVE_DOUBLE);
-    w.int_attribute("tags/varlen", "variable_length", 1);
-    w.tag("handle", 2, H5T_NATIVE_UINT64);
-    w.int_attribute("tags/handle", "is_handle", 1);
-    w.tag("on_sets", 1, H5T_NATIVE_INT32);
-    const std::int32_t sv[] = {1, 2};
-    w.sparse("on_sets", {6, 7}, sv);
-    w.tag("dense_sets", 2, H5T_NATIVE_INT32);
-    w.dense("sets", "dense_sets", sv, 2);
-    const std::int32_t g = 3;
-    w.tag("mesh_only", 3, H5T_NATIVE_INT32, nullptr, &g);
     w.tag("short", 2, H5T_NATIVE_INT16);
     const std::int16_t s[] = {1, 2, 3, 4};
     w.dense("nodes", "short", s, 4);
+    w.tag("bits16", 0, H5T_NATIVE_B16);
+    w.tag("pairs", 1, H5T_NATIVE_INT32);
+    w.int_attribute("tags/pairs", "variable_length", 1);
+    const hsize_t two = 2;
+    const hid_t pair = H5Tarray_create2(H5T_NATIVE_INT32, 1, &two);
+    w.tag("varpairs", 1, pair);
+    H5Tclose(pair);
+    w.int_attribute("tags/varpairs", "variable_length", 1);
   }
   soma::H5mReport report;
   report.skipped.push_back({"stale", "left from before"});
   HostMesh m = soma::read_h5m(file(), {}, report);
-  EXPECT_TRUE(skipped(report, "varlen", "no values on entities or sets"));
-  EXPECT_TRUE(skipped(report, "handle", "no values on entities or sets"));
-  EXPECT_TRUE(skipped(report, "mesh_only", "no values on entities or sets"));
   EXPECT_TRUE(skipped(report, "short", "16-bit integer"));
+  EXPECT_TRUE(skipped(report, "bits16", "bit tags wider than 8 bits"));
+  EXPECT_TRUE(skipped(report, "varpairs", "variable-length tags of 2-component values"));
   EXPECT_FALSE(skipped(report, "stale", ""));
-  EXPECT_EQ(report.skipped.size(), 4u);
-  for (const char* n : {"varlen", "handle", "mesh_only", "short"}) {
+  EXPECT_EQ(report.skipped.size(), 3u);
+  for (const char* n : {"short", "bits16", "varpairs"}) {
     EXPECT_FALSE(m.fields().contains(n)) << n;
+    EXPECT_FALSE(m.values().contains(n)) << n;
   }
-  // Values on sets are read like any others.
-  EXPECT_EQ(m.fields().get<std::int32_t>("on_sets", soma::set_dim).rows(), 2);
-  EXPECT_EQ(m.fields().get<std::int32_t>("dense_sets", soma::set_dim).rows(), 2);
+  EXPECT_TRUE(m.values().contains("pairs"));  // declared, with no values
+}
+
+// Tags with values on no entity: one of class 3 with a global value, and
+// fixed, variable-length and handle tags declared only.
+TEST_F(H5mRead, TagsWithoutEntityValuesAreMeshValues) {
+  {
+    Writer w(file());
+    square(w);
+    const std::int32_t g[] = {3, 4};
+    const hsize_t two = 2;
+    const hid_t pair = H5Tarray_create2(H5T_NATIVE_INT32, 1, &two);
+    w.tag("mesh_only", 3, pair, nullptr, g);
+    H5Tclose(pair);
+    const double d = 0.5;
+    w.tag("declared", 2, H5T_NATIVE_DOUBLE, &d);
+    w.tag("varlen", 1, H5T_NATIVE_DOUBLE);
+    w.int_attribute("tags/varlen", "variable_length", 1);
+    const double vg[] = {1, 2, 3};
+    w.array_attribute("varlen", "global", vg, 3);
+    w.tag("handle", 1, H5T_NATIVE_UINT64);
+    w.int_attribute("tags/handle", "is_handle", 1);
+  }
+  soma::H5mReport report;
+  const HostMesh m = soma::read_h5m(file(), {}, report);
+  EXPECT_TRUE(report.skipped.empty());
+  const auto& v = m.values();
+  EXPECT_EQ(v.names(), (std::vector<std::string>{"declared", "handle", "mesh_only", "varlen"}));
+  const auto& mo = v.at("mesh_only");
+  EXPECT_EQ(mo.type, soma::DataType::i32);
+  EXPECT_EQ(mo.ncomp, 2);
+  EXPECT_EQ(mo.storage_class, 3);
+  EXPECT_FALSE(mo.default_value.has_value());
+  EXPECT_EQ(mo.global_as<std::int32_t>(), (std::vector<std::int32_t>{3, 4}));
+  EXPECT_EQ(v.at("declared").default_as<double>(), std::vector<double>{0.5});
+  EXPECT_EQ(v.at("declared").storage_class, 2);
+  EXPECT_EQ(v.at("varlen").ncomp, 0);
+  EXPECT_EQ(v.at("varlen").global_as<double>(), (std::vector<double>{1, 2, 3}));
+  EXPECT_TRUE(v.at("handle").handle);
+  EXPECT_EQ(v.at("handle").type, soma::DataType::i64);
+  EXPECT_THROW(mo.global_as<double>(), std::invalid_argument);
+  for (const auto& n : v.names()) EXPECT_FALSE(m.fields().contains(n)) << n;
+  // Mirrors keep them.
+  EXPECT_EQ(m.mirror<Kokkos::HostSpace>().values().names(), v.names());
+}
+
+// Every tag of the data files is read: as a field, or as a mesh value.
+TEST_F(H5mRead, DataFilesLeaveNothingOut) {
+  for (const char* name : {"64bricks_1khex.h5m", "hex_2048.h5m", "hexes_mixed.h5m", "hybrid_3quad_1tri.h5m",
+                           "moab_i.h5m", "recMeshOcn128.h5m"}) {
+    SCOPED_TRACE(name);
+    soma::H5mReport report;
+    const HostMesh m = soma::read_h5m(data(name), {}, report);
+    for (const auto& sk : report.skipped) ADD_FAILURE() << sk.name << ": " << sk.reason;
+  }
 }
 
 TEST_F(H5mRead, TagsCanBeLeftOut) {

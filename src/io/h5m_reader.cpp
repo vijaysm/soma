@@ -588,6 +588,19 @@ void check_handle_options(const FieldOptions<T>& o, const Locator& at, const std
   if (o.global_value) check_handles<T>(*o.global_value, at, where, named("global"));
 }
 
+// A tag with values on no entity, kept with the mesh.
+template <class T>
+MeshValue mesh_value(const FieldOptions<T>& o, int ncomp, int storage_class) {
+  MeshValue v;
+  v.type = data_type_of<T>();
+  v.ncomp = ncomp;
+  v.handle = o.handle;
+  v.storage_class = storage_class;
+  if (o.default_value) v.default_value = MeshValue::bytes_of<T>(*o.default_value);
+  if (o.global_value) v.global_value = MeshValue::bytes_of<T>(*o.global_value);
+  return v;
+}
+
 // A dense tag dataset: one row per entity of the group whose file ids start at first.
 struct Dense {
   std::string path;  // below /tstt
@@ -639,7 +652,7 @@ class FullDomains {
 template <class T>
 void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKind& k,
                 const std::vector<Dense>& dense, const Locator& at, FullDomains& full,
-                H5mReport& report, bool handle) {
+                bool handle, int storage_class) {
   const std::string where = "/tstt/tags/" + name;
   const auto nc = static_cast<std::size_t>(k.ncomp);
   std::array<std::vector<LO>, num_field_slots> lids;
@@ -744,9 +757,7 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
       for (std::size_t c = 0; c < nc; ++c) view(i, c) = src[from + c];
     }
   }
-  if (!any) {
-    report.skipped.push_back({name, "it has no values on entities or sets"});
-  }
+  if (!any) mesh.values().set(name, mesh_value(options, k.ncomp, storage_class));
 }
 
 // The default or global of a variable-length tag: one value of an array type
@@ -777,8 +788,8 @@ std::optional<std::vector<T>> read_var_attribute(hid_t tag, const char* name, co
 // holds the last index of each one's run of values.
 template <class T>
 void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKind& k,
-                    const std::vector<Dense>& dense, const Locator& at, FullDomains& full, H5mReport& report,
-                    bool handle) {
+                    const std::vector<Dense>& dense, const Locator& at, FullDomains& full, bool handle,
+                    int storage_class) {
   const std::string where = "/tstt/tags/" + name;
   if (!dense.empty()) {
     fail("/tstt/" + dense.front().path + " holds dense values of a variable-length tag, which MOAB does not write");
@@ -864,7 +875,7 @@ void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const T
                             : Domain<Kokkos::HostSpace>::from_list(mesh, d, lids);
     mesh.fields().add_var<T>(name, Space<Kokkos::HostSpace>(domain, Layout::per_entity()), offsets, held, options);
   }
-  if (!any) report.skipped.push_back({name, "it has no values on entities or sets"});
+  if (!any) mesh.values().set(name, mesh_value(options, 0, storage_class));
 }
 
 void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vector<Group>& groups,
@@ -903,6 +914,8 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
                           h5::read_attribute<std::int32_t>(tag.get(), "variable_length", where) != 0;
     const bool handle = h5::has_attribute(tag.get(), "is_handle") &&
                         h5::read_attribute<std::int32_t>(tag.get(), "is_handle", where) != 0;
+    const int storage_class =
+        h5::has_attribute(tag.get(), "class") ? h5::read_attribute<std::int32_t>(tag.get(), "class", where) : -1;
     if (!h5::exists(tag.get(), "type")) fail(where + " has no type");
     const Id type = h5::check(H5Topen2(tag.get(), "type", H5P_DEFAULT), "open the type of " + where);
     std::string why;
@@ -922,12 +935,12 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
         continue;
       }
       dispatch_data_type(kind->type, [&]<class T>() {
-        import_var_tag<T>(mesh, tstt, name, *kind, sources, at, full, report, handle);
+        import_var_tag<T>(mesh, tstt, name, *kind, sources, at, full, handle, storage_class);
       });
       continue;
     }
     dispatch_data_type(kind->type, [&]<class T>() {
-      import_tag<T>(mesh, tstt, name, *kind, sources, at, full, report, handle);
+      import_tag<T>(mesh, tstt, name, *kind, sources, at, full, handle, storage_class);
     });
   }
 }
