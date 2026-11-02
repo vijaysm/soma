@@ -5,7 +5,8 @@
 // down. The empty snapshot that a move leaves behind must still exist then, even
 // though it was first needed after the holder was constructed (statics are
 // destroyed in reverse order of construction). Run under AddressSanitizer: the
-// defect is a use of a destroyed shared_ptr that is silent otherwise.
+// defect is a use of a destroyed shared_ptr that is silent otherwise. On a
+// device build the device memory space's snapshots are covered as well.
 
 #include <utility>
 
@@ -18,26 +19,29 @@
 #include "soma/fields/space.hpp"
 
 using HostMem = Kokkos::HostSpace;
+using DevMem = Kokkos::DefaultExecutionSpace::memory_space;
 
 namespace soma_test {
 
 // The holders own no Views (those would have to be freed before
 // Kokkos::finalize). Their destructors run at program exit and create and move
 // from an empty Domain or Space, which needs the shared empty snapshot.
+template <class M>
 struct DomainHolder {
   soma::LO unused = 0;
   ~DomainHolder() {
-    soma::Domain<HostMem> a;
-    const soma::Domain<HostMem> b(std::move(a));
+    soma::Domain<M> a;
+    const soma::Domain<M> b(std::move(a));
     unused = b.size();
   }
 };
 
+template <class M>
 struct SpaceHolder {
   soma::LO unused = 0;
   ~SpaceHolder() {
-    soma::Space<HostMem> a;
-    const soma::Space<HostMem> b(std::move(a));
+    soma::Space<M> a;
+    const soma::Space<M> b(std::move(a));
     unused = b.rows();
   }
 };
@@ -49,16 +53,21 @@ struct SpaceHolder {
 // holders' destructors run. The two types get one test each (ctest runs every
 // test in its own process): an empty Space holds a copy of the empty Domain
 // snapshot, which would keep that one alive in a process that used both.
-TEST(StaticLifetime, EmptyDomainIsUsableDuringShutdown) {
-  static soma_test::DomainHolder holder;
-  const soma::Domain<HostMem> late;
+template <class M>
+class StaticLifetimeTyped : public ::testing::Test {};
+using Spaces = ::testing::Types<HostMem, DevMem>;
+TYPED_TEST_SUITE(StaticLifetimeTyped, Spaces);
+
+TYPED_TEST(StaticLifetimeTyped, EmptyDomainIsUsableDuringShutdown) {
+  static soma_test::DomainHolder<TypeParam> holder;
+  const soma::Domain<TypeParam> late;
   EXPECT_TRUE(late.empty());
   EXPECT_EQ(holder.unused, 0);
 }
 
-TEST(StaticLifetime, EmptySpaceIsUsableDuringShutdown) {
-  static soma_test::SpaceHolder holder;
-  const soma::Space<HostMem> late;
+TYPED_TEST(StaticLifetimeTyped, EmptySpaceIsUsableDuringShutdown) {
+  static soma_test::SpaceHolder<TypeParam> holder;
+  const soma::Space<TypeParam> late;
   EXPECT_EQ(late.rows(), 0);
   EXPECT_EQ(holder.unused, 0);
 }
