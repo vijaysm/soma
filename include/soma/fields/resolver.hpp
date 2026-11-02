@@ -40,7 +40,7 @@
 #include "soma/core/view_types.hpp"
 #include "soma/fields/domain.hpp"
 #include "soma/fields/field.hpp"
-#include "soma/fields/search.hpp"
+#include "soma/core/search.hpp"
 
 namespace soma {
 

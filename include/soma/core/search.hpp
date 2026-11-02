@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
-#ifndef SOMA_FIELDS_SEARCH_HPP_
-#define SOMA_FIELDS_SEARCH_HPP_
+#ifndef SOMA_CORE_SEARCH_HPP_
+#define SOMA_CORE_SEARCH_HPP_
 
 #include <Kokkos_Core.hpp>
 
@@ -44,4 +44,4 @@ KOKKOS_INLINE_FUNCTION LO upper_bound(const V& v, LO n, LO key) {
 
 }  // namespace soma::detail
 
-#endif  // SOMA_FIELDS_SEARCH_HPP_
+#endif  // SOMA_CORE_SEARCH_HPP_

@@ -29,31 +29,14 @@
 
 #include "soma/core/types.hpp"
 #include "soma/core/view_types.hpp"
-#include "soma/fields/search.hpp"
+#include "soma/core/lid_runs.hpp"
+#include "soma/core/search.hpp"
 
 namespace soma {
 
 template <class MemSpace>
 class Mesh;
 struct SegmentFilter;
-
-enum class DomainKind : std::uint8_t { full, intervals, list };
-
-constexpr const char* name(DomainKind k) noexcept {
-  switch (k) {
-    case DomainKind::full: return "full";
-    case DomainKind::intervals: return "intervals";
-    case DomainKind::list: return "list";
-  }
-  return "unknown";
-}
-
-// Half-open run [begin, end) of local ids.
-struct Interval {
-  LO begin = 0;
-  LO end = 0;
-  friend bool operator==(const Interval&, const Interval&) = default;
-};
 
 KOKKOS_INLINE_FUNCTION constexpr std::uint64_t splitmix64(std::uint64_t x) noexcept {
   x += 0x9e3779b97f4a7c15ULL;
@@ -88,37 +71,10 @@ struct DomainBlockView {
   UView1<LO, MemSpace> b{};
 
   // Row in [0, size) to local id; invalid_lo when out of range.
-  KOKKOS_INLINE_FUNCTION LO entity(LO row) const {
-    if (row < 0 || row >= size) return invalid_lo;
-    switch (kind) {
-      case DomainKind::full: return row;
-      case DomainKind::list: return a(row);
-      case DomainKind::intervals: {
-        const LO i = detail::upper_bound(b, runs, row) - 1;
-        return a(i) + (row - b(i));
-      }
-    }
-    return invalid_lo;
-  }
+  KOKKOS_INLINE_FUNCTION LO entity(LO row) const { return detail::run_entity(kind, size, runs, a, b, row); }
 
   // Local id to row; invalid_lo when the entity is not a member.
-  KOKKOS_INLINE_FUNCTION LO row(LO lid) const {
-    if (lid < 0 || lid >= count) return invalid_lo;
-    switch (kind) {
-      case DomainKind::full: return lid;
-      case DomainKind::list: {
-        const LO i = detail::lower_bound(a, size, lid);
-        return (i < size && a(i) == lid) ? i : invalid_lo;
-      }
-      case DomainKind::intervals: {
-        const LO i = detail::upper_bound(a, runs, lid) - 1;
-        if (i < 0) return invalid_lo;
-        const LO offset = lid - a(i);
-        return offset < b(i + 1) - b(i) ? b(i) + offset : invalid_lo;
-      }
-    }
-    return invalid_lo;
-  }
+  KOKKOS_INLINE_FUNCTION LO row(LO lid) const { return detail::run_row(kind, count, size, runs, a, b, lid); }
 };
 
 template <class MemSpace>
@@ -248,19 +204,6 @@ struct DomainBlockData {
     return make_view<Kokkos::HostSpace>(info, ha, hb);
   }
 };
-
-// Canonical runs of a sorted id list.
-inline std::vector<Interval> runs_of(std::span<const LO> lids) {
-  std::vector<Interval> runs;
-  for (const LO l : lids) {
-    if (!runs.empty() && runs.back().end == l) {
-      ++runs.back().end;
-    } else {
-      runs.push_back(Interval{l, l + 1});
-    }
-  }
-  return runs;
-}
 
 template <class T>
 View1<const T, Kokkos::HostSpace> host_copy(const std::vector<T>& v, const std::string& label) {
@@ -542,10 +485,8 @@ class Domain {
     blk.info.size = size;
     std::vector<LO> a;
     std::vector<LO> b;
-    if (size == count) {
-      blk.info.kind = DomainKind::full;
-    } else if (2 * nruns + 1 < size) {
-      blk.info.kind = DomainKind::intervals;
+    blk.info.kind = detail::form_of(size, count, nruns);
+    if (blk.info.kind == DomainKind::intervals) {
       blk.info.runs = nruns;
       LO row = 0;
       for (const Interval& r : runs) {
@@ -554,8 +495,7 @@ class Domain {
         row += r.end - r.begin;
       }
       b.push_back(row);
-    } else {
-      blk.info.kind = DomainKind::list;
+    } else if (blk.info.kind == DomainKind::list) {
       for (const Interval& r : runs) {
         for (LO l = r.begin; l < r.end; ++l) a.push_back(l);
       }

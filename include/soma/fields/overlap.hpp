@@ -10,7 +10,7 @@
 
 #include "soma/core/types.hpp"
 #include "soma/fields/domain.hpp"
-#include "soma/fields/search.hpp"
+#include "soma/core/search.hpp"
 
 namespace soma::detail {
 
