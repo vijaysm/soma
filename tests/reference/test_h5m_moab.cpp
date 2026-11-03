@@ -5,7 +5,8 @@
 // type, coordinates and connectivity bitwise, and every tag MOAB holds on
 // vertices and elements, value by value, with its default and global value.
 // The "written:" files are those files read by read_h5m and written again by
-// write_h5m, so MOAB is checked to read what SOMA writes.
+// write_h5m, so MOAB is checked to read what SOMA writes; the "compressed:"
+// ones are written so at deflate level 6.
 //
 // MOAB numbers a freshly loaded file's entities of one type in file id
 // order, so the i-th handle of a type is the entity with the i-th smallest
@@ -265,17 +266,27 @@ fs::path sets_kinds_file() {
 
 fs::path path_of(const std::string& name);
 
-// The file `name` names, read by read_h5m and written again by write_h5m.
-fs::path written_file(const std::string& name) {
+// The file `name` names, read by read_h5m and written again by write_h5m at
+// the compression level.
+fs::path written_file(const std::string& name, int compression) {
   std::string flat = name;
   std::replace(flat.begin(), flat.end(), ':', '_');
-  const fs::path p = scratch_dir() / ("written_" + flat);
-  if (!fs::exists(p)) soma::write_h5m(soma::read_h5m(path_of(name)), p);
+  const fs::path p = scratch_dir() / ((compression > 0 ? "compressed_" : "written_") + flat);
+  if (!fs::exists(p)) soma::write_h5m(soma::read_h5m(path_of(name)), p, {.compression = compression});
   return p;
 }
 
+// The file a test parameter names without its "written:" or "compressed:".
+std::string original_of(const std::string& name) {
+  for (const std::string prefix : {"written:", "compressed:"}) {
+    if (name.rfind(prefix, 0) == 0) return name.substr(prefix.size());
+  }
+  return name;
+}
+
 fs::path path_of(const std::string& name) {
-  if (name.rfind("written:", 0) == 0) return written_file(name.substr(8));
+  if (name.rfind("written:", 0) == 0) return written_file(name.substr(8), 0);
+  if (name.rfind("compressed:", 0) == 0) return written_file(name.substr(11), 6);
   if (name == "tag_kinds") return tag_kinds_file();
   if (name == "poly_indices") return poly_indices_file();
   if (name == "sets_kinds") return sets_kinds_file();
@@ -562,7 +573,7 @@ TEST_P(H5mMoab, SetsMatch) {
     check(f.mb.get_parent_meshsets(h, links), "get_parent_meshsets");
     EXPECT_EQ(set_gids(sets.parents(s)), gids(links));
   }
-  if (GetParam() == "sets_kinds") {
+  if (original_of(GetParam()) == "sets_kinds") {
     EXPECT_EQ(sets.count(), 7);
     for (soma::LO s = 0; s < sets.count(); ++s) {
       if (!sets.children(s).empty() && sets.ordered(s)) return;  // the parent of the cycle
@@ -679,11 +690,12 @@ TEST_P(H5mMoab, EveryTagMatchesValueByValue) {
   const auto has = [&](const char* n) {
     return std::any_of(compared.begin(), compared.end(), [&](const auto& c) { return c.first == n; });
   };
-  if (GetParam() != "hex_2048.h5m" && GetParam() != "written:hex_2048.h5m") EXPECT_FALSE(compared.empty());
-  if (GetParam() == "tag_kinds" || GetParam() == "written:tag_kinds") {
+  const std::string original = original_of(GetParam());
+  if (original != "hex_2048.h5m") EXPECT_FALSE(compared.empty());
+  if (original == "tag_kinds") {
     for (const char* n : {"DENSE_D2", "SPARSE_I", "PAIR", "OPAQUE7", "BITS3", "WITH_GLOBAL"}) EXPECT_TRUE(has(n)) << n;
   }
-  if (GetParam() == "sets_kinds" || GetParam() == "written:sets_kinds") {
+  if (original == "sets_kinds") {
     for (const char* n : {"VARF", "VAROPQ", "QV", "SS", "VH"}) EXPECT_TRUE(has(n)) << n;
     EXPECT_EQ(compared.count({"SETI", soma::set_dim}) + compared.count({"SETI", 0}), 2u);
     EXPECT_EQ(mesh_values, (std::set<std::string>{"DECLARED", "MESHVAL", "VARG"}));
@@ -753,9 +765,12 @@ class H5mMoabWritten : public ::testing::TestWithParam<std::string> {};
 
 TEST_P(H5mMoabWritten, ReadsAsTheOriginal) {
   const soma::HostMesh original = soma::read_h5m(path_of(GetParam()));
-  soma::HostMesh written = soma::read_h5m(path_of("written:" + GetParam()));
-  drop_added_global_id(written, original);
-  EXPECT_EQ(mesh_difference(written, original), "");
+  for (const std::string prefix : {"written:", "compressed:"}) {
+    SCOPED_TRACE(prefix);
+    soma::HostMesh written = soma::read_h5m(path_of(prefix + GetParam()));
+    drop_added_global_id(written, original);
+    EXPECT_EQ(mesh_difference(written, original), "");
+  }
 }
 
 INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
@@ -765,7 +780,12 @@ INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                                            "written:64bricks_1khex.h5m", "written:hex_2048.h5m",
                                            "written:hexes_mixed.h5m", "written:hybrid_3quad_1tri.h5m",
                                            "written:moab_i.h5m", "written:recMeshOcn128.h5m",
-                                           "written:poly_indices", "written:tag_kinds", "written:sets_kinds"),
+                                           "written:poly_indices", "written:tag_kinds", "written:sets_kinds",
+                                           "compressed:64bricks_1khex.h5m", "compressed:hex_2048.h5m",
+                                           "compressed:hexes_mixed.h5m", "compressed:hybrid_3quad_1tri.h5m",
+                                           "compressed:moab_i.h5m", "compressed:recMeshOcn128.h5m",
+                                           "compressed:poly_indices", "compressed:tag_kinds",
+                                           "compressed:sets_kinds"),
                          [](const auto& info) {
                            std::string n = info.param;
                            std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');

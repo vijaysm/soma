@@ -138,6 +138,13 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // std::invalid_argument. GLOBAL_ID values on a dimension left out are not
 // written.
 //
+// Compression (options.compression, a deflate level in [0, 9]): above 0,
+// every dataset with values is stored in chunks of about 1 MiB with the
+// shuffle and deflate filters, which MOAB and every HDF5 built with zlib
+// read; 0 (the default) stores them contiguous, as MOAB does. A level
+// outside [0, 9] throws std::invalid_argument, and an HDF5 without deflate
+// std::runtime_error.
+//
 // The file is written to a new temporary next to `path` (`path` + "." + six
 // random characters, created exclusively) and renamed over `path`, so a
 // failure leaves neither a partial file nor a damaged earlier one. A mesh that
@@ -145,6 +152,7 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // I/O failures throw std::runtime_error naming the path and the cause.
 struct H5mWriteOptions {
   std::array<std::optional<bool>, 4> dims{};
+  int compression = 0;
 };
 
 void write_h5m(const HostMesh& mesh, const std::filesystem::path& path, const H5mWriteOptions& options = {});

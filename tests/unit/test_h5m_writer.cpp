@@ -1138,6 +1138,108 @@ TEST(H5mWrite, VerticesCannotBeLeftOut) {
   EXPECT_TRUE(listing(dir).empty());
 }
 
+// At a compression level above 0 every dataset with values is stored in
+// chunks of about 1 MiB, shuffled and deflated; the file is smaller, reads
+// back the same and is reproducible. Level 0 stores them contiguous.
+TEST(H5mWrite, CompressesWhenAsked) {
+  HostMesh in = soma::testing::box_mesh({40, 40, 40});
+  const auto t = in.fields().add_tag<double>("T", 3, 1);
+  for (std::size_t r = 0; r < static_cast<std::size_t>(in.count(3)); ++r) t.view()(r, 0) = 0.5 * static_cast<double>(r % 17);
+  const fs::path plain = scratch() / "plain.h5m";
+  const fs::path packed = scratch() / "packed.h5m";
+  const fs::path again = scratch() / "packed_again.h5m";
+  soma::write_h5m(in, plain);
+  soma::write_h5m(in, packed, {.compression = 6});
+  soma::write_h5m(in, again, {.compression = 6});
+  EXPECT_LT(fs::file_size(packed), fs::file_size(plain) / 2);
+  EXPECT_EQ(bytes(packed), bytes(again));
+  HostMesh back = soma::read_h5m(packed);
+  EXPECT_EQ(mesh_difference(back, soma::read_h5m(plain)), "");
+
+  struct Storage {
+    H5D_layout_t layout = H5D_CONTIGUOUS;
+    std::vector<hsize_t> chunk;
+    std::vector<H5Z_filter_t> filters;
+    unsigned level = 0;
+  };
+  const auto storage = [](const fs::path& p, const char* name) {
+    Storage s;
+    const hid_t f = open_file(p);
+    const hid_t ds = H5Dopen2(f, name, H5P_DEFAULT);
+    const hid_t dcpl = H5Dget_create_plist(ds);
+    s.layout = H5Pget_layout(dcpl);
+    if (s.layout == H5D_CHUNKED) {
+      s.chunk.resize(2);
+      s.chunk.resize(static_cast<std::size_t>(H5Pget_chunk(dcpl, 2, s.chunk.data())));
+    }
+    for (int i = 0; i < H5Pget_nfilters(dcpl); ++i) {
+      unsigned flags = 0;
+      std::size_t n = 1;
+      unsigned cd = 0;
+      s.filters.push_back(H5Pget_filter2(dcpl, static_cast<unsigned>(i), &flags, &n, &cd, 0, nullptr, nullptr));
+      if (s.filters.back() == H5Z_FILTER_DEFLATE) s.level = cd;
+    }
+    H5Pclose(dcpl);
+    H5Dclose(ds);
+    H5Fclose(f);
+    return s;
+  };
+  const Storage contiguous = storage(plain, "/tstt/nodes/coordinates");
+  EXPECT_EQ(contiguous.layout, H5D_CONTIGUOUS);
+  EXPECT_TRUE(contiguous.filters.empty());
+  // 41^3 vertices of 24 bytes and 40^3 hexes of 64: chunks of 2^20 bytes.
+  const std::vector<H5Z_filter_t> both{H5Z_FILTER_SHUFFLE, H5Z_FILTER_DEFLATE};
+  for (const auto& [name, chunk] : {std::pair{"/tstt/nodes/coordinates", std::vector<hsize_t>{43690, 3}},
+                                    std::pair{"/tstt/elements/Hex8/connectivity", std::vector<hsize_t>{16384, 8}},
+                                    std::pair{"/tstt/elements/Hex8/tags/T", std::vector<hsize_t>{64000}},
+                                    std::pair{"/tstt/nodes/tags/GLOBAL_ID", std::vector<hsize_t>{68921}}}) {
+    const Storage s = storage(packed, name);
+    EXPECT_EQ(s.layout, H5D_CHUNKED) << name;
+    EXPECT_EQ(s.chunk, chunk) << name;
+    EXPECT_EQ(s.filters, both) << name;
+    EXPECT_EQ(s.level, 6u) << name;
+  }
+
+  // A row wider than a chunk gets a chunk of its own; a variable-length tag
+  // whose entities hold no values has an empty values dataset, which stays
+  // contiguous.
+  using HS = Kokkos::HostSpace;
+  HostMesh odd = mixed_2d();
+  constexpr int wide = (1 << 17) + 1;  // doubles: just over 1 MiB
+  const auto w = odd.fields().add_tag<double>("WIDE", 2, wide);
+  for (std::size_t r = 0; r < 3; ++r) w.view()(r, static_cast<std::size_t>(wide - 1)) = static_cast<double>(r + 1);
+  odd.fields().add_var<std::int32_t>("NONE", soma::Space<HS>(soma::Domain<HS>::all(odd, 0), soma::Layout::per_entity()),
+                                     std::vector<soma::Offset>(8, 0), std::vector<std::int32_t>{});
+  const fs::path odd_plain = scratch() / "odd_plain.h5m";
+  const fs::path odd_packed = scratch() / "odd_packed.h5m";
+  soma::write_h5m(odd, odd_plain);
+  soma::write_h5m(odd, odd_packed, {.compression = 6});
+  EXPECT_EQ(storage(odd_packed, "/tstt/elements/Quad4/tags/WIDE").chunk, (std::vector<hsize_t>{1}));
+  {
+    const hid_t f = open_file(odd_packed);
+    EXPECT_GT(H5Lexists(f, "/tstt/tags/NONE/values", H5P_DEFAULT), 0);
+    H5Fclose(f);
+  }
+  EXPECT_EQ(storage(odd_packed, "/tstt/tags/NONE/values").layout, H5D_CONTIGUOUS);
+  EXPECT_EQ(mesh_difference(soma::read_h5m(odd_packed), soma::read_h5m(odd_plain)), "");
+}
+
+TEST(H5mWrite, RejectsACompressionLevelDeflateDoesNotHave) {
+  const fs::path dir = scratch() / "bad_level";
+  fs::create_directory(dir);
+  for (const int level : {-1, 10}) {
+    try {
+      soma::write_h5m(mixed_2d(), dir / "m.h5m", {.compression = level});
+      ADD_FAILURE() << "written at level " << level;
+    } catch (const std::invalid_argument& e) {
+      EXPECT_EQ(std::string(e.what()), "write_h5m: compression is a deflate level in [0, 9], not " + std::to_string(level));
+    }
+  }
+  soma::write_h5m(mixed_2d(), dir / "m.h5m", {.compression = 9});
+  soma::write_h5m(mixed_2d(), dir / "m.h5m", {.compression = 1});
+  EXPECT_EQ(listing(dir), (std::vector<std::string>{"m.h5m"}));
+}
+
 TEST(H5mWrite, EqualMeshesGiveEqualBytes) {
   const fs::path a = scratch() / "same_a.h5m";
   const fs::path b = scratch() / "same_b.h5m";

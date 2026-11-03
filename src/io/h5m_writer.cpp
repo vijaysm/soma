@@ -100,10 +100,14 @@ struct Plan {
   std::vector<Block> blocks;  // in file id order
   std::vector<TagPlan> tags;  // families, then mesh values, each in name order
   std::optional<HandleRef<Kokkos::HostSpace>> handles;  // when the mesh has handle values
+  int compression = 0;  // deflate level; 0: datasets stored contiguous
 };
 
 // The number of temporary file names write_h5m tries before it gives up.
 constexpr int temporary_attempts = 100;
+
+// The bytes of a compressed dataset's chunks, short of its whole size.
+constexpr std::size_t chunk_bytes = std::size_t{1} << 20;
 
 [[noreturn]] void reject(const std::string& why) { throw std::invalid_argument("write_h5m: " + why); }
 
@@ -528,6 +532,10 @@ void plan_tags(const HostMesh& mesh, Plan& p) {
 
 Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
   Plan p;
+  if (options.compression < 0 || options.compression > 9) {
+    reject("compression is a deflate level in [0, 9], not " + std::to_string(options.compression));
+  }
+  p.compression = options.compression;
   p.handles = handle_ref(mesh);
   p.dims = written_dims(mesh, options, p.handles);
   const auto nv = static_cast<std::size_t>(mesh.count(0));
@@ -589,9 +597,11 @@ Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
 // Writes the file at `name` with the default HDF5 property lists, as MOAB
 // does, but no dataset modification times, so that equal meshes give equal
 // bytes. (In the default file format groups and committed types carry none.)
+// At a compression level above 0 datasets with values are chunked, shuffled
+// and deflated.
 class File {
  public:
-  explicit File(const std::string& name) {
+  File(const std::string& name, int compression) : compression_(compression) {
     dcpl_ = h5::check(H5Pcreate(H5P_DATASET_CREATE), "create a dataset property list");
     h5::check(H5Pset_obj_track_times(dcpl_.get(), false), "turn off dataset times");
     file_ = h5::check(H5Fcreate(name.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT), "create the file");
@@ -612,10 +622,21 @@ class File {
              const void* data) const {
     const Id space = h5::check(H5Screate_simple(static_cast<int>(dims.size()), dims.data(), nullptr),
                                "create the dataspace of " + path);
-    Id ds = h5::check(H5Dcreate2(loc, path.c_str(), type, space.get(), H5P_DEFAULT, dcpl_.get(), H5P_DEFAULT),
-                      "create the dataset " + path);
     hsize_t n = 1;
     for (const hsize_t x : dims) n *= x;
+    Id chunked;
+    if (compression_ > 0 && n > 0) {
+      chunked = h5::check(H5Pcopy(dcpl_.get()), "copy the dataset property list");
+      const hsize_t row = H5Tget_size(type) * n / dims[0];
+      std::vector<hsize_t> chunk = dims;
+      chunk[0] = std::clamp<hsize_t>(chunk_bytes / row, 1, dims[0]);
+      h5::check(H5Pset_chunk(chunked.get(), static_cast<int>(chunk.size()), chunk.data()), "chunk " + path);
+      h5::check(H5Pset_shuffle(chunked.get()), "shuffle " + path);
+      h5::check(H5Pset_deflate(chunked.get(), static_cast<unsigned>(compression_)), "deflate " + path);
+    }
+    Id ds = h5::check(H5Dcreate2(loc, path.c_str(), type, space.get(), H5P_DEFAULT,
+                                 chunked.get() >= 0 ? chunked.get() : dcpl_.get(), H5P_DEFAULT),
+                      "create the dataset " + path);
     if (n > 0) h5::check(H5Dwrite(ds.get(), mem, H5S_ALL, H5S_ALL, H5P_DEFAULT, data), "write " + path);
     return ds;
   }
@@ -630,6 +651,7 @@ class File {
   void flush() const { h5::check(H5Fflush(file_.get(), H5F_SCOPE_GLOBAL), "flush the file"); }
 
  private:
+  int compression_ = 0;
   Id dcpl_, file_;
 };
 
@@ -746,7 +768,7 @@ void write_tag(const File& f, hid_t tstt, const std::vector<Block>& blocks, cons
 }
 
 void write_file(const std::string& name, const HostMesh& mesh, const Plan& p) {
-  const File f(name);
+  const File f(name, p.compression);
   const Id tstt = f.group(f.get(), "tstt");
 
   const Id types = h5::check(H5Tenum_create(H5T_STD_U8LE), "create the element type enumeration");
@@ -816,6 +838,9 @@ void write_file(const std::string& name, const HostMesh& mesh, const Plan& p) {
 
 void write_h5m(const HostMesh& mesh, const fs::path& path, const H5mWriteOptions& options) {
   const Plan p = plan(mesh, options);
+  if (p.compression > 0 && H5Zfilter_avail(H5Z_FILTER_DEFLATE) <= 0) {
+    throw std::runtime_error(io::cannot_write("write_h5m", path, "this HDF5 has no deflate filter"));
+  }
   io::Temporary file("write_h5m", path, io::random_names(path), temporary_attempts);
   try {
     file.close();
