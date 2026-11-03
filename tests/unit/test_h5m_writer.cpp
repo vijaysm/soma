@@ -758,12 +758,12 @@ TEST(H5mWrite, GlobalIdHoldsTheGids) {
                                                      std::nullopt});
   soma::write_h5m(declared, out);
   {
-    const hid_t file = open_file(out);
-    EXPECT_EQ(int_attribute(file, "/tstt/tags/GLOBAL_ID", "class"), 1);
-    EXPECT_EQ(int_attribute(file, "/tstt/tags/GLOBAL_ID", "default"), -7);
-    EXPECT_EQ(H5Aexists_by_name(file, "/tstt/tags/GLOBAL_ID", "global", H5P_DEFAULT), 0);
-    EXPECT_GT(H5Lexists(file, "/tstt/nodes/tags/GLOBAL_ID", H5P_DEFAULT), 0);
-    H5Fclose(file);
+    const hid_t declared_file = open_file(out);
+    EXPECT_EQ(int_attribute(declared_file, "/tstt/tags/GLOBAL_ID", "class"), 1);
+    EXPECT_EQ(int_attribute(declared_file, "/tstt/tags/GLOBAL_ID", "default"), -7);
+    EXPECT_EQ(H5Aexists_by_name(declared_file, "/tstt/tags/GLOBAL_ID", "global", H5P_DEFAULT), 0);
+    EXPECT_GT(H5Lexists(declared_file, "/tstt/nodes/tags/GLOBAL_ID", H5P_DEFAULT), 0);
+    H5Fclose(declared_file);
   }
   const HostMesh declared_back = soma::read_h5m(out);
   EXPECT_FALSE(declared_back.values().contains("GLOBAL_ID"));
