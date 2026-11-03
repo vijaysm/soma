@@ -138,6 +138,14 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // std::invalid_argument. GLOBAL_ID values on a dimension left out are not
 // written.
 //
+// Cached adjacencies (options.adjacencies, an AdjacencyRequest): each graph
+// it names, but the connectivity (d, 0), in /tstt/soma/adjacency/pair_F_T or
+// bridge_D_V (offsets I64, targets as file ids U64, and for pairs codes U8;
+// rows in file id order), under /tstt/soma (attribute version 1), which MOAB
+// ignores. The dimensions a graph names are written by default. A graph the
+// mesh does not hold (build_adjacencies first), or one naming a dimension
+// left out, throws std::invalid_argument.
+//
 // Compression (options.compression, a deflate level in [0, 9]): above 0,
 // every dataset with values is stored in chunks of about 1 MiB with the
 // shuffle and deflate filters, which MOAB and every HDF5 built with zlib
@@ -153,6 +161,7 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 struct H5mWriteOptions {
   std::array<std::optional<bool>, 4> dims{};
   int compression = 0;
+  AdjacencyRequest adjacencies{};
 };
 
 void write_h5m(const HostMesh& mesh, const std::filesystem::path& path, const H5mWriteOptions& options = {});

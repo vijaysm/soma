@@ -1240,6 +1240,115 @@ TEST(H5mWrite, RejectsACompressionLevelDeflateDoesNotHave) {
   EXPECT_EQ(listing(dir), (std::vector<std::string>{"m.h5m"}));
 }
 
+// Two quads sharing an edge: vertices 1-6, quads 7 and 8 by file id.
+HostMesh two_quads() {
+  soma::MeshBuilder b(2);
+  b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6}, std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 1, 0, 1, 1, 0, 2, 1, 0});
+  b.add_elements(Topology::quad, std::vector<GO>{1, 2}, std::vector<GO>{1, 2, 5, 4, 2, 3, 6, 5});
+  return std::move(b).build(soma::Ordering::file);
+}
+
+template <class T>
+std::vector<T> read_column(hid_t file, const std::string& path, hid_t mem) {
+  const hid_t ds = H5Dopen2(file, path.c_str(), H5P_DEFAULT);
+  const hid_t space = H5Dget_space(ds);
+  std::vector<T> v(static_cast<std::size_t>(H5Sget_simple_extent_npoints(space)));
+  if (!v.empty()) H5Dread(ds, mem, H5S_ALL, H5S_ALL, H5P_DEFAULT, v.data());
+  H5Sclose(space);
+  H5Dclose(ds);
+  return v;
+}
+
+// The graphs options.adjacencies names are cached under /tstt/soma: rows in
+// file id order, targets as file ids, codes for pairs; the connectivity is
+// not cached, and the dimensions a graph names are written.
+TEST(H5mWrite, CachesTheAdjacenciesAsked) {
+  HostMesh in = two_quads();
+  const auto host = Kokkos::DefaultHostExecutionSpace{};
+  soma::build_adjacencies(in, soma::AdjacencyRequest{}.add(0, 2).add_bridge(2, 1), host);
+  const fs::path out = scratch() / "cached.h5m";
+  soma::write_h5m(in, out, {.adjacencies = soma::AdjacencyRequest{}.add(0, 2).add(2, 0).add_bridge(2, 1)});
+  hid_t f = open_file(out);
+  EXPECT_EQ(int_attribute(f, "/tstt/soma", "version"), 1);
+  const std::string up = "/tstt/soma/adjacency/pair_0_2/";
+  EXPECT_EQ(read_column<std::int64_t>(f, up + "offsets", H5T_NATIVE_INT64), (std::vector<std::int64_t>{0, 1, 3, 4, 5, 7, 8}));
+  EXPECT_EQ(read_column<std::uint64_t>(f, up + "targets", H5T_NATIVE_UINT64),
+            (std::vector<std::uint64_t>{7, 7, 8, 8, 7, 7, 8, 8}));
+  // The vertex's place in each quad.
+  EXPECT_EQ(read_column<std::uint8_t>(f, up + "codes", H5T_NATIVE_UINT8), (std::vector<std::uint8_t>{0, 1, 0, 1, 3, 2, 3, 2}));
+  const std::string bridge = "/tstt/soma/adjacency/bridge_2_1/";
+  EXPECT_EQ(read_column<std::int64_t>(f, bridge + "offsets", H5T_NATIVE_INT64), (std::vector<std::int64_t>{0, 1, 2}));
+  EXPECT_EQ(read_column<std::uint64_t>(f, bridge + "targets", H5T_NATIVE_UINT64), (std::vector<std::uint64_t>{8, 7}));
+  EXPECT_EQ(H5Lexists(f, (bridge + "codes").c_str(), H5P_DEFAULT), 0);
+  EXPECT_EQ(H5Lexists(f, "/tstt/soma/adjacency/pair_2_0", H5P_DEFAULT), 0);
+  EXPECT_EQ(H5Lexists(f, "/tstt/elements/Edge2", H5P_DEFAULT), 0);
+  H5Fclose(f);
+  // Without a request, no /tstt/soma.
+  soma::write_h5m(in, out);
+  f = open_file(out);
+  EXPECT_EQ(H5Lexists(f, "/tstt/soma", H5P_DEFAULT), 0);
+  H5Fclose(f);
+
+  // Quad to edge: the edges are written; one code per target.
+  soma::build_adjacencies(in, soma::AdjacencyRequest{}.add(2, 1), host);
+  ASSERT_FALSE(in.input(1));
+  soma::write_h5m(in, out, {.adjacencies = soma::AdjacencyRequest{}.add(2, 1)});
+  f = open_file(out);
+  EXPECT_EQ(read_column<std::int64_t>(f, "/tstt/soma/adjacency/pair_2_1/offsets", H5T_NATIVE_INT64),
+            (std::vector<std::int64_t>{0, 4, 8}));
+  EXPECT_EQ(read_column<std::uint8_t>(f, "/tstt/soma/adjacency/pair_2_1/codes", H5T_NATIVE_UINT8).size(), 8u);
+  H5Fclose(f);
+  EXPECT_EQ(soma::read_h5m(out).count(1), in.count(1));
+  // Vertex to edge, from the vertices up, and edge to edge through
+  // vertices: the edges are written too.
+  soma::build_adjacencies(in, soma::AdjacencyRequest{}.add(0, 1).add_bridge(1, 0), host);
+  soma::write_h5m(in, out, {.adjacencies = soma::AdjacencyRequest{}.add(0, 1)});
+  EXPECT_EQ(soma::read_h5m(out).count(1), in.count(1));
+  soma::write_h5m(in, out, {.adjacencies = soma::AdjacencyRequest{}.add_bridge(1, 0)});
+  EXPECT_EQ(soma::read_h5m(out).count(1), in.count(1));
+
+  // Rows follow file ids whatever the local order: mixed_2d's vertices in
+  // gid order 10 .. 70 are file ids 1-7, its triangle 8 and quads 9, 10.
+  HostMesh mixed = mixed_2d();
+  ASSERT_FALSE(std::is_sorted(mixed.gid(0).data(), mixed.gid(0).data() + mixed.count(0)));
+  soma::build_adjacencies(mixed, soma::AdjacencyRequest{}.add(0, 2), host);
+  soma::write_h5m(mixed, out, {.adjacencies = soma::AdjacencyRequest{}.add(0, 2)});
+  f = open_file(out);
+  const auto offsets = read_column<std::int64_t>(f, "/tstt/soma/adjacency/pair_0_2/offsets", H5T_NATIVE_INT64);
+  const auto targets = read_column<std::uint64_t>(f, "/tstt/soma/adjacency/pair_0_2/targets", H5T_NATIVE_UINT64);
+  H5Fclose(f);
+  EXPECT_EQ(offsets, (std::vector<std::int64_t>{0, 2, 4, 5, 7, 9, 10, 11}));
+  std::vector<std::vector<std::uint64_t>> rows;
+  for (std::size_t r = 0; r + 1 < offsets.size(); ++r) {
+    rows.emplace_back(targets.begin() + offsets[r], targets.begin() + offsets[r + 1]);
+    std::sort(rows.back().begin(), rows.back().end());
+  }
+  EXPECT_EQ(rows, (std::vector<std::vector<std::uint64_t>>{{8, 9}, {9, 10}, {10}, {8, 9}, {9, 10}, {10}, {8}}));
+}
+
+TEST(H5mWrite, RejectsAdjacenciesItCannotCache) {
+  HostMesh in = two_quads();
+  const fs::path dir = scratch() / "bad_cache";
+  fs::create_directory(dir);
+  const auto expect = [&](const soma::H5mWriteOptions& o, const std::string& what) {
+    try {
+      soma::write_h5m(in, dir / "m.h5m", o);
+      ADD_FAILURE() << "written: " << what;
+    } catch (const std::invalid_argument& e) {
+      EXPECT_EQ(std::string(e.what()), "write_h5m: " + what);
+    }
+  };
+  expect({.adjacencies = soma::AdjacencyRequest{}.add(2, 1)},
+         "the mesh holds no (2, 1) adjacency; build it with build_adjacencies to write it");
+  expect({.adjacencies = soma::AdjacencyRequest{}.add_bridge(2, 0)},
+         "the mesh holds no bridge (2 via 0); build it with build_adjacencies to write it");
+  soma::build_adjacencies(in, soma::AdjacencyRequest{}.add(2, 1), Kokkos::DefaultHostExecutionSpace{});
+  soma::H5mWriteOptions no_edges = with_dims({{1, false}});
+  no_edges.adjacencies.add(2, 1);
+  expect(no_edges, "the (2, 1) adjacency names dimension 1, which is not written");
+  EXPECT_TRUE(listing(dir).empty());
+}
+
 TEST(H5mWrite, EqualMeshesGiveEqualBytes) {
   const fs::path a = scratch() / "same_a.h5m";
   const fs::path b = scratch() / "same_b.h5m";

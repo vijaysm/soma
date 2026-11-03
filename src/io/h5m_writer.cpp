@@ -88,6 +88,16 @@ struct TagPlan {
 
 // What is written and under which file ids, settled before the file is
 // touched.
+// A cached adjacency graph (options.adjacencies): rows in file id order of
+// its source entities, targets as file ids.
+struct GraphPlan {
+  std::string name;  // pair_<from>_<to> or bridge_<dim>_<via>
+  bool pair = true;
+  std::vector<std::int64_t> offsets;
+  std::vector<std::uint64_t> targets;
+  std::vector<std::uint8_t> codes;  // pairs only
+};
+
 struct Plan {
   std::array<bool, 4> dims{};
   std::vector<LO> nodes;  // vertex rows in gid order
@@ -101,6 +111,7 @@ struct Plan {
   std::vector<TagPlan> tags;  // families, then mesh values, each in name order
   std::optional<HandleRef<Kokkos::HostSpace>> handles;  // when the mesh has handle values
   int compression = 0;  // deflate level; 0: datasets stored contiguous
+  std::vector<GraphPlan> graphs;
 };
 
 // The number of temporary file names write_h5m tries before it gives up.
@@ -222,6 +233,14 @@ std::array<bool, 4> written_dims(const HostMesh& mesh, const H5mWriteOptions& op
       const HandleTarget x = handles->resolve(h);
       if (x.valid() && x.slot < set_dim) w[static_cast<std::size_t>(x.slot)] = true;
     });
+  }
+  // The dimensions of cached graphs: both of a pair (but the connectivity),
+  // that of a bridge.
+  for (int a = 0; a <= mesh.dim(); ++a) {
+    for (int b = 0; b <= mesh.dim(); ++b) {
+      if (b != 0 && options.adjacencies.has(a, b)) w[static_cast<std::size_t>(a)] = w[static_cast<std::size_t>(b)] = true;
+      if (options.adjacencies.has_bridge(a, b)) w[static_cast<std::size_t>(a)] = true;
+    }
   }
   // Without a dimension turned off, every one left out was derived from
   // written ones.
@@ -530,6 +549,54 @@ void plan_tags(const HostMesh& mesh, Plan& p) {
   }
 }
 
+// The graphs options.adjacencies names, but the connectivity (d, 0): each
+// one the mesh holds, over written dimensions.
+void plan_graphs(const HostMesh& mesh, const AdjacencyRequest& request, Plan& p) {
+  for (int slot = 0; slot < adjacency_slots; ++slot) {
+    if (!request.has_slot(slot)) continue;
+    const bool pair = slot < 16;
+    const int from = (pair ? slot : slot - 16) / 4;
+    const int other = slot % 4;  // the target dimension of a pair, the via of a bridge
+    if (pair && other == 0) continue;
+    const int to = pair ? other : from;
+    const std::string what = pair ? "(" + std::to_string(from) + ", " + std::to_string(to) + ") adjacency"
+                                  : "bridge (" + std::to_string(from) + " via " + std::to_string(other) + ")";
+    if (pair ? !mesh.has_adjacency(from, to) : !mesh.has_bridge(from, other)) {
+      reject("the mesh holds no " + what + "; build it with build_adjacencies to write it");
+    }
+    for (const int d : {from, to}) {
+      if (!p.dims[static_cast<std::size_t>(d)]) {
+        reject("the " + what + " names dimension " + std::to_string(d) + ", which is not written");
+      }
+    }
+    const AdjacencyGraph<Kokkos::HostSpace> g = pair ? mesh.adjacency(from, to) : mesh.bridge(from, other);
+    // The source entities in file id order.
+    std::vector<LO> rows;
+    if (from == 0) {
+      rows = p.nodes;
+    } else {
+      for (const Group& grp : p.groups) {
+        if (grp.dim == from) rows.insert(rows.end(), grp.rows.begin(), grp.rows.end());
+      }
+    }
+    const auto& target_fid = p.fid[static_cast<std::size_t>(to)];
+    GraphPlan out;
+    out.name = (pair ? "pair_" : "bridge_") + std::to_string(from) + "_" + std::to_string(other);
+    out.pair = pair;
+    out.offsets.reserve(rows.size() + 1);
+    out.offsets.push_back(0);
+    for (const LO r : rows) {
+      const auto e = static_cast<std::size_t>(r);
+      for (auto k = static_cast<std::size_t>(g.offsets(e)); k < static_cast<std::size_t>(g.offsets(e + 1)); ++k) {
+        out.targets.push_back(target_fid[static_cast<std::size_t>(g.targets(k))]);
+        if (pair) out.codes.push_back(g.codes(k));
+      }
+      out.offsets.push_back(static_cast<std::int64_t>(out.targets.size()));
+    }
+    p.graphs.push_back(std::move(out));
+  }
+}
+
 Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
   Plan p;
   if (options.compression < 0 || options.compression > 9) {
@@ -591,6 +658,7 @@ Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
   for (const Group& g : p.groups) p.blocks.push_back(Block{"elements/" + g.name(), g.start, g.rows.size()});
   p.blocks.push_back(Block{"sets", p.set_start, p.fid[set_dim].size()});
   plan_tags(mesh, p);
+  plan_graphs(mesh, options.adjacencies, p);
   return p;
 }
 
@@ -830,6 +898,18 @@ void write_file(const std::string& name, const HostMesh& mesh, const Plan& p) {
   }
   f.group(tstt.get(), "tags");
   for (const TagPlan& t : p.tags) write_tag(f, tstt.get(), p.blocks, t);
+  if (!p.graphs.empty()) {
+    const Id soma = f.group(tstt.get(), "soma");
+    const std::int32_t version = 1;
+    File::attribute(soma.get(), "version", H5T_STD_I32LE, H5T_NATIVE_INT32, &version);
+    const Id adjacency = f.group(soma.get(), "adjacency");
+    for (const GraphPlan& g : p.graphs) {
+      const Id grp = f.group(adjacency.get(), g.name);
+      f.dataset(grp.get(), "offsets", H5T_STD_I64LE, {g.offsets.size()}, H5T_NATIVE_INT64, g.offsets.data());
+      f.dataset(grp.get(), "targets", H5T_STD_U64LE, {g.targets.size()}, H5T_NATIVE_UINT64, g.targets.data());
+      if (g.pair) f.dataset(grp.get(), "codes", H5T_STD_U8LE, {g.codes.size()}, H5T_NATIVE_UINT8, g.codes.data());
+    }
+  }
   File::attribute(tstt.get(), "max_id", H5T_STD_U64LE, H5T_NATIVE_UINT64, &p.max_id);
   f.flush();
 }
