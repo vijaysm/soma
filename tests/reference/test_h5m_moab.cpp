@@ -42,6 +42,7 @@
 #include "soma/fields/space.hpp"
 #include "soma/fields/var_field.hpp"
 #include "soma/io/h5m.hpp"
+#include "soma/topology/build.hpp"
 
 namespace fs = std::filesystem;
 
@@ -771,6 +772,26 @@ TEST_P(H5mMoabWritten, ReadsAsTheOriginal) {
     drop_added_global_id(written, original);
     EXPECT_EQ(mesh_difference(written, original), "");
   }
+}
+
+// MOAB loads a file with cached adjacencies (under /tstt/soma, which it
+// ignores) as the same mesh: the entities of every dimension, including the
+// faces the cached graphs made write_h5m write.
+TEST(H5mMoabCached, LoadsAFileWithCachedAdjacencies) {
+  soma::HostMesh mesh = soma::read_h5m(path_of("64bricks_1khex.h5m"), {.tags = false});
+  const auto request = soma::AdjacencyRequest{}.add(0, 3).add(3, 2).add(2, 3).add_bridge(3, 2);
+  soma::build_adjacencies(mesh, request, Kokkos::DefaultHostExecutionSpace{});
+  const fs::path out = scratch_dir() / "cached_64bricks.h5m";
+  soma::write_h5m(mesh, out, {.adjacencies = request});
+  moab::Core mb;
+  check(mb.load_file(out.c_str()), "load_file");
+  for (int d = 0; d <= 3; ++d) {
+    int n = 0;
+    check(mb.get_number_entities_by_dimension(0, d, n), "count");
+    EXPECT_EQ(n, mesh.count(d)) << d;
+  }
+  EXPECT_GT(mesh.count(2), 0);
+  EXPECT_EQ(soma::read_h5m(out).adjacencies().bits(), request.bits());
 }
 
 INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
