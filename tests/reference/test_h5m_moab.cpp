@@ -753,13 +753,8 @@ class H5mMoabWritten : public ::testing::TestWithParam<std::string> {};
 
 TEST_P(H5mMoabWritten, ReadsAsTheOriginal) {
   const soma::HostMesh original = soma::read_h5m(path_of(GetParam()));
-  // write_h5m adds GLOBAL_ID to a mesh without one.
   soma::HostMesh written = soma::read_h5m(path_of("written:" + GetParam()));
-  if (!original.fields().contains("GLOBAL_ID") && written.fields().contains("GLOBAL_ID")) {
-    for (const soma::FieldInfo& info : written.fields().list()) {
-      if (info.name == "GLOBAL_ID") written.fields().remove(info.id);
-    }
-  }
+  drop_added_global_id(written, original);
   EXPECT_EQ(mesh_difference(written, original), "");
 }
 

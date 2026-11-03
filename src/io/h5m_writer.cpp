@@ -419,22 +419,22 @@ void place(const std::vector<Block>& blocks, TagPlan& t) {
 }
 
 // GLOBAL_ID as MOAB declares it (dense i32, default and global -1) holding
-// the gid of every written vertex and element; none when a gid does not fit.
-std::optional<TagPlan> gid_tag(const HostMesh& mesh, const Plan& p) {
+// the gid of every written vertex and element.
+TagPlan gid_tag(const HostMesh& mesh, const Plan& p) {
   std::vector<std::int32_t> gids;
   const auto add = [&](int d, const std::vector<LO>& rows) {
     const auto g = mesh.gid(d);
     for (const LO l : rows) {
       const GO v = g(static_cast<std::size_t>(l));
-      if (!std::in_range<std::int32_t>(v)) return false;
+      if (!std::in_range<std::int32_t>(v)) {
+        reject("the gid " + std::to_string(v) + " of dimension " + std::to_string(d) +
+               " does not fit GLOBAL_ID, a 32-bit integer in MOAB's format");
+      }
       gids.push_back(static_cast<std::int32_t>(v));
     }
-    return true;
   };
-  if (!add(0, p.nodes)) return std::nullopt;
-  for (const Group& g : p.groups) {
-    if (!add(g.dim, g.rows)) return std::nullopt;
-  }
+  add(0, p.nodes);
+  for (const Group& g : p.groups) add(g.dim, g.rows);
   TagPlan t;
   t.name = "GLOBAL_ID";
   t.type = DataType::i32;
@@ -451,7 +451,7 @@ std::optional<TagPlan> gid_tag(const HostMesh& mesh, const Plan& p) {
 // One tag per field family, checked: one family per name, per_entity
 // layouts, no pending writes, members that agree on their default and
 // global values; and one per mesh value.
-void plan_tags(const HostMesh& mesh, const H5mWriteOptions& options, Plan& p) {
+void plan_tags(const HostMesh& mesh, Plan& p) {
   std::map<std::string, std::vector<FieldInfo>> by_name;
   for (const FieldInfo& info : mesh.fields().list()) by_name[info.name].push_back(info);
   for (const auto& [name, members] : by_name) {
@@ -482,6 +482,7 @@ void plan_tags(const HostMesh& mesh, const H5mWriteOptions& options, Plan& p) {
   // global value and the mesh recorded no class.
   for (const std::string& name : mesh.values().names()) {
     if (by_name.contains(name)) reject("a field and a mesh value are both named '" + name + "'");
+    if (name == "GLOBAL_ID") continue;
     const MeshValue& v = mesh.values().at(name);
     TagPlan t;
     t.name = name;
@@ -506,11 +507,22 @@ void plan_tags(const HostMesh& mesh, const H5mWriteOptions& options, Plan& p) {
     place(p.blocks, t);
     p.tags.push_back(std::move(t));
   }
-  if (options.gid_tag && !by_name.contains("GLOBAL_ID") && !mesh.values().contains("GLOBAL_ID")) {
-    if (auto t = gid_tag(mesh, p)) {
-      place(p.blocks, *t);
-      p.tags.push_back(std::move(*t));
+  // GLOBAL_ID: the mesh's own field; or else the gids, declared as the mesh
+  // value of that name declares the tag (a file with the tag but no values
+  // read so), or as MOAB does.
+  if (!by_name.contains("GLOBAL_ID")) {
+    TagPlan t = gid_tag(mesh, p);
+    if (mesh.values().contains("GLOBAL_ID")) {
+      const MeshValue& v = mesh.values().at("GLOBAL_ID");
+      if (v.type != DataType::i32 || v.ncomp != 1 || v.handle) {
+        reject("the mesh value 'GLOBAL_ID' cannot declare the gids: it is not one 32-bit integer");
+      }
+      t.def = v.default_value;
+      t.global = v.global_value;
+      t.format = v.format;
     }
+    place(p.blocks, t);
+    p.tags.push_back(std::move(t));
   }
 }
 
@@ -570,7 +582,7 @@ Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
   p.blocks.push_back(Block{"nodes", 1, nv});
   for (const Group& g : p.groups) p.blocks.push_back(Block{"elements/" + g.name(), g.start, g.rows.size()});
   p.blocks.push_back(Block{"sets", p.set_start, p.fid[set_dim].size()});
-  plan_tags(mesh, options, p);
+  plan_tags(mesh, p);
   return p;
 }
 

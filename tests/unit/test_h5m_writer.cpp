@@ -14,6 +14,7 @@
 #include <fstream>
 #include <initializer_list>
 #include <iterator>
+#include <limits>
 #include <map>
 #include <optional>
 #include <span>
@@ -155,8 +156,10 @@ TEST_P(H5mWriteBack, ReadsBackTheSameEntitiesUnderTheSameFileIds) {
     SCOPED_TRACE(static_cast<int>(ordering));
     const HostMesh in = soma::read_h5m(data(GetParam()), {.ordering = ordering});
     const fs::path out = scratch() / ("back_" + GetParam());
-    soma::write_h5m(in, out, {.gid_tag = false});
-    EXPECT_EQ(mesh_difference(soma::read_h5m(out), in), "");
+    soma::write_h5m(in, out);
+    HostMesh back = soma::read_h5m(out);
+    drop_added_global_id(back, in);
+    EXPECT_EQ(mesh_difference(back, in), "");
   }
 }
 
@@ -423,7 +426,7 @@ TEST(H5mWrite, FieldsBecomeTags) {
   f32.view()(1, 0) = -2.5f;
 
   const fs::path out = scratch() / "tags.h5m";
-  soma::write_h5m(in, out, {.gid_tag = false});
+  soma::write_h5m(in, out);
   const hid_t file = open_file(out);
   const auto exists = [&](const std::string& p) { return H5Lexists(file, p.c_str(), H5P_DEFAULT) > 0; };
   for (const char* p : {"/tstt/nodes/tags/D2", "/tstt/nodes/tags/B", "/tstt/elements/Tri3/tags/Q",
@@ -486,7 +489,8 @@ TEST(H5mWrite, FieldsBecomeTags) {
   auto want = fields_of(in);
   for (auto& [k, t] : want) t.format = {static_cast<int>(classes.at(k.first)), t.format.kind, t.format.nbits};
   want.erase({"Z", 0});
-  const HostMesh back = soma::read_h5m(out);
+  HostMesh back = soma::read_h5m(out);
+  drop_added_global_id(back, in);
   EXPECT_EQ(difference(fields_of(back), want), "");
   EXPECT_TRUE(back.values().contains("Z"));
 
@@ -584,7 +588,7 @@ TEST(H5mWrite, VariableLengthFieldsBecomeVariableLengthTags) {
                           std::vector<soma::Offset>{0}, std::vector<std::int32_t>{});
 
   const fs::path out = scratch() / "var.h5m";
-  soma::write_h5m(in, out, {.gid_tag = false});
+  soma::write_h5m(in, out);
   const hid_t file = open_file(out);
   EXPECT_EQ(int_attribute(file, "/tstt/tags/V", "variable_length"), 1);
   EXPECT_EQ(int_attribute(file, "/tstt/tags/V", "class"), 1);
@@ -631,7 +635,8 @@ TEST(H5mWrite, VariableLengthFieldsBecomeVariableLengthTags) {
   want.at({"VO", soma::set_dim}).def.reset();
   want.at({"VQ", 2}).format = {1, Kind::plain, 0};
   want.erase({"VE", 0});  // no values: read back as a mesh value
-  const HostMesh back = soma::read_h5m(out);
+  HostMesh back = soma::read_h5m(out);
+  drop_added_global_id(back, in);
   EXPECT_EQ(difference(fields_of(back), want), "");
   EXPECT_TRUE(back.values().contains("VE"));
 }
@@ -689,7 +694,9 @@ TEST(H5mWrite, MeshValuesBecomeTagsWithoutValues) {
 }
 
 // GLOBAL_ID holds the gids of the written vertices and elements, as MOAB
-// declares it, unless the mesh has its own, or a gid does not fit an i32.
+// declares it or as a mesh value declares it, unless the mesh has its own
+// field; a gid that does not fit an i32, or a declaration that is not one
+// i32, throws.
 TEST(H5mWrite, GlobalIdHoldsTheGids) {
   HostMesh in = mixed_2d();
   soma::SetBuilder b;
@@ -721,8 +728,6 @@ TEST(H5mWrite, GlobalIdHoldsTheGids) {
   const std::map<GO, std::int32_t> elements{{8, 7}, {9, 4}, {10, 9}};
   for (LO l = 0; l < back.count(2); ++l) EXPECT_EQ(eg.value_or_default(2, l), elements.at(back.gid(2)(static_cast<std::size_t>(l))));
 
-  soma::write_h5m(in, out, {.gid_tag = false});
-  EXPECT_FALSE(soma::read_h5m(out).fields().contains("GLOBAL_ID"));
 
   // The mesh's own GLOBAL_ID is written instead, a field or a mesh value.
   HostMesh own = mixed_2d();
@@ -732,22 +737,63 @@ TEST(H5mWrite, GlobalIdHoldsTheGids) {
   const HostMesh own_back = soma::read_h5m(out);
   EXPECT_EQ(own_back.fields().get<std::int32_t>("GLOBAL_ID", 0).value_or_default(0, 3), 5);
   EXPECT_THROW((void)own_back.fields().get<std::int32_t>("GLOBAL_ID", 2), std::out_of_range);
+
+  const fs::path dir = scratch() / "gid_rejects";
+  fs::create_directory(dir);
+  const auto expect = [&](const HostMesh& m, const std::string& what) {
+    try {
+      soma::write_h5m(m, dir / "m.h5m");
+      ADD_FAILURE() << "written: " << what;
+    } catch (const std::invalid_argument& e) {
+      EXPECT_EQ(std::string(e.what()), "write_h5m: " + what);
+    }
+  };
   HostMesh value = mixed_2d();
   value.values().set("GLOBAL_ID", soma::MeshValue{soma::DataType::f64, 1, false, {}, std::nullopt, std::nullopt});
-  soma::write_h5m(value, out);
-  EXPECT_FALSE(soma::read_h5m(out).fields().contains("GLOBAL_ID"));
-
-  // A gid beyond the i32 range: no GLOBAL_ID.
+  expect(value, "the mesh value 'GLOBAL_ID' cannot declare the gids: it is not one 32-bit integer");
+  // A declaration of one i32: its default and class, and no global.
+  HostMesh declared = mixed_2d();
+  declared.values().set("GLOBAL_ID", soma::MeshValue{soma::DataType::i32, 1, false, {1, soma::TagFormat::Kind::plain, 0},
+                                                     soma::MeshValue::bytes_of(std::span<const std::int32_t>(std::vector<std::int32_t>{-7})),
+                                                     std::nullopt});
+  soma::write_h5m(declared, out);
+  {
+    const hid_t file = open_file(out);
+    EXPECT_EQ(int_attribute(file, "/tstt/tags/GLOBAL_ID", "class"), 1);
+    EXPECT_EQ(int_attribute(file, "/tstt/tags/GLOBAL_ID", "default"), -7);
+    EXPECT_EQ(H5Aexists_by_name(file, "/tstt/tags/GLOBAL_ID", "global", H5P_DEFAULT), 0);
+    EXPECT_GT(H5Lexists(file, "/tstt/nodes/tags/GLOBAL_ID", H5P_DEFAULT), 0);
+    H5Fclose(file);
+  }
+  const HostMesh declared_back = soma::read_h5m(out);
+  EXPECT_FALSE(declared_back.values().contains("GLOBAL_ID"));
+  const auto dg = declared_back.fields().get<std::int32_t>("GLOBAL_ID", 2);
+  for (LO l = 0; l < declared_back.count(2); ++l) {
+    EXPECT_EQ(dg.value_or_default(2, l), elements.at(declared_back.gid(2)(static_cast<std::size_t>(l))));
+  }
+  // Gids beyond the i32 range, of a vertex and of an edge; the largest that
+  // fits is written.
+  const auto too_big = [](int d) {
+    return "the gid " + std::to_string(GO{1} << 31) + " of dimension " + std::to_string(d) +
+           " does not fit GLOBAL_ID, a 32-bit integer in MOAB's format";
+  };
   soma::MeshBuilder big(1);
   big.add_vertices(std::vector<GO>{1, GO{1} << 31}, std::vector<soma::Real>{0, 0, 0, 1, 0, 0});
   big.add_elements(Topology::edge, std::vector<GO>{1}, std::vector<GO>{1, GO{1} << 31});
-  soma::write_h5m(std::move(big).build(), out);
-  EXPECT_FALSE(soma::read_h5m(out).fields().contains("GLOBAL_ID"));
+  expect(std::move(big).build(), too_big(0));
   soma::MeshBuilder big_edge(1);
   big_edge.add_vertices(std::vector<GO>{1, 2}, std::vector<soma::Real>{0, 0, 0, 1, 0, 0});
   big_edge.add_elements(Topology::edge, std::vector<GO>{GO{1} << 31}, std::vector<GO>{1, 2});
-  soma::write_h5m(std::move(big_edge).build(), out);
-  EXPECT_FALSE(soma::read_h5m(out).fields().contains("GLOBAL_ID"));
+  expect(std::move(big_edge).build(), too_big(1));
+  constexpr GO largest = std::numeric_limits<std::int32_t>::max();
+  soma::MeshBuilder fits(1);
+  fits.add_vertices(std::vector<GO>{1, largest}, std::vector<soma::Real>{0, 0, 0, 1, 0, 0});
+  fits.add_elements(Topology::edge, std::vector<GO>{largest}, std::vector<GO>{1, largest});
+  soma::write_h5m(std::move(fits).build(), out);
+  const HostMesh fits_back = soma::read_h5m(out);
+  EXPECT_EQ(fits_back.fields().get<std::int32_t>("GLOBAL_ID", 0).value_or_default(0, 1), largest);
+  EXPECT_EQ(fits_back.fields().get<std::int32_t>("GLOBAL_ID", 1).value_or_default(1, 0), largest);
+  EXPECT_TRUE(listing(dir).empty());
 }
 
 // Handle values, defaults and globals are written as the file ids of what
@@ -773,7 +819,7 @@ TEST(H5mWrite, HandlesBecomeFileIds) {
                                         soma::MeshValue::bytes_of(std::span<const GO>(std::vector<GO>{make_handle(0, 2)}))});
 
   const fs::path out = scratch() / "handles.h5m";
-  soma::write_h5m(in, out, {.gid_tag = false});
+  soma::write_h5m(in, out);
   const hid_t file = open_file(out);
   for (const char* t : {"/tstt/tags/QV", "/tstt/tags/VH", "/tstt/tags/MH"}) {
     EXPECT_EQ(int_attribute(file, t, "is_handle"), 1) << t;
@@ -800,7 +846,8 @@ TEST(H5mWrite, HandlesBecomeFileIds) {
   H5Fclose(file);
 
   // gid = file id here, so the handles read back unchanged.
-  const HostMesh back = soma::read_h5m(out);
+  HostMesh back = soma::read_h5m(out);
+  drop_added_global_id(back, in);
   EXPECT_EQ(difference(fields_of(back), [&] {
               auto w = fields_of(in);
               w.at({"QV", 0}).format = {2, soma::TagFormat::Kind::plain, 0};

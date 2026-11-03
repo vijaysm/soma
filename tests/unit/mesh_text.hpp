@@ -228,6 +228,17 @@ inline std::string mesh_difference(const HostMesh& a, const HostMesh& b) {
   return "";
 }
 
+// Turns the GLOBAL_ID that write_h5m writes for a mesh, like `original`,
+// without a GLOBAL_ID field back into what `original` had: nothing, or the
+// mesh value declaring the tag.
+inline void drop_added_global_id(HostMesh& written, const HostMesh& original) {
+  if (original.fields().contains("GLOBAL_ID")) return;
+  for (const soma::FieldInfo& info : written.fields().list()) {
+    if (info.name == "GLOBAL_ID") written.fields().remove(info.id);
+  }
+  if (original.values().contains("GLOBAL_ID")) written.values().set("GLOBAL_ID", original.values().at("GLOBAL_ID"));
+}
+
 }  // namespace soma_test
 
 #endif  // SOMA_TESTS_UNIT_MESH_TEXT_HPP_
