@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <initializer_list>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -20,6 +21,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <utility>
 #include <vector>
 
 #include <hdf5.h>
@@ -112,6 +114,13 @@ HostMesh numbered_2d() {
   s.add(soma::SetSpec{12, soma::set_unique, {}, {}, {}});
   std::move(s).install(m);
   return m;
+}
+
+// Write options that write (true) or leave out (false) the dimensions named.
+soma::H5mWriteOptions with_dims(std::initializer_list<std::pair<int, bool>> set) {
+  soma::H5mWriteOptions o;
+  for (const auto& [d, w] : set) o.dims[static_cast<std::size_t>(d)] = w;
+  return o;
 }
 
 hid_t open_file(const fs::path& p) { return H5Fopen(p.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT); }
@@ -305,7 +314,7 @@ TEST(H5mWrite, RejectsSetsHoldingEntitiesNotWritten) {
   const fs::path dir = scratch() / "edge_set";
   fs::create_directory(dir);
   try {
-    soma::write_h5m(in, dir / "m.h5m", {.dims = std::array<bool, 4>{true, false, false, true}});
+    soma::write_h5m(in, dir / "m.h5m", with_dims({{1, false}}));
     ADD_FAILURE() << "written without its members";
   } catch (const std::invalid_argument& e) {
     EXPECT_STREQ(e.what(), "write_h5m: set 3 holds an entity of dimension 1, which is not written");
@@ -543,9 +552,9 @@ TEST(H5mWrite, RejectsFieldsItCannotWrite) {
   }
   {
     HostMesh m = numbered_2d();
-    m.fields().add_tag<double>("E", 2, 1);
-    expect(m, "field 'E' has values on dimension 2, which is not written",
-           {.dims = std::array<bool, 4>{true, false, false, false}});
+    soma::build_adjacencies(m, soma::AdjacencyRequest{}.add(2, 1), Kokkos::DefaultHostExecutionSpace{});
+    m.fields().add_tag<double>("E", 1, 1);
+    expect(m, "field 'E' has values on dimension 1, which is not written", with_dims({{1, false}}));
   }
 }
 
@@ -819,7 +828,7 @@ TEST(H5mWrite, HandlesNeedWhatTheyName) {
     EXPECT_EQ(soma::read_h5m(dir / "m.h5m").count(1), in.count(1));
     fs::remove(dir / "m.h5m");
     try {
-      soma::write_h5m(m, dir / "m.h5m", {.dims = std::array<bool, 4>{true, false, false, true}});
+      soma::write_h5m(m, dir / "m.h5m", with_dims({{1, false}}));
       ADD_FAILURE() << "written without the edge";
     } catch (const std::invalid_argument& e) {
       EXPECT_STREQ(e.what(), "write_h5m: mesh value 'E' names an entity of dimension 1, which is not written");
@@ -902,7 +911,7 @@ TEST(H5mWrite, WritesTheInputDimensionsOrThoseNamed) {
   EXPECT_EQ(back.count(2), 0);
   EXPECT_EQ(back.count(3), 2);
 
-  soma::write_h5m(in, out, {.dims = std::array<bool, 4>{true, false, true, true}});
+  soma::write_h5m(in, out, with_dims({{2, true}}));
   back = soma::read_h5m(out);
   EXPECT_EQ(back.count(1), 0);
   EXPECT_EQ(back.count(2), in.count(2));
@@ -918,10 +927,110 @@ TEST(H5mWrite, WritesTheInputDimensionsOrThoseNamed) {
   EXPECT_EQ(entities(back, 2).begin()->first, in.count(0) + 1);
   EXPECT_EQ(entities(back, 3).begin()->first, in.count(0) + in.count(2) + 1);
 
-  soma::write_h5m(in, out, {.dims = std::array<bool, 4>{true, true, false, true}});
+  soma::write_h5m(in, out, with_dims({{1, true}}));
   back = soma::read_h5m(out);
   EXPECT_EQ(back.count(1), in.count(1));
   EXPECT_EQ(back.count(2), 0);
+}
+
+// A dimension whose entities are all sides of written ones can be left out:
+// a reader rebuilds it.
+TEST(H5mWrite, LeavesOutDimensionsAReaderCanRebuild) {
+  HostMesh box = soma::testing::box_mesh({2, 1, 1});
+  soma::build_adjacencies(box, soma::AdjacencyRequest{}.add(3, 2), Kokkos::DefaultHostExecutionSpace{});
+  const fs::path out = scratch() / "rebuilt.h5m";
+  soma::write_h5m(box, out, with_dims({{2, true}}));
+  const HostMesh in = soma::read_h5m(out);  // its faces are input now
+  ASSERT_TRUE(in.input(2));
+  soma::write_h5m(in, out);
+  EXPECT_EQ(soma::read_h5m(out).count(2), in.count(2));
+  soma::write_h5m(in, out, with_dims({{2, false}}));
+  HostMesh back = soma::read_h5m(out);
+  EXPECT_EQ(back.count(2), 0);
+  // The faces' GLOBAL_ID values went with them.
+  std::set<int> gid_dims;
+  for (const soma::FieldInfo& info : back.fields().list()) {
+    if (info.name == "GLOBAL_ID") gid_dims.insert(info.dims.begin(), info.dims.end());
+  }
+  EXPECT_EQ(gid_dims, (std::set<int>{0, 3}));
+  soma::build_adjacencies(back, soma::AdjacencyRequest{}.add(3, 2), Kokkos::DefaultHostExecutionSpace{});
+  const auto faces = [](const HostMesh& m) {
+    std::multiset<std::vector<GO>> v;
+    for (const auto& [g, e] : entities(m, 2)) {
+      std::vector<GO> x = e.vertices;
+      std::sort(x.begin(), x.end());
+      v.insert(x);
+    }
+    return v;
+  };
+  EXPECT_EQ(faces(back), faces(in));
+  // A dimension with no entities.
+  soma::write_h5m(mixed_2d(), out, with_dims({{1, false}}));
+  EXPECT_EQ(soma::read_h5m(out).count(2), 3);
+}
+
+// The top dimension, and entities that are no side of a written entity of
+// a higher dimension, cannot be left out.
+TEST(H5mWrite, RejectsLeavingOutWhatCannotBeRebuilt) {
+  const fs::path dir = scratch() / "not_rebuilt";
+  fs::create_directory(dir);
+  const auto expect = [&](const HostMesh& m, const soma::H5mWriteOptions& o, const std::string& what) {
+    try {
+      soma::write_h5m(m, dir / "m.h5m", o);
+      ADD_FAILURE() << "written: " << what;
+    } catch (const std::invalid_argument& e) {
+      EXPECT_EQ(std::string(e.what()), "write_h5m: " + what);
+    }
+  };
+  const auto lost = [](int d, GO g) {
+    return "dimension " + std::to_string(d) + " cannot be left out: its entity of gid " + std::to_string(g) +
+           " is not a side of a written entity of a higher dimension, so a reader could not rebuild it";
+  };
+  const HostMesh box = soma::testing::box_mesh({2, 1, 1});
+  expect(box, with_dims({{3, false}}), lost(3, box.gid(3)(0)));
+  {
+    // Edge 3 is a side of quad 9; edge 5 joins vertices 60 and 10, of no face.
+    soma::MeshBuilder b(2);
+    b.add_vertices(std::vector<GO>{60, 50, 40, 30, 20, 10, 70},
+                   std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 1, 0, 1, 1, 0, 2, 1, 0, 3, 0, 0});
+    b.add_elements(Topology::quad, std::vector<GO>{9, 4}, std::vector<GO>{60, 50, 20, 30, 50, 40, 10, 20});
+    b.add_elements(Topology::tri, std::vector<GO>{7}, std::vector<GO>{40, 70, 10});
+    b.add_elements(Topology::edge, std::vector<GO>{3, 5}, std::vector<GO>{60, 50, 60, 10});
+    const HostMesh m = std::move(b).build();
+    expect(m, with_dims({{1, false}}), lost(1, 5));
+  }
+  // A hex 1-8, with vertices 9-13 beside it.
+  const auto hex_and = [](const auto& add) {
+    soma::MeshBuilder b(3);
+    b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13},
+                   std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1,
+                                           2, 0, 0, 3, 0, 0, 3, 1, 0, 2, 1, 0, 2.5, 1.5, 0});
+    b.add_elements(Topology::hex, std::vector<GO>{1}, std::vector<GO>{1, 2, 3, 4, 5, 6, 7, 8});
+    add(b);
+    return std::move(b).build();
+  };
+  {
+    // Quad 1 and edge 1 are sides of the hex; quad 2 is not, and edge 2 is a
+    // side of quad 2 only, which is left out too.
+    const HostMesh m = hex_and([](soma::MeshBuilder& b) {
+      b.add_elements(Topology::quad, std::vector<GO>{1, 2}, std::vector<GO>{1, 2, 3, 4, 9, 10, 11, 12});
+      b.add_elements(Topology::edge, std::vector<GO>{1, 2}, std::vector<GO>{1, 2, 9, 10});
+    });
+    expect(m, with_dims({{2, false}}), lost(2, 2));
+    expect(m, with_dims({{1, false}, {2, false}}), lost(1, 2));
+    soma::write_h5m(m, dir / "m.h5m", with_dims({{1, false}}));
+    EXPECT_EQ(soma::read_h5m(dir / "m.h5m").count(2), 2);
+    fs::remove(dir / "m.h5m");
+  }
+  {
+    // A pentagon is a side of no hex.
+    const HostMesh m = hex_and([](soma::MeshBuilder& b) {
+      b.add_elements(Topology::quad, std::vector<GO>{1}, std::vector<GO>{5, 6, 7, 8});
+      b.add_polygons(std::vector<GO>{3}, std::vector<soma::Offset>{0, 5}, std::vector<GO>{9, 10, 11, 13, 12});
+    });
+    expect(m, with_dims({{2, false}}), lost(2, 3));
+  }
+  EXPECT_TRUE(listing(dir).empty());
 }
 
 // Derived faces of two prisms: a Tri3 group, then a Quad4 group, then the
@@ -938,7 +1047,7 @@ TEST(H5mWrite, DerivedFacesAreGroupedByType) {
   const auto ntri = std::count(faces.begin(), faces.end(), Topology::tri);
   ASSERT_EQ(ntri, 4);
   const fs::path out = scratch() / "faces.h5m";
-  soma::write_h5m(in, out, {.dims = std::array<bool, 4>{true, false, true, true}});
+  soma::write_h5m(in, out, with_dims({{2, true}}));
   const hid_t f = open_file(out);
   EXPECT_EQ(int_attribute(f, "/tstt/elements/Tri3/connectivity", "start_id"), 9);
   EXPECT_EQ(int_attribute(f, "/tstt/elements/Quad4/connectivity", "start_id"), 13);
@@ -974,10 +1083,10 @@ TEST(H5mWrite, VerticesCannotBeLeftOut) {
   const fs::path dir = scratch() / "no_vertices";
   fs::create_directory(dir);
   try {
-    soma::write_h5m(in, dir / "m.h5m", {.dims = std::array<bool, 4>{false, false, true, false}});
+    soma::write_h5m(in, dir / "m.h5m", with_dims({{0, false}}));
     ADD_FAILURE() << "written without vertices";
   } catch (const std::invalid_argument& e) {
-    EXPECT_STREQ(e.what(), "write_h5m: the vertices are always written; dims[0] must be true");
+    EXPECT_STREQ(e.what(), "write_h5m: the vertices are always written; dims[0] cannot be false");
   }
   EXPECT_TRUE(listing(dir).empty());
 }

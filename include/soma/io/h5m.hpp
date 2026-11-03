@@ -86,8 +86,12 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 //
 // Entities: the vertices, the elements of mesh.dim(), of every dimension the
 // mesh was built with (Mesh::input) and of every dimension that fields have
-// values on, sets hold or handles name; or the dimensions options.dims names
-// (dims[0] must be true). One group per element type and node count
+// values on, sets hold or handles name. options.dims[d], where set, writes
+// dimension d (true) or leaves it out (false). A dimension can be left out
+// only when every entity of it is a side of a written entity of a higher
+// dimension, so that a reader can rebuild it; the vertices and, with
+// entities, mesh.dim() never can. Fields, sets and handles on a dimension
+// left out throw as below. One group per element type and node count
 // (Edge2, Tri3, Quad4, Polygon5, Hex8, ...), in type order and then node
 // count; knives and polyhedra throw. File ids are 1-based and contiguous:
 // the vertices, then the groups, each in gid order. A mesh that read_h5m read
@@ -136,7 +140,7 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // cannot be written throws std::invalid_argument before any file is touched;
 // I/O failures throw std::runtime_error naming the path and the cause.
 struct H5mWriteOptions {
-  std::optional<std::array<bool, 4>> dims{};
+  std::array<std::optional<bool>, 4> dims{};
   bool gid_tag = true;
 };
 

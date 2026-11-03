@@ -26,6 +26,7 @@
 #include "soma/fields/tag_format.hpp"
 #include "soma/io/h5m.hpp"
 #include "soma/io/id_runs.hpp"
+#include "soma/topology/sides.hpp"
 #include "temporary.hpp"
 
 namespace soma {
@@ -162,16 +163,44 @@ std::optional<HandleRef<Kokkos::HostSpace>> handle_ref(const HostMesh& mesh) {
   return HandleRef<Kokkos::HostSpace>::build(mesh);
 }
 
-// options.dims, or else the vertices, mesh.dim(), the dimensions the mesh
-// was built with, and those that fields have values on, sets hold or
-// handles name.
+// The gid of the first entity of dimension k that is not a side of a
+// written entity of a higher dimension, which a reader could not rebuild;
+// none when every one is.
+std::optional<GO> not_rebuilt(const HostMesh& mesh, const std::array<bool, 4>& w, int k) {
+  using Key = std::array<LO, 5>;  // vertex count, then the vertices sorted
+  const auto key = [](const topology::Side& s) {
+    Key x{static_cast<LO>(s.n), -1, -1, -1, -1};
+    std::copy(s.v, s.v + s.n, x.begin() + 1);
+    std::sort(x.begin() + 1, x.begin() + 1 + s.n);
+    return x;
+  };
+  const auto m = mesh.view();
+  std::vector<Key> sides;
+  for (int d = k + 1; d <= mesh.dim(); ++d) {
+    if (!w[static_cast<std::size_t>(d)]) continue;
+    for (LO e = 0; e < mesh.count(d); ++e) {
+      const int n = topology::side_count(m, d, e, k);
+      for (int s = 0; s < n; ++s) sides.push_back(key(topology::side_of(m, d, e, k, s)));
+    }
+  }
+  std::sort(sides.begin(), sides.end());
+  for (LO e = 0; e < mesh.count(k); ++e) {
+    const topology::Side s = topology::entity_as_side(m, k, e);
+    if (s.n > 4 || !std::binary_search(sides.begin(), sides.end(), key(s))) {
+      return mesh.gid(k)(static_cast<std::size_t>(e));
+    }
+  }
+  return std::nullopt;
+}
+
+// The vertices, mesh.dim(), the dimensions the mesh was built with, and
+// those that fields have values on, sets hold or handles name; then
+// options.dims where set. A dimension left out must be one a reader can
+// rebuild from the written ones.
 std::array<bool, 4> written_dims(const HostMesh& mesh, const H5mWriteOptions& options,
                                  const std::optional<HandleRef<Kokkos::HostSpace>>& handles) {
+  if (options.dims[0] == false) reject("the vertices are always written; dims[0] cannot be false");
   std::array<bool, 4> w{};
-  if (options.dims) {
-    if (!(*options.dims)[0]) reject("the vertices are always written; dims[0] must be true");
-    return *options.dims;
-  }
   for (int d = 0; d <= mesh.dim(); ++d) w[static_cast<std::size_t>(d)] = d == 0 || d == mesh.dim() || mesh.input(d);
   for (const FieldInfo& info : mesh.fields().list()) {
     for (const int d : info.dims) {
@@ -189,6 +218,22 @@ std::array<bool, 4> written_dims(const HostMesh& mesh, const H5mWriteOptions& op
       const HandleTarget x = handles->resolve(h);
       if (x.valid() && x.slot < set_dim) w[static_cast<std::size_t>(x.slot)] = true;
     });
+  }
+  // Without a dimension turned off, every one left out was derived from
+  // written ones.
+  bool off = false;
+  for (std::size_t d = 0; d < w.size(); ++d) {
+    if (options.dims[d]) {
+      w[d] = *options.dims[d];
+      off = off || !w[d];
+    }
+  }
+  for (int k = 1; off && k <= mesh.dim(); ++k) {
+    if (w[static_cast<std::size_t>(k)] || mesh.count(k) == 0) continue;
+    if (const auto g = not_rebuilt(mesh, w, k)) {
+      reject("dimension " + std::to_string(k) + " cannot be left out: its entity of gid " + std::to_string(*g) +
+             " is not a side of a written entity of a higher dimension, so a reader could not rebuild it");
+    }
   }
   return w;
 }
@@ -276,7 +321,8 @@ void collect_family(const HostMesh& mesh, const Plan& p, const std::vector<Field
   std::vector<Entry> order;
   std::vector<T> values;
   // Walks the members of each block of a field's space: their file id and
-  // field row.
+  // field row. GLOBAL_ID values on a dimension left out go with it: a reader
+  // numbers the entities it rebuilds.
   const auto each = [&](const FieldInfo& info, const Space<Kokkos::HostSpace>& space, const auto& append) {
     for (int k = 0; k < space.num_blocks(); ++k) {
       const auto block = space.block(k);
@@ -284,6 +330,7 @@ void collect_family(const HostMesh& mesh, const Plan& p, const std::vector<Field
       const auto& fid = p.fid[static_cast<std::size_t>(slot)];
       const LO n = slot == set_dim ? mesh.sets().count() : mesh.count(slot);
       if (fid.size() != static_cast<std::size_t>(n)) {
+        if (info.name == "GLOBAL_ID" && slot != set_dim && !p.dims[static_cast<std::size_t>(slot)]) continue;
         reject("field '" + info.name + "' has values on dimension " + std::to_string(slot) + ", which is not written");
       }
       for (LO m = 0; m < block.domain.size; ++m) {
