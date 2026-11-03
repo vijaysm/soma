@@ -281,15 +281,17 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   domain once for every tag that covers it.
 - `write_h5m` writes a mesh in MOAB's legacy `.h5m` format, read back by MOAB `load_file` and
   `read_h5m` alike. Entities: the vertices, `mesh.dim()`, the dimensions the mesh was built with
-  (`Mesh::input`) and those that fields, sets or handles use, or `H5mWriteOptions::dims`
-  instead; one group per element type and node count, file ids 1-based in gid order, so a file
+  (`Mesh::input`) and those that fields, sets or handles use; `H5mWriteOptions::dims[d]` writes
+  or leaves out any dimension, leaving one out only when a reader can rebuild it from the
+  written ones; one group per element type and node count, file ids 1-based in gid order, so a file
   read and written back keeps its file ids. Sets with their flags, ordered sequences, children
   and parents, contents ranged where MOAB would. One tag per field family, dense on the blocks
   its values cover and sparse elsewhere, every MOAB kind: arrays, bit and opaque tags
   (`TagFormat`), variable-length tags, handles written as file ids, defaults, globals, mesh
-  values, and `GLOBAL_ID` from the gids when the mesh has none (`gid_tag`). The file is written
-  to a temporary next to the target and renamed over it; a mesh it cannot write throws before
-  any file is touched; equal meshes give equal bytes.
+  values, and always `GLOBAL_ID`: the mesh's own, or else the gids (a gid beyond i32 throws).
+  `H5mWriteOptions::compression` (deflate level 0–9, default 0) chunks, shuffles and deflates
+  the datasets. The file is written to a temporary next to the target and renamed over it; a
+  mesh it cannot write throws before any file is touched; equal meshes give equal bytes.
 - Each field family keeps its legacy tag format, `TagFormat{storage_class, kind, nbits}`
   (`FieldRegistry::tag_format`, `set_tag_format`, checked against the value type); `read_h5m`
   records it for fields and mesh values (`MeshValue::format`), and rejects classes MOAB does
@@ -307,8 +309,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `bench/bench_h5m_read` times `read_h5m` against MOAB `load_file` on the bundled meshes, the
   large ones when present, and a MOAB-written box of N^3 hexes (`--box N`, default 64); the
   `soma_sfc` workflow times the read in `Ordering::type_major_sfc`.
-- `bench/bench_h5m_write` times `write_h5m` against MOAB `write_file` on the same meshes and
-  prints both file sizes; both written files are loaded by MOAB and checked.
+- `bench/bench_h5m_write` times `write_h5m` against MOAB `write_file` on the same meshes, and
+  `write_h5m` at a deflate level (`--compression L`, default 4), and prints the file sizes;
+  every written file is loaded by MOAB and checked.
 
 ### Packaging
 
