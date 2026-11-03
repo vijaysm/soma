@@ -6,8 +6,10 @@
 // read_h5m) to a temporary directory. Both written files are loaded by MOAB
 // and checked to hold the same entity counts per dimension as the input; a
 // mismatch exits with status 2. The file sizes are printed beside the times.
+// SOMA also writes at deflate level L (--compression, default 4; 0 skips it),
+// checked and sized the same way.
 //
-//   bench_h5m_write [--json] [--repeats N] [--box N] [mesh.h5m ...]
+//   bench_h5m_write [--json] [--repeats N] [--box N] [--compression L] [mesh.h5m ...]
 //
 // Without meshes it writes the bundled ones, the large meshes when
 // SOMA_LARGE_DATA_DIR holds them, and a box of N^3 hexes (default 64) that
@@ -50,7 +52,8 @@ std::vector<int> moab_counts(const fs::path& path) {
 }
 
 // Returns false if a written file does not hold the input's entities.
-bool run_mesh(const soma::Comm& comm, const std::string& path, const fs::path& scratch, int repeats, bool json) {
+bool run_mesh(const soma::Comm& comm, const std::string& path, const fs::path& scratch, int repeats, int level,
+              bool json) {
   const std::string name = fs::path(path).filename().string();
   soma::bench::Runner runner(comm, soma::bench::make_environment(comm, name, repeats), json);
   if (!json) soma::bench::print_environment(comm, soma::bench::make_environment(comm, name, repeats));
@@ -60,6 +63,7 @@ bool run_mesh(const soma::Comm& comm, const std::string& path, const fs::path& s
 
   const fs::path by_moab = scratch / ("moab_" + name);
   const fs::path by_soma = scratch / ("soma_" + name);
+  const fs::path by_soma_z = scratch / ("soma_z_" + name);
   moab::Core mb;
   check(mb.load_file(path.c_str()), "load_file " + path);
   const auto tm = runner.run("write_h5m", "moab", elements, [&] { fs::remove(by_moab); },
@@ -68,11 +72,20 @@ bool run_mesh(const soma::Comm& comm, const std::string& path, const fs::path& s
   const auto ts = runner.run("write_h5m", "soma", elements, [&] { fs::remove(by_soma); },
                              [&] { soma::write_h5m(mesh, by_soma); });
   runner.compare(tm, ts);
+  if (level > 0) {
+    const auto tz = runner.run("write_h5m", "soma_deflate" + std::to_string(level), elements,
+                               [&] { fs::remove(by_soma_z); },
+                               [&] { soma::write_h5m(mesh, by_soma_z, {.compression = level}); });
+    runner.compare(tm, tz);
+  }
   if (!json) {
     std::cout << "[bench] " << name << " file bytes: moab " << fs::file_size(by_moab) << ", soma "
-              << fs::file_size(by_soma) << "\n";
+              << fs::file_size(by_soma);
+    if (level > 0) std::cout << ", soma deflate " << level << " " << fs::file_size(by_soma_z);
+    std::cout << "\n";
   }
-  const bool ok = moab_counts(by_moab) == want && moab_counts(by_soma) == want;
+  const bool ok = moab_counts(by_moab) == want && moab_counts(by_soma) == want &&
+                  (level == 0 || moab_counts(by_soma_z) == want);
   if (!ok) std::cerr << "[bench] " << name << ": a written file holds other entity counts than the input\n";
   return ok;
 }
@@ -85,6 +98,7 @@ int main(int argc, char** argv) {
   bool json = false;
   int repeats = 5;
   int box = 64;
+  int level = 4;
   std::vector<std::string> meshes;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -94,6 +108,8 @@ int main(int argc, char** argv) {
       repeats = std::atoi(argv[++i]);
     } else if (a == "--box" && i + 1 < argc) {
       box = std::atoi(argv[++i]);
+    } else if (a == "--compression" && i + 1 < argc) {
+      level = std::atoi(argv[++i]);
     } else {
       meshes.push_back(a);
     }
@@ -113,7 +129,7 @@ int main(int argc, char** argv) {
     if (box > 0) meshes.push_back(write_box(scratch, box).string());
   }
   bool ok = true;
-  for (const auto& m : meshes) ok = run_mesh(comm, m, scratch, repeats, json) && ok;
+  for (const auto& m : meshes) ok = run_mesh(comm, m, scratch, repeats, level, json) && ok;
   std::error_code ignored;
   fs::remove_all(scratch, ignored);
   return ok ? 0 : 2;
