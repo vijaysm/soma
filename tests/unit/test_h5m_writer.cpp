@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
@@ -1347,6 +1348,167 @@ TEST(H5mWrite, RejectsAdjacenciesItCannotCache) {
   no_edges.adjacencies.add(2, 1);
   expect(no_edges, "the (2, 1) adjacency names dimension 1, which is not written");
   EXPECT_TRUE(listing(dir).empty());
+}
+
+// Cached graphs read back equal, entity by entity, to the ones
+// build_adjacencies makes for the same file, in file and in curve order:
+// pairs up and down, bridges, hexes and mixed 2D. (build_adjacencies
+// renumbers the edges and faces it derives, so graphs are compared by gid:
+// downward rows in side order, the others as sets; cached upward and bridge
+// rows are sorted by local target and code, as build_adjacencies sorts them.)
+TEST(H5mWrite, CachedAdjacenciesReadBackAsBuilt) {
+  const auto host = Kokkos::DefaultHostExecutionSpace{};
+  using Rows = std::map<GO, std::vector<std::pair<GO, int>>>;
+  const auto rows_of = [](const HostMesh& m, int from, int to, const soma::AdjacencyGraph<Kokkos::HostSpace>& g,
+                          bool in_order) {
+    Rows r;
+    const auto gf = m.gid(from);
+    const auto gt = m.gid(to);
+    for (std::size_t e = 0; e < gf.extent(0); ++e) {
+      auto& row = r[gf(e)];
+      for (auto k = static_cast<std::size_t>(g.offsets(e)); k < static_cast<std::size_t>(g.offsets(e + 1)); ++k) {
+        row.emplace_back(gt(static_cast<std::size_t>(g.targets(k))), g.codes.extent(0) > 0 ? g.codes(k) : -1);
+      }
+      if (!in_order) std::sort(row.begin(), row.end());
+    }
+    return r;
+  };
+  const auto sorted_rows = [](const soma::AdjacencyGraph<Kokkos::HostSpace>& g) {
+    for (std::size_t e = 0; e + 1 < g.offsets.extent(0); ++e) {
+      for (auto k = static_cast<std::size_t>(g.offsets(e)) + 1; k < static_cast<std::size_t>(g.offsets(e + 1)); ++k) {
+        const int c0 = g.codes.extent(0) > 0 ? g.codes(k - 1) : 0;
+        const int c1 = g.codes.extent(0) > 0 ? g.codes(k) : 0;
+        if (std::pair(g.targets(k - 1), c0) > std::pair(g.targets(k), c1)) return false;
+      }
+    }
+    return true;
+  };
+  const std::vector<std::pair<HostMesh, soma::AdjacencyRequest>> cases = [&] {
+    std::vector<std::pair<HostMesh, soma::AdjacencyRequest>> v;
+    v.emplace_back(soma::testing::box_mesh({3, 2, 2}),
+                   soma::AdjacencyRequest{}.add(0, 3).add(3, 2).add(2, 3).add(1, 2).add(3, 1).add_bridge(3, 2).add_bridge(0, 1));
+    v.emplace_back(mixed_2d(), soma::AdjacencyRequest{}.add(0, 2).add(2, 1).add(1, 2).add_bridge(2, 1).add_bridge(2, 0));
+    return v;
+  }();
+  for (const auto& [base, request] : cases) {
+    HostMesh in = base.clone();
+    soma::build_adjacencies(in, request, host);
+    const fs::path out = scratch() / "cached_back.h5m";
+    soma::write_h5m(in, out, {.adjacencies = request});
+    for (const soma::Ordering ordering : {soma::Ordering::file, soma::Ordering::type_major_sfc}) {
+      SCOPED_TRACE(static_cast<int>(ordering));
+      const HostMesh cached = soma::read_h5m(out, {.ordering = ordering});
+      HostMesh fresh = soma::read_h5m(out, {.ordering = ordering, .adjacencies = false});
+      EXPECT_TRUE(fresh.adjacencies().empty());
+      EXPECT_EQ(cached.adjacencies().bits(), request.bits());
+      soma::build_adjacencies(fresh, request, host);
+      for (int slot = 0; slot < soma::adjacency_slots; ++slot) {
+        if (!request.has_slot(slot)) continue;
+        SCOPED_TRACE(slot);
+        const bool pair = slot < 16;
+        const int a = (pair ? slot : slot - 16) / 4;
+        const int b = slot % 4;
+        const int to = pair ? b : a;
+        const bool down = pair && a > b;
+        const auto x = pair ? cached.adjacency(a, b) : cached.bridge(a, b);
+        const auto y = pair ? fresh.adjacency(a, b) : fresh.bridge(a, b);
+        EXPECT_EQ(x.codes.extent(0), pair ? x.targets.extent(0) : 0u);
+        EXPECT_EQ(rows_of(cached, a, to, x, down), rows_of(fresh, a, to, y, down));
+        if (!down) EXPECT_TRUE(sorted_rows(x));
+      }
+    }
+  }
+}
+
+// A copy of `from` changed through HDF5.
+fs::path altered(const fs::path& from, const std::string& name, const std::function<void(hid_t)>& change) {
+  const fs::path to = from.parent_path() / name;
+  fs::copy_file(from, to, fs::copy_options::overwrite_existing);
+  const hid_t f = H5Fopen(to.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  change(f);
+  H5Fclose(f);
+  return to;
+}
+
+// Replaces the dataset at path with `values` of file type `type`, of rank 1
+// or, with rows > 0, rank 2.
+template <class T>
+void put(hid_t f, const std::string& path, const std::vector<T>& values, hid_t type, hid_t mem, hsize_t rows = 0) {
+  if (H5Lexists(f, path.c_str(), H5P_DEFAULT) > 0) H5Ldelete(f, path.c_str(), H5P_DEFAULT);
+  const hsize_t dims[2] = {rows > 0 ? rows : values.size(), rows > 0 ? values.size() / rows : 1};
+  const hid_t space = H5Screate_simple(rows > 0 ? 2 : 1, dims, nullptr);
+  const hid_t ds = H5Dcreate2(f, path.c_str(), type, space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  if (!values.empty()) H5Dwrite(ds, mem, H5S_ALL, H5S_ALL, H5P_DEFAULT, values.data());
+  H5Dclose(ds);
+  H5Sclose(space);
+}
+
+// Malformed caches throw naming the dataset; adjacencies = false skips them.
+TEST(H5mRead, RejectsMalformedAdjacencyCaches) {
+  HostMesh in = two_quads();
+  soma::build_adjacencies(in, soma::AdjacencyRequest{}.add(0, 2).add_bridge(2, 1), Kokkos::DefaultHostExecutionSpace{});
+  const fs::path dir = scratch() / "bad_caches";
+  fs::create_directory(dir);
+  const fs::path good = dir / "good.h5m";
+  soma::write_h5m(in, good, {.adjacencies = soma::AdjacencyRequest{}.add(0, 2).add_bridge(2, 1)});
+  const std::string up = "/tstt/soma/adjacency/pair_0_2";
+  const std::string bridge = "/tstt/soma/adjacency/bridge_2_1";
+  const auto i64 = [](hid_t f, const std::string& p, const std::vector<std::int64_t>& v, hsize_t rows = 0) {
+    put(f, p, v, H5T_STD_I64LE, H5T_NATIVE_INT64, rows);
+  };
+  const auto u64 = [](hid_t f, const std::string& p, const std::vector<std::uint64_t>& v) {
+    put(f, p, v, H5T_STD_U64LE, H5T_NATIVE_UINT64);
+  };
+  const auto group = [](hid_t f, const std::string& p) { H5Gclose(H5Gcreate2(f, p.c_str(), H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT)); };
+  const std::vector<std::pair<std::function<void(hid_t)>, std::string>> cases{
+      {[](hid_t f) {
+         const std::int32_t two = 2;
+         H5Adelete_by_name(f, "/tstt/soma", "version", H5P_DEFAULT);
+         const hid_t space = H5Screate(H5S_SCALAR);
+         const hid_t a = H5Acreate_by_name(f, "/tstt/soma", "version", H5T_STD_I32LE, space, H5P_DEFAULT, H5P_DEFAULT,
+                                           H5P_DEFAULT);
+         H5Awrite(a, H5T_NATIVE_INT32, &two);
+         H5Aclose(a);
+         H5Sclose(space);
+       },
+       "/tstt/soma is not of version 1, the only one this reader knows"},
+      {[&](hid_t f) { group(f, "/tstt/soma/adjacency/edges"); },
+       "/tstt/soma/adjacency/edges is not a graph this reader knows (pair_<from>_<to> or bridge_<dim>_<via>)"},
+      {[&](hid_t f) { group(f, "/tstt/soma/adjacency/pair_2x1"); },
+       "/tstt/soma/adjacency/pair_2x1 is not a graph this reader knows (pair_<from>_<to> or bridge_<dim>_<via>)"},
+      {[&](hid_t f) { group(f, "/tstt/soma/adjacency/pair_2_3"); },
+       "/tstt/soma/adjacency/pair_2_3 names dimensions that are not two distinct ones of this mesh"},
+      {[&](hid_t f) { group(f, "/tstt/soma/adjacency/bridge_2_2"); },
+       "/tstt/soma/adjacency/bridge_2_2 names dimensions that are not two distinct ones of this mesh"},
+      {[&](hid_t f) { group(f, "/tstt/soma/adjacency/pair_2_0"); },
+       "/tstt/soma/adjacency/pair_2_0 caches the connectivity, which is not cached"},
+      {[&](hid_t f) { H5Ldelete(f, (up + "/targets").c_str(), H5P_DEFAULT); }, up + "/targets is missing"},
+      {[&](hid_t f) { i64(f, up + "/offsets", {0, 1, 3, 4, 5, 7, 8, 8}, 4); }, up + "/offsets must have rank 1"},
+      {[&](hid_t f) { i64(f, up + "/offsets", {0, 1, 3, 4, 5, 8}); }, up + "/offsets must hold 7 entries"},
+      {[&](hid_t f) { i64(f, up + "/offsets", {1, 1, 3, 4, 5, 7, 8}); }, up + "/offsets must rise from 0 to the number of targets"},
+      {[&](hid_t f) { i64(f, up + "/offsets", {0, 3, 1, 4, 5, 7, 8}); }, up + "/offsets must rise from 0 to the number of targets"},
+      {[&](hid_t f) { i64(f, up + "/offsets", {0, 1, 3, 4, 5, 7, 7}); }, up + "/offsets must rise from 0 to the number of targets"},
+      {[&](hid_t f) { u64(f, up + "/targets", {7, 7, 8, 8, 7, 1, 8, 8}); },
+       up + "/targets names 1, which is not an entity of dimension 2"},
+      {[&](hid_t f) { u64(f, up + "/targets", {7, 7, 8, 8, 7, 99, 8, 8}); },
+       up + "/targets names 99, which is not an entity of dimension 2"},
+      {[&](hid_t f) { H5Ldelete(f, (up + "/codes").c_str(), H5P_DEFAULT); }, up + "/codes is missing"},
+      {[&](hid_t f) { put(f, up + "/codes", std::vector<std::uint8_t>{0, 1}, H5T_STD_U8LE, H5T_NATIVE_UINT8); },
+       up + "/codes must hold one code per target"},
+      {[&](hid_t f) { put(f, bridge + "/codes", std::vector<std::uint8_t>{0, 0}, H5T_STD_U8LE, H5T_NATIVE_UINT8); },
+       bridge + "/codes is not part of a bridge"},
+  };
+  int n = 0;
+  for (const auto& [change, what] : cases) {
+    const fs::path bad = altered(good, "bad" + std::to_string(n++) + ".h5m", change);
+    try {
+      (void)soma::read_h5m(bad);
+      ADD_FAILURE() << "read: " << what;
+    } catch (const std::runtime_error& e) {
+      EXPECT_EQ(std::string(e.what()), "read_h5m: " + bad.string() + ": " + what);
+    }
+    EXPECT_TRUE(soma::read_h5m(bad, {.adjacencies = false}).adjacencies().empty()) << what;
+  }
 }
 
 TEST(H5mWrite, EqualMeshesGiveEqualBytes) {

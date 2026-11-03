@@ -24,6 +24,7 @@
 #include "soma/fields/domain_mesh.hpp"
 #include "soma/fields/space.hpp"
 #include "soma/io/h5m.hpp"
+#include "soma/topology/build.hpp"
 
 namespace soma {
 
@@ -1013,6 +1014,128 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
   }
 }
 
+// A cached graph's group name: pair_<from>_<to> or bridge_<dim>_<via>, one
+// digit each.
+struct GraphName {
+  bool pair = true;
+  int a = 0, b = 0;
+};
+std::optional<GraphName> graph_named(std::string_view n) {
+  GraphName g;
+  if (n.starts_with("pair_")) {
+    n.remove_prefix(5);
+  } else if (n.starts_with("bridge_")) {
+    g.pair = false;
+    n.remove_prefix(7);
+  } else {
+    return std::nullopt;
+  }
+  if (n.size() != 3 || n[1] != '_' || n[0] < '0' || n[0] > '3' || n[2] < '0' || n[2] > '3') return std::nullopt;
+  g.a = n[0] - '0';
+  g.b = n[2] - '0';
+  return g;
+}
+
+// One dataset of a cached graph: rank 1, read whole.
+template <class T>
+std::vector<T> read_column(hid_t group, const char* name, const std::string& where) {
+  const std::string path = where + "/" + name;
+  if (!h5::exists(group, name)) fail(path + " is missing");
+  const Id ds = h5::open_dataset(group, name);
+  const auto ext = h5::extent(ds.get(), path);
+  if (ext.size() != 1) fail(path + " must have rank 1");
+  return h5::read_all<T>(ds.get(), static_cast<std::size_t>(ext[0]), path);
+}
+
+// The adjacency graphs a file caches (/tstt/soma/adjacency), installed on
+// the mesh as build_adjacencies would make them: rows and targets mapped
+// from file ids to local ids, downward rows in their side order, upward and
+// bridge rows sorted by (target, code).
+void read_graphs(HostMesh& mesh, hid_t tstt, std::uint64_t max_id) {
+  if (!h5::exists(tstt, "soma")) return;
+  const Id soma = h5::open_group(tstt, "soma");
+  if (!h5::has_attribute(soma.get(), "version") ||
+      h5::read_attribute<std::int32_t>(soma.get(), "version", "/tstt/soma") != 1) {
+    fail("/tstt/soma is not of version 1, the only one this reader knows");
+  }
+  if (!h5::exists(soma.get(), "adjacency")) return;
+  const Id graphs = h5::open_group(soma.get(), "adjacency");
+  // File id -> dimension and local id of each vertex and element (their gids
+  // are their file ids), and each dimension's local ids in file id order.
+  std::vector<std::int8_t> dim_of(static_cast<std::size_t>(max_id) + 1, -1);
+  std::vector<LO> lid_of(dim_of.size(), invalid_lo);
+  for (int d = 0; d <= mesh.dim(); ++d) {
+    const auto gid = mesh.gid(d);
+    for (std::size_t l = 0; l < gid.extent(0); ++l) {
+      const auto id = static_cast<std::size_t>(gid(l));
+      dim_of[id] = static_cast<std::int8_t>(d);
+      lid_of[id] = static_cast<LO>(l);
+    }
+  }
+  std::array<std::vector<LO>, 4> in_file_order;
+  for (std::size_t id = 1; id < dim_of.size(); ++id) {
+    if (dim_of[id] >= 0) in_file_order[static_cast<std::size_t>(dim_of[id])].push_back(lid_of[id]);
+  }
+  for (const std::string& name : h5::children(graphs.get(), "/tstt/soma/adjacency")) {
+    const std::string where = "/tstt/soma/adjacency/" + name;
+    const auto g = graph_named(name);
+    if (!g) fail(where + " is not a graph this reader knows (pair_<from>_<to> or bridge_<dim>_<via>)");
+    if (g->a == g->b || g->a > mesh.dim() || g->b > mesh.dim()) {
+      fail(where + " names dimensions that are not two distinct ones of this mesh");
+    }
+    if (g->pair && g->b == 0) fail(where + " caches the connectivity, which is not cached");
+    const int from = g->a;
+    const int to = g->pair ? g->b : g->a;
+    const Id grp = h5::open_group(graphs.get(), name);
+    const auto offsets = read_column<std::int64_t>(grp.get(), "offsets", where);
+    const auto targets = read_column<std::uint64_t>(grp.get(), "targets", where);
+    std::vector<std::uint8_t> codes;
+    if (g->pair) {
+      codes = read_column<std::uint8_t>(grp.get(), "codes", where);
+      if (codes.size() != targets.size()) fail(where + "/codes must hold one code per target");
+    } else if (h5::exists(grp.get(), "codes")) {
+      fail(where + "/codes is not part of a bridge");
+    }
+    const std::vector<LO>& sources = in_file_order[static_cast<std::size_t>(from)];
+    if (offsets.size() != sources.size() + 1) {
+      fail(where + "/offsets must hold " + str(static_cast<std::uint64_t>(sources.size() + 1)) + " entries");
+    }
+    if (offsets.front() != 0 || !std::is_sorted(offsets.begin(), offsets.end()) ||
+        offsets.back() != static_cast<std::int64_t>(targets.size())) {
+      fail(where + "/offsets must rise from 0 to the number of targets");
+    }
+    const Offset total = to_offset(targets.size(), where + "/targets");
+    Adjacency<Kokkos::HostSpace> out;
+    out.offsets = View1<Offset, Kokkos::HostSpace>("h5m_adjacency_offsets", sources.size() + 1);
+    out.targets = View1<LO, Kokkos::HostSpace>("h5m_adjacency_targets", static_cast<std::size_t>(total));
+    if (g->pair) out.codes = View1<std::uint8_t, Kokkos::HostSpace>("h5m_adjacency_codes", static_cast<std::size_t>(total));
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+      out.offsets(static_cast<std::size_t>(sources[i]) + 1) = static_cast<Offset>(offsets[i + 1] - offsets[i]);
+    }
+    for (std::size_t l = 0; l < sources.size(); ++l) out.offsets(l + 1) += out.offsets(l);
+    const bool sorted_rows = from < to || !g->pair;
+    std::vector<std::pair<LO, std::uint8_t>> row;
+    for (std::size_t i = 0; i < sources.size(); ++i) {
+      row.clear();
+      for (auto k = static_cast<std::size_t>(offsets[i]); k < static_cast<std::size_t>(offsets[i + 1]); ++k) {
+        const std::uint64_t id = targets[k];
+        if (id >= dim_of.size() || dim_of[static_cast<std::size_t>(id)] != to) {
+          fail(where + "/targets names " + str(id) + ", which is not an entity of dimension " + std::to_string(to));
+        }
+        row.emplace_back(lid_of[static_cast<std::size_t>(id)], g->pair ? codes[k] : std::uint8_t{0});
+      }
+      if (sorted_rows) std::sort(row.begin(), row.end());
+      auto k = static_cast<std::size_t>(out.offsets(static_cast<std::size_t>(sources[i])));
+      for (const auto& [lid, code] : row) {
+        out.targets(k) = lid;
+        if (g->pair) out.codes(k) = code;
+        ++k;
+      }
+    }
+    soma::detail::TopologyAccess::store(mesh).put(g->pair ? pair_slot(from, to) : bridge_slot(from, g->b), std::move(out));
+  }
+}
+
 HostMesh read(const fs::path& path, const H5mReadOptions& options, H5mReport& report) {
   const h5::Session session;
   if (H5Fis_accessible(path.c_str(), H5P_DEFAULT) <= 0) fail("it is not an HDF5 file, or cannot be opened");
@@ -1071,6 +1194,7 @@ HostMesh read(const fs::path& path, const H5mReadOptions& options, H5mReport& re
   HostMesh mesh = std::move(b).build(options.ordering);
   const Locator at(mesh, ranges);
   read_sets(mesh, tstt.get(), sets, max_id, at);
+  if (options.adjacencies) read_graphs(mesh, tstt.get(), max_id);
   if (options.tags) {
     import_tags(mesh, tstt.get(), nodes, groups, names, sets, at, report);
   }

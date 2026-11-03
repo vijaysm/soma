@@ -37,6 +37,15 @@
 // A tag with values on no entity (class 3, or declared only) becomes a
 // MeshValue in mesh.values().
 //
+// Cached adjacencies (options.adjacencies, written by write_h5m under
+// /tstt/soma, version 1): each graph is installed on the mesh as
+// build_adjacencies would make it, rows and targets mapped to local ids. A
+// graph is checked for its shape (a known name of distinct dimensions of the
+// mesh and not the connectivity, offsets from 0 rising to the target count,
+// targets of the target dimension, one code per target exactly for pairs),
+// not against its derivation; another /tstt/soma version, or a check that
+// fails, throws.
+//
 // Not read, and listed in the report instead: 16-bit integers, reals other
 // than f32 and f64, bit tags wider than 8 bits, arrays and opaque values of an
 // unusable size, variable-length tags of several components per value, and
@@ -65,6 +74,7 @@ namespace soma {
 struct H5mReadOptions {
   Ordering ordering = Ordering::file;
   bool tags = true;
+  bool adjacencies = true;  // install the graphs the file caches (write_h5m)
 };
 
 // What a read left out, one entry per tag (or tag part) not read.
