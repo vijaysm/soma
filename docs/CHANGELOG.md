@@ -290,7 +290,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   (`TagFormat`), variable-length tags, handles written as file ids, defaults, globals, mesh
   values, and always `GLOBAL_ID`: the mesh's own, or else the gids (a gid beyond i32 throws).
   `H5mWriteOptions::compression` (deflate level 0–9, default 0) chunks, shuffles and deflates
-  the datasets. The file is written to a temporary next to the target and renamed over it; a
+  the datasets. `H5mWriteOptions::adjacencies` (an `AdjacencyRequest`) caches the graphs it
+  names under `/tstt/soma`, which MOAB ignores; `read_h5m` installs them
+  (`H5mReadOptions::adjacencies`, default true) after checking their shape. The file is written to a temporary next to the target and renamed over it; a
   mesh it cannot write throws before any file is touched; equal meshes give equal bytes.
 - Each field family keeps its legacy tag format, `TagFormat{storage_class, kind, nbits}`
   (`FieldRegistry::tag_format`, `set_tag_format`, checked against the value type); `read_h5m`
@@ -311,7 +313,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `soma_sfc` workflow times the read in `Ordering::type_major_sfc`.
 - `bench/bench_h5m_write` times `write_h5m` against MOAB `write_file` on the same meshes, and
   `write_h5m` at a deflate level (`--compression L`, default 4), and prints the file sizes;
-  every written file is loaded by MOAB and checked.
+  every written file is loaded by MOAB and checked. `bench_h5m_read` also times reading cached adjacencies
+  against building them.
 
 ### Packaging
 
