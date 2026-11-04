@@ -84,6 +84,13 @@ BoxArray::BoxArray(BoxList boxes, const Box& domain, Curve curve) : boxes_(std::
   }
 }
 
+BoxArray BoxArray::scratch(BoxList boxes, const Box& domain) {
+  BoxArray out;
+  out.boxes_ = std::move(boxes);
+  out.domain_ = domain;
+  return out;
+}
+
 Distribution Distribution::along_curve(const BoxArray& boxes, int nranks) {
   if (nranks < 1) throw std::invalid_argument("Distribution: nranks must be at least 1");
   Distribution out;

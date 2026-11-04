@@ -32,6 +32,9 @@ class BoxArray {
   // Throws std::invalid_argument, naming the boxes, unless every box is of
   // the domain's kind, inside it, and disjoint from the others.
   BoxArray(BoxList boxes, const Box& domain, Curve curve = Curve::morton);
+  // Boxes for temporary data, kept in the order given and not checked: they
+  // may overlap one another and leave the domain.
+  static BoxArray scratch(BoxList boxes, const Box& domain);
 
   std::size_t size() const { return boxes_.size(); }
   const Box& operator[](std::size_t i) const { return boxes_[i]; }
