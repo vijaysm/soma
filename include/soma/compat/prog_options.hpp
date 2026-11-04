@@ -51,7 +51,9 @@ class ProgOptions {
   bool getOpt(const std::string& name, T* value = nullptr) {
     for (const Opt& o : opts_) {
       if (o.long_name == name || o.short_name == name) {
-        if (o.given && value != nullptr && !o.flag) parse(o.text, value);
+        if constexpr (!std::is_void_v<T>) {
+          if (o.given && value != nullptr && !o.flag) parse(o.text, value);
+        }
         return o.given;
       }
     }

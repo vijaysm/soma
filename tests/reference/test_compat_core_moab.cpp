@@ -457,11 +457,31 @@ TEST(CompatCore, WritesWhatMoabReads) {
   a.get_entities_by_type(0, sc::MBHEX, hexes);
   std::vector<int> ones(10, 1);
   a.tag_set_data(t, sc::Range(hexes[0], hexes[9]), ones.data());
+  // An ordered set keeps its order and repeats; a tag with no values is
+  // still declared.
+  H ordered = 0;
+  a.create_meshset(sc::MESHSET_ORDERED, ordered);
+  const H seq[] = {hexes[5], hexes[1], hexes[5]};
+  a.add_entities(ordered, seq, 3);
+  sc::Tag unused = nullptr;
+  const double half = 0.5;
+  a.tag_get_handle("unused", 1, sc::MB_TYPE_DOUBLE, unused, sc::MB_TAG_DENSE | sc::MB_TAG_CREAT, &half);
   const std::string out = (dir.path / "out.h5m").string();
   ASSERT_EQ(a.write_file(out.c_str()), sc::MB_SUCCESS);
   moab::Core b;
   ASSERT_EQ(b.load_file(out.c_str()), moab::MB_SUCCESS);
   expect_same_mesh(a, b);
+  unsigned flags = 0;
+  b.get_meshset_options(ordered, flags);
+  EXPECT_NE(flags & moab::MESHSET_ORDERED, 0u);
+  std::vector<H> got;
+  b.get_entities_by_handle(ordered, got);
+  EXPECT_EQ(got, std::vector<H>(seq, seq + 3));
+  moab::Tag ub = nullptr;
+  ASSERT_EQ(b.tag_get_handle("unused", ub), moab::MB_SUCCESS);
+  double d = 0;
+  EXPECT_EQ(b.tag_get_default_value(ub, &d), moab::MB_SUCCESS);
+  EXPECT_EQ(d, 0.5);
   moab::Tag tb = nullptr;
   ASSERT_EQ(b.tag_get_handle("flag", tb), moab::MB_SUCCESS);
   moab::Range tagged;
