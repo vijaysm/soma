@@ -2,10 +2,12 @@
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -64,6 +66,90 @@ TEST(DistributedMesh, VerticesAreOrderedByOwnershipWithTheirSharing) {
   std::int64_t owned = m.segment_table(0).owned_end;
   EXPECT_EQ(c.allreduce(owned, soma::Op::sum), static_cast<std::int64_t>((nx + 1) * (ny + 1)));
   EXPECT_EQ(m.count(2), static_cast<LO>(std::count_if(rank_of.begin(), rank_of.end(), [&](const auto& x) { return x.second == me; })));
+}
+
+// The grid as quad9s on a lattice twice as fine: point (I, J) has gid
+// 1 + I + (2 nx + 1) J, corners at even I and J. A cell lists its corners,
+// its edge midpoints (01, 12, 23, 30) and its centre.
+GO point(int i, int j) { return 1 + i + (2 * nx + 1) * j; }
+std::vector<GO> quad9(int c) {
+  const int i = 2 * (c % nx), j = 2 * (c / nx);
+  return {point(i, j),         point(i + 2, j),     point(i + 2, j + 2), point(i, j + 2),    point(i + 1, j),
+          point(i + 2, j + 1), point(i + 1, j + 2), point(i, j + 1),     point(i + 1, j + 1)};
+}
+
+// Node-only vertices (edge midpoints, centres) take their ownership and
+// sharing like corners, and follow the corners of their kind.
+TEST(DistributedMesh, HighOrderVerticesFollowTheCornersOfTheirKind) {
+  const Comm c = Comm::world();
+  const int me = c.rank();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  std::map<GO, std::set<int>> users;
+  std::set<GO> used;
+  std::vector<GO> cells, conn;
+  for (const auto& [cell, r] : rank_of) {
+    for (const GO v : quad9(static_cast<int>(cell - 1000))) {
+      users[v].insert(r);
+      if (r != me) continue;
+      conn.push_back(v);
+      used.insert(v);
+    }
+    if (r == me) cells.push_back(cell);
+  }
+  std::vector<GO> vg(used.rbegin(), used.rend());
+  std::vector<Real> xyz;
+  const auto lattice = [](GO v) { return std::pair<int, int>((v - 1) % (2 * nx + 1), (v - 1) / (2 * nx + 1)); };
+  for (const GO v : vg) xyz.insert(xyz.end(), {0.5 * lattice(v).first, 0.5 * lattice(v).second, 0});
+  soma::MeshBuilder b(2);
+  b.add_vertices(vg, xyz);
+  b.add_elements(soma::Topology::quad, cells, conn, 9);
+  const soma::HostMesh m = soma::build_local_part(c, std::move(b));
+
+  const auto& t = m.segment_table(0);
+  const auto gid = m.gid(0);
+  const auto v = m.view();
+  const auto sharing = m.fields().get_var<int>(soma::sharing_field);
+  const std::array<LO, 5> bounds = soma::kind_bounds(t);
+  for (std::size_t k = 0; k < 4; ++k) {
+    const LO end = m.corner_end(static_cast<Ownership>(k));
+    EXPECT_LE(bounds[k], end);
+    EXPECT_LE(end, bounds[k + 1]);
+  }
+  for (LO e = 0; e < m.count(0); ++e) {
+    const std::set<int>& u = users.at(gid(e));
+    std::vector<int> others;
+    for (const int r : u) {
+      if (r != me) others.push_back(r);
+    }
+    const Ownership want = others.empty() ? Ownership::interior : *u.begin() == me ? Ownership::shared : Ownership::shared_copy;
+    const Ownership got = e < t.interior_end ? Ownership::interior : e < t.owned_end ? Ownership::shared : Ownership::shared_copy;
+    EXPECT_EQ(got, want) << "vertex " << gid(e);
+    const auto [i, j] = lattice(gid(e));
+    const bool corner = i % 2 == 0 && j % 2 == 0;
+    EXPECT_EQ(v.corner(e), corner) << "vertex " << gid(e);
+    EXPECT_EQ(e < m.corner_end(got), corner) << "vertex " << gid(e);
+    if (got == Ownership::interior) continue;
+    const auto row = static_cast<std::size_t>(e - t.interior_end);
+    const auto off = sharing.offsets();
+    const std::vector<int> listed(sharing.values().data() + off(row), sharing.values().data() + off(row + 1));
+    EXPECT_EQ(listed, others) << "vertex " << gid(e);
+  }
+  // No segment mixes corners and node-only vertices.
+  for (const soma::Segment& s : t.segments) {
+    for (LO e = s.begin; e < s.end; ++e) EXPECT_EQ(v.corner(e), v.corner(s.begin)) << "vertex " << gid(e);
+  }
+  for (LO cell = 0; cell < m.count(2); ++cell) {
+    for (LO k = 0; k < 4; ++k) EXPECT_TRUE(v.corner(v.node(2, cell, k)));
+    for (LO k = 4; k < 9; ++k) EXPECT_FALSE(v.corner(v.node(2, cell, k)));
+  }
+  // Every point is owned once; the update reaches node-only copies too.
+  std::int64_t owned = t.owned_end;
+  EXPECT_EQ(c.allreduce(owned, soma::Op::sum), static_cast<std::int64_t>((2 * nx + 1) * (2 * ny + 1)));
+  const soma::SharedExchange<Kokkos::HostSpace> x(c, m, 0);
+  soma::View2<double, Kokkos::HostSpace> value("value", static_cast<std::size_t>(m.count(0)), 1);
+  for (LO e = 0; e < m.count(0); ++e) value(e, 0) = e < t.owned_end ? static_cast<double>(gid(e)) : -1.0;
+  x.update(c, value);
+  for (LO e = 0; e < m.count(0); ++e) EXPECT_EQ(value(e, 0), static_cast<double>(gid(e))) << "vertex " << gid(e);
 }
 
 TEST(DistributedMesh, AFailureOnOneRankThrowsOnEvery) {
