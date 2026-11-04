@@ -156,12 +156,61 @@ TEST(MeshEdit, InputIsCheckedAsItIsGiven) {
   EXPECT_THROW(edit.add_elements(Topology::quad, std::vector<LO>{0, 1, 2, 7}), std::invalid_argument);
   EXPECT_THROW(edit.add_elements(Topology::quad, std::vector<LO>{0, 1, 2, 3, 4, 5}, 6), std::invalid_argument);
   EXPECT_THROW(edit.add_elements(Topology::quad, std::vector<LO>{0, 1, 2, 3, 4, 5, 6}, 7), std::invalid_argument);
-  EXPECT_THROW(edit.add_elements(Topology::hex, std::vector<LO>(8, 0)), std::invalid_argument);
+  EXPECT_THROW(edit.add_elements(Topology::polyhedron, std::vector<LO>(4, 0)), std::invalid_argument);
   EXPECT_THROW(edit.add_elements(Topology::polygon, std::vector<LO>{0, 1, 2}), std::invalid_argument);
   EXPECT_THROW(edit.add_polygons(std::vector<soma::Offset>{0, 2}, std::vector<LO>{0, 1}), std::invalid_argument);
   EXPECT_THROW(edit.remove(3, std::vector<LO>{0}), std::invalid_argument);
   EXPECT_EQ(edit.apply().added[2], 0);
   EXPECT_FALSE(m.edited());
+}
+
+// Elements above the mesh dimension raise it: an empty mesh takes a tet, and
+// a surface mesh taking a prism keeps its faces as explicit sides.
+TEST(MeshEdit, ElementsAboveTheDimensionRaiseIt) {
+  HostMesh m;
+  {
+    MeshEdit edit(m);
+    const LO v = edit.add_vertices(std::vector<Real>{0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1});
+    edit.add_elements(Topology::tet, std::vector<LO>{v, v + 1, v + 2, v + 3});
+    edit.apply();
+  }
+  EXPECT_EQ(m.dim(), 3);
+  EXPECT_EQ(m.count(3), 1);
+  EXPECT_EQ(vertex_gids(m, 3, 0), (std::vector<GO>{0, 1, 2, 3}));
+  soma::build_adjacencies(m, soma::AdjacencyRequest{}.add(3, 2));
+  EXPECT_EQ(m.num_live(2), 4);
+  m.compress();
+  EXPECT_EQ(m.dim(), 3);
+  EXPECT_EQ(m.count(3), 1);
+  EXPECT_EQ(m.count(2), 4);
+
+  soma::MeshBuilder b(2);
+  b.add_vertices(std::vector<GO>{1, 2, 3}, std::vector<Real>{0, 0, 0, 1, 0, 0, 0, 1, 0});
+  b.add_elements(Topology::tri, std::vector<GO>{9}, std::vector<GO>{1, 2, 3});
+  HostMesh s = std::move(b).build();
+  MeshEdit edit(s);
+  const LO top = edit.add_vertices(std::vector<Real>{0, 0, 1, 1, 0, 1, 0, 1, 1});
+  edit.add_elements(Topology::prism, std::vector<LO>{0, 1, 2, top, top + 1, top + 2});
+  edit.apply();
+  EXPECT_EQ(s.dim(), 3);
+  EXPECT_EQ(s.count(2), 1);
+  soma::build_adjacencies(s, soma::AdjacencyRequest{}.add(3, 2));
+  const auto faces = graph_by_gid(s, 3, 2);
+  ASSERT_EQ(faces.size(), 1u);
+  const auto& row = faces.begin()->second;
+  EXPECT_EQ(row.size(), 5u);
+  EXPECT_TRUE(std::find(row.begin(), row.end(), GO{9}) != row.end());  // the triangle, kept by gid
+  EXPECT_EQ(s.num_live(2), 5);
+
+  // Old elements that are no side of a new one cannot be derived over.
+  HostMesh q = soma_test::two_quads_and_a_triangle();
+  MeshEdit more(q);
+  const LO w = more.add_vertices(std::vector<Real>{0, 0, 1});
+  more.add_elements(Topology::tet, std::vector<LO>{0, 1, 2, w});
+  more.apply();
+  EXPECT_EQ(q.dim(), 3);
+  EXPECT_NE(what_of([&] { soma::build_adjacencies(q, soma::AdjacencyRequest{}.add(3, 2)); }).find("is no side of any element"),
+            std::string::npos);
 }
 
 // Given gids must be new to their dimension; a failed apply changes nothing

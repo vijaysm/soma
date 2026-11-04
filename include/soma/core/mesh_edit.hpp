@@ -34,6 +34,9 @@ struct EditReport {
 // added; given gids must be new to the dimension. Removing a vertex that a
 // live element uses (as a corner or a node) throws, unless the element goes in
 // the same edit, as MOAB refuses it; edges and faces can always be removed.
+// Elements of a dimension above the mesh's raise it (as on an empty mesh);
+// the elements of the old dimension become explicit sides, which deriving
+// sides then requires to be sides of some element.
 // Removed entities leave every set. Fields over every entity of a dimension
 // grow, the added entities at the field's default; other fields keep their
 // members. Graphs the mesh holds are built again over the live entities (rows

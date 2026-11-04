@@ -124,10 +124,6 @@ LO MeshEdit::add_elements(Topology t, std::span<const GO> gids, std::span<const 
   if (t == Topology::polygon) reject("use add_polygons for polygons");
   if (t == Topology::polyhedron || t == Topology::vertex) reject(std::string(name(t)) + " elements cannot be added");
   const int d = dimension(t);
-  if (d < 1 || d > mesh_->dim()) {
-    reject(std::string(name(t)) + " elements have dimension " + std::to_string(d) + ", outside [1, " +
-           std::to_string(mesh_->dim()) + "]");
-  }
   const int n = nodes_per_element == 0 ? num_vertices(t) : nodes_per_element;
   if (mid_node_bits(t, n) < 0) reject("no " + std::string(name(t)) + " element has " + std::to_string(n) + " nodes");
   if (node_lids.size() != gids.size() * static_cast<std::size_t>(n)) {
@@ -152,7 +148,6 @@ LO MeshEdit::add_elements(Topology t, std::span<const GO> gids, std::span<const 
 }
 
 LO MeshEdit::add_polygons(std::span<const Offset> offsets, std::span<const LO> vertex_lids) {
-  if (mesh_->dim() < 2) reject("add_polygons: polygons need dimension 2 or 3");
   if (offsets.empty() || offsets[0] != 0 || static_cast<std::size_t>(offsets.back()) != vertex_lids.size()) {
     reject("add_polygons: offsets must start at 0 and end at the number of vertices");
   }
@@ -195,7 +190,11 @@ void MeshEdit::remove(int d, std::span<const LO> lids) {
 
 EditReport MeshEdit::apply() {
   HostMesh& m = *mesh_;
-  const int D = m.dim();
+  // Elements above the mesh dimension raise it.
+  int D = m.dim();
+  for (int d = D + 1; d <= 3; ++d) {
+    if (added_[static_cast<std::size_t>(d)].count > 0) D = d;
+  }
   EditReport report;
 
   // Removed per dimension, as a mask over the existing entities.
