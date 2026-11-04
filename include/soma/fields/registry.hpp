@@ -633,6 +633,75 @@ class FieldRegistry {
     dst.epoch_ = built.epoch_;
   }
 
+  // One slot renumbered: entity l becomes new_lid[l] (invalid_lo: gone) out of
+  // `count` entities; entities past new_lid.size() are new.
+  struct SlotRemap {
+    std::vector<LO> new_lid;
+    LO count = 0;
+  };
+
+  // Every live field into the empty registry `dst`, whose entities (counts and
+  // gids, set_entities) the caller has set for the renumbered mesh, at `epoch`.
+  // A block on a renumbered slot keeps the members that survive, at their new
+  // lids; a block that held every entity holds every entity again, the new ones
+  // at the field's default (variable-length: its default, or no values). Other
+  // blocks keep their members; a block left without members stays, empty, so
+  // the field keeps its dimensions. Fields keep their ids and families; their
+  // revision advances, so handles taken earlier are no longer current. Pending
+  // writes are committed first; a stale live field throws StaleField before
+  // that. `info` is the renumbered mesh's (element_nodes layouts read it). A
+  // throw leaves `dst` empty and reusable.
+  void remap_into(FieldRegistry& dst, const std::array<std::optional<SlotRemap>, num_field_slots>& maps,
+                  std::uint64_t epoch, const ElementInfo<MemSpace>& info = {}) const {
+    if (!dst.entries_.empty()) throw std::logic_error("remap_into: the destination registry must be empty");
+    for (const Entry& e : entries_) {
+      if (e.alive) require_current(e);
+    }
+    commit_everything();
+    FieldRegistry built;
+    built.epoch_ = epoch;
+    built.entities_ = dst.entities_;
+    for (const Family& f : families_) {
+      built.families_.push_back(Family{f.key});
+      built.families_.back().format = f.format;
+    }
+    std::map<const void*, Domain<MemSpace>> domains;
+    std::map<const void*, Space<MemSpace>> spaces;
+    for (const Entry& e : entries_) {
+      Entry out;
+      out.info = e.info;
+      if (!e.alive) {
+        built.entries_.push_back(std::move(out));
+        continue;
+      }
+      const Domain<MemSpace>& old_domain = e.space.domain();
+      auto dm = domains.find(old_domain.storage_id());
+      if (dm == domains.end()) {
+        dm = domains.emplace(old_domain.storage_id(), remapped_domain(old_domain, maps, epoch, dst)).first;
+      }
+      auto sp = spaces.find(e.space.storage_id());
+      if (sp == spaces.end()) {
+        sp = spaces.emplace(e.space.storage_id(), Space<MemSpace>(dm->second, e.space.layout(), info)).first;
+      }
+      out.space = sp->second;
+      out.info.rows = out.space.rows();
+      ++out.info.revision;
+      dispatch_data_type(e.info.type, [&]<class T>() {
+        if (e.info.variable) {
+          out.field = remapped_var<T>(e, out, maps, dst.serial_);
+        } else {
+          out.field = remapped_fixed<T>(e, out, maps, dst.serial_);
+        }
+      });
+      out.alive = true;
+      built.families_[out.info.family].members.push_back(out.info.id);
+      built.entries_.push_back(std::move(out));
+    }
+    dst.entries_.swap(built.entries_);
+    dst.families_.swap(built.families_);
+    dst.epoch_ = built.epoch_;
+  }
+
  private:
   template <class>
   friend class FieldRegistry;
@@ -674,6 +743,138 @@ class FieldRegistry {
     mutable std::array<std::shared_ptr<const detail::FamilyDimData<MemSpace>>, num_field_slots> index;
     mutable std::array<std::uint64_t, num_field_slots> built{};
   };
+
+  // The rows of every member of the new space, from the old one: new member r
+  // of block b takes the old rows of the entity it came from, or none (-1).
+  struct RowMap {
+    std::vector<LO> old_begin;  // per new member, first old row or -1
+    std::vector<LO> new_begin;  // per new member, first new row
+    std::vector<LO> width;      // rows per new member
+  };
+
+  static RowMap row_map(const Space<MemSpace>& from, const Space<MemSpace>& to,
+                        const std::array<std::optional<SlotRemap>, num_field_slots>& maps) {
+    RowMap m;
+    const Domain<MemSpace>& nd = to.domain();
+    for (int b = 0; b < nd.num_blocks(); ++b) {
+      const int dim = nd.info(b).dim;
+      const auto& map = maps[static_cast<std::size_t>(dim)];
+      std::vector<LO> old_of;  // new lid -> old lid
+      if (map) {
+        old_of.assign(static_cast<std::size_t>(map->count), invalid_lo);
+        for (std::size_t l = 0; l < map->new_lid.size(); ++l) {
+          if (map->new_lid[l] != invalid_lo) old_of[static_cast<std::size_t>(map->new_lid[l])] = static_cast<LO>(l);
+        }
+      }
+      for (const LO lid : nd.members(b)) {
+        const LO old = map ? old_of[static_cast<std::size_t>(lid)] : lid;
+        const RowRange nr = to.entity_rows(dim, lid);
+        const RowRange orr = old == invalid_lo ? RowRange{} : from.entity_rows(dim, old);
+        if (orr.valid() && orr.size() != nr.size()) {
+          throw std::logic_error("remap_into: entity " + std::to_string(old) + " of dimension " +
+                                 std::to_string(dim) + " changes its row count");
+        }
+        m.old_begin.push_back(orr.valid() ? orr.begin : -1);
+        m.new_begin.push_back(nr.begin);
+        m.width.push_back(nr.size());
+      }
+    }
+    return m;
+  }
+
+  Domain<MemSpace> remapped_domain(const Domain<MemSpace>& old,
+                                   const std::array<std::optional<SlotRemap>, num_field_slots>& maps,
+                                   std::uint64_t epoch, const FieldRegistry& dst) const {
+    Domain<MemSpace> out;
+    for (int b = 0; b < old.num_blocks(); ++b) {
+      const DomainBlockInfo& bi = old.info(b);
+      const auto& map = maps[static_cast<std::size_t>(bi.dim)];
+      const Entities& ent = dst.entities_[static_cast<std::size_t>(bi.dim)];
+      const LO count = map ? map->count : bi.count;
+      const GidView gids = ent.set ? ent.gids : GidView{};
+      Domain<MemSpace> blk;
+      if (bi.size == bi.count && bi.count > 0) {
+        blk = Domain<MemSpace>::all(bi.dim, count, epoch, gids);
+      } else {
+        std::vector<LO> lids = old.members(b);
+        if (map) {
+          std::vector<LO> mapped;
+          mapped.reserve(lids.size());
+          for (const LO l : lids) {
+            const auto at = static_cast<std::size_t>(l);
+            const LO m = at < map->new_lid.size() ? map->new_lid[at] : invalid_lo;
+            if (m != invalid_lo) mapped.push_back(m);
+          }
+          std::sort(mapped.begin(), mapped.end());
+          lids.swap(mapped);
+        }
+        blk = Domain<MemSpace>::from_list(bi.dim, count, epoch, lids, gids);
+      }
+      out = Domain<MemSpace>::combine(out, blk);
+    }
+    return out;
+  }
+
+  template <class T>
+  static std::any remapped_fixed(const Entry& e, const Entry& out,
+                                 const std::array<std::optional<SlotRemap>, num_field_slots>& maps,
+                                 std::uint64_t owner) {
+    const auto old = std::any_cast<const Field<T, MemSpace>&>(e.field);
+    const RowMap rm = row_map(e.space, out.space, maps);
+    const auto ncomp = static_cast<std::size_t>(e.info.ncomp);
+    const auto src = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, old.view());
+    View2<T, Kokkos::HostSpace> dst(Kokkos::view_alloc("soma::field::" + e.info.name, Kokkos::WithoutInitializing),
+                                    static_cast<std::size_t>(out.space.rows()), ncomp);
+    const std::vector<T>& def = old.default_value();
+    for (std::size_t m = 0; m < rm.new_begin.size(); ++m) {
+      for (LO r = 0; r < rm.width[m]; ++r) {
+        const auto to = static_cast<std::size_t>(rm.new_begin[m] + r);
+        for (std::size_t c = 0; c < ncomp; ++c) {
+          dst(to, c) = rm.old_begin[m] >= 0 ? src(static_cast<std::size_t>(rm.old_begin[m] + r), c)
+                                            : (c < def.size() ? def[c] : T{});
+        }
+      }
+    }
+    const View2<T, MemSpace> data = Kokkos::create_mirror_view_and_copy(MemSpace{}, dst);
+    return std::any(Field<T, MemSpace>(e.info.id, out.space, data, old.default_value(), old.global_value(),
+                                       out.info.revision, owner));
+  }
+
+  template <class T>
+  static std::any remapped_var(const Entry& e, const Entry& out,
+                               const std::array<std::optional<SlotRemap>, num_field_slots>& maps,
+                               std::uint64_t owner) {
+    const auto old = std::any_cast<const VarField<T, MemSpace>&>(e.field);
+    const RowMap rm = row_map(e.space, out.space, maps);
+    const auto offs = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, old.offsets());
+    const auto vals = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, old.values());
+    const std::vector<T> none;
+    const std::vector<T>& def = old.default_value() ? *old.default_value() : none;
+    std::vector<Offset> new_offs(static_cast<std::size_t>(out.space.rows()) + 1, 0);
+    std::vector<T> new_vals;
+    // Members are visited in row order (blocks stacked, members sorted).
+    for (std::size_t m = 0; m < rm.new_begin.size(); ++m) {
+      for (LO r = 0; r < rm.width[m]; ++r) {
+        const auto to = static_cast<std::size_t>(rm.new_begin[m] + r);
+        if (rm.old_begin[m] >= 0) {
+          const auto from = static_cast<std::size_t>(rm.old_begin[m] + r);
+          for (auto k = offs(from); k < offs(from + 1); ++k) new_vals.push_back(vals(static_cast<std::size_t>(k)));
+        } else {
+          new_vals.insert(new_vals.end(), def.begin(), def.end());
+        }
+        new_offs[to + 1] = static_cast<Offset>(new_vals.size());
+      }
+    }
+    View1<Offset, Kokkos::HostSpace> ho("soma::field::offsets", new_offs.size());
+    for (std::size_t i = 0; i < new_offs.size(); ++i) ho(i) = new_offs[i];
+    View1<T, Kokkos::HostSpace> hv(Kokkos::view_alloc("soma::field::" + e.info.name, Kokkos::WithoutInitializing),
+                                   new_vals.size());
+    for (std::size_t i = 0; i < new_vals.size(); ++i) hv(i) = new_vals[i];
+    return std::any(VarField<T, MemSpace>(e.info.id, out.space,
+                                          View1<const Offset, MemSpace>(Kokkos::create_mirror_view_and_copy(MemSpace{}, ho)),
+                                          Kokkos::create_mirror_view_and_copy(MemSpace{}, hv), old.default_value(),
+                                          old.global_value(), out.info.revision, owner));
+  }
 
   const Family& family_at(FamilyId fam) const {
     if (fam >= families_.size()) throw std::out_of_range("no family with id " + std::to_string(fam));

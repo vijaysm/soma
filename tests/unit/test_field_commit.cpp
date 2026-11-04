@@ -900,3 +900,138 @@ TEST(FieldCommit, AddIsAcceptedOnceThePendingWriteIsDiscarded) {
   reg.discard_pending(a.id());
   EXPECT_NO_THROW(reg.add<double>("T", subset(reg, 2, 30, {20}), 1));
 }
+
+namespace {
+
+using Remaps = std::array<std::optional<Reg::SlotRemap>, soma::num_field_slots>;
+
+}  // namespace
+
+// Dimension 2 of 6 entities becomes 5: entity 1 goes, 0 and 5 swap places
+// with 4 and ... (new_lid below), and one new entity (lid 4) appears. A full
+// field holds every entity again, the new one at its default; a subset keeps
+// the survivors at their new lids; a field on dimension 0 alone keeps its
+// members. Every field keeps its id, family and values, at the new epoch.
+TEST(FieldRemap, FieldsFollowTheRenumbering) {
+  Reg reg;
+  reg.set_entities(0, 4);
+  reg.set_entities(2, 6);
+  auto full = reg.add<double>("full", Spc(Dom::all(2, 6, reg.epoch()), Layout::per_entity()), 2,
+                              {.default_value = std::vector<double>{-1, -2}});
+  for (std::size_t r = 0; r < 6; ++r) {
+    full.view()(r, 0) = static_cast<double>(r);
+    full.view()(r, 1) = 10.0 + static_cast<double>(r);
+  }
+  auto sub = reg.add<std::int32_t>("sub", subset(reg, 2, 6, {1, 3, 5}), 1);
+  sub.view()(0, 0) = 1;
+  sub.view()(1, 0) = 3;
+  sub.view()(2, 0) = 5;
+  auto verts = reg.add<double>("v", subset(reg, 0, 4, {0, 2}), 1);
+  verts.view()(1, 0) = 7.5;
+  Remaps maps;
+  // old 0 1 2 3 4 5  ->  new 3 - 0 1 2 5 ; new lid 4 is new
+  maps[2] = Reg::SlotRemap{{3, soma::invalid_lo, 0, 1, 2, 5}, 6};
+  Reg out;
+  out.set_entities(0, 4);
+  out.set_entities(2, 6);
+  reg.remap_into(out, maps, reg.epoch() + 1);
+  EXPECT_EQ(out.epoch(), reg.epoch() + 1);
+
+  const auto f = out.get<double>(full.id());
+  EXPECT_EQ(f.domain().members(0), (std::vector<LO>{0, 1, 2, 3, 4, 5}));
+  const std::vector<double> c0{2, 3, 4, 0, -1, 5};
+  const std::vector<double> c1{12, 13, 14, 10, -2, 15};
+  for (std::size_t r = 0; r < 6; ++r) {
+    EXPECT_DOUBLE_EQ(f.view()(r, 0), c0[r]) << r;
+    EXPECT_DOUBLE_EQ(f.view()(r, 1), c1[r]) << r;
+  }
+  const auto s = out.get<std::int32_t>(sub.id());
+  EXPECT_EQ(s.domain().members(0), (std::vector<LO>{1, 5}));  // 3 -> 1, 5 -> 5; 1 is gone
+  EXPECT_EQ(s.view()(0, 0), 3);
+  EXPECT_EQ(s.view()(1, 0), 5);
+  const auto v = out.get<double>(verts.id());
+  EXPECT_EQ(v.domain().members(0), (std::vector<LO>{0, 2}));
+  EXPECT_DOUBLE_EQ(v.view()(1, 0), 7.5);
+  EXPECT_EQ(out.family_members(out.info(full.id()).family, 2), (std::vector<soma::FieldId>{full.id()}));
+  // Handles from before are not current in the new registry, fresh ones are.
+  EXPECT_FALSE(out.is_current(full));
+  EXPECT_TRUE(out.is_current(f));
+  EXPECT_EQ(f.revision(), full.revision() + 1);
+}
+
+// Pending writes join first; a two-block field and a variable-length field
+// follow too; a destination that is not empty is refused.
+TEST(FieldRemap, PendingMultiBlockAndVariableLengthFields) {
+  Reg reg;
+  reg.set_entities(1, 3);
+  reg.set_entities(2, 3);
+  const Dom both = Dom::combine(Dom::all(1, 3, reg.epoch()), Dom::from_list(2, 3, reg.epoch(), std::vector<LO>{2}));
+  auto two = reg.add<double>("two", Spc(both, Layout::per_entity()), 1);
+  for (std::size_t r = 0; r < 4; ++r) two.view()(r, 0) = static_cast<double>(r);
+  auto sub = reg.add<double>("sub", subset(reg, 2, 3, {0}), 1);
+  put<double>(reg, sub.id(), 1, {9.0});
+  const std::vector<soma::Offset> off{0, 2, 2, 3};
+  const std::vector<double> vals{1, 2, 3};
+  auto var = reg.add_var<double>("var", Spc(Dom::all(1, 3, reg.epoch()), Layout::per_entity()), off, vals,
+                                 {.default_value = std::vector<double>{8, 8}});
+  Remaps maps;
+  maps[1] = Reg::SlotRemap{{2, 0, 1}, 4};  // edges rotate, and one is new (lid 3)
+  maps[2] = Reg::SlotRemap{{1, 0, soma::invalid_lo}, 2};
+  Reg out;
+  out.set_entities(1, 4);
+  out.set_entities(2, 2);
+  reg.remap_into(out, maps, reg.epoch());
+
+  const auto t = out.get<double>(two.id());
+  EXPECT_EQ(t.domain().members(0), (std::vector<LO>{0, 1, 2, 3}));
+  ASSERT_EQ(t.domain().num_blocks(), 2);  // the face (lid 2) is gone; its block stays, empty
+  EXPECT_EQ(t.domain().members(1), (std::vector<LO>{}));
+  EXPECT_EQ(t.rows(), 4);
+  EXPECT_DOUBLE_EQ(t.view()(0, 0), 1.0);
+  EXPECT_DOUBLE_EQ(t.view()(1, 0), 2.0);
+  EXPECT_DOUBLE_EQ(t.view()(2, 0), 0.0);
+  EXPECT_DOUBLE_EQ(t.view()(3, 0), 0.0);  // new edge, default zero
+  const auto s = out.get<double>(sub.id());
+  EXPECT_EQ(s.domain().members(0), (std::vector<LO>{0, 1}));  // pending 1 -> 0, member 0 -> 1
+  EXPECT_DOUBLE_EQ(s.view()(0, 0), 9.0);
+  const auto v = out.get_var<double>(var.id());
+  const auto vo = v.offsets();
+  const auto vv = v.values();
+  // new 0 <- old 1 (no values), 1 <- old 2 {3}, 2 <- old 0 {1, 2}, 3 new {8, 8}
+  EXPECT_EQ(std::vector<soma::Offset>(vo.data(), vo.data() + vo.extent(0)), (std::vector<soma::Offset>{0, 0, 1, 3, 5}));
+  EXPECT_EQ(std::vector<double>(vv.data(), vv.data() + vv.extent(0)), (std::vector<double>{3, 1, 2, 8, 8}));
+  EXPECT_THROW(reg.remap_into(out, maps, reg.epoch()), std::logic_error);
+}
+
+// Element-node rows move with their element: a quad of 4 GLL nodes at order
+// 1 and a triangle of 3, swapped.
+TEST(FieldRemap, ElementNodeRowsMoveWithTheirElement) {
+  Reg reg;
+  reg.set_entities(2, 2);
+  soma::ElementInfo<HostMem> info;
+  soma::View1<std::uint8_t, HostMem> topo("topo", 2);
+  topo(0) = static_cast<std::uint8_t>(soma::Topology::quad);
+  topo(1) = static_cast<std::uint8_t>(soma::Topology::tri);
+  info.topology[2] = topo;
+  const Layout nodes = Layout::element_nodes(soma::NodeFamily::gll, 1);
+  auto f = reg.add<double>("n", Spc(Dom::all(2, 2, reg.epoch()), nodes, info), 1);
+  for (std::size_t r = 0; r < 7; ++r) f.view()(r, 0) = static_cast<double>(r);
+  soma::View1<std::uint8_t, HostMem> topo2("topo", 2);
+  topo2(0) = static_cast<std::uint8_t>(soma::Topology::tri);
+  topo2(1) = static_cast<std::uint8_t>(soma::Topology::quad);
+  soma::ElementInfo<HostMem> info2;
+  info2.topology[2] = topo2;
+  Remaps maps;
+  maps[2] = Reg::SlotRemap{{1, 0}, 2};
+  Reg out;
+  out.set_entities(2, 2);
+  reg.remap_into(out, maps, reg.epoch(), info2);
+  const auto g = out.get<double>(f.id());
+  std::vector<double> got;
+  for (std::size_t r = 0; r < 7; ++r) got.push_back(g.view()(r, 0));
+  EXPECT_EQ(got, (std::vector<double>{4, 5, 6, 0, 1, 2, 3}));
+  // Topology that does not match the rows refuses to remap.
+  Reg bad;
+  bad.set_entities(2, 2);
+  EXPECT_THROW(reg.remap_into(bad, maps, reg.epoch(), info), std::logic_error);
+}
