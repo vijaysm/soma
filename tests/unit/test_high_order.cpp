@@ -12,6 +12,7 @@
 
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/topology/build.hpp"
 
 using soma::GO;
 using soma::LO;
@@ -38,11 +39,18 @@ soma::HostMesh quad9_and_quad4(soma::Ordering ordering) {
   return std::move(b).build(ordering);
 }
 
-std::vector<GO> node_gids(const soma::HostMesh& mesh, LO e) {
+std::vector<GO> node_gids(const soma::HostMesh& mesh, LO e, int d = 2) {
   const auto v = mesh.view();
   std::vector<GO> out;
-  for (LO k = 0; k < v.num_nodes(2, e); ++k) out.push_back(v.gid(0, v.node(2, e, k)));
+  for (LO k = 0; k < v.num_nodes(d, e); ++k) out.push_back(v.gid(0, v.node(d, e, k)));
   return out;
+}
+
+LO local_of(const soma::HostMesh& mesh, int d, GO gid) {
+  for (LO e = 0; e < mesh.count(d); ++e) {
+    if (mesh.gid(d)(e) == gid) return e;
+  }
+  return -1;
 }
 
 }  // namespace
@@ -192,4 +200,60 @@ TEST(HighOrder, NodeOnlyVerticesMoveUnderContiguousGids) {
   EXPECT_EQ(v.node(1, 0, 2), 3);
   EXPECT_EQ(v.node(1, 1, 2), 4);
   EXPECT_EQ(v.vertex(1, 1, 0), 1);
+}
+
+// Derivation adopts explicit high-order sides with their nodes: a quad8 face
+// listed from another corner than the hex's side, and an edge3; the derived
+// sides have none. The face's node 23 is also the edge's.
+//   hex gid 1: 1(0,0,0) 2(1,0,0) 3(1,1,0) 4(0,1,0) 5..8 the same at z = 1
+//   quad8 gid 100: 4 3 2 1 | 21 22 23 24;  edge3 gid 200: 1 2 | 23
+TEST(HighOrder, DerivationKeepsTheNodesOfAdoptedSides) {
+  soma::MeshBuilder b(3);
+  b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6, 7, 8, 21, 22, 23, 24},
+                 std::vector<Real>{0, 0, 0,  1, 0, 0,  1, 1, 0,  0, 1, 0,  0, 0, 1,  1, 0, 1,
+                                   1, 1, 1,  0, 1, 1,  0.5, 1, 0,  1, 0.5, 0,  0.5, 0, 0,  0, 0.5, 0});
+  b.add_elements(Topology::hex, std::vector<GO>{1}, std::vector<GO>{1, 2, 3, 4, 5, 6, 7, 8});
+  b.add_elements(Topology::quad, std::vector<GO>{100}, std::vector<GO>{4, 3, 2, 1, 21, 22, 23, 24}, 8);
+  b.add_elements(Topology::edge, std::vector<GO>{200}, std::vector<GO>{1, 2, 23}, 3);
+  auto mesh = std::move(b).build();
+  soma::build_adjacencies(mesh, soma::AdjacencyRequest{}.add(3, 2).add(3, 1));
+  ASSERT_EQ(mesh.count(2), 6);
+  ASSERT_EQ(mesh.count(1), 12);
+  ASSERT_TRUE(mesh.has_nodes(2));
+  ASSERT_TRUE(mesh.has_nodes(1));
+  const LO face = local_of(mesh, 2, 100);
+  ASSERT_GE(face, 0);
+  EXPECT_EQ(node_gids(mesh, face), (std::vector<GO>{4, 3, 2, 1, 21, 22, 23, 24}));
+  const LO edge = local_of(mesh, 1, 200);
+  ASSERT_GE(edge, 0);
+  EXPECT_EQ(node_gids(mesh, edge, 1), (std::vector<GO>{1, 2, 23}));
+  const auto v = mesh.view();
+  for (LO f = 0; f < 6; ++f) {
+    if (f != face) EXPECT_EQ(v.num_nodes(2, f), 4) << f;
+  }
+  for (LO e = 0; e < 12; ++e) {
+    if (e != edge) EXPECT_EQ(v.num_nodes(1, e), 2) << e;
+  }
+  EXPECT_EQ(mesh.node_offsets(2)(6), 4);
+  EXPECT_EQ(mesh.node_offsets(1)(12), 1);
+}
+
+// A prism with an explicit tri6 face on top and a quad9 side.
+TEST(HighOrder, DerivationKeepsTri6AndQuad9Faces) {
+  soma::MeshBuilder b(3);
+  b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6, 31, 32, 33, 41, 42, 43, 44, 45},
+                 std::vector<Real>{0, 0, 0,  1, 0, 0,  0, 1, 0,  0, 0, 1,  1, 0, 1,  0, 1, 1,
+                                   0.5, 0, 1,  0.5, 0.5, 1,  0, 0.5, 1,
+                                   0.5, 0, 0,  1, 0, 0.5,  0.5, 0, 1,  0, 0, 0.5,  0.5, 0, 0.5});
+  b.add_elements(Topology::prism, std::vector<GO>{1}, std::vector<GO>{1, 2, 3, 4, 5, 6});
+  b.add_elements(Topology::tri, std::vector<GO>{10}, std::vector<GO>{4, 5, 6, 31, 32, 33}, 6);
+  b.add_elements(Topology::quad, std::vector<GO>{11},
+                 std::vector<GO>{1, 2, 5, 4, 41, 42, 43, 44, 45}, 9);
+  auto mesh = std::move(b).build();
+  soma::build_adjacencies(mesh, soma::AdjacencyRequest{}.add(3, 2));
+  ASSERT_EQ(mesh.count(2), 5);
+  EXPECT_EQ(node_gids(mesh, local_of(mesh, 2, 10)), (std::vector<GO>{4, 5, 6, 31, 32, 33}));
+  EXPECT_EQ(node_gids(mesh, local_of(mesh, 2, 11)),
+            (std::vector<GO>{1, 2, 5, 4, 41, 42, 43, 44, 45}));
+  EXPECT_EQ(mesh.node_offsets(2)(5), 3 + 5);
 }

@@ -279,6 +279,33 @@ Derived<typename ExecSpace::memory_space> derive(
         for (Offset q = 0; q < offs(id + 1) - offs(id); ++q) conn(offs(id) + q) = xconn(xoff(x) + q);
       });
 
+  // Adopted high-order entities keep their nodes, which follow the explicit
+  // vertex order they keep; derived ones have none.
+  if (mesh.has_nodes(k)) {
+    const auto xnoff = mesh.node_offsets(k);
+    const auto xnodes = mesh.nodes(k);
+    View1<Offset, M> nnodes(base + "::node_counts", static_cast<std::size_t>(n));
+    Kokkos::parallel_for(
+        base + "::node_counts", Policy(exec, 0, n), KOKKOS_LAMBDA(const LO id) {
+          const LO x = adopted(id);
+          nnodes(id) = x == detail::no_entity ? 0 : xnoff(x + 1) - xnoff(x);
+        });
+    b.node_offsets = View1<Offset, M>(base + "::node_offsets", static_cast<std::size_t>(n) + 1);
+    const Offset total_nodes =
+        soma::topology::detail::exclusive_scan(exec, base + "::node_offsets", n, nnodes, b.node_offsets);
+    b.nodes = View1<LO, M>(base + "::nodes", static_cast<std::size_t>(total_nodes));
+    const auto noff = b.node_offsets;
+    const auto nodes = b.nodes;
+    Kokkos::parallel_for(
+        base + "::nodes", Policy(exec, 0, n), KOKKOS_LAMBDA(const LO id) {
+          const LO x = adopted(id);
+          if (x == detail::no_entity) return;
+          for (Offset q = 0; q < noff(id + 1) - noff(id); ++q) {
+            nodes(noff(id) + q) = xnodes(xnoff(x) + q);
+          }
+        });
+  }
+
   // Every slot: its entity and its orientation against the stored vertices.
   // A side fails to match when an explicit entity or an element is tangled.
   Kokkos::View<LO, M> crossed(base + "::crossed");
