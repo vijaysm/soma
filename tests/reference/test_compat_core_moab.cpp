@@ -109,6 +109,11 @@ TEST(CompatCore, HandlesAndErrors) {
   const sc::EntityHandle* conn = nullptr;
   int n = 0;
   EXPECT_EQ(a.get_connectivity(h + 100000, conn, n), sc::MB_ENTITY_NOT_FOUND);
+  // An element's coordinates are its corners' mean.
+  double ca[3], cb[3];
+  ASSERT_EQ(a.get_coords(&h, 1, ca), sc::MB_SUCCESS);
+  b.get_coords(&h, 1, cb);
+  for (int q = 0; q < 3; ++q) EXPECT_DOUBLE_EQ(ca[q], cb[q]);
 }
 
 // Adjacencies among existing entities: vertex to elements, element to
