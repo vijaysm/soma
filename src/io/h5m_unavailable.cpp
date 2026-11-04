@@ -20,6 +20,15 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
   return read_h5m(path, options, report);
 }
 
+HostMesh read_h5m(const Comm&, const std::filesystem::path& path, const H5mReadOptions& options, H5mReport& report) {
+  return read_h5m(path, options, report);
+}
+
+HostMesh read_h5m(const Comm& comm, const std::filesystem::path& path, const H5mReadOptions& options) {
+  H5mReport report;
+  return read_h5m(comm, path, options, report);
+}
+
 void write_h5m(const HostMesh&, const std::filesystem::path& path, const H5mWriteOptions&) {
   throw std::runtime_error("write_h5m: " + path.string() +
                            ": SOMA was built without HDF5; configure it with -DSOMA_ENABLE_HDF5=ON");

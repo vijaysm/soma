@@ -68,6 +68,7 @@
 
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/parallel/comm.hpp"
 
 namespace soma {
 
@@ -90,6 +91,21 @@ bool h5m_available() noexcept;
 
 HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& options = {});
 HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& options,
+                  H5mReport& report);
+
+// Collective over comm: the local part, on each rank, of the mesh the file
+// holds (design §21.3). Every rank reads the metadata and a slice of each
+// dataset; the elements of the mesh's dimension are placed by the curve of
+// their corners' centroids (partition_by_curve), explicit entities of lower
+// dimensions on every rank holding all their corners (else on the rank that
+// read them), vertices on every rank holding an entity that uses them (else
+// on the rank that read them), and each rank builds its part with
+// build_local_part, so every dimension has its ownership and sharing. Gids
+// are file ids, as in the serial read, and each rank's entities equal the
+// serial read's by gid. Throws as the serial read, on every rank if any
+// rank's slice is invalid (std::runtime_error on the others).
+HostMesh read_h5m(const Comm& comm, const std::filesystem::path& path, const H5mReadOptions& options = {});
+HostMesh read_h5m(const Comm& comm, const std::filesystem::path& path, const H5mReadOptions& options,
                   H5mReport& report);
 
 // write_h5m writes a file that MOAB's load_file and read_h5m read.
