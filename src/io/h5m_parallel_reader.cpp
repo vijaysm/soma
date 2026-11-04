@@ -14,7 +14,9 @@
 #include <limits>
 #include <map>
 #include <numeric>
+#include <optional>
 #include <span>
+#include <tuple>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -299,7 +301,7 @@ static_assert(sizeof(Member) == 32);
 // contents in slices whose members reach their holders through the
 // directory of file ids.
 void read_sets(const Comm& comm, HostMesh& mesh, hid_t tstt, const IdRange& sets, std::uint64_t max_id,
-               const Locator& at) {
+               const Locator& at, const Blocks& ids, const std::vector<std::pair<GO, int>>& holders) {
   if (sets.count == 0) return;
   constexpr std::int64_t ranged = 0x8;
   constexpr std::int64_t known_flags = set_flag_bits | ranged;
@@ -360,7 +362,6 @@ void read_sets(const Comm& comm, HostMesh& mesh, hid_t tstt, const IdRange& sets
 
   // This rank's contents: [first, end), and a pair begun at end - 1 is read whole.
   const Blocks rows{entries, static_cast<std::uint64_t>(size)};
-  const Blocks ids{std::max<std::uint64_t>(max_id, 1), static_cast<std::uint64_t>(size)};
   std::vector<Member> to_directory, to_all;
   collectively(comm, [&] {
     const std::uint64_t first = rows.first(comm.rank()), end = rows.end(comm.rank());
@@ -419,7 +420,6 @@ void read_sets(const Comm& comm, HostMesh& mesh, hid_t tstt, const IdRange& sets
   });
 
   // At each directory: members forwarded to every rank holding them.
-  const std::vector<std::pair<GO, int>> holders = register_ids(comm, mesh, ids);
   std::vector<int> dest(to_directory.size());
   for (std::size_t k = 0; k < to_directory.size(); ++k) dest[k] = ids.owner(static_cast<std::uint64_t>(to_directory[k].first - 1));
   const Batch arrived = route(comm, dest, sizeof(Member),
@@ -510,8 +510,369 @@ void read_sets(const Comm& comm, HostMesh& mesh, hid_t tstt, const IdRange& sets
   });
 }
 
+// Rows keyed by file id (an id, then `width` bytes) delivered to every rank
+// holding the id, through its directory; rows on sets reach every rank.
+// Returns the rows that arrived here, grouped by sender.
+std::vector<std::byte> deliver(const Comm& comm, const Blocks& ids, const std::vector<std::pair<GO, int>>& holders,
+                               const IdRange& sets, const std::vector<std::byte>& rows, std::size_t width) {
+  const std::size_t stride = sizeof(GO) + width;
+  const std::size_t n = rows.size() / stride;
+  const auto is_set = [&](GO id) { return id >= sets.first && id < sets.first + sets.count; };
+  std::vector<int> dest;
+  std::vector<std::size_t> which;
+  for (std::size_t i = 0; i < n; ++i) {
+    const GO id = take<GO>(rows.data() + i * stride, 0);
+    if (is_set(id)) continue;
+    dest.push_back(ids.owner(static_cast<std::uint64_t>(id - 1)));
+    which.push_back(i);
+  }
+  const Batch arrived = route(comm, dest, stride, [&](std::size_t k, std::byte* row) {
+    std::memcpy(row, rows.data() + which[k] * stride, stride);
+  });
+  dest.clear();
+  std::vector<const std::byte*> from;
+  for (std::size_t k = 0; k < arrived.size(); ++k) {
+    const std::byte* row = &arrived.payload(k, 0);
+    const GO id = take<GO>(row, 0);
+    auto it = std::lower_bound(holders.begin(), holders.end(), std::pair<GO, int>{id, std::numeric_limits<int>::min()});
+    for (; it != holders.end() && it->first == id; ++it) {
+      dest.push_back(it->second);
+      from.push_back(row);
+    }
+  }
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::byte* row = rows.data() + i * stride;
+    if (!is_set(take<GO>(row, 0))) continue;
+    for (int r = 0; r < comm.size(); ++r) {
+      dest.push_back(r);
+      from.push_back(row);
+    }
+  }
+  const Batch got = route(comm, dest, stride, [&](std::size_t k, std::byte* row) { std::memcpy(row, from[k], stride); });
+  std::vector<std::byte> out(got.size() * stride);
+  if (!out.empty()) std::memcpy(out.data(), got.payload.data(), out.size());
+  return out;
+}
+
+// What every rank knows of the file: its id ranges, the entities of each slot.
+struct FileLayout {
+  NodeInfo nodes;
+  const std::vector<Group>* groups = nullptr;
+  const std::vector<std::string>* names = nullptr;
+  IdRange sets;
+  Blocks ids;
+  std::array<std::uint64_t, num_field_slots> count{};  // entities per slot in the file
+};
+
+// The entries of a fixed-size tag this rank read (dense rows of its slices
+// and its slice of the sparse list), delivered to their holders and
+// installed as the serial read installs them.
+template <class T>
+void import_tag(const Comm& comm, HostMesh& mesh, hid_t tstt, const std::string& name, const TagKind& k,
+                const std::vector<Dense>& dense, const Locator& at, FullDomains& full, bool handle,
+                const TagFormat& format, const FileLayout& file, const std::vector<std::pair<GO, int>>& holders) {
+  const std::string where = "/tstt/tags/" + name;
+  const auto nc = static_cast<std::size_t>(k.ncomp);
+  const std::size_t width = nc * sizeof(T);
+  const std::uint64_t size = static_cast<std::uint64_t>(comm.size());
+  std::vector<GO> ids;
+  std::vector<T> values;
+  FieldOptions<T> options;
+  collectively(comm, [&] {
+    for (const Dense& d : dense) {
+      const std::string dw = "/tstt/" + d.path;
+      const Id ds = h5::open_dataset(tstt, d.path);
+      const auto ext = h5::extent(ds.get(), dw);
+      if (ext.size() != 1 || ext[0] != static_cast<hsize_t>(d.count)) {
+        fail(dw + " must hold one value per entity (" + str(d.count) + ")");
+      }
+      const Blocks rows{static_cast<std::uint64_t>(d.count), size};
+      const std::uint64_t first = rows.first(comm.rank()), n = rows.end(comm.rank()) - first;
+      std::vector<T> v(static_cast<std::size_t>(n) * nc);
+      h5::read_rows(ds.get(), k.mem.get(), first, n, v.data(), dw);
+      for (std::uint64_t i = 0; i < n; ++i) ids.push_back(d.first + static_cast<GO>(first + i));
+      values.insert(values.end(), v.begin(), v.end());
+    }
+    const Id tag = h5::open_group(tstt, "tags/" + name);
+    if (h5::exists(tag.get(), "id_list")) {
+      const std::string iw = where + "/id_list";
+      const Id ids_ds = h5::open_dataset(tag.get(), "id_list");
+      const auto ext = h5::extent(ids_ds.get(), iw);
+      if (ext.size() != 1) fail(iw + " must be one-dimensional");
+      if (!h5::exists(tag.get(), "values")) fail(where + " has an id_list but no values");
+      const std::string vw = where + "/values";
+      const Id vs = h5::open_dataset(tag.get(), "values");
+      const auto vext = h5::extent(vs.get(), vw);
+      if (vext.size() != 1 || vext[0] != ext[0]) fail(vw + " must hold one value per entity (" + str(std::uint64_t{ext[0]}) + ")");
+      const Blocks rows{ext[0], size};
+      const std::uint64_t first = rows.first(comm.rank()), n = rows.end(comm.rank()) - first;
+      const auto listed = h5::read_rows<std::uint64_t>(ids_ds.get(), first, n, 1, iw);
+      std::vector<T> v(static_cast<std::size_t>(n) * nc);
+      h5::read_rows(vs.get(), k.mem.get(), first, n, v.data(), vw);
+      for (const std::uint64_t id : listed) {
+        const IdRange* r = id <= static_cast<std::uint64_t>(std::numeric_limits<GO>::max()) ? at.range_of(static_cast<GO>(id))
+                                                                                           : nullptr;
+        if (r == nullptr) fail(iw + " lists file id " + str(id) + ", which names no entity");
+        ids.push_back(static_cast<GO>(id));
+      }
+      values.insert(values.end(), v.begin(), v.end());
+    }
+    options.default_value = read_value_attribute<T>(tag.get(), "default", k, where);
+    options.global_value = read_value_attribute<T>(tag.get(), "global", k, where);
+    options.handle = handle;
+    if (handle) {
+      to_handle_options(options, at, where);
+      to_handles<T>(values, at, where, [&](std::size_t i) { return "file id " + str(std::int64_t{ids[i / nc]}); });
+    }
+  });
+
+  SlotTotals totals;
+  std::array<std::int64_t, num_field_slots> listed{};
+  for (const GO id : ids) ++listed[static_cast<std::size_t>(at.range_of(id)->dim)];
+  comm.allreduce(std::span<std::int64_t>(listed), Op::sum);
+  for (std::size_t d = 0; d < listed.size(); ++d) {
+    totals.entries[d] = static_cast<std::uint64_t>(listed[d]);
+    totals.every[d] = totals.entries[d] == file.count[d];
+  }
+  std::vector<std::byte> rows(ids.size() * (sizeof(GO) + width));
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    std::byte* row = rows.data() + i * (sizeof(GO) + width);
+    put(row, 0, ids[i]);
+    std::memcpy(row + sizeof(GO), values.data() + i * nc, width);
+  }
+  const std::vector<std::byte> got = deliver(comm, file.ids, holders, file.sets, rows, width);
+  std::array<std::vector<LO>, num_field_slots> lids;
+  std::array<std::vector<T>, num_field_slots> by_slot;
+  for (std::size_t i = 0; i < got.size() / (sizeof(GO) + width); ++i) {
+    const std::byte* row = got.data() + i * (sizeof(GO) + width);
+    const GO id = take<GO>(row, 0);
+    const int d = at.range_of(id)->dim;
+    lids[static_cast<std::size_t>(d)].push_back(at.lid(d, id));
+    auto& v = by_slot[static_cast<std::size_t>(d)];
+    v.resize(v.size() + nc);
+    std::memcpy(v.data() + v.size() - nc, row + sizeof(GO), width);
+  }
+  collectively(comm, [&] { install_tag<T>(mesh, name, k, lids, by_slot, options, handle, format, full, totals); });
+}
+
+// A variable-length tag: this rank's slice of id_list and var_indices, with
+// the values they name, delivered to the holders as a count per entity and
+// then each value with its index.
+template <class T>
+void import_var_tag(const Comm& comm, HostMesh& mesh, hid_t tstt, const std::string& name, const TagKind& k,
+                    const std::vector<Dense>& dense, const Locator& at, FullDomains& full, bool handle,
+                    const TagFormat& format, const FileLayout& file, const std::vector<std::pair<GO, int>>& holders) {
+  const std::string where = "/tstt/tags/" + name;
+  const std::uint64_t size = static_cast<std::uint64_t>(comm.size());
+  std::vector<GO> ids;
+  std::vector<std::int64_t> ends;  // of each entity's values, relative to `values`
+  std::vector<T> values;
+  FieldOptions<T> options;
+  collectively(comm, [&] {
+    if (!dense.empty()) {
+      fail("/tstt/" + dense.front().path + " holds dense values of a variable-length tag, which MOAB does not write");
+    }
+    const Id tag = h5::open_group(tstt, "tags/" + name);
+    if (h5::exists(tag.get(), "id_list")) {
+      const std::string iw = where + "/id_list";
+      const Id ids_ds = h5::open_dataset(tag.get(), "id_list");
+      const auto ext = h5::extent(ids_ds.get(), iw);
+      if (ext.size() != 1) fail(iw + " must be one-dimensional");
+      const std::string xw = where + "/var_indices";
+      if (!h5::exists(tag.get(), "var_indices")) fail(where + " is variable-length but has no var_indices");
+      const Id x_ds = h5::open_dataset(tag.get(), "var_indices");
+      const auto xext = h5::extent(x_ds.get(), xw);
+      if (xext.size() != 1 || xext[0] != ext[0]) fail(xw + " must hold one index per entry of " + iw);
+      if (!h5::exists(tag.get(), "values")) fail(where + " has an id_list but no values");
+      const Blocks rows{ext[0], size};
+      const std::uint64_t first = rows.first(comm.rank()), n = rows.end(comm.rank()) - first;
+      const std::uint64_t before = first > 0 ? 1 : 0;
+      const auto listed = h5::read_rows<std::uint64_t>(ids_ds.get(), first, n, 1, iw);
+      const auto last = h5::read_rows<std::int64_t>(x_ds.get(), first - before, n + before, 1, xw);
+      std::int64_t prev = before ? last[0] : -1;
+      const std::int64_t base = prev + 1;
+      for (std::size_t i = 0; i < n; ++i) {
+        const std::int64_t end = last[i + before];
+        if (end < prev) {
+          fail(xw + ": file id " + str(listed[i]) + " ends its values at index " + str(end) +
+               "; the ends must be at least -1 and never decrease");
+        }
+        prev = end;
+      }
+      const std::uint64_t held = static_cast<std::uint64_t>(prev) + 1;  // prev >= -1
+      if (held > static_cast<std::uint64_t>(std::numeric_limits<GO>::max())) {
+        fail(xw + " ends at index " + str(prev) + ", beyond what an index can count");
+      }
+      const std::string vw = where + "/values";
+      const Id vs = h5::open_dataset(tag.get(), "values");
+      const auto vext = h5::extent(vs.get(), vw);
+      if (first + n == ext[0] && (vext.size() != 1 || vext[0] != held)) {
+        fail(vw + " must hold one value per entity (" + str(held) + ")");
+      }
+      values.resize(static_cast<std::size_t>(held - static_cast<std::uint64_t>(base)));
+      h5::read_rows(vs.get(), k.mem.get(), static_cast<hsize_t>(base), values.size(), values.data(), vw);
+      for (std::size_t i = 0; i < n; ++i) {
+        const std::uint64_t id = listed[i];
+        const IdRange* r = id <= static_cast<std::uint64_t>(std::numeric_limits<GO>::max()) ? at.range_of(static_cast<GO>(id))
+                                                                                           : nullptr;
+        if (r == nullptr) fail(iw + " lists file id " + str(id) + ", which names no entity");
+        ids.push_back(static_cast<GO>(id));
+        ends.push_back(last[i + before] + 1 - base);
+      }
+      if (handle) {
+        to_handles<T>(values, at, where, [&](std::size_t i) {
+          const auto j = static_cast<std::size_t>(
+              std::upper_bound(ends.begin(), ends.end(), static_cast<std::int64_t>(i)) - ends.begin());
+          return "file id " + str(std::int64_t{ids[j]});
+        });
+      }
+    }
+    options.default_value = read_var_attribute<T>(tag.get(), "default", k, where);
+    options.global_value = read_var_attribute<T>(tag.get(), "global", k, where);
+    options.handle = handle;
+    if (handle) to_handle_options(options, at, where);
+  });
+
+  SlotTotals totals;
+  std::array<std::int64_t, num_field_slots> listed{};
+  for (const GO id : ids) ++listed[static_cast<std::size_t>(at.range_of(id)->dim)];
+  comm.allreduce(std::span<std::int64_t>(listed), Op::sum);
+  for (std::size_t d = 0; d < listed.size(); ++d) {
+    totals.entries[d] = static_cast<std::uint64_t>(listed[d]);
+    totals.every[d] = totals.entries[d] == file.count[d];
+  }
+  // Counts, then values with their index in the entity's run.
+  constexpr std::size_t cw = sizeof(std::int64_t);
+  std::vector<std::byte> counts(ids.size() * (sizeof(GO) + cw));
+  std::size_t nvalues = 0;
+  for (std::size_t i = 0; i < ids.size(); ++i) {
+    const std::int64_t b = i == 0 ? 0 : ends[i - 1];
+    put(counts.data() + i * (sizeof(GO) + cw), 0, ids[i]);
+    put(counts.data() + i * (sizeof(GO) + cw), sizeof(GO), ends[i] - b);
+    nvalues += static_cast<std::size_t>(ends[i] - b);
+  }
+  constexpr std::size_t vw = sizeof(std::int64_t) + sizeof(T);
+  std::vector<std::byte> each(nvalues * (sizeof(GO) + vw));
+  for (std::size_t i = 0, at_value = 0; i < ids.size(); ++i) {
+    const std::int64_t b = i == 0 ? 0 : ends[i - 1];
+    for (std::int64_t q = b; q < ends[i]; ++q, ++at_value) {
+      std::byte* row = each.data() + at_value * (sizeof(GO) + vw);
+      put(row, 0, ids[i]);
+      put(row, sizeof(GO), q - b);
+      put(row, sizeof(GO) + sizeof(std::int64_t), values[static_cast<std::size_t>(q)]);
+    }
+  }
+  const std::vector<std::byte> got_counts = deliver(comm, file.ids, holders, file.sets, counts, cw);
+  const std::vector<std::byte> got_values = deliver(comm, file.ids, holders, file.sets, each, vw);
+  // Values by (id, index); an id listed twice is caught by install_var_tag.
+  std::vector<std::tuple<GO, std::int64_t, T>> vals;
+  for (std::size_t i = 0; i < got_values.size() / (sizeof(GO) + vw); ++i) {
+    const std::byte* row = got_values.data() + i * (sizeof(GO) + vw);
+    vals.emplace_back(take<GO>(row, 0), take<std::int64_t>(row, sizeof(GO)), take<T>(row, sizeof(GO) + sizeof(std::int64_t)));
+  }
+  std::stable_sort(vals.begin(), vals.end(), [](const auto& x, const auto& y) {
+    return std::pair(std::get<0>(x), std::get<1>(x)) < std::pair(std::get<0>(y), std::get<1>(y));
+  });
+  std::array<std::vector<Run>, num_field_slots> runs;
+  std::vector<T> held;
+  std::size_t next = 0;
+  std::vector<std::pair<GO, std::int64_t>> count_of;
+  for (std::size_t i = 0; i < got_counts.size() / (sizeof(GO) + cw); ++i) {
+    const std::byte* row = got_counts.data() + i * (sizeof(GO) + cw);
+    count_of.emplace_back(take<GO>(row, 0), take<std::int64_t>(row, sizeof(GO)));
+  }
+  std::stable_sort(count_of.begin(), count_of.end(), [](const auto& x, const auto& y) { return x.first < y.first; });
+  for (const auto& [id, c] : count_of) {
+    while (next < vals.size() && std::get<0>(vals[next]) < id) ++next;
+    const std::size_t begin = held.size();
+    for (std::int64_t q = 0; q < c && next < vals.size() && std::get<0>(vals[next]) == id; ++q) {
+      held.push_back(std::get<2>(vals[next++]));
+    }
+    const int d = at.range_of(id)->dim;
+    runs[static_cast<std::size_t>(d)].push_back({at.lid(d, id), begin, held.size()});
+  }
+  collectively(comm, [&] { install_var_tag<T>(mesh, name, runs, held, options, handle, format, full, totals); });
+}
+
+// Every tag, as the serial read takes them (design §21.3).
+void import_tags(const Comm& comm, HostMesh& mesh, hid_t tstt, const FileLayout& file, const Locator& at,
+                 const std::vector<std::pair<GO, int>>& holders, H5mReport& report) {
+  std::map<std::string, std::vector<Dense>> dense;
+  std::vector<std::string> names;
+  const auto& groups = *file.groups;
+  collectively(comm, [&] {
+    const auto collect = [&](const std::string& base, int dim, GO first, GO count) {
+      if (!h5::exists(tstt, base + "/tags")) return;
+      const Id g = h5::open_group(tstt, base + "/tags");
+      for (const std::string& n : h5::children(g.get(), "/tstt/" + base + "/tags")) {
+        dense[n].push_back({base + "/tags/" + n, dim, first, count});
+      }
+    };
+    collect("nodes", 0, file.nodes.start, file.nodes.count);
+    for (std::size_t i = 0; i < groups.size(); ++i) {
+      collect("elements/" + (*file.names)[i], dimension(groups[i].topology), groups[i].start, groups[i].count);
+    }
+    collect("sets", set_dim, file.sets.first, file.sets.count);
+    if (h5::exists(tstt, "tags")) {
+      const Id tags = h5::open_group(tstt, "tags");
+      names = h5::children(tags.get(), "/tstt/tags");
+    }
+    for (const auto& [n, sources] : dense) {
+      if (!std::binary_search(names.begin(), names.end(), n)) {
+        fail("/tstt/" + sources.front().path + " holds values of a tag /tstt/tags does not define");
+      }
+    }
+  });
+
+  FullDomains full(mesh);
+  for (const std::string& name : names) {
+    const std::string where = "/tstt/tags/" + name;
+    bool variable = false, handle = false, skip = false;
+    std::optional<TagKind> kind;
+    TagFormat format;
+    collectively(comm, [&] {
+      const Id tag = h5::open_group(tstt, "tags/" + name);
+      variable = h5::has_attribute(tag.get(), "variable_length") &&
+                 h5::read_attribute<std::int32_t>(tag.get(), "variable_length", where) != 0;
+      handle = h5::has_attribute(tag.get(), "is_handle") &&
+               h5::read_attribute<std::int32_t>(tag.get(), "is_handle", where) != 0;
+      const int storage_class =
+          h5::has_attribute(tag.get(), "class") ? h5::read_attribute<std::int32_t>(tag.get(), "class", where) : -1;
+      if (!h5::exists(tag.get(), "type")) fail(where + " has no type");
+      const Id type = h5::check(H5Topen2(tag.get(), "type", H5P_DEFAULT), "open the type of " + where);
+      std::string why;
+      kind = tag_kind(type.get(), why);
+      if (!kind) {
+        report.skipped.push_back({name, why});
+        skip = true;
+        return;
+      }
+      if (handle) kind = handle_kind(type.get(), *kind, where);
+      if (storage_class < -1 || storage_class > 3) {
+        fail(where + " has class " + std::to_string(storage_class) + ", not 0 (bit), 1 (sparse), 2 (dense) or 3 (mesh)");
+      }
+      format = TagFormat{storage_class, kind->kind, kind->nbits};
+      if (variable && kind->ncomp != 1) {
+        report.skipped.push_back({name, "variable-length tags of " + std::to_string(kind->ncomp) +
+                                            "-component values are not read"});
+        skip = true;
+      }
+    });
+    if (skip) continue;
+    const auto it = dense.find(name);
+    const std::vector<Dense> none;
+    const std::vector<Dense>& sources = it != dense.end() ? it->second : none;
+    dispatch_data_type(kind->type, [&]<class T>() {
+      if (variable) {
+        import_var_tag<T>(comm, mesh, tstt, name, *kind, sources, at, full, handle, format, file, holders);
+      } else {
+        import_tag<T>(comm, mesh, tstt, name, *kind, sources, at, full, handle, format, file, holders);
+      }
+    });
+  }
+}
+
 HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& options, H5mReport& report) {
-  (void)report;
   const h5::Session session;
   const int me = comm.rank();
   const auto size = static_cast<std::uint64_t>(comm.size());
@@ -714,7 +1075,13 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
   });
   HostMesh mesh = build_local_part(comm, std::move(b), options.ordering);
   const Locator at(mesh, ranges);
-  read_sets(comm, mesh, tstt.get(), sets, max_id, at);
+  FileLayout file_layout{nodes, &groups, &names, sets, Blocks{std::max<std::uint64_t>(max_id, 1), size}, {}};
+  file_layout.count[0] = static_cast<std::uint64_t>(nodes.count);
+  for (const Group& g : groups) file_layout.count[static_cast<std::size_t>(dimension(g.topology))] += static_cast<std::uint64_t>(g.count);
+  file_layout.count[static_cast<std::size_t>(set_dim)] = static_cast<std::uint64_t>(sets.count);
+  const std::vector<std::pair<GO, int>> holders = register_ids(comm, mesh, file_layout.ids);
+  read_sets(comm, mesh, tstt.get(), sets, max_id, at, file_layout.ids, holders);
+  if (options.tags) import_tags(comm, mesh, tstt.get(), file_layout, at, holders, report);
   return mesh;
 }
 

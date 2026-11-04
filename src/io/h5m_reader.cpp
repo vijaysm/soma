@@ -221,14 +221,6 @@ void read_sets(HostMesh& mesh, hid_t tstt, const IdRange& sets, std::uint64_t ma
   std::move(b).install(mesh);
 }
 
-// A dense tag dataset: one row per entity of the group whose file ids start at first.
-struct Dense {
-  std::string path;  // below /tstt
-  int dim = 0;
-  GO first = 1;
-  GO count = 0;
-};
-
 template <class T>
 std::vector<T> read_rows(hid_t loc, const std::string& path, const TagKind& k, GO rows) {
   const std::string where = "/tstt/" + path;

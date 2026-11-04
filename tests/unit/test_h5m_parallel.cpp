@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -20,6 +21,11 @@
 #include "h5m_writer.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/set_builder.hpp"
+#include "soma/fields/data_type.hpp"
+#include "soma/core/handle_ref.hpp"
+#include "soma/core/mesh_values.hpp"
+#include "soma/fields/domain_mesh.hpp"
+#include "soma/fields/space.hpp"
 #include "soma/io/h5m.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
@@ -138,11 +144,89 @@ void expect_sets(const HostMesh& serial, const HostMesh& part) {
   }
 }
 
+LO slot_count(const HostMesh& m, int slot) { return slot == soma::set_dim ? m.sets().count() : m.count(slot); }
+
+// Every field of the serial read is on each rank, with the same values on
+// the entities held there and the same default and global values; a field
+// over all of a slot's entities is so on every rank.
+void expect_fields(const HostMesh& serial, const HostMesh& part) {
+  EXPECT_EQ(part.values().names(), serial.values().names());
+  for (const soma::FieldInfo& f : serial.fields().list()) {
+    if (f.name.starts_with("soma:")) continue;
+    for (const int d : f.dims) {
+      SCOPED_TRACE(f.name + " on slot " + std::to_string(d));
+      std::map<GO, LO> lid_of;
+      for (LO l = 0; l < slot_count(serial, d); ++l) lid_of[member_gid(serial, d, l)] = l;
+      const soma::FieldInfo* pf = nullptr;
+      std::vector<soma::FieldInfo> plist = part.fields().list();
+      for (const soma::FieldInfo& g : plist) {
+        if (g.name == f.name && g.type == f.type && g.variable == f.variable &&
+            std::find(g.dims.begin(), g.dims.end(), d) != g.dims.end()) {
+          pf = &g;
+        }
+      }
+      soma::dispatch_data_type(f.type, [&]<class T>() {
+        const auto check_rows = [&](const auto& sd, const auto* pd, auto&& same) {
+          LO members = 0;
+          for (LO e = 0; e < slot_count(part, d); ++e) {
+            const LO s = lid_of.at(member_gid(part, d, e));
+            const LO sr = sd.row(d, s);
+            const LO pr = pd == nullptr ? soma::invalid_lo : pd->row(d, e);
+            EXPECT_EQ(sr == soma::invalid_lo, pr == soma::invalid_lo) << "gid " << member_gid(part, d, e);
+            if (sr != soma::invalid_lo && pr != soma::invalid_lo) {
+              same(sr, pr, member_gid(part, d, e));
+              ++members;
+            }
+          }
+          return members;
+        };
+        if (!f.variable) {
+          const auto sf = serial.fields().get<T>(f.id);
+          std::optional<soma::Field<T, Kokkos::HostSpace>> pfield;
+          if (pf != nullptr) pfield = part.fields().get<T>(pf->id);
+          const LO held = check_rows(sf.domain(), pfield ? &pfield->domain() : nullptr, [&](LO sr, LO pr, GO g) {
+            for (int c = 0; c < f.ncomp; ++c) EXPECT_EQ(pfield->view()(pr, c), sf.view()(sr, c)) << "gid " << g;
+          });
+          if (static_cast<LO>(sf.view().extent(0)) == slot_count(serial, d)) EXPECT_EQ(held, slot_count(part, d));
+          if (pfield) {
+            EXPECT_EQ(pfield->default_value(), sf.default_value());
+            EXPECT_EQ(pfield->global_value(), sf.global_value());
+          }
+        } else {
+          const auto sf = serial.fields().get_var<T>(f.id);
+          std::optional<soma::VarField<T, Kokkos::HostSpace>> pfield;
+          if (pf != nullptr) pfield = part.fields().get_var<T>(pf->id);
+          check_rows(sf.domain(), pfield ? &pfield->domain() : nullptr, [&](LO sr, LO pr, GO g) {
+            const auto so = sf.offsets(), po = pfield->offsets();
+            std::vector<T> a(sf.values().data() + so(sr), sf.values().data() + so(sr + 1));
+            std::vector<T> b(pfield->values().data() + po(pr), pfield->values().data() + po(pr + 1));
+            EXPECT_EQ(b, a) << "gid " << g;
+          });
+          if (pfield) {
+            EXPECT_EQ(pfield->default_value(), sf.default_value());
+            EXPECT_EQ(pfield->global_value(), sf.global_value());
+          }
+        }
+      });
+    }
+  }
+}
+
 // Each local entity matches the serial read's of its gid; the owned ones of
 // all ranks count the serial read's.
-void expect_parity(const Comm& c, const fs::path& path, soma::Ordering ordering = soma::Ordering::file) {
-  const HostMesh serial = soma::read_h5m(path, entities_only(ordering));
-  const HostMesh part = soma::read_h5m(c, path, entities_only(ordering));
+void expect_parity(const Comm& c, const fs::path& path, soma::Ordering ordering = soma::Ordering::file,
+                   bool tags = true) {
+  soma::H5mReadOptions o = entities_only(ordering);
+  o.tags = tags;
+  soma::H5mReport sr, pr;
+  const HostMesh serial = soma::read_h5m(path, o, sr);
+  const HostMesh part = soma::read_h5m(c, path, o, pr);
+  ASSERT_EQ(pr.skipped.size(), sr.skipped.size());
+  for (std::size_t i = 0; i < sr.skipped.size(); ++i) {
+    EXPECT_EQ(pr.skipped[i].name, sr.skipped[i].name);
+    EXPECT_EQ(pr.skipped[i].reason, sr.skipped[i].reason);
+  }
+  expect_fields(serial, part);
   ASSERT_EQ(part.dim(), serial.dim());
   const auto sv = serial.view();
   const auto pv = part.view();
@@ -262,6 +346,42 @@ TEST(H5mParallel, ExplicitEdgesFreeVerticesAndHighOrderNodes) {
     sb.add(seq);
     sb.add(parent);
     std::move(sb).install(mesh);
+    // Tags of each kind: dense on every vertex (two components), sparse on
+    // some quads, variable-length on some vertices (one with no values),
+    // handles on the edges naming quads, values on the sets, a mesh value.
+    using HS = Kokkos::HostSpace;
+    auto& f = mesh.fields();
+    const auto xy = f.add<double>("XY", soma::Space<HS>(soma::Domain<HS>::all(mesh, 0), soma::Layout::per_entity()), 2,
+                                  {.default_value = std::vector<double>{-1, -2}});
+    for (LO e = 0; e < mesh.count(0); ++e) {
+      xy.view()(e, 0) = 0.25 * static_cast<double>(mesh.gid(0)(e));
+      xy.view()(e, 1) = -static_cast<double>(e);
+    }
+    std::vector<LO> some_quads;
+    for (LO e = 0; e < mesh.count(2); e += 3) some_quads.push_back(e);
+    const auto q = f.add<std::int32_t>("Q", soma::Space<HS>(soma::Domain<HS>::from_list(mesh, 2, some_quads), soma::Layout::per_entity()), 1);
+    for (std::size_t i = 0; i < some_quads.size(); ++i) q.view()(static_cast<LO>(i), 0) = 7 * static_cast<std::int32_t>(i) - 20;
+    std::vector<LO> some_vertices;
+    std::vector<soma::Offset> off{0};
+    std::vector<float> vals;
+    for (LO e = 1; e < mesh.count(0); e += 4) {
+      some_vertices.push_back(e);
+      for (LO k = 0; k < e % 5; ++k) vals.push_back(static_cast<float>(e) + 0.5f * static_cast<float>(k));
+      off.push_back(static_cast<soma::Offset>(vals.size()));
+    }
+    f.add_var<float>("V", soma::Space<HS>(soma::Domain<HS>::from_list(mesh, 0, some_vertices), soma::Layout::per_entity()), off,
+                     vals, {.global_value = std::vector<float>{3, 4}});
+    soma::FieldOptions<GO> ho;
+    ho.handle = true;
+    const auto h = f.add<GO>("H", soma::Space<HS>(soma::Domain<HS>::all(mesh, 1), soma::Layout::per_entity()), 1, ho);
+    for (LO e = 0; e < mesh.count(1); ++e) h.view()(e, 0) = soma::make_handle(2, mesh.gid(2)(e % mesh.count(2)));
+    const auto sv = f.add<std::int64_t>("S", soma::Space<HS>(soma::Domain<HS>::all(mesh, soma::set_dim), soma::Layout::per_entity()), 1);
+    for (LO e = 0; e < mesh.sets().count(); ++e) sv.view()(e, 0) = 100 + e;
+    soma::MeshValue mv;
+    mv.type = soma::DataType::i32;
+    const std::int32_t g = 42;
+    mv.global_value = soma::MeshValue::bytes_of<std::int32_t>(std::span<const std::int32_t>(&g, 1));
+    mesh.values().set("M", mv);
   }
   const fs::path p = scratch.write("edges.h5m", &mesh);
   expect_parity(c, p);

@@ -574,6 +574,14 @@ std::optional<std::vector<T>> read_var_attribute(hid_t tag, const char* name, co
   return v;
 }
 
+// A dense tag dataset: one row per entity of the group whose file ids start at first.
+struct Dense {
+  std::string path;  // below /tstt
+  int dim = 0;
+  GO first = 1;
+  GO count = 0;
+};
+
 // Entries of a tag per slot in the whole file, and whether every entity of
 // the slot has one: a slot with entries gets a field (empty where none is
 // held), over all its entities when every one has a value.
