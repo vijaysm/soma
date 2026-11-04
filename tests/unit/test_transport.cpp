@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <random>
 #include <set>
@@ -329,4 +330,19 @@ TEST(Transport, RendezvousFailuresReachEveryRank) {
   } else {
     EXPECT_THROW((void)soma::transport::rendezvous(Space{}, c, keys, payload, 8, throw_on_rank_zero), std::runtime_error);
   }
+}
+
+// A received count is checked before any buffer is sized from it, so a
+// corrupt or mismatched message throws instead of allocating without bound.
+TEST(Transport, IncomingMessagesAreBoundedByWhatWasSent) {
+  using soma::transport::detail::check_incoming;
+  const std::size_t huge = std::numeric_limits<std::size_t>::max();
+  EXPECT_NO_THROW(check_incoming(0, 40, 20, 2));
+  EXPECT_NO_THROW(check_incoming(1, 20, 20, 2));
+  EXPECT_NO_THROW(check_incoming(5, 0, 20, 5));
+  EXPECT_THROW(check_incoming(0, 41, 20, 10), std::runtime_error);
+  EXPECT_THROW(check_incoming(0, 60, 20, 2), std::runtime_error);
+  EXPECT_THROW(check_incoming(2, 20, 20, 2), std::runtime_error);
+  EXPECT_THROW(check_incoming(0, std::numeric_limits<std::uint64_t>::max() - 15, 8, 1000), std::runtime_error);
+  EXPECT_THROW(check_incoming(huge, 8, 8, huge), std::runtime_error);
 }

@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
+#include <string>
 #include <numeric>
 #include <stdexcept>
 
@@ -29,6 +31,7 @@ static_assert(sizeof(Header) == detail::Arrivals::header);
 struct Rows {
   std::size_t stride;
   std::vector<std::byte> bytes;
+  std::size_t limit;  // the most rows any rank can hold (detail::check_incoming)
 
   [[nodiscard]] std::size_t size() const { return bytes.size() / stride; }
   [[nodiscard]] Header header(std::size_t i) const {
@@ -37,6 +40,14 @@ struct Rows {
     return h;
   }
 };
+
+// Throws unless `rows` more rows fit beside `held` within `limit`.
+void check_rows(std::size_t held, std::uint64_t rows, std::size_t limit) {
+  if (rows > limit || held > limit - rows) {
+    throw std::runtime_error("transport::route: a message of " + std::to_string(rows) +
+                             " records is more than the ranks sent; the exchange is corrupt");
+  }
+}
 
 // The rows reordered stably by key(header) in [0, buckets), with where each
 // bucket starts (and the end) in `starts`.
@@ -51,7 +62,7 @@ Rows bucket(const Rows& rows, std::size_t buckets, Key key, std::vector<std::siz
   }
   for (std::size_t b = 0; b < buckets; ++b) starts[b + 1] += starts[b];
   std::vector<std::size_t> at(starts.begin(), starts.end() - 1);
-  Rows out{rows.stride, std::vector<std::byte>(rows.bytes.size())};
+  Rows out{rows.stride, std::vector<std::byte>(rows.bytes.size()), rows.limit};
   for (std::size_t i = 0; i < n; ++i) {
     std::memcpy(out.bytes.data() + at[keys[i]]++ * rows.stride, rows.bytes.data() + i * rows.stride, rows.stride);
   }
@@ -76,6 +87,8 @@ void exchange_crystal(const Comm& comm, Rows& rows, int stage, int send_to, std:
   Request::wait_all(r);
   r.clear();
   std::size_t at = rows.bytes.size();
+  detail::check_incoming(rows.size(), counts[0], rows.stride, rows.limit);
+  detail::check_incoming(rows.size() + counts[0] / rows.stride, counts[1], rows.stride, rows.limit);
   rows.bytes.resize(at + counts[0] + counts[1]);
   for (std::size_t k = 0; k < recv_from.size(); ++k) {
     r.push_back(comm.irecv_bytes(std::span<std::byte>(rows.bytes.data() + at, counts[k]), recv_from[k], tag + 1));
@@ -137,6 +150,11 @@ void alltoallv(const Comm& comm, Rows& rows) {
   for (std::size_t r = 0; r < p; ++r) send_counts[r] = starts[r + 1] - starts[r];
   comm.alltoall(std::span<const std::uint64_t>(send_counts), std::span<std::uint64_t>(recv_counts));
   std::vector<std::size_t> sc(send_counts.begin(), send_counts.end()), rc(recv_counts.begin(), recv_counts.end());
+  std::size_t held = 0;
+  for (const std::uint64_t c : recv_counts) {
+    check_rows(held, c, rows.limit);
+    held += c;
+  }
   rows.bytes.resize(std::accumulate(rc.begin(), rc.end(), std::size_t{0}) * rows.stride);
   comm.alltoallv_bytes(out.bytes, sc, rows.bytes, rc, rows.stride);
 }
@@ -157,6 +175,7 @@ void nbx(const Comm& comm, Rows& rows) {
   bool barrier_started = false;
   while (true) {
     if (const auto e = comm.iprobe(Comm::any_source, tag)) {
+      detail::check_incoming(rows.size(), e->bytes, rows.stride, rows.limit);
       const std::size_t at = rows.bytes.size();
       rows.bytes.resize(at + e->bytes);
       comm.irecv_bytes(std::span<std::byte>(rows.bytes.data() + at, e->bytes), e->source, tag).wait();
@@ -174,6 +193,14 @@ void nbx(const Comm& comm, Rows& rows) {
 
 }  // namespace
 
+void detail::check_incoming(std::size_t held, std::uint64_t bytes, std::size_t stride, std::size_t limit) {
+  if (bytes % stride != 0) {
+    throw std::runtime_error("transport::route: a message of " + std::to_string(bytes) +
+                             " bytes is not whole records; the exchange is corrupt");
+  }
+  check_rows(held, bytes / stride, limit);
+}
+
 Strategy detail::resolve(Strategy s, int size) {
   if (s != Strategy::automatic) return s;
   return size <= 64 ? Strategy::alltoallv : Strategy::crystal;
@@ -184,16 +211,21 @@ detail::Arrivals detail::route_host(const Comm& comm, std::span<const int> dest,
   const bool bad_dest = std::any_of(dest.begin(), dest.end(), [&](int d) { return d < 0 || d >= comm.size(); });
   const bool bad_rows = payload.size() != dest.size() * width;
   // One reduction: the maxima of the flag, of the width and the strategy, and
-  // of their negatives, which agree only if every rank passed the same.
+  // of their negatives, which agree only if every rank passed the same; and
+  // the largest batch, which bounds what any rank can receive.
   const auto w = static_cast<std::int64_t>(width), st = static_cast<std::int64_t>(strategy);
-  std::array<std::int64_t, 5> v{bad_dest || bad_rows, w, -w, st, -st};
+  std::array<std::int64_t, 6> v{bad_dest || bad_rows, w, -w, st, -st, static_cast<std::int64_t>(dest.size())};
   comm.allreduce(std::span<std::int64_t>(v), Op::max);
   if (v[0] != 0 || v[1] != -v[2] || v[3] != -v[4]) {
     throw std::invalid_argument(
         "transport::route: a rank names a destination outside the communicator, passes a payload that is not a row "
         "per record, or differs from another in width or strategy");
   }
-  Rows rows{sizeof(Header) + width, std::vector<std::byte>(dest.size() * (sizeof(Header) + width))};
+  const auto largest = static_cast<std::size_t>(v[5]);
+  const auto p = static_cast<std::size_t>(comm.size());
+  const std::size_t limit = largest > std::numeric_limits<std::size_t>::max() / p ? std::numeric_limits<std::size_t>::max()
+                                                                                   : largest * p;
+  Rows rows{sizeof(Header) + width, std::vector<std::byte>(dest.size() * (sizeof(Header) + width)), limit};
   for (std::size_t i = 0; i < dest.size(); ++i) {
     const Header h{dest[i], comm.rank()};
     std::byte* row = rows.bytes.data() + i * rows.stride;

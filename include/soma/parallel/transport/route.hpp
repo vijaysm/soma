@@ -75,10 +75,18 @@ struct Arrivals {
 
 [[nodiscard]] Strategy resolve(Strategy s, int size);
 
+// Checks `bytes` received when `held` rows are already here, before any
+// buffer is sized from it: whole rows of `stride` bytes, and no more than
+// `limit` rows held in all (P times the largest batch of any rank, which no
+// exchange can exceed). Throws std::runtime_error otherwise, so a corrupt or
+// mismatched message cannot drive an unbounded allocation.
+void check_incoming(std::size_t held, std::uint64_t bytes, std::size_t stride, std::size_t limit);
+
 // Collective. Throws std::invalid_argument on every rank if any rank names
 // a destination outside the communicator, passes a payload that is not a
 // row of `width` bytes per record, or differs from another rank in width or
-// strategy.
+// strategy. Throws std::runtime_error from check_incoming if a message is
+// inconsistent with what the ranks sent.
 [[nodiscard]] Arrivals route_host(const Comm& comm, std::span<const int> dest, std::span<const std::byte> payload,
                                   std::size_t width, Strategy strategy);
 

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -204,9 +205,12 @@ TEST(Comm, IprobeFindsTheSenderAndSize) {
   const int next = (c.rank() + 1) % c.size(), prev = (c.rank() + c.size() - 1) % c.size();
   const std::vector<std::int32_t> out(static_cast<std::size_t>(c.rank() + 1), c.rank());
   Request s = c.issend(std::span<const std::int32_t>(out), next, 7);
+  // Bounded: a probe that never finds the message fails instead of spinning.
   std::optional<soma::Envelope> e;
-  while (!(e = c.iprobe(Comm::any_source, 7))) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (!(e = c.iprobe(Comm::any_source, 7)) && std::chrono::steady_clock::now() < deadline) {
   }
+  ASSERT_TRUE(e.has_value()) << "no message arrived within 20 s";
   EXPECT_EQ(e->source, prev);
   EXPECT_EQ(e->tag, 7);
   EXPECT_EQ(e->bytes, sizeof(std::int32_t) * static_cast<std::size_t>(prev + 1));
