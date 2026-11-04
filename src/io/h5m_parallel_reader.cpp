@@ -25,6 +25,7 @@
 #include "h5m_read.hpp"
 #include "hdf5.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/core/set_builder.hpp"
 #include "soma/io/h5m.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/partition.hpp"
@@ -264,6 +265,251 @@ std::vector<Entity> place_lower(const Comm& comm, const std::vector<Group>& grou
   return out;
 }
 
+// Every rank holding each file id, kept by the id's directory: the rank
+// owning its block of [1, max_id]. (id, rank), sorted.
+std::vector<std::pair<GO, int>> register_ids(const Comm& comm, const HostMesh& mesh, const Blocks& ids) {
+  std::vector<GO> held;
+  for (int d = 0; d <= mesh.dim(); ++d) {
+    const auto g = mesh.gid(d);
+    held.insert(held.end(), g.data(), g.data() + g.extent(0));
+  }
+  std::vector<int> dest(held.size());
+  for (std::size_t i = 0; i < held.size(); ++i) dest[i] = ids.owner(static_cast<std::uint64_t>(held[i] - 1));
+  const Batch in = route(comm, dest, sizeof(GO), [&](std::size_t i, std::byte* row) { put(row, 0, held[i]); });
+  std::vector<std::pair<GO, int>> out(in.size());
+  for (std::size_t i = 0; i < in.size(); ++i) out[i] = {take<GO>(&in.payload(i, 0), 0), in.source(i)};
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+// A member of a set on its way to the ranks holding it: set index, kind,
+// position in the set's contents, and a file id or a range of them.
+struct Member {
+  enum Kind : std::int32_t { one = 0, range = 1, set_run = 2 };
+  std::int32_t set = 0;
+  std::int32_t kind = one;
+  std::int64_t pos = 0;
+  GO first = 0;
+  GO last = 0;
+};
+static_assert(sizeof(Member) == 32);
+
+// The sets of /tstt/sets/list on every rank, each holding the members held
+// here (design §21.3): the list, children and parents are read whole, the
+// contents in slices whose members reach their holders through the
+// directory of file ids.
+void read_sets(const Comm& comm, HostMesh& mesh, hid_t tstt, const IdRange& sets, std::uint64_t max_id,
+               const Locator& at) {
+  if (sets.count == 0) return;
+  constexpr std::int64_t ranged = 0x8;
+  constexpr std::int64_t known_flags = set_flag_bits | ranged;
+  const auto n = static_cast<std::size_t>(sets.count);
+  const int size = comm.size();
+  std::vector<std::int64_t> list;
+  std::array<std::vector<std::uint64_t>, 3> links;  // children and parents (1, 2) whole
+  std::uint64_t entries = 0;                         // of /tstt/sets/contents
+  const auto set_name = [&](std::size_t i) { return "set " + str(sets.first + static_cast<GO>(i)); };
+  static constexpr std::array<const char*, 3> column{"contents", "children", "parents"};
+  collectively(comm, [&] {
+    list = h5::read_all<std::int64_t>(h5::open_dataset(tstt, "sets/list").get(), 4 * n, sets.where);
+    for (std::size_t c = 0; c < column.size(); ++c) {
+      std::int64_t prev = -1;
+      for (std::size_t i = 0; i < n; ++i) {
+        const std::int64_t end = list[4 * i + c];
+        if (end < prev) {
+          fail(sets.where + ": " + set_name(i) + " ends its " + column[c] + " at index " + str(end) +
+               "; the ends must be at least -1 and never decrease");
+        }
+        prev = end;
+      }
+      const std::string path = std::string("sets/") + column[c];
+      const std::string where = "/tstt/" + path;
+      if (!h5::exists(tstt, path)) {
+        if (prev != -1) fail(sets.where + " ends " + column[c] + " at index " + str(prev) + ", but there is no " + where);
+        continue;
+      }
+      const Id ds = h5::open_dataset(tstt, path);
+      const auto ext = h5::extent(ds.get(), where);
+      if (ext.size() != 1) fail(where + " must be one-dimensional");
+      if (static_cast<std::uint64_t>(prev) + 1 != ext[0]) {
+        fail(where + " has " + str(std::uint64_t{ext[0]}) + " entries, but " + sets.where + " ends " + column[c] +
+             " at index " + str(prev));
+      }
+      if (c == 0) {
+        entries = ext[0];
+      } else {
+        links[c] = h5::read_all<std::uint64_t>(ds.get(), static_cast<std::size_t>(ext[0]), where);
+      }
+    }
+    for (std::size_t i = 0; i < n; ++i) {
+      const std::int64_t flags = list[4 * i + 3];
+      if (flags < 0 || (flags & ~known_flags) != 0) {
+        fail(sets.where + ": " + set_name(i) + " has flags " + hex(flags) + ", outside " + hex(known_flags));
+      }
+      if ((flags & ranged) != 0 && (flags & set_ordered) != 0) {
+        fail(sets.where + ": " + set_name(i) + " is both ordered and ranged, which MOAB does not write");
+      }
+    }
+  });
+  const auto begin_of = [&](std::size_t i) { return static_cast<std::uint64_t>(i == 0 ? 0 : list[4 * (i - 1)] + 1); };
+  const auto end_of = [&](std::size_t i) { return static_cast<std::uint64_t>(list[4 * i] + 1); };
+  const auto is_ranged = [&](std::size_t i) { return (list[4 * i + 3] & ranged) != 0; };
+  const auto range_of = [&](std::uint64_t id) {
+    return id <= static_cast<std::uint64_t>(std::numeric_limits<GO>::max()) ? at.range_of(static_cast<GO>(id)) : nullptr;
+  };
+
+  // This rank's contents: [first, end), and a pair begun at end - 1 is read whole.
+  const Blocks rows{entries, static_cast<std::uint64_t>(size)};
+  const Blocks ids{std::max<std::uint64_t>(max_id, 1), static_cast<std::uint64_t>(size)};
+  std::vector<Member> to_directory, to_all;
+  collectively(comm, [&] {
+    const std::uint64_t first = rows.first(comm.rank()), end = rows.end(comm.rank());
+    if (first == end) return;
+    const std::string where = "/tstt/sets/contents";
+    const Id ds = h5::open_dataset(tstt, "sets/contents");
+    const std::uint64_t upto = std::min(end + 1, entries);
+    const auto got = h5::read_rows<std::uint64_t>(ds.get(), first, upto - first, 1, where);
+    // The set of each entry: the first whose contents end after it.
+    std::size_t i = 0;
+    while (end_of(i) <= first) ++i;
+    const auto no_entity = [&](std::size_t s, std::uint64_t id) {
+      fail(where + ": " + set_name(s) + " lists file id " + str(id) + ", which names no entity");
+    };
+    for (std::uint64_t j = first; j < end; ++j) {
+      while (end_of(i) <= j) ++i;
+      const std::uint64_t offset = j - begin_of(i);
+      const std::uint64_t id = got[static_cast<std::size_t>(j - first)];
+      const auto set = static_cast<std::int32_t>(i);
+      if (!is_ranged(i)) {
+        const IdRange* r = range_of(id);
+        if (r == nullptr) no_entity(i, id);
+        Member m{set, Member::one, static_cast<std::int64_t>(offset), static_cast<GO>(id), 0};
+        (r->dim == set_dim ? to_all : to_directory).push_back(m);
+        continue;
+      }
+      if (offset % 2 != 0) continue;  // the second of a pair
+      if ((end_of(i) - begin_of(i)) % 2 != 0) {
+        fail(where + ": " + set_name(i) + " is ranged but has " + str(end_of(i) - begin_of(i)) +
+             " entries, not (start, count) pairs");
+      }
+      const std::uint64_t count = got[static_cast<std::size_t>(j + 1 - first)];
+      if (count == 0) fail(where + ": " + set_name(i) + " has a range of no entities at " + str(id));
+      if (id == 0 || count > max_id || id > max_id - count + 1) {
+        fail(where + ": " + set_name(i) + " has the range of " + str(count) + " file ids from " + str(id) +
+             ", beyond the max_id " + str(max_id) + " of /tstt");
+      }
+      // Pieces within one dataset; entities split again at directory blocks.
+      for (std::uint64_t a = id, last = id + count - 1; a <= last;) {
+        const IdRange* r = range_of(a);
+        if (r == nullptr) no_entity(i, a);
+        const auto piece_end = std::min(last, static_cast<std::uint64_t>(r->first + r->count - 1));
+        if (r->dim == set_dim) {
+          to_all.push_back({set, Member::set_run, 0, static_cast<GO>(a), static_cast<GO>(piece_end)});
+        } else {
+          for (std::uint64_t b = a; b <= piece_end;) {
+            const int owner = ids.owner(b - 1);
+            const std::uint64_t block_end = std::min(piece_end, ids.end(owner));  // the block's last id
+            to_directory.push_back({set, Member::range, 0, static_cast<GO>(b), static_cast<GO>(block_end)});
+            b = block_end + 1;
+          }
+        }
+        a = piece_end + 1;
+      }
+    }
+  });
+
+  // At each directory: members forwarded to every rank holding them.
+  const std::vector<std::pair<GO, int>> holders = register_ids(comm, mesh, ids);
+  std::vector<int> dest(to_directory.size());
+  for (std::size_t k = 0; k < to_directory.size(); ++k) dest[k] = ids.owner(static_cast<std::uint64_t>(to_directory[k].first - 1));
+  const Batch arrived = route(comm, dest, sizeof(Member),
+                              [&](std::size_t k, std::byte* row) { std::memcpy(row, &to_directory[k], sizeof(Member)); });
+  std::vector<Member> out;
+  dest.clear();
+  const auto forward = [&](const Member& m, GO id) {
+    auto it = std::lower_bound(holders.begin(), holders.end(), std::pair<GO, int>{id, std::numeric_limits<int>::min()});
+    for (; it != holders.end() && it->first == id; ++it) {
+      out.push_back({m.set, Member::one, m.pos, id, m.kind});  // last: the kind it was listed as
+      dest.push_back(it->second);
+    }
+  };
+  for (std::size_t k = 0; k < arrived.size(); ++k) {
+    Member m;
+    std::memcpy(&m, &arrived.payload(k, 0), sizeof(Member));
+    if (m.kind == Member::one) {
+      forward(m, m.first);
+    } else {
+      for (GO id = m.first; id <= m.last; ++id) forward(m, id);
+    }
+  }
+  for (const Member& m : to_all) {
+    for (int r = 0; r < size; ++r) {
+      out.push_back(m);
+      dest.push_back(r);
+    }
+  }
+  const Batch members =
+      route(comm, dest, sizeof(Member), [&](std::size_t k, std::byte* row) { std::memcpy(row, &out[k], sizeof(Member)); });
+
+  // Each set with its members held here, in content order.
+  std::vector<std::vector<Member>> of(n);
+  for (std::size_t k = 0; k < members.size(); ++k) {
+    Member m;
+    std::memcpy(&m, &members.payload(k, 0), sizeof(Member));
+    of[static_cast<std::size_t>(m.set)].push_back(m);
+  }
+  SetBuilder b;
+  collectively(comm, [&] {
+    const auto set_ids = [&](std::size_t i, std::size_t c, std::size_t from, std::size_t to) {
+      std::vector<GO> v;
+      for (std::size_t j = from; j < to; ++j) {
+        const IdRange* r = range_of(links[c][j]);
+        if (r == nullptr || r->dim != set_dim) {
+          fail("/tstt/sets/" + std::string(column[c]) + ": " + set_name(i) + " lists file id " + str(links[c][j]) +
+               ", which is not a set");
+        }
+        v.push_back(static_cast<GO>(links[c][j]));
+      }
+      return v;
+    };
+    std::array<std::size_t, 3> from{};
+    for (std::size_t i = 0; i < n; ++i) {
+      std::array<std::size_t, 3> to{};
+      for (std::size_t c = 0; c < 3; ++c) to[c] = static_cast<std::size_t>(list[4 * i + c] + 1);
+      SetSpec spec;
+      spec.gid = sets.first + static_cast<GO>(i);
+      spec.flags = static_cast<std::uint8_t>(list[4 * i + 3] & set_flag_bits);
+      std::vector<SetRun> runs;
+      auto& ms = of[i];
+      std::stable_sort(ms.begin(), ms.end(), [](const Member& x, const Member& y) {
+        return std::pair(x.pos, x.first) < std::pair(y.pos, y.first);
+      });
+      std::vector<std::pair<int, GO>> from_ranges;  // (slot, lid) listed by ranges: unique
+      for (const Member& m : ms) {
+        if (m.kind == Member::set_run) {
+          runs.push_back({set_dim, m.first, m.last - m.first + 1});
+          continue;
+        }
+        const IdRange* r = at.range_of(m.first);
+        const SetItem item{r->dim, r->dim == set_dim ? m.first : GO{at.lid(r->dim, m.first)}};
+        if (m.last == Member::range) {
+          from_ranges.emplace_back(item.slot, item.id);
+        } else {
+          spec.contents.push_back(item);
+        }
+      }
+      std::sort(from_ranges.begin(), from_ranges.end());
+      from_ranges.erase(std::unique(from_ranges.begin(), from_ranges.end()), from_ranges.end());
+      for (const auto& [slot, id] : from_ranges) runs.push_back({slot, id, 1});
+      spec.children = set_ids(i, 1, from[1], to[1]);
+      spec.parents = set_ids(i, 2, from[2], to[2]);
+      from = to;
+      b.add(std::move(spec), std::move(runs));
+    }
+    std::move(b).install(mesh);
+  });
+}
+
 HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& options, H5mReport& report) {
   (void)report;
   const h5::Session session;
@@ -466,7 +712,10 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
       }
     }
   });
-  return build_local_part(comm, std::move(b), options.ordering);
+  HostMesh mesh = build_local_part(comm, std::move(b), options.ordering);
+  const Locator at(mesh, ranges);
+  read_sets(comm, mesh, tstt.get(), sets, max_id, at);
+  return mesh;
 }
 
 }  // namespace

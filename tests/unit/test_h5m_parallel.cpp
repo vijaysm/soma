@@ -19,6 +19,7 @@
 
 #include "h5m_writer.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/core/set_builder.hpp"
 #include "soma/io/h5m.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
@@ -76,6 +77,67 @@ soma::H5mReadOptions entities_only(soma::Ordering ordering = soma::Ordering::fil
   return o;
 }
 
+// The gid of member lid of slot `slot`.
+GO member_gid(const HostMesh& m, int slot, LO lid) {
+  return slot == soma::set_dim ? m.sets().gid()(lid) : m.gid(slot)(lid);
+}
+
+// Every set of the serial read is on each rank with its flags, links, and
+// the members held there (in order, for an ordered set).
+void expect_sets(const HostMesh& serial, const HostMesh& part) {
+  const auto& ss = serial.sets();
+  const auto& ps = part.sets();
+  ASSERT_EQ(ps.count(), ss.count());
+  std::vector<int> slots{soma::set_dim};
+  for (int d = 0; d <= serial.dim(); ++d) slots.push_back(d);
+  std::vector<std::vector<GO>> here(slots.size());
+  for (std::size_t k = 0; k < slots.size(); ++k) {
+    const LO n = slots[k] == soma::set_dim ? ps.count() : part.count(slots[k]);
+    for (LO l = 0; l < n; ++l) here[k].push_back(member_gid(part, slots[k], l));
+    std::sort(here[k].begin(), here[k].end());
+  }
+  for (LO i = 0; i < ss.count(); ++i) {
+    const GO g = ss.gid()(i);
+    const auto j = ps.index_of(g);
+    ASSERT_TRUE(j.has_value()) << "set " << g;
+    EXPECT_EQ(ps.flags(*j), ss.flags(i)) << "set " << g;
+    const auto gids = [](const HostMesh& m, std::span<const LO> l) {
+      std::vector<GO> v;
+      for (const LO x : l) v.push_back(m.sets().gid()(x));
+      return v;
+    };
+    EXPECT_EQ(gids(part, ps.children(*j)), gids(serial, ss.children(i))) << "set " << g;
+    EXPECT_EQ(gids(part, ps.parents(*j)), gids(serial, ss.parents(i))) << "set " << g;
+    for (std::size_t k = 0; k < slots.size(); ++k) {
+      const int slot = slots[k];
+      std::vector<GO> want, got;
+      if (ss.has_members(slot)) {
+        for (const LO l : ss.members_of(i, slot)) {
+          const GO m = member_gid(serial, slot, l);
+          if (std::binary_search(here[k].begin(), here[k].end(), m)) want.push_back(m);
+        }
+      }
+      if (ps.has_members(slot)) {
+        for (const LO l : ps.members_of(*j, slot)) got.push_back(member_gid(part, slot, l));
+      }
+      std::sort(want.begin(), want.end());
+      std::sort(got.begin(), got.end());
+      EXPECT_EQ(got, want) << "set " << g << " slot " << slot;
+    }
+    if (ss.ordered(i)) {
+      std::vector<std::pair<int, GO>> want, got;
+      for (const soma::SetEntry& x : ss.sequence(i)) {
+        const GO m = member_gid(serial, x.slot, x.lid);
+        const auto k = static_cast<std::size_t>(
+            std::find(slots.begin(), slots.end(), x.slot) - slots.begin());
+        if (std::binary_search(here[k].begin(), here[k].end(), m)) want.emplace_back(x.slot, m);
+      }
+      for (const soma::SetEntry& x : ps.sequence(*j)) got.emplace_back(x.slot, member_gid(part, x.slot, x.lid));
+      EXPECT_EQ(got, want) << "ordered set " << g;
+    }
+  }
+}
+
 // Each local entity matches the serial read's of its gid; the owned ones of
 // all ranks count the serial read's.
 void expect_parity(const Comm& c, const fs::path& path, soma::Ordering ordering = soma::Ordering::file) {
@@ -105,6 +167,7 @@ void expect_parity(const Comm& c, const fs::path& path, soma::Ordering ordering 
     std::int64_t owned = part.segment_table(d).owned_end;
     EXPECT_EQ(c.allreduce(owned, soma::Op::sum), static_cast<std::int64_t>(serial.count(d))) << "dimension " << d;
   }
+  expect_sets(serial, part);
   // An explicit entity of a lower dimension is on every rank whose elements
   // of the mesh's dimension use all its corners.
   const int D = serial.dim();
@@ -186,6 +249,19 @@ TEST(H5mParallel, ExplicitEdgesFreeVerticesAndHighOrderNodes) {
     }
     b.add_elements(Topology::edge, edges, econn);
     mesh = std::move(b).build(soma::Ordering::file);
+    // Every quad (stored as ranges), an ordered set of vertices with a
+    // repeat, and a set holding both and an edge.
+    soma::SetBuilder sb;
+    soma::SetSpec all{10, soma::set_unique, {}, {}, {}};
+    for (LO e = 0; e < mesh.count(2); ++e) all.contents.push_back({2, e});
+    soma::SetSpec seq{11, soma::set_ordered, {{0, 5}, {0, 1}, {0, 5}, {0, 40}, {0, 2}}, {}, {}};
+    soma::SetSpec parent{12, soma::set_unique, {{soma::set_dim, 10}, {soma::set_dim, 11}, {1, 3}}, {10, 11}, {}};
+    all.parents = {12};
+    seq.parents = {12};
+    sb.add(all);
+    sb.add(seq);
+    sb.add(parent);
+    std::move(sb).install(mesh);
   }
   const fs::path p = scratch.write("edges.h5m", &mesh);
   expect_parity(c, p);
