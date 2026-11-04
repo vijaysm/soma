@@ -9,13 +9,16 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
+#include <vector>
 
 #include <Kokkos_Core.hpp>
 
 #include "soma/core/mesh_view.hpp"
 #include "soma/core/segments.hpp"
 #include "soma/core/mesh_values.hpp"
+#include "soma/core/ordering.hpp"
 #include "soma/core/sets.hpp"
 #include "soma/core/transfer.hpp"
 #include "soma/core/types.hpp"
@@ -29,6 +32,7 @@ template <class MemSpace>
 using CoordView = Kokkos::View<Real* [3], Kokkos::LayoutLeft, MemSpace>;
 
 class MeshBuilder;
+class MeshEdit;
 class SetBuilder;
 struct MeshTestAccess;
 
@@ -43,6 +47,11 @@ struct EntityBlock {
   // local ids in MOAB's order; both empty when no element has any.
   View1<Offset, MemSpace> node_offsets;  // count + 1
   View1<LO, MemSpace> nodes;
+  // Edited meshes (MeshEdit): one byte per entity, 0 for a removed one; empty
+  // when every entity is live. The last `tail` entities were added after the
+  // others were ordered, in the order they were added.
+  View1<std::uint8_t, MemSpace> alive;
+  LO tail = 0;
   SegmentTable segments;
   bool derived = false;  // complete: built from the elements, explicit input adopted
   bool input = false;    // given to MeshBuilder; kept when derivation adopts the entities
@@ -51,7 +60,17 @@ struct EntityBlock {
 template <class MemSpace>
 class Mesh;
 
+// Old local id to new local id per dimension (invalid_lo: removed); empty for
+// a dimension compress() left as it was.
+struct Renumbering {
+  std::array<std::vector<LO>, 4> new_lid;
+};
+
 namespace detail {
+// Defined in src/core/mesh_edit.cpp.
+Renumbering compress(Mesh<Kokkos::HostSpace>& mesh);
+// build_adjacencies on a host mesh holding removed entities.
+void build_edited(Mesh<Kokkos::HostSpace>& mesh, AdjacencyRequest req);
 struct TopologyAccess;
 // Defined in soma/topology/build.hpp, which this header includes at its end.
 template <class MemSpace>
@@ -106,6 +125,43 @@ class Mesh {
   View1<const Offset, MemSpace> node_offsets(int d) const { return block(d).node_offsets; }
   View1<const LO, MemSpace> nodes(int d) const { return block(d).nodes; }
   LO corners() const noexcept { return corners_; }
+  // Edits (MeshEdit::apply) leave the mesh edited until compress(): removed
+  // entities stay in place, masked (alive(d) is 0 for them; empty when none
+  // is), and added ones follow the others (tail(d) of them). count(d) counts
+  // every entity, removed ones too; num_live(d) the others. corners() then
+  // counts the corner vertices before the tail.
+  View1<const std::uint8_t, MemSpace> alive(int d) const { return block(d).alive; }
+  LO tail(int d) const { return block(d).tail; }
+  LO num_live(int d) const {
+    const auto& b = block(d);
+    if (b.alive.extent(0) == 0) return b.count;
+    LO n = 0;
+    const View1<const std::uint8_t, MemSpace> a = b.alive;
+    Kokkos::parallel_reduce(
+        "soma::mesh::num_live",
+        Kokkos::RangePolicy<typename MemSpace::execution_space>(0, static_cast<std::size_t>(b.count)),
+        KOKKOS_LAMBDA(const std::size_t i, LO& acc) { acc += a(i) != 0 ? 1 : 0; }, n);
+    return n;
+  }
+  bool edited() const {
+    for (const auto& b : ents_) {
+      if (b.tail > 0 || b.alive.extent(0) > 0) return true;
+    }
+    return false;
+  }
+  // The ordering MeshBuilder ordered the mesh by, which compress() keeps.
+  Ordering ordering() const noexcept { return ordering_; }
+
+  // Drops removed entities and orders the added ones with the others, as
+  // MeshBuilder orders a mesh built from the live entities in ordering():
+  // vertices, elements and explicit sides with their gids, nodes and
+  // coordinates. Fields, sets and held graphs follow (fields stay current; the
+  // epoch advances). Returns the renumbering; does nothing on a mesh that is
+  // not edited. Host meshes only.
+  Renumbering compress() {
+    static_assert(std::is_same_v<MemSpace, Kokkos::HostSpace>, "compress: host meshes only");
+    return detail::compress(*this);
+  }
   // True for the dimensions MeshBuilder was given entities of (vertices
   // always), also after derivation adopts them; false for derived-only ones.
   bool input(int d) const { return block(d).input; }
@@ -179,6 +235,7 @@ class Mesh {
       v.gids[d] = ents_[d].gid;
       v.node_offsets[d] = ents_[d].node_offsets;
       v.nodes[d] = ents_[d].nodes;
+      v.alive_mask[d] = ents_[d].alive;
     }
     v.coords = coords_;
     v.corners = corners_;
@@ -215,6 +272,7 @@ class Mesh {
   void swap(Mesh& o) noexcept {
     std::swap(dim_, o.dim_);
     std::swap(corners_, o.corners_);
+    std::swap(ordering_, o.ordering_);
     for (std::size_t d = 0; d < 4; ++d) std::swap(ents_[d], o.ents_[d]);
     std::swap(coords_, o.coords_);
     std::swap(epoch_, o.epoch_);
@@ -228,9 +286,12 @@ class Mesh {
   template <class>
   friend class Mesh;
   friend class MeshBuilder;
+  friend class MeshEdit;
   friend class SetBuilder;
   friend struct MeshTestAccess;
   friend struct detail::TopologyAccess;
+  friend Renumbering detail::compress(Mesh<Kokkos::HostSpace>& mesh);
+  friend void detail::build_edited(Mesh<Kokkos::HostSpace>& mesh, AdjacencyRequest req);
 
   AdjacencyGraph<MemSpace> graph(int slot) const {
     const auto& g = adj_.graphs[static_cast<std::size_t>(slot)];
@@ -291,7 +352,10 @@ class Mesh {
       transfer(t.gid, s.gid, alias);
       transfer(t.node_offsets, s.node_offsets, alias);
       transfer(t.nodes, s.nodes, alias);
+      transfer(t.alive, s.alive, alias);
+      t.tail = s.tail;
     }
+    out.ordering_ = ordering_;
     if (o.dims[0]) out.corners_ = corners_;
     if (o.coordinates) transfer(out.coords_, coords_, alias);
     if (o.adj_source == TransferOptions::AdjSource::copy) {
@@ -337,6 +401,7 @@ class Mesh {
 
   int dim_ = 0;
   LO corners_ = 0;
+  Ordering ordering_ = default_ordering;
   std::array<EntityBlock<MemSpace>, 4> ents_{};
   CoordView<MemSpace> coords_;
   std::uint64_t epoch_ = 1;

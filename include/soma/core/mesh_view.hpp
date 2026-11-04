@@ -35,6 +35,8 @@ struct MeshView {
   // Empty for a dimension without high-order elements.
   Kokkos::Array<UView1<Offset, MemSpace>, 4> node_offsets{};
   Kokkos::Array<UView1<LO, MemSpace>, 4> nodes{};
+  // Empty unless the mesh is edited and holds removed entities.
+  Kokkos::Array<UView1<std::uint8_t, MemSpace>, 4> alive_mask{};
   CoordsU coords{};
   LO corners = 0;  // vertices [0, corners) are corners, the rest nodes only
   // Indexed by pair_slot and bridge_slot; empty where the mesh holds no graph.
@@ -53,6 +55,12 @@ struct MeshView {
   KOKKOS_INLINE_FUNCTION LO vertex(int d, LO e, LO k) const {
     const auto i = static_cast<std::size_t>(d);
     return d == 0 ? e : conn[i](offsets[i](e) + k);
+  }
+  // False for an entity MeshEdit removed and compress() has not dropped yet;
+  // always true on a mesh that was not edited.
+  KOKKOS_INLINE_FUNCTION bool alive(int d, LO e) const {
+    const auto& m = alive_mask[static_cast<std::size_t>(d)];
+    return m.extent(0) == 0 || m(e) != 0;
   }
   // The corners and then the other nodes of a high-order element, in MOAB's
   // order (soma/topology/nodes.hpp names the sub-entity each sits on).

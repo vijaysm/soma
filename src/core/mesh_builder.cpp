@@ -211,6 +211,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
   }
   HostMesh mesh;
   mesh.dim_ = dim_;
+  mesh.ordering_ = ordering;
   const Keys keys = make_keys(ordering, xyz_);
 
   // Vertices: (key, gid). With Ordering::file every key is 0, so by gid.

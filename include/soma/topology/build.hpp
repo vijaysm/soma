@@ -44,6 +44,10 @@ struct TopologyAccess {
     return m.ents_[static_cast<std::size_t>(d)];
   }
   template <class M>
+  static const EntityBlock<M>& block(const Mesh<M>& m, int d) {
+    return m.ents_[static_cast<std::size_t>(d)];
+  }
+  template <class M>
   static AdjacencyStore<M>& store(Mesh<M>& m) {
     return m.adj_;
   }
@@ -141,7 +145,11 @@ struct DefaultExec {
 }  // namespace topology::detail
 
 // Builds the requested graphs, and the sub-entity dimensions they touch.
-// Throws std::invalid_argument for a dimension above mesh.dim(), for a
+// On a host mesh holding removed entities (MeshEdit) the graphs are built
+// over the live entities: rows of removed entities are empty and no row names
+// one; sides derived again keep their gids, and sets and fields follow them
+// (the epoch stays). Throws std::invalid_argument for a device mesh holding removed
+// entities, for a dimension above mesh.dim(), for a
 // derivation on a mesh with vertices but no elements of mesh.dim(), and what
 // derive throws for explicit sub-entities it cannot adopt. A second call with
 // the same request does nothing.
@@ -159,6 +167,16 @@ void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRe
       throw std::invalid_argument("build_adjacencies: the mesh has dimension " +
                                   std::to_string(D) + "; a graph between " + std::to_string(a) +
                                   " and " + std::to_string(b) + " is not defined");
+    }
+  }
+  for (int d = 0; d <= D; ++d) {
+    if (Access::block(mesh, d).alive.extent(0) == 0) continue;
+    if constexpr (std::is_same_v<M, Kokkos::HostSpace>) {
+      soma::detail::build_edited(mesh, req);
+      return;
+    } else {
+      throw std::invalid_argument("build_adjacencies: dimension " + std::to_string(d) +
+                                  " holds removed entities; build on the host mesh, or compress() it");
     }
   }
   const AdjacencyRequest held = mesh.adjacencies();
