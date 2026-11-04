@@ -73,11 +73,11 @@ void CN::SubEntityVertexIndices(EntityType t, int d, int index, int out[]) {
 int CN::HasMidNodes(EntityType t, int num_verts) {
   if (!fixed(t) || t == MBVERTEX) return 0;
   const int d = Dimension(t);
+  // Smaller bits first: bits a type has no sub-entities for add nothing, so
+  // the configuration without them matches first.
   for (int bits = 0; bits <= 14; bits += 2) {
-    if ((bits & 4) != 0 && d < 2) continue;
-    if ((bits & 8) != 0 && d < 3) continue;
     const int n = VerticesPerEntity(t) + ((bits & 2) != 0 ? NumSubEntities(t, 1) : 0) +
-                  ((bits & 4) != 0 ? NumSubEntities(t, 2) : 0) + ((bits & 8) != 0 ? 1 : 0);
+                  ((bits & 4) != 0 ? NumSubEntities(t, 2) : 0) + ((bits & 8) != 0 && d == 3 ? 1 : 0);
     if (n == num_verts) return bits;
   }
   return 0;
