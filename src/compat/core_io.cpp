@@ -11,6 +11,7 @@
 #include <exception>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -24,6 +25,8 @@
 #include "soma/io/h5m.hpp"
 #include "soma/io/vtk_reader.hpp"
 #include "soma/io/vtk_writer.hpp"
+#include "soma/topology/canonical.hpp"
+#include "soma/topology/nodes.hpp"
 
 namespace soma::compat {
 
@@ -68,6 +71,37 @@ void import_sets(CoreState& s, const HostMesh& m) {
     for (const LO c : sets.children(x)) d.children.push_back(handle_of(s, set_dim, c));
     for (const LO p : sets.parents(x)) d.parents.push_back(handle_of(s, set_dim, p));
   }
+}
+
+// High-order elements that disagree on the node of a side they share, named
+// MOAB's way, or an empty string: MOAB's structures need such nodes shared.
+std::string nonconforming(const CoreState& s) {
+  const auto v = s.mesh.view();
+  std::map<std::vector<LO>, std::pair<LO, EntityHandle>> seen;  // side dim, sorted corners -> node, element
+  const auto name = [](EntityHandle h) { return std::string(CN::EntityTypeName(type_of(h))) + " " + std::to_string(id_of(h)); };
+  for (int d = 2; d <= s.mesh.dim(); ++d) {
+    for (LO e = 0; e < s.mesh.count(d); ++e) {
+      const LO n = v.num_nodes(d, e);
+      const LO corners = v.num_vertices(d, e);
+      if (n == corners) continue;
+      const Topology t = v.topology(d, e);
+      for (LO k = corners; k < n; ++k) {
+        const NodeParent p = node_parent(t, static_cast<int>(n), static_cast<int>(k));
+        if (p.dim <= 0 || p.dim >= d) continue;  // nodes of the element itself are its own
+        const canonical::SideDef side = canonical::side(t, p.dim, p.index);
+        std::vector<LO> key{p.dim};
+        for (int q = 0; q < side.num_vertices; ++q) key.push_back(v.node(d, e, side.v[q]));
+        std::sort(key.begin() + 1, key.end());
+        const EntityHandle h = handle_of(s, d, e);
+        const auto [it, fresh] = seen.emplace(key, std::pair<LO, EntityHandle>{v.node(d, e, k), h});
+        if (!fresh && it->second.first != v.node(d, e, k)) {
+          return name(it->second.second) + " and " + name(h) + " disagree on the node of a shared " +
+                 (p.dim == 1 ? "edge" : "face");
+        }
+      }
+    }
+  }
+  return {};
 }
 
 // How a field's values are kept as a tag.
@@ -437,6 +471,7 @@ ErrorCode Interface::load_file(const char* file_name, const EntityHandle* file_s
     MeshValues none;
     s_->mesh.values().swap(none);
     s_->number_entities();
+    if (const std::string bad = nonconforming(*s_); !bad.empty()) throw std::runtime_error("load_file: " + bad);
     import_sets(*s_, m);
     std::optional<HandleRef<Kokkos::HostSpace>> ref;
     const auto handles = [&]() -> const HandleRef<Kokkos::HostSpace>* {

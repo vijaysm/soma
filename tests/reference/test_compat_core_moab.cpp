@@ -594,12 +594,12 @@ TEST(CompatCore, IdsFollowMoabAllocation) {
   EXPECT_EQ(x, y);
 }
 
-// Two six-node triangles share the edge 2-3; the tenth vertex is on no
-// element. Handles follow the file's order, though the mesh keeps
-// node-only vertices last.
+// Two six-node triangles share the edge 2-3. MOAB reads them whether or not
+// they share its mid-node; compat reads them only when they do, and names
+// both triangles when they do not.
 TEST(CompatCore, HighOrderSidesMustShareNodes) {
   TempDir dir;
-  for (const bool conforming : {true}) {
+  for (const bool conforming : {true, false}) {
     moab::Core w;
     const double xyz[] = {0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0,                   // corners 1-4
                           .5, 0, 0, .5, .5, 0, 0, .5, 0, 1, .5, 0, .5, 1, 0,  // mid-nodes 5-9
