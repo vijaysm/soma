@@ -63,11 +63,28 @@ std::array<std::vector<LO>, 4> new_lids(const HostMesh& from, const HostMesh& to
   std::array<std::vector<LO>, 4> out;
   const auto v = from.view();
   for (int d = 0; d <= 3; ++d) {
-    std::vector<std::pair<GO, LO>> by_gid(static_cast<std::size_t>(to.count(d)));
-    for (LO l = 0; l < to.count(d); ++l) by_gid[static_cast<std::size_t>(l)] = {to.gid(d)(static_cast<std::size_t>(l)), l};
-    std::sort(by_gid.begin(), by_gid.end());
     auto& map = out[static_cast<std::size_t>(d)];
     map.assign(static_cast<std::size_t>(from.count(d)), invalid_lo);
+    const auto to_gid = to.gid(d);
+    const auto n = static_cast<std::size_t>(to.count(d));
+    GO lo = 0, hi = -1;
+    for (std::size_t l = 0; l < n; ++l) {
+      lo = l == 0 ? to_gid(l) : std::min(lo, to_gid(l));
+      hi = l == 0 ? to_gid(l) : std::max(hi, to_gid(l));
+    }
+    // Gids spanning at most a few times the count: a table indexed by gid.
+    if (n > 0 && hi - lo < 4 * static_cast<GO>(n) + 1024) {
+      std::vector<LO> lid_of(static_cast<std::size_t>(hi - lo + 1), invalid_lo);
+      for (std::size_t l = 0; l < n; ++l) lid_of[static_cast<std::size_t>(to_gid(l) - lo)] = static_cast<LO>(l);
+      for (LO l = 0; l < from.count(d); ++l) {
+        const GO g = v.gid(d, l);
+        if (v.alive(d, l) && g >= lo && g <= hi) map[static_cast<std::size_t>(l)] = lid_of[static_cast<std::size_t>(g - lo)];
+      }
+      continue;
+    }
+    std::vector<std::pair<GO, LO>> by_gid(n);
+    for (std::size_t l = 0; l < n; ++l) by_gid[l] = {to_gid(l), static_cast<LO>(l)};
+    std::sort(by_gid.begin(), by_gid.end());
     for (LO l = 0; l < from.count(d); ++l) {
       if (!v.alive(d, l)) continue;
       const GO g = v.gid(d, l);

@@ -402,6 +402,51 @@ TEST(MeshEdit, CompressGivesTheMeshBuiltFromTheLiveEntities) {
   }
 }
 
+// Gids far apart (too sparse for a table indexed by gid): apply carries the
+// held graph back and compress renumbers and remaps by gid all the same.
+TEST(MeshEdit, SparseGidsAreFollowed) {
+  constexpr GO step = 1'000'000'000;
+  soma::MeshBuilder b(2);
+  std::vector<GO> vg;
+  std::vector<Real> xyz;
+  for (GO j = 0; j < 2; ++j) {
+    for (GO i = 0; i < 4; ++i) {
+      vg.push_back(step * (1 + i + 4 * j));
+      xyz.insert(xyz.end(), {static_cast<Real>(i), static_cast<Real>(j), 0});
+    }
+  }
+  b.add_vertices(vg, xyz);
+  std::vector<GO> conn;
+  for (std::size_t i = 0; i < 3; ++i) conn.insert(conn.end(), {vg[i], vg[i + 1], vg[i + 5], vg[i + 4]});
+  b.add_elements(Topology::quad, std::vector<GO>{step, 2 * step, 3 * step}, conn);
+  HostMesh m = std::move(b).build(soma::Ordering::file);
+  soma::build_adjacencies(m, soma::AdjacencyRequest{}.add(0, 2));
+  auto f = m.fields().add<double>("x", soma::make_space(m, soma::Domain<Kokkos::HostSpace>::all(m, 2),
+                                                         soma::Layout::per_entity()),
+                                  1);
+  for (LO e = 0; e < 3; ++e) f.view()(static_cast<std::size_t>(e), 0) = static_cast<double>(m.gid(2)(static_cast<std::size_t>(e)) / step);
+
+  MeshEdit edit(m);
+  edit.remove(2, std::vector<LO>{lid_of(m, 2, 2 * step)});
+  edit.apply();
+  // Vertex 2 (lid 1) keeps its first quad only; vertex 3 its third.
+  const auto adj = m.adjacency(0, 2);
+  const auto row = [&](LO v) {
+    return std::vector<GO>{adj.targets.data() + adj.offsets(static_cast<std::size_t>(v)),
+                           adj.targets.data() + adj.offsets(static_cast<std::size_t>(v) + 1)};
+  };
+  EXPECT_EQ(row(lid_of(m, 0, 2 * step)), (std::vector<GO>{lid_of(m, 2, step)}));
+  EXPECT_EQ(row(lid_of(m, 0, 3 * step)), (std::vector<GO>{lid_of(m, 2, 3 * step)}));
+
+  const soma::Renumbering r = m.compress();
+  ASSERT_EQ(m.count(2), 2);
+  EXPECT_EQ(r.new_lid[2], (std::vector<LO>{0, soma::invalid_lo, 1}));
+  const auto g = m.fields().get<double>("x");
+  for (LO e = 0; e < 2; ++e) {
+    EXPECT_DOUBLE_EQ(g.view()(static_cast<std::size_t>(e), 0), static_cast<double>(m.gid(2)(static_cast<std::size_t>(e)) / step));
+  }
+}
+
 // Removing elements and a vertex they alone used, then compressing, drops
 // them; a high-order element added with its nodes puts its node-only vertices
 // after the corners again.
