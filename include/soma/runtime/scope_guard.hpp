@@ -4,6 +4,11 @@
 #ifndef SOMA_RUNTIME_SCOPE_GUARD_HPP_
 #define SOMA_RUNTIME_SCOPE_GUARD_HPP_
 
+// Starts what SOMA needs and stops what it started: reads SOMA's options from
+// the environment and the command line (parse_options, removing its own
+// arguments), then initializes MPI (in MPI builds) and Kokkos unless they run
+// already.
+
 namespace soma {
 
 // Owns runtime lifetime: MPI (when enabled), then Kokkos; torn down in

@@ -6,6 +6,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "soma/config.hpp"
+#include "soma/runtime/options.hpp"
 
 #if SOMA_ENABLE_MPI
 #include <mpi.h>
@@ -14,6 +15,8 @@
 namespace soma {
 
 ScopeGuard::ScopeGuard(int& argc, char**& argv) {
+  // SOMA's own options first: a bad value throws before anything starts.
+  parse_options(argc, argv);
 #if SOMA_ENABLE_MPI
   int initialized = 0;
   MPI_Initialized(&initialized);
