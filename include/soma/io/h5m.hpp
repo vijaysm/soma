@@ -174,6 +174,7 @@ struct H5mWriteOptions {
   AdjacencyRequest adjacencies{};
 };
 
+// An edited mesh (MeshEdit) is written as its compressed copy would be.
 void write_h5m(const HostMesh& mesh, const std::filesystem::path& path, const H5mWriteOptions& options = {});
 
 }  // namespace soma

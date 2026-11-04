@@ -926,6 +926,12 @@ void write_file(const std::string& name, const HostMesh& mesh, const Plan& p) {
 }  // namespace
 
 void write_h5m(const HostMesh& mesh, const fs::path& path, const H5mWriteOptions& options) {
+  if (mesh.edited()) {  // removed entities masked, added ones out of order
+    HostMesh compact = mesh.clone();
+    compact.compress();
+    write_h5m(compact, path, options);
+    return;
+  }
   const Plan p = plan(mesh, options);
   if (p.compression > 0 && H5Zfilter_avail(H5Z_FILTER_DEFLATE) <= 0) {
     throw std::runtime_error(io::cannot_write("write_h5m", path, "this HDF5 has no deflate filter"));

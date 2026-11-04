@@ -81,6 +81,7 @@ struct VtkWriteOptions {
   VtkLegacyVersion version = VtkLegacyVersion::v5_1;
 };
 
+// An edited mesh (MeshEdit) is written as its compressed copy would be.
 void write_vtk(const HostMesh& mesh, const std::filesystem::path& path,
                std::span<const std::string> fields = {}, const VtkWriteOptions& options = {});
 

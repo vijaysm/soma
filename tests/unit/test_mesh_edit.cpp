@@ -3,12 +3,17 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <iterator>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <unistd.h>
 
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
@@ -21,6 +26,8 @@
 #include "soma/core/set_builder.hpp"
 #include "soma/fields/domain_mesh.hpp"
 #include "soma/fields/space.hpp"
+#include "soma/io/h5m.hpp"
+#include "soma/io/vtk_writer.hpp"
 #include "soma/testing/box_mesh.hpp"
 #include "soma/topology/build.hpp"
 
@@ -491,4 +498,42 @@ TEST(MeshEdit, CompressKeepsCompleteSidesInBuilderOrder) {
   for (LO e = 0; e < m.count(1); ++e) {
     EXPECT_EQ(m.gid(1)(static_cast<std::size_t>(e)), want.gid(1)(static_cast<std::size_t>(e))) << e;
   }
+}
+
+namespace {
+
+std::string file_bytes(const std::filesystem::path& p) {
+  std::ifstream in(p, std::ios::binary);
+  return {std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()};
+}
+
+}  // namespace
+
+// Writers write an edited mesh as they write its compressed copy.
+TEST(MeshEdit, WritersWriteTheCompressedCopy) {
+  HostMesh m = soma_test::two_quads_and_a_triangle();
+  auto f = m.fields().add_tag<double>("t", 2, 1);
+  for (std::size_t i = 0; i < 3; ++i) f.view()(i, 0) = 1.5 * static_cast<double>(i);
+  MeshEdit edit(m);
+  const LO v = edit.add_vertices(std::vector<Real>{-1, 0.5, 0});
+  edit.add_elements(Topology::tri, std::vector<LO>{lid_of(m, 0, 10), v, lid_of(m, 0, 40)});
+  edit.remove(2, std::vector<LO>{lid_of(m, 2, 3)});
+  edit.apply();
+  HostMesh c = m.clone();
+  c.compress();
+  const auto dir = std::filesystem::temp_directory_path() / ("soma_mesh_edit_" + std::to_string(::getpid()));
+  std::filesystem::create_directories(dir);
+  const std::vector<std::string> names{"t"};
+  soma::write_vtk(m, dir / "edited.vtk", names);
+  soma::write_vtk(c, dir / "compact.vtk", names);
+  EXPECT_EQ(file_bytes(dir / "edited.vtk"), file_bytes(dir / "compact.vtk"));
+  if (soma::h5m_available()) {
+    soma::write_h5m(m, dir / "edited.h5m");
+    soma::write_h5m(c, dir / "compact.h5m");
+    EXPECT_EQ(file_bytes(dir / "edited.h5m"), file_bytes(dir / "compact.h5m"));
+    const HostMesh back = soma::read_h5m(dir / "edited.h5m", {.ordering = soma::Ordering::file});
+    EXPECT_EQ(back.count(2), 3);
+  }
+  EXPECT_TRUE(m.edited());
+  std::filesystem::remove_all(dir);
 }

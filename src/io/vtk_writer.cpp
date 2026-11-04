@@ -537,6 +537,12 @@ void detail::write_vtk_with_temporary_names(const HostMesh& mesh, const fs::path
                                             std::span<const VtkField> fields,
                                             const std::function<std::string(int)>& candidate,
                                             const VtkWriteOptions& options) {
+  if (mesh.edited()) {  // removed entities masked, added ones out of order
+    HostMesh compact = mesh.clone();
+    compact.compress();
+    write_vtk_with_temporary_names(compact, path, fields, candidate, options);
+    return;
+  }
   const Contents contents = collect_contents(mesh, fields, options.version);
   check_ids(mesh, contents, options.version);
   check_values(mesh, contents);
