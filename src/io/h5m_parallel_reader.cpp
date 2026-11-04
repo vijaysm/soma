@@ -33,6 +33,7 @@
 #include "soma/parallel/partition.hpp"
 #include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/route.hpp"
+#include "soma/topology/adjacency.hpp"
 
 namespace soma {
 
@@ -872,6 +873,35 @@ void import_tags(const Comm& comm, HostMesh& mesh, hid_t tstt, const FileLayout&
   }
 }
 
+// The graphs the file caches (/tstt/soma/adjacency), named and checked as
+// the serial read checks their names, built on the part instead of read:
+// build_adjacencies over the local entities makes what installing the
+// file's rows restricted to them would.
+AdjacencyRequest cached_graphs(hid_t tstt, int dim) {
+  AdjacencyRequest request;
+  if (!h5::exists(tstt, "soma")) return request;
+  const Id soma = h5::open_group(tstt, "soma");
+  if (!h5::has_attribute(soma.get(), "version") ||
+      h5::read_attribute<std::int32_t>(soma.get(), "version", "/tstt/soma") != 1) {
+    fail("/tstt/soma is not of version 1, the only one this reader knows");
+  }
+  if (!h5::exists(soma.get(), "adjacency")) return request;
+  const Id graphs = h5::open_group(soma.get(), "adjacency");
+  for (const std::string& name : h5::children(graphs.get(), "/tstt/soma/adjacency")) {
+    const std::string where = "/tstt/soma/adjacency/" + name;
+    const auto g = graph_named(name);
+    if (!g) fail(where + " is not a graph this reader knows (pair_<from>_<to> or bridge_<dim>_<via>)");
+    if (g->a == g->b || g->a > dim || g->b > dim) fail(where + " names dimensions that are not two distinct ones of this mesh");
+    if (g->pair && g->b == 0) fail(where + " caches the connectivity, which is not cached");
+    if (g->pair) {
+      request.add(g->a, g->b);
+    } else {
+      request.add_bridge(g->a, g->b);
+    }
+  }
+  return request;
+}
+
 HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& options, H5mReport& report) {
   const h5::Session session;
   const int me = comm.rank();
@@ -1074,6 +1104,13 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
     }
   });
   HostMesh mesh = build_local_part(comm, std::move(b), options.ordering);
+  // Graphs first: deriving entities for them renews the mesh's epoch, which
+  // sets and fields made before would not survive.
+  if (options.adjacencies) {
+    AdjacencyRequest request;
+    collectively(comm, [&] { request = cached_graphs(tstt.get(), dim); });
+    if (!request.empty()) build_distributed_adjacencies(comm, mesh, request);
+  }
   const Locator at(mesh, ranges);
   FileLayout file_layout{nodes, &groups, &names, sets, Blocks{std::max<std::uint64_t>(max_id, 1), size}, {}};
   file_layout.count[0] = static_cast<std::uint64_t>(nodes.count);

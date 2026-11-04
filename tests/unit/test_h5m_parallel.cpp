@@ -30,6 +30,7 @@
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/partition.hpp"
+#include "soma/topology/build.hpp"
 
 namespace fs = std::filesystem;
 using soma::Comm;
@@ -63,9 +64,9 @@ class Scratch {
   }
   // Rank 0 writes `mesh` (built there only) to `name`; every rank gets the path.
   fs::path path(const std::string& name) const { return dir_ / name; }
-  fs::path write(const std::string& name, const HostMesh* mesh) const {
+  fs::path write(const std::string& name, const HostMesh* mesh, const soma::H5mWriteOptions& o = {}) const {
     const fs::path p = dir_ / name;
-    if (c_.rank() == 0) soma::write_h5m(*mesh, p);
+    if (c_.rank() == 0) soma::write_h5m(*mesh, p, o);
     c_.barrier();
     return p;
   }
@@ -475,6 +476,53 @@ TEST(H5mParallel, ElementsFollowTheCurvePartition) {
     EXPECT_EQ(part.count(D), here);
     for (LO e = 0; e < part.count(D); ++e) {
       EXPECT_EQ(where[static_cast<std::size_t>(lid_of.at(part.gid(D)(e)))], c.rank()) << "gid " << part.gid(D)(e);
+    }
+  }
+}
+
+// Cached graphs are built on each part: a downward row names the same
+// entities as the serial read's, an upward or bridge row those of them held
+// here.
+TEST(H5mParallel, CachedGraphsAreBuiltOnEachPart) {
+  const Comm c = Comm::world();
+  const Scratch scratch(c);
+  HostMesh mesh;
+  const soma::AdjacencyRequest request = soma::AdjacencyRequest{}.add(3, 2).add(2, 3).add(0, 3).add_bridge(3, 0);
+  if (c.rank() == 0) {
+    mesh = soma::read_h5m(data("hexes_mixed.h5m"), entities_only());  // fields would not survive the derivation
+    soma::build_adjacencies(mesh, request);
+  }
+  soma::H5mWriteOptions wo;
+  wo.adjacencies = request;
+  const fs::path p = scratch.write("graphs.h5m", &mesh, wo);
+  const HostMesh serial = soma::read_h5m(p);
+  const HostMesh part = soma::read_h5m(c, p);
+  const auto gid_of = [](const HostMesh& m, int d, LO l) { return m.gid(d)(l); };
+  for (int s = 0; s < soma::adjacency_slots; ++s) {
+    if (!request.has_slot(s)) continue;
+    const bool pair = s < 16;
+    const int from = pair ? s / 4 : (s - 16) / 4;
+    const int to = pair ? s % 4 : from;
+    ASSERT_TRUE(part.adjacencies().has_slot(s)) << "slot " << s;
+    const auto sg = pair ? serial.adjacency(from, to) : serial.bridge(from, s % 4);
+    const auto pg = pair ? part.adjacency(from, to) : part.bridge(from, s % 4);
+    std::map<GO, LO> lid_of;
+    for (LO e = 0; e < serial.count(from); ++e) lid_of[gid_of(serial, from, e)] = e;
+    std::vector<GO> here(part.gid(to).data(), part.gid(to).data() + part.count(to));
+    std::sort(here.begin(), here.end());
+    for (LO e = 0; e < part.count(from); ++e) {
+      const LO se = lid_of.at(gid_of(part, from, e));
+      std::vector<GO> want, got;
+      for (auto k = sg.offsets(se); k < sg.offsets(se + 1); ++k) {
+        const GO g = gid_of(serial, to, sg.targets(k));
+        if (std::binary_search(here.begin(), here.end(), g)) want.push_back(g);
+      }
+      for (auto k = pg.offsets(e); k < pg.offsets(e + 1); ++k) got.push_back(gid_of(part, to, pg.targets(k)));
+      if (!pair || from < to) {
+        std::sort(want.begin(), want.end());
+        std::sort(got.begin(), got.end());
+      }
+      EXPECT_EQ(got, want) << "slot " << s << " gid " << gid_of(part, from, e);
     }
   }
 }
