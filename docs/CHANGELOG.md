@@ -35,6 +35,14 @@ All notable changes to SOMA are recorded here. The format follows
   `Op::sum`, `min`, `max` and `prod`, on one value or a span. Other types fail to link.
 - `Comm::self()` gives a single-rank communicator.
 - MPI errors carry the MPI error string, and counts above `INT_MAX` are rejected.
+- `Comm::alltoall` and `Comm::alltoallv` (counts per rank, contiguous in rank order),
+  checked alike in both builds.
+- Non-blocking point-to-point: `isend`, `issend`, `irecv` (typed or bytes) return a move-only
+  `Request` (`test`, `wait`, `Request::wait_all`; destroying an unfinished one waits);
+  `iprobe` returns an `Envelope` (source, tag, bytes); `ibarrier`; `next_sequence`, a count
+  per communicator (an MPI attribute), so ranks agree on tags for successive exchanges.
+  Without MPI, rank 0 sends to itself through a queue matched by tag in send order, and
+  waiting for a message nothing can send throws `std::logic_error`.
 - `soma::ScopeGuard` initializes MPI and then Kokkos, and tears them down in reverse order.
 - The fixed-width types `LO`, `Offset`, `GO` and `Real` are defined in `soma/core/types.hpp`.
   `SOMA_LO_64` and `SOMA_OFFSET_64` select 64-bit widths.
@@ -272,6 +280,27 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - Twelve of MOAB's examples, built against MOAB and against compat, give the same output and
   files (`compat.gate.*`).
 
+### Distributed transport
+
+- `soma::transport::route` delivers fixed-width records (`RecordBatch`: `dest`, `source`,
+  byte rows of one width on every rank) by the crystal router (clean-room after gslib, with its
+  odd-count partner rule), `alltoallv`, or NBX (`Strategy`; `automatic` takes `alltoallv` up to
+  64 ranks, a placeholder until measured at scale). Every strategy returns the same records
+  grouped by source rank in each sender's order. A bad destination, a ragged payload, or a
+  width or strategy that differs between ranks throws `std::invalid_argument` on every rank.
+  Every received count is checked against what the ranks sent (P times the largest batch)
+  before any buffer is sized from it; a corrupt message throws `std::runtime_error`.
+- `CommPlan` / `learn_plan` keep the pattern of one routed exchange and replay it with one
+  round of point-to-point messages: `forward` (values per sent record to where route() put
+  them) and `reverse` (answers back to the sender's order). Learnt from both halves of the
+  exchange, so no handshake is needed.
+- `rendezvous(keys, payload, answer_width, answer)` sends each record to
+  `owner(key, P) = mix(key) % P` (the splitmix64 finalizer, so owners depend only on the key
+  and P), lets the owner answer every arrival, and returns the answers in key order; failures
+  in `answer` reach every rank.
+- Records are staged through host memory (one copy in, one out); transport uses tags 32000 to
+  32767.
+
 ### Patch-based AMR
 
 - `soma::amr` (headers in `include/soma/amr/`): boxes in ijk index space for cell, node and
@@ -413,6 +442,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   (1, 10 and 50 % of the hexes of a box removed and created again), `apply` and `compress`
   against building the mesh, and compat's tag, connectivity and adjacency calls against MOAB's
   on the same edits, checksummed.
+- `bench/bench_transport` (MPI builds) times `route` with each strategy against MOAB's crystal
+  router (`gs_transfer`) on dense and sparse destination patterns, checked by count and
+  checksum on every rank.
 
 ### Packaging
 
