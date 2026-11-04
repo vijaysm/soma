@@ -18,6 +18,7 @@
 #include <utility>
 #include <vector>
 
+#include "h5m_read.hpp"
 #include "hdf5.hpp"
 #include "soma/core/handle_ref.hpp"
 #include "soma/core/set_builder.hpp"
@@ -33,39 +34,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using h5::Id;
-
-class Failure : public std::runtime_error {
- public:
-  using std::runtime_error::runtime_error;
-};
-
-[[noreturn]] void fail(const std::string& what) { throw Failure(what); }
-
-std::string str(std::uint64_t v) { return std::to_string(v); }
-std::string str(std::int64_t v) { return std::to_string(v); }
-
-std::string hex(std::int64_t v) {
-  std::array<char, 24> buf{};
-  const auto end = std::to_chars(buf.data(), buf.data() + buf.size(), v, 16).ptr;
-  std::string digits(buf.data(), end);
-  if (digits.size() < 2) digits.insert(0, 2 - digits.size(), '0');
-  return v < 0 ? "-0x" + digits.substr(1) : "0x" + digits;
-}
-
-GO start_id(hid_t dataset, const std::string& where) {
-  if (!h5::has_attribute(dataset, "start_id")) fail(where + " has no start_id attribute");
-  const auto s = h5::read_attribute<std::int64_t>(dataset, "start_id", where);
-  if (s < 1) fail(where + " has start_id " + str(s) + "; file ids start at 1");
-  return s;
-}
-
-// File ids first .. first + count - 1, held by one dataset.
-struct IdRange {
-  GO first = 1;
-  GO count = 0;
-  int dim = set_dim;  // set_dim: entity sets
-  std::string where;
-};
+using namespace h5m_read;
 
 struct Nodes {
   GO start = 1;
@@ -98,57 +67,6 @@ Nodes read_nodes(hid_t tstt) {
   }
   n.start = start_id(ds.get(), where);
   return n;
-}
-
-std::optional<Topology> topology_named(std::string_view name) {
-  static constexpr std::array<std::pair<std::string_view, Topology>, 8> table{{
-      {"Edge", Topology::edge},
-      {"Tri", Topology::tri},
-      {"Quad", Topology::quad},
-      {"Polygon", Topology::polygon},
-      {"Tet", Topology::tet},
-      {"Pyramid", Topology::pyramid},
-      {"Prism", Topology::prism},
-      {"Hex", Topology::hex},
-  }};
-  for (const auto& [n, t] : table) {
-    if (n == name) return t;
-  }
-  return std::nullopt;
-}
-
-// The name the file's element type enumeration gives the group's value.
-std::string element_type(hid_t group, const std::string& where) {
-  if (!h5::has_attribute(group, "element_type")) fail(where + " has no element_type attribute");
-  const Id a = h5::check(H5Aopen(group, "element_type", H5P_DEFAULT),
-                         "open the element_type of " + where);
-  const Id t = h5::check(H5Aget_type(a.get()), "get the type of the element_type of " + where);
-  if (H5Tget_class(t.get()) != H5T_ENUM) fail(where + ": element_type is not an enumeration");
-  h5::require_one_value(a.get(), "the element_type of " + where);
-  std::vector<unsigned char> value(H5Tget_size(t.get()));
-  h5::check(H5Aread(a.get(), t.get(), value.data()), "read the element_type of " + where);
-  std::array<char, 256> name{};
-  if (H5Tenum_nameof(t.get(), value.data(), name.data(), name.size()) < 0) {
-    fail(where + ": element_type holds a value its enumeration does not name");
-  }
-  return name.data();
-}
-
-struct Group {
-  std::string where;
-  Topology topology = Topology::edge;
-  GO start = 1;
-  GO count = 0;
-  std::vector<Offset> offsets;  // polygons: count + 1
-  std::vector<GO> conn;         // vertex file ids
-  int nodes = 0;                // an element's nodes, corners first; 0 for polygons
-};
-
-Offset to_offset(std::uint64_t n, const std::string& where) {
-  if (n > static_cast<std::uint64_t>(std::numeric_limits<Offset>::max())) {
-    fail(where + " has " + str(n) + " entries, more than the Offset type of this build can index");
-  }
-  return static_cast<Offset>(n);
 }
 
 Group read_group(hid_t elements, const std::string& name, const Nodes& nodes) {
@@ -245,114 +163,6 @@ Group read_group(hid_t elements, const std::string& name, const Nodes& nodes) {
   }
   return g;
 }
-
-void check_ranges(std::vector<IdRange> ranges, std::uint64_t max_id) {
-  std::erase_if(ranges, [](const IdRange& r) { return r.count == 0; });
-  std::sort(ranges.begin(), ranges.end(),
-            [](const IdRange& a, const IdRange& b) { return a.first < b.first; });
-  for (std::size_t i = 0; i < ranges.size(); ++i) {
-    const IdRange& r = ranges[i];
-    if (r.first > std::numeric_limits<GO>::max() - r.count) fail(r.where + " has file ids beyond the gid type");
-    const auto last = static_cast<std::uint64_t>(r.first + r.count - 1);
-    if (last > max_id) {
-      fail(r.where + " has file ids up to " + str(last) + ", beyond the max_id " + str(max_id) + " of /tstt");
-    }
-    if (i > 0) {
-      const IdRange& p = ranges[i - 1];
-      if (r.first <= p.first + p.count - 1) {
-        fail(p.where + " and " + r.where + " both claim file id " + str(r.first));
-      }
-    }
-  }
-}
-
-// File id -> (slot, local id) through each dimension's (gid, lid) pairs; a
-// set's local id is its index, its file id less the first set's.
-class Locator {
- public:
-  Locator(const HostMesh& mesh, std::vector<IdRange> ranges) : ranges_(std::move(ranges)) {
-    std::erase_if(ranges_, [](const IdRange& r) { return r.count == 0; });
-    std::sort(ranges_.begin(), ranges_.end(),
-              [](const IdRange& a, const IdRange& b) { return a.first < b.first; });
-    for (const IdRange& r : ranges_) {
-      if (r.dim == set_dim) set_first_ = r.first;
-    }
-    for (int d = 0; d <= mesh.dim(); ++d) {
-      const auto gid = mesh.gid(d);
-      auto& p = pairs_[static_cast<std::size_t>(d)];
-      p.resize(gid.extent(0));
-      for (std::size_t l = 0; l < p.size(); ++l) p[l] = {gid(l), static_cast<LO>(l)};
-      if (!std::is_sorted(p.begin(), p.end())) std::sort(p.begin(), p.end());
-      auto& sg = segs_[static_cast<std::size_t>(d)];
-      for (const auto& [g, l] : p) {
-        if (!sg.empty() && g == sg.back().gid + sg.back().len && l == sg.back().lid + sg.back().len) {
-          ++sg.back().len;
-        } else {
-          sg.push_back({g, l, 1});
-        }
-      }
-    }
-  }
-
-  // The range holding id, or nullptr.
-  const IdRange* range_of(GO id) const {
-    auto it = std::upper_bound(ranges_.begin(), ranges_.end(), id,
-                               [](GO v, const IdRange& r) { return v < r.first; });
-    if (it == ranges_.begin()) return nullptr;
-    --it;
-    return id < it->first + it->count ? &*it : nullptr;
-  }
-
-  LO lid(int dim, GO id) const {
-    if (dim == set_dim) return static_cast<LO>(id - set_first_);
-    const auto& p = pairs_[static_cast<std::size_t>(dim)];
-    const auto it = std::lower_bound(p.begin(), p.end(), std::pair<GO, LO>{id, 0});
-    return it->second;
-  }
-
-  // Local ids of the count entities of dimension dim from file id first on,
-  // as runs (not sorted); every id of the range must name an entity. Costs the
-  // runs, not the entities: one run when the lids follow the file ids.
-  std::vector<Interval> lid_runs(int dim, GO first, GO count) const {
-    const auto& sg = segs_[static_cast<std::size_t>(dim)];
-    auto it = std::upper_bound(sg.begin(), sg.end(), first, [](GO v, const Seg& s) { return v < s.gid; });
-    --it;
-    std::vector<Interval> out;
-    for (GO id = first; id < first + count; ++it) {
-      const GO end = std::min(first + count, it->gid + it->len);
-      const auto l = static_cast<LO>(it->lid + (id - it->gid));
-      out.push_back(Interval{l, static_cast<LO>(l + (end - id))});
-      id = end;
-    }
-    return out;
-  }
-
-  // Local ids of the count entities of dimension dim from file id first on.
-  std::vector<LO> lids(int dim, GO first, GO count) const {
-    if (dim == set_dim) {
-      std::vector<LO> out(static_cast<std::size_t>(count));
-      std::iota(out.begin(), out.end(), static_cast<LO>(first - set_first_));
-      return out;
-    }
-    const auto& p = pairs_[static_cast<std::size_t>(dim)];
-    auto it = std::lower_bound(p.begin(), p.end(), std::pair<GO, LO>{first, 0});
-    std::vector<LO> out(static_cast<std::size_t>(count));
-    for (auto& l : out) l = (it++)->second;
-    return out;
-  }
-
- private:
-  // gid gid .. gid + len - 1 at lids lid .. lid + len - 1.
-  struct Seg {
-    GO gid;
-    LO lid;
-    LO len;
-  };
-  std::vector<IdRange> ranges_;
-  std::array<std::vector<std::pair<GO, LO>>, 4> pairs_;
-  std::array<std::vector<Seg>, 4> segs_;
-  GO set_first_ = 1;
-};
 
 // The sets of /tstt/sets/list, installed on mesh. A row's contents name
 // entities and sets by file id, one by one or (flag 0x8) as (start, count)
@@ -497,166 +307,6 @@ void read_sets(HostMesh& mesh, hid_t tstt, const IdRange& sets, std::uint64_t ma
   std::move(b).install(mesh);
 }
 
-// How a tag's values are held in memory.
-struct TagKind {
-  DataType type = DataType::u8;
-  int ncomp = 1;
-  Id mem;
-  TagFormat::Kind kind = TagFormat::Kind::plain;
-  int nbits = 0;
-};
-
-std::optional<DataType> scalar_type(hid_t t, std::string& why) {
-  const std::size_t size = H5Tget_size(t);
-  switch (H5Tget_class(t)) {
-    case H5T_INTEGER: {
-      const bool sign = H5Tget_sign(t) == H5T_SGN_2;
-      if (size == 1) return sign ? DataType::i8 : DataType::u8;
-      if (size == 4) return sign ? DataType::i32 : DataType::u32;
-      if (size == 8) return sign ? DataType::i64 : DataType::u64;
-      why = std::to_string(8 * size) + "-bit integer values are not read";
-      return std::nullopt;
-    }
-    case H5T_FLOAT:
-      if (size == 4) return DataType::f32;
-      if (size == 8) return DataType::f64;
-      why = std::to_string(8 * size) + "-bit real values are not read";
-      return std::nullopt;
-    default:
-      why = "values of this HDF5 type class are not read";
-      return std::nullopt;
-  }
-}
-
-hid_t native_of(DataType t) {
-  hid_t out = H5I_INVALID_HID;
-  dispatch_data_type(t, [&]<class T>() { out = h5::native<T>(); });
-  return out;
-}
-
-std::optional<TagKind> tag_kind(hid_t type, std::string& why) {
-  TagKind k;
-  const std::size_t size = H5Tget_size(type);
-  switch (H5Tget_class(type)) {
-    case H5T_INTEGER:
-    case H5T_FLOAT: {
-      const auto s = scalar_type(type, why);
-      if (!s) return std::nullopt;
-      k.type = *s;
-      k.mem = h5::check(H5Tcopy(native_of(*s)), "copy a native type");
-      return k;
-    }
-    case H5T_ARRAY: {
-      const Id base = h5::check(H5Tget_super(type), "get the base of an array type");
-      const auto s = scalar_type(base.get(), why);
-      if (!s) return std::nullopt;
-      const int rank = H5Tget_array_ndims(type);
-      if (rank < 1) fail("an array tag type has no dimensions");
-      std::vector<hsize_t> dims(static_cast<std::size_t>(rank));
-      h5::check(H5Tget_array_dims2(type, dims.data()), "get the dimensions of an array type");
-      const hsize_t n = std::accumulate(dims.begin(), dims.end(), hsize_t{1}, std::multiplies<>());
-      if (n < 1 || n > static_cast<hsize_t>(std::numeric_limits<int>::max())) {
-        why = "the array size is out of range";
-        return std::nullopt;
-      }
-      k.type = *s;
-      k.ncomp = static_cast<int>(n);
-      // HDF5 converts between array types of the same shape only.
-      k.mem = h5::check(H5Tarray_create2(native_of(*s), static_cast<unsigned>(rank), dims.data()),
-                        "create an array type");
-      return k;
-    }
-    case H5T_OPAQUE:
-      if (size < 1 || size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
-        why = "the opaque size is out of range";
-        return std::nullopt;
-      }
-      k.type = DataType::u8;
-      k.ncomp = static_cast<int>(size);
-      k.mem = h5::check(H5Tcopy(type), "copy an opaque type");
-      k.kind = TagFormat::Kind::opaque;
-      return k;
-    case H5T_BITFIELD:
-      if (size != 1) {
-        why = "bit tags wider than 8 bits are not read";
-        return std::nullopt;
-      }
-      k.type = DataType::u8;
-      k.mem = h5::check(H5Tcopy(H5T_NATIVE_B8), "copy the bitfield type");
-      k.kind = TagFormat::Kind::bit;
-      k.nbits = static_cast<int>(H5Tget_precision(type));  // 1 to 8 in one byte
-      return k;
-    default:
-      why = "values of this HDF5 type class are not read";
-      return std::nullopt;
-  }
-}
-
-// Handle values read as GO: the tag's shape over a native signed 64-bit type.
-// A file id beyond the GO range converts to its largest value, which names
-// nothing and is rejected with the others.
-TagKind handle_kind(hid_t type, const TagKind& k, const std::string& where) {
-  if (k.type != DataType::u64 && k.type != DataType::i64) {
-    fail(where + " holds handles, but its values are " + std::string(name(k.type)) + ", not 64-bit file ids");
-  }
-  TagKind h;
-  h.type = DataType::i64;
-  h.ncomp = k.ncomp;
-  if (H5Tget_class(type) == H5T_ARRAY) {
-    const int rank = H5Tget_array_ndims(type);
-    std::vector<hsize_t> dims(static_cast<std::size_t>(rank));
-    h5::check(H5Tget_array_dims2(type, dims.data()), "get the dimensions of an array type");
-    h.mem = h5::check(H5Tarray_create2(H5T_NATIVE_INT64, static_cast<unsigned>(rank), dims.data()),
-                      "create an array type");
-  } else {
-    h.mem = h5::check(H5Tcopy(H5T_NATIVE_INT64), "copy a native type");
-  }
-  return h;
-}
-
-// Handle values in the file are 0 (no entity) or the file id of an entity or
-// set; each becomes make_handle(slot, file id), the file id being the gid.
-// owner(i) names the holder of value i.
-template <class T, class Owner>
-void to_handles(std::span<T> v, const Locator& at, const std::string& where, Owner&& owner) {
-  if constexpr (std::is_same_v<T, GO>) {
-    for (std::size_t i = 0; i < v.size(); ++i) {
-      if (v[i] == 0) continue;
-      const IdRange* r = at.range_of(v[i]);
-      if (r == nullptr) {
-        fail(where + ": " + owner(i) + " holds the handle " + str(std::int64_t{v[i]}) +
-             ", which names no entity or set");
-      }
-      const GO h = make_handle(r->dim, v[i]);
-      if (h == 0) {
-        fail(where + ": " + owner(i) + " holds the handle " + str(std::int64_t{v[i]}) +
-             ", a file id beyond the gids a handle can hold");
-      }
-      v[i] = h;
-    }
-  }
-}
-
-template <class T>
-void to_handle_options(FieldOptions<T>& o, const Locator& at, const std::string& where) {
-  const auto named = [](const char* what) { return [what](std::size_t) { return std::string("the ") + what; }; };
-  if (o.default_value) to_handles<T>(*o.default_value, at, where, named("default"));
-  if (o.global_value) to_handles<T>(*o.global_value, at, where, named("global"));
-}
-
-// A tag with values on no entity, kept with the mesh.
-template <class T>
-MeshValue mesh_value(const FieldOptions<T>& o, int ncomp, const TagFormat& format) {
-  MeshValue v;
-  v.type = data_type_of<T>();
-  v.ncomp = ncomp;
-  v.handle = o.handle;
-  v.format = format;
-  if (o.default_value) v.default_value = MeshValue::bytes_of<T>(*o.default_value);
-  if (o.global_value) v.global_value = MeshValue::bytes_of<T>(*o.global_value);
-  return v;
-}
-
 // A dense tag dataset: one row per entity of the group whose file ids start at first.
 struct Dense {
   std::string path;  // below /tstt
@@ -677,33 +327,6 @@ std::vector<T> read_rows(hid_t loc, const std::string& path, const TagKind& k, G
   if (!out.empty()) h5::read(ds.get(), k.mem.get(), out.data(), where);
   return out;
 }
-
-template <class T>
-std::optional<std::vector<T>> read_value_attribute(hid_t tag, const char* name, const TagKind& k,
-                                                   const std::string& where) {
-  if (!h5::has_attribute(tag, name)) return std::nullopt;
-  const Id a = h5::check(H5Aopen(tag, name, H5P_DEFAULT), std::string("open the ") + name + " of " + where);
-  h5::require_one_value(a.get(), std::string("the ") + name + " of " + where);
-  std::vector<T> v(static_cast<std::size_t>(k.ncomp));
-  h5::check(H5Aread(a.get(), k.mem.get(), v.data()), std::string("read the ") + name + " of " + where);
-  return v;
-}
-
-// The domain of every entity of a dimension, built (and fingerprinted) once
-// for all the tags that cover it.
-class FullDomains {
- public:
-  explicit FullDomains(const HostMesh& mesh) : mesh_(mesh) {}
-  const Domain<Kokkos::HostSpace>& get(int d) {
-    auto& slot = all_[static_cast<std::size_t>(d)];
-    if (!slot) slot = Domain<Kokkos::HostSpace>::all(mesh_, d);
-    return *slot;
-  }
-
- private:
-  const HostMesh& mesh_;
-  std::array<std::optional<Domain<Kokkos::HostSpace>>, num_field_slots> all_;
-};
 
 template <class T>
 void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKind& k,
@@ -818,30 +441,6 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
   } else {
     mesh.values().set(name, mesh_value(options, k.ncomp, format));
   }
-}
-
-// The default or global of a variable-length tag: one value of an array type
-// of any length, or a single value of the tag's type.
-template <class T>
-std::optional<std::vector<T>> read_var_attribute(hid_t tag, const char* name, const TagKind& k,
-                                                 const std::string& where) {
-  if (!h5::has_attribute(tag, name)) return std::nullopt;
-  const std::string what = std::string("the ") + name + " of " + where;
-  const Id a = h5::check(H5Aopen(tag, name, H5P_DEFAULT), "open " + what);
-  h5::require_one_value(a.get(), what);
-  const Id t = h5::check(H5Aget_type(a.get()), "get the type of " + what);
-  if (H5Tget_class(t.get()) != H5T_ARRAY) {
-    std::vector<T> v(1);
-    h5::check(H5Aread(a.get(), k.mem.get(), v.data()), "read " + what);
-    return v;
-  }
-  if (H5Tget_array_ndims(t.get()) != 1) fail(what + " is an array of more than one dimension");
-  hsize_t n = 0;
-  H5Tget_array_dims2(t.get(), &n);
-  const Id mem = h5::check(H5Tarray_create2(k.mem.get(), 1, &n), "make the memory type of " + what);
-  std::vector<T> v(static_cast<std::size_t>(n));
-  h5::check(H5Aread(a.get(), mem.get(), v.data()), "read " + what);
-  return v;
 }
 
 // A variable-length tag: id_list names the entities and sets, var_indices
@@ -1015,28 +614,6 @@ void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vect
       import_tag<T>(mesh, tstt, name, *kind, sources, at, full, handle, format);
     });
   }
-}
-
-// A cached graph's group name: pair_<from>_<to> or bridge_<dim>_<via>, one
-// digit each.
-struct GraphName {
-  bool pair = true;
-  int a = 0, b = 0;
-};
-std::optional<GraphName> graph_named(std::string_view n) {
-  GraphName g;
-  if (n.starts_with("pair_")) {
-    n.remove_prefix(5);
-  } else if (n.starts_with("bridge_")) {
-    g.pair = false;
-    n.remove_prefix(7);
-  } else {
-    return std::nullopt;
-  }
-  if (n.size() != 3 || n[1] != '_' || n[0] < '0' || n[0] > '3' || n[2] < '0' || n[2] > '3') return std::nullopt;
-  g.a = n[0] - '0';
-  g.b = n[2] - '0';
-  return g;
 }
 
 // One dataset of a cached graph: rank 1, read whole.
