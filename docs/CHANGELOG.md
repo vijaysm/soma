@@ -300,6 +300,45 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   in `answer` reach every rank.
 - Records are staged through host memory (one copy in, one out); transport uses tags 32000 to
   32767.
+- `rendezvous_to` is `rendezvous` with destinations the caller chooses (blocks of ids, say).
+- `rank_keys(comm, keys, words, distinct)` ranks fixed-width keys across ranks by a sample sort
+  (splitters chosen on rank 0 and broadcast); with `distinct`, equal keys share one index and
+  the indices do not depend on P.
+
+### Distributed meshes
+
+- `Ownership` gains `shared_copy`, and `SegmentTable` `shared_end`: each dimension is ordered
+  interior, shared and owned here, shared and owned elsewhere, ghosts, so ownership is a
+  comparison with segment ends (`MeshView::owned`, `interior`, `shared`).
+  `SegmentFilter::Own` selects each kind. `kind_bounds` gives each kind's range and
+  `split_segments` splits segments at cuts.
+- `MeshBuilder::set_ownership(dim, gids, kinds, groups)` orders a dimension by ownership, then
+  topology, arity and nodes, then neighbour group; `set_key_box` gives every rank the same curve
+  box. `vertex_gids()`, `vertex_coordinates()` and `element_gids(dim)` return what was added.
+- High-order vertices: within each ownership kind, corners come before node-only vertices, in
+  segments of their own. `Mesh::corner_end(kind)`, `MeshView::corner_ends` and
+  `MeshView::corner(v)`; `corners()` is the interior kind's end, so an all-interior mesh keeps
+  `[0, corners())`.
+- `partition_by_curve(comm, centroids, gids)` cuts elements into runs of a Morton curve of
+  their centroids whose sizes differ by at most one.
+- `resolve_sharing(comm, gids)` finds every rank holding each gid (the lowest owns it).
+- `build_local_part(comm, builder, ordering)` builds a rank's part with the ownership and
+  sharing of every dimension it holds, kept in the internal fields `soma:sharing` (the other
+  ranks holding each shared entity) and `soma:owner` (the owner of each shared copy).
+- `build_distributed_adjacencies(comm, mesh, request)` builds graphs on a part and gives
+  derived edges and faces gids that do not depend on P (the largest explicit gid plus the rank
+  of their sorted corner gids), sharing and ownership order; a distributed dimension that the
+  derivation extends is distributed again.
+- `SharedExchange(comm, mesh, dim)`: `update` (owners to copies) and `reduce` (every holder
+  gets the same bits, combined in ascending rank order) over the shared entities.
+- `permute_entities(mesh, dim, new_of_old, table, gids)` reorders one dimension with
+  everything that refers to it (connectivity, graphs, sets, fields), optionally with new gids.
+- `read_h5m(comm, path, options)` reads a file in parallel: every rank reads the metadata and
+  a slice of each dataset; elements go by the file's `PARALLEL_PARTITION` sets when there are
+  at least as many as ranks (`H5mReadOptions::file_parts`), else by the curve; explicit
+  entities of lower dimensions go to every rank holding all their corners; sets, tags and
+  cached graphs follow (graphs are built on each part). Each rank's entities, set members and
+  values equal the serial read's by gid.
 
 ### Patch-based AMR
 
