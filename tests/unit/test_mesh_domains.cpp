@@ -108,6 +108,20 @@ TEST(MeshDomains, GhostSegmentsHoldOnlyGhosts) {
   EXPECT_EQ(d.row(2, 1), soma::invalid_lo);
 }
 
+TEST(MeshDomains, SharedSegmentsTakeBothSharedKinds) {
+  const auto mesh = soma_test::mesh_with_every_vertex_ownership();
+  const auto with = [&](SegmentFilter::Own own) {
+    SegmentFilter f;
+    f.ownership = own;
+    return Dom::segments(mesh, 0, f);
+  };
+  EXPECT_EQ(with(SegmentFilter::Own::shared), Dom::from_list(mesh, 0, std::vector<LO>{3, 4, 5}));
+  EXPECT_EQ(with(SegmentFilter::Own::shared_copy), Dom::from_list(mesh, 0, std::vector<LO>{5}));
+  EXPECT_EQ(with(SegmentFilter::Own::owned), Dom::from_list(mesh, 0, std::vector<LO>{0, 1, 2, 3, 4}));
+  EXPECT_EQ(with(SegmentFilter::Own::interior), Dom::from_list(mesh, 0, std::vector<LO>{0, 1, 2}));
+  EXPECT_EQ(with(SegmentFilter::Own::ghost), Dom::from_list(mesh, 0, std::vector<LO>{6}));
+}
+
 TEST(MeshDomains, ArityFilterCombinesWithOwnership) {
   const auto mesh = soma_test::mesh_with_shared_and_ghost_elements();
   SegmentFilter four;

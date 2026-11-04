@@ -184,6 +184,7 @@ SegmentTable interior_segments(std::size_t n, KeyOf key_of) {
   }
   out.interior_end = out.count;
   out.owned_end = out.count;
+  out.shared_end = out.count;
   return out;
 }
 
@@ -290,6 +291,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
   }
   v.segments.interior_end = v.count;
   v.segments.owned_end = v.count;
+  v.segments.shared_end = v.count;
 
   const auto find_vertex = [&](GO g) -> LO {
     if (!dense_local.empty()) {

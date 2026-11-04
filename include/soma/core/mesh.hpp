@@ -229,6 +229,7 @@ class Mesh {
       v.counts[d] = ents_[d].count;
       v.interior_ends[d] = ents_[d].segments.interior_end;
       v.owned_ends[d] = ents_[d].segments.owned_end;
+      v.shared_ends[d] = ents_[d].segments.shared_end;
       v.offsets[d] = ents_[d].conn_offsets;
       v.conn[d] = ents_[d].conn;
       v.topo[d] = ents_[d].topology;

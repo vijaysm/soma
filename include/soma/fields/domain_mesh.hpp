@@ -22,7 +22,7 @@ namespace soma {
 
 // Which segments of one dimension a domain takes. Unset members match anything.
 struct SegmentFilter {
-  enum class Own : std::uint8_t { any, owned, interior, ghost };
+  enum class Own : std::uint8_t { any, owned, interior, ghost, shared, shared_copy };
   std::optional<Topology> topology{};
   std::optional<std::uint16_t> arity{};
   Own ownership = Own::any;
@@ -32,9 +32,11 @@ struct SegmentFilter {
     if (arity && *arity != s.arity) return false;
     switch (ownership) {
       case Own::any: return true;
-      case Own::owned: return s.ownership != Ownership::ghost;
+      case Own::owned: return s.ownership <= Ownership::shared;
       case Own::interior: return s.ownership == Ownership::interior;
       case Own::ghost: return s.ownership == Ownership::ghost;
+      case Own::shared: return s.ownership == Ownership::shared || s.ownership == Ownership::shared_copy;
+      case Own::shared_copy: return s.ownership == Ownership::shared_copy;
     }
     return false;
   }

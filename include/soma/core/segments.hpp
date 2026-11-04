@@ -13,7 +13,11 @@
 
 namespace soma {
 
-enum class Ownership : std::uint8_t { interior = 0, shared = 1, ghost = 2 };
+// Each dimension is ordered by ownership first: entities only here, shared and
+// owned here, shared and owned by another rank (copies of its entities), and
+// ghosts (never owned). Each kind is a contiguous range, so ownership is a
+// comparison with the ends below.
+enum class Ownership : std::uint8_t { interior = 0, shared = 1, shared_copy = 2, ghost = 3 };
 
 // A contiguous run of entities sharing ownership class, topology, and arity.
 // Uniform arity lets kernels be instantiated with a compile-time vertex count.
@@ -33,8 +37,9 @@ struct Segment {
 struct SegmentTable {
   std::vector<Segment> segments;
   LO count = 0;
-  LO interior_end = 0;
-  LO owned_end = 0;
+  LO interior_end = 0;  // [0, interior_end): interior
+  LO owned_end = 0;     // [interior_end, owned_end): shared and owned here
+  LO shared_end = 0;    // [owned_end, shared_end): shared copies; the rest ghosts
 };
 
 // Builds the table from per-entity keys already sorted by

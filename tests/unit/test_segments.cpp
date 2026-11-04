@@ -45,3 +45,42 @@ TEST(Segments, EmptyInputIsEmptyTable) {
   EXPECT_TRUE(s.segments.empty());
   EXPECT_EQ(s.count, 0);
 }
+
+TEST(Segments, EveryOwnershipKindIsARangeInOrder) {
+  const std::vector<Ownership> own{Ownership::interior, Ownership::shared, Ownership::shared,
+                                   Ownership::shared_copy, Ownership::ghost, Ownership::ghost};
+  const std::vector<Topology> topo(6, Topology::hex);
+  const std::vector<std::uint16_t> arity(6, 8);
+  const SegmentTable s = make_segments(own, topo, arity);
+  ASSERT_EQ(s.segments.size(), 4u);
+  EXPECT_EQ(s.segments[2], (Segment{3, 4, Topology::hex, 8, Ownership::shared_copy}));
+  EXPECT_EQ(s.interior_end, 1);
+  EXPECT_EQ(s.owned_end, 3);
+  EXPECT_EQ(s.shared_end, 4);
+  EXPECT_EQ(s.count, 6);
+  const std::vector<Ownership> backwards{Ownership::shared_copy, Ownership::shared};
+  EXPECT_THROW(make_segments(backwards, std::vector<Topology>(2, Topology::hex), std::vector<std::uint16_t>(2, 8)),
+               std::invalid_argument);
+}
+
+// An absent kind is an empty range where the one before it ends.
+TEST(Segments, AbsentKindsAreEmptyRanges) {
+  const auto table = [](std::vector<Ownership> own) {
+    return make_segments(own, std::vector<Topology>(own.size(), Topology::tet),
+                         std::vector<std::uint16_t>(own.size(), 4));
+  };
+  const SegmentTable copies = table({Ownership::shared_copy, Ownership::shared_copy, Ownership::ghost});
+  EXPECT_EQ(copies.interior_end, 0);
+  EXPECT_EQ(copies.owned_end, 0);
+  EXPECT_EQ(copies.shared_end, 2);
+  const SegmentTable interior = table({Ownership::interior, Ownership::interior});
+  EXPECT_EQ(interior.owned_end, 2);
+  EXPECT_EQ(interior.shared_end, 2);
+  const SegmentTable ghosts = table({Ownership::ghost});
+  EXPECT_EQ(ghosts.interior_end, 0);
+  EXPECT_EQ(ghosts.owned_end, 0);
+  EXPECT_EQ(ghosts.shared_end, 0);
+  const SegmentTable owned = table({Ownership::interior, Ownership::shared, Ownership::ghost});
+  EXPECT_EQ(owned.owned_end, 2);
+  EXPECT_EQ(owned.shared_end, 2);
+}

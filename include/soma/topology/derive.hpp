@@ -343,6 +343,7 @@ Derived<typename ExecSpace::memory_space> derive(
   st.count = n;
   st.interior_end = n;
   st.owned_end = n;
+  st.shared_end = n;
   return out;
 }
 

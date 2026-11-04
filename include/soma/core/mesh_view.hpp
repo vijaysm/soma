@@ -28,6 +28,7 @@ struct MeshView {
   Kokkos::Array<LO, 4> counts{};
   Kokkos::Array<LO, 4> interior_ends{};
   Kokkos::Array<LO, 4> owned_ends{};
+  Kokkos::Array<LO, 4> shared_ends{};
   Kokkos::Array<UView1<Offset, MemSpace>, 4> offsets{};
   Kokkos::Array<UView1<LO, MemSpace>, 4> conn{};
   Kokkos::Array<UView1<std::uint8_t, MemSpace>, 4> topo{};
@@ -102,6 +103,11 @@ struct MeshView {
   }
   KOKKOS_INLINE_FUNCTION bool interior(int d, LO e) const {
     return e < interior_ends[static_cast<std::size_t>(d)];
+  }
+  // Shared with another rank, whichever owns it.
+  KOKKOS_INLINE_FUNCTION bool shared(int d, LO e) const {
+    const auto k = static_cast<std::size_t>(d);
+    return e >= interior_ends[k] && e < shared_ends[k];
   }
 
  private:

@@ -65,6 +65,19 @@ inline soma::HostMesh mesh_with_shared_and_ghost_elements() {
   return mesh;
 }
 
+// The fixture mesh with its seven vertices relabelled: three interior, two
+// shared and owned here, one shared copy, one ghost.
+inline soma::HostMesh mesh_with_every_vertex_ownership() {
+  soma::HostMesh mesh = two_quads_and_a_triangle();
+  using soma::Ownership;
+  const std::vector<Ownership> own{Ownership::interior, Ownership::interior, Ownership::interior, Ownership::shared,
+                                   Ownership::shared,   Ownership::shared_copy, Ownership::ghost};
+  const std::vector<soma::Topology> topo(7, soma::Topology::vertex);
+  const std::vector<std::uint16_t> arity(7, 1);
+  soma::MeshTestAccess::set_segments(mesh, 0, soma::make_segments(own, topo, arity));
+  return mesh;
+}
+
 }  // namespace soma_test
 
 #endif  // SOMA_TESTS_MESH_FIXTURE_HPP_

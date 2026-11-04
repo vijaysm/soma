@@ -201,6 +201,22 @@ TEST(MeshSemantics, ViewSeparatesInteriorOwnedAndGhostEntities) {
   EXPECT_EQ(dv.interior_ends[2], 1);
 }
 
+TEST(MeshSemantics, ViewTellsEveryOwnershipKindApart) {
+  const auto mesh = soma_test::mesh_with_every_vertex_ownership();
+  EXPECT_EQ(mesh.segment_table(0).shared_end, 6);
+  const auto v = mesh.view();
+  for (LO e = 0; e < 7; ++e) {
+    EXPECT_EQ(v.interior(0, e), e < 3) << e;
+    EXPECT_EQ(v.owned(0, e), e < 5) << e;
+    EXPECT_EQ(v.shared(0, e), e >= 3 && e < 6) << e;
+  }
+  const auto dev = mesh.mirror<DevMem>();
+  EXPECT_EQ(dev.view().shared_ends[0], 6);
+  // Built meshes are interior throughout.
+  const auto plain = soma_test::two_quads_and_a_triangle();
+  for (int d = 0; d <= 2; ++d) EXPECT_EQ(plain.segment_table(d).shared_end, plain.count(d)) << d;
+}
+
 TEST(MeshSemantics, ViewDoesNotOwn) {
   const auto h = soma_test::two_quads_and_a_triangle();
   const auto before = h.coords().use_count();

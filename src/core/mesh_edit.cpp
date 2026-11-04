@@ -345,6 +345,7 @@ EditReport MeshEdit::apply() {
       b.segments.count = b.count;
       b.segments.interior_end = b.count;
       b.segments.owned_end = b.count;
+      b.segments.shared_end = b.count;
     }
     if (!removed_[k].empty() || old.alive.extent(0) > 0) {
       View1<std::uint8_t, Host> alive(Kokkos::view_alloc(std::string("soma::mesh::alive"), Kokkos::WithoutInitializing), n);

@@ -3,6 +3,7 @@
 
 #include "soma/core/segments.hpp"
 
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <tuple>
@@ -31,8 +32,12 @@ SegmentTable make_segments(std::span<const Ownership> ownership,
   }
   for (const Segment& s : out.segments) {
     if (s.ownership == Ownership::interior) out.interior_end = s.end;
-    if (s.ownership != Ownership::ghost) out.owned_end = s.end;
+    if (s.ownership <= Ownership::shared) out.owned_end = s.end;
+    if (s.ownership <= Ownership::shared_copy) out.shared_end = s.end;
   }
+  // A kind that is absent ends where the one before it does.
+  out.owned_end = std::max(out.owned_end, out.interior_end);
+  out.shared_end = std::max(out.shared_end, out.owned_end);
   return out;
 }
 
