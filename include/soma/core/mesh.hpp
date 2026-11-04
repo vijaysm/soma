@@ -39,6 +39,10 @@ struct EntityBlock {
   View1<LO, MemSpace> conn;
   View1<std::uint8_t, MemSpace> topology;
   View1<GO, MemSpace> gid;
+  // High-order elements: each element's nodes beyond its corners, as vertex
+  // local ids in MOAB's order; both empty when no element has any.
+  View1<Offset, MemSpace> node_offsets;  // count + 1
+  View1<LO, MemSpace> nodes;
   SegmentTable segments;
   bool derived = false;  // complete: built from the elements, explicit input adopted
   bool input = false;    // given to MeshBuilder; kept when derivation adopts the entities
@@ -95,6 +99,13 @@ class Mesh {
   View1<const LO, MemSpace> conn(int d) const { return block(d).conn; }
   View1<const std::uint8_t, MemSpace> topology(int d) const { return block(d).topology; }
   View1<const GO, MemSpace> gid(int d) const { return block(d).gid; }
+  // The nodes of high-order elements beyond their corners (MeshView::node
+  // gives corners and nodes together). Vertices that are only such nodes are
+  // numbered after the others: [0, corners()) are the corner vertices.
+  bool has_nodes(int d) const { return block(d).node_offsets.extent(0) > 0; }
+  View1<const Offset, MemSpace> node_offsets(int d) const { return block(d).node_offsets; }
+  View1<const LO, MemSpace> nodes(int d) const { return block(d).nodes; }
+  LO corners() const noexcept { return corners_; }
   // True for the dimensions MeshBuilder was given entities of (vertices
   // always), also after derivation adopts them; false for derived-only ones.
   bool input(int d) const { return block(d).input; }
@@ -166,8 +177,11 @@ class Mesh {
       v.conn[d] = ents_[d].conn;
       v.topo[d] = ents_[d].topology;
       v.gids[d] = ents_[d].gid;
+      v.node_offsets[d] = ents_[d].node_offsets;
+      v.nodes[d] = ents_[d].nodes;
     }
     v.coords = coords_;
+    v.corners = corners_;
     for (std::size_t s = 0; s < adj_.graphs.size(); ++s) {
       v.adj_offsets[s] = adj_.graphs[s].offsets;
       v.adj_targets[s] = adj_.graphs[s].targets;
@@ -200,6 +214,7 @@ class Mesh {
 
   void swap(Mesh& o) noexcept {
     std::swap(dim_, o.dim_);
+    std::swap(corners_, o.corners_);
     for (std::size_t d = 0; d < 4; ++d) std::swap(ents_[d], o.ents_[d]);
     std::swap(coords_, o.coords_);
     std::swap(epoch_, o.epoch_);
@@ -274,7 +289,10 @@ class Mesh {
       transfer(t.conn, s.conn, alias);
       transfer(t.topology, s.topology, alias);
       transfer(t.gid, s.gid, alias);
+      transfer(t.node_offsets, s.node_offsets, alias);
+      transfer(t.nodes, s.nodes, alias);
     }
+    if (o.dims[0]) out.corners_ = corners_;
     if (o.coordinates) transfer(out.coords_, coords_, alias);
     if (o.adj_source == TransferOptions::AdjSource::copy) {
       for (int s = 0; s < adjacency_slots; ++s) {
@@ -318,6 +336,7 @@ class Mesh {
   }
 
   int dim_ = 0;
+  LO corners_ = 0;
   std::array<EntityBlock<MemSpace>, 4> ents_{};
   CoordView<MemSpace> coords_;
   std::uint64_t epoch_ = 1;
