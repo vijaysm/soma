@@ -139,6 +139,30 @@ inline void read(hid_t dataset, hid_t mem, void* out, const std::string& where) 
   check(H5Dread(dataset, mem, H5S_ALL, H5S_ALL, H5P_DEFAULT, out), "read " + where);
 }
 
+// Rows [first, first + count) of a dataset of rank 1 or 2 (every column)
+// into out, which holds them in memory type `mem`.
+inline void read_rows(hid_t dataset, hid_t mem, hsize_t first, hsize_t count, void* out, const std::string& where) {
+  if (count == 0) return;
+  const Id file = check(H5Dget_space(dataset), "get the dataspace of " + where);
+  const int rank = H5Sget_simple_extent_ndims(file.get());
+  if (rank != 1 && rank != 2) throw Error(where + " must have rank 1 or 2 to be read in rows");
+  hsize_t dims[2] = {0, 1};
+  check(H5Sget_simple_extent_dims(file.get(), dims, nullptr), "get the extent of " + where);
+  if (first > dims[0] || count > dims[0] - first) throw Error("rows beyond the end of " + where);
+  const hsize_t start[2] = {first, 0};
+  const hsize_t extent[2] = {count, rank == 2 ? dims[1] : 1};
+  check(H5Sselect_hyperslab(file.get(), H5S_SELECT_SET, start, nullptr, extent, nullptr), "select rows of " + where);
+  const Id memory = check(H5Screate_simple(rank, extent, nullptr), "make a dataspace for rows of " + where);
+  check(H5Dread(dataset, mem, memory.get(), file.get(), H5P_DEFAULT, out), "read rows of " + where);
+}
+
+template <class T>
+std::vector<T> read_rows(hid_t dataset, hsize_t first, hsize_t count, std::size_t columns, const std::string& where) {
+  std::vector<T> out(static_cast<std::size_t>(count) * columns);
+  read_rows(dataset, native<T>(), first, count, out.data(), where);
+  return out;
+}
+
 template <class T>
 std::vector<T> read_all(hid_t dataset, std::size_t count, const std::string& where) {
   std::vector<T> out(count);

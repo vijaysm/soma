@@ -121,6 +121,34 @@ inline Offset to_offset(std::uint64_t n, const std::string& where) {
   return static_cast<Offset>(n);
 }
 
+// The vertices' file ids and coordinate columns, checked.
+struct NodeInfo {
+  GO start = 1;
+  GO count = 0;
+  std::size_t columns = 3;
+};
+
+inline NodeInfo describe_nodes(hid_t tstt) {
+  const std::string where = "/tstt/nodes/coordinates";
+  if (!h5::exists(tstt, "nodes/coordinates")) fail("it has no " + where);
+  const Id ds = h5::open_dataset(tstt, "nodes/coordinates");
+  const auto ext = h5::extent(ds.get(), where);
+  if (ext.size() != 2 || ext[1] < 1 || ext[1] > 3) {
+    fail(where + " must have one row per vertex and 1 to 3 columns");
+  }
+  if (ext[0] == 0) fail(where + " holds no vertices");
+  if (ext[0] > static_cast<hsize_t>(std::numeric_limits<LO>::max())) {
+    fail(where + " holds " + str(std::uint64_t{ext[0]}) +
+         " vertices, more than the LO type of this build can number");
+  }
+  if (ext[0] > std::numeric_limits<std::size_t>::max() / 3) fail(where + " holds more values than memory can index");
+  NodeInfo n;
+  n.count = static_cast<GO>(ext[0]);
+  n.columns = static_cast<std::size_t>(ext[1]);
+  n.start = start_id(ds.get(), where);
+  return n;
+}
+
 // A group's type, extents and start id, checked, without its connectivity.
 inline Group describe_group(hid_t elements, const std::string& name) {
   Group g;

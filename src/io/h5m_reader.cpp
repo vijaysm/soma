@@ -43,29 +43,18 @@ struct Nodes {
 };
 
 Nodes read_nodes(hid_t tstt) {
+  const NodeInfo info = describe_nodes(tstt);
   const std::string where = "/tstt/nodes/coordinates";
-  if (!h5::exists(tstt, "nodes/coordinates")) fail("it has no " + where);
   const Id ds = h5::open_dataset(tstt, "nodes/coordinates");
-  const auto ext = h5::extent(ds.get(), where);
-  if (ext.size() != 2 || ext[1] < 1 || ext[1] > 3) {
-    fail(where + " must have one row per vertex and 1 to 3 columns");
-  }
-  if (ext[0] == 0) fail(where + " holds no vertices");
-  if (ext[0] > static_cast<hsize_t>(std::numeric_limits<LO>::max())) {
-    fail(where + " holds " + str(std::uint64_t{ext[0]}) +
-         " vertices, more than the LO type of this build can number");
-  }
-  if (ext[0] > std::numeric_limits<std::size_t>::max() / 3) fail(where + " holds more values than memory can index");
   Nodes n;
-  n.count = static_cast<GO>(ext[0]);
-  const auto rows = static_cast<std::size_t>(ext[0]);
-  const auto cols = static_cast<std::size_t>(ext[1]);
-  const auto raw = h5::read_all<double>(ds.get(), rows * cols, where);
+  n.start = info.start;
+  n.count = info.count;
+  const auto rows = static_cast<std::size_t>(info.count);
+  const auto raw = h5::read_all<double>(ds.get(), rows * info.columns, where);
   n.xyz.assign(3 * rows, 0.0);
   for (std::size_t i = 0; i < rows; ++i) {
-    for (std::size_t c = 0; c < cols; ++c) n.xyz[3 * i + c] = raw[cols * i + c];
+    for (std::size_t c = 0; c < info.columns; ++c) n.xyz[3 * i + c] = raw[info.columns * i + c];
   }
-  n.start = start_id(ds.get(), where);
   return n;
 }
 
