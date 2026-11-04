@@ -84,3 +84,30 @@ TEST(Segments, AbsentKindsAreEmptyRanges) {
   EXPECT_EQ(owned.owned_end, 2);
   EXPECT_EQ(owned.shared_end, 2);
 }
+
+TEST(Segments, KindBoundsDelimitEachKind) {
+  const SegmentTable s = make_segments(
+      std::vector<Ownership>{Ownership::interior, Ownership::interior, Ownership::shared_copy, Ownership::ghost},
+      std::vector<Topology>(4, Topology::vertex), std::vector<std::uint16_t>(4, 1));
+  EXPECT_EQ(kind_bounds(s), (std::array<LO, 5>{0, 2, 2, 3, 4}));
+  EXPECT_EQ(kind_bounds(SegmentTable{}), (std::array<LO, 5>{0, 0, 0, 0, 0}));
+}
+
+// A cut inside a segment splits it; one at a segment's end, or repeated,
+// changes nothing.
+TEST(Segments, SplitAtCuts) {
+  SegmentTable s = make_segments(std::vector<Ownership>{Ownership::interior, Ownership::interior, Ownership::interior,
+                                                        Ownership::shared, Ownership::shared},
+                                 std::vector<Topology>(5, Topology::vertex), std::vector<std::uint16_t>(5, 1));
+  const std::vector<LO> cuts{3, 2, 0, 5, 4, 2};
+  split_segments(s, cuts);
+  ASSERT_EQ(s.segments.size(), 4u);
+  EXPECT_EQ(s.segments[0], (Segment{0, 2, Topology::vertex, 1, Ownership::interior}));
+  EXPECT_EQ(s.segments[1], (Segment{2, 3, Topology::vertex, 1, Ownership::interior}));
+  EXPECT_EQ(s.segments[2], (Segment{3, 4, Topology::vertex, 1, Ownership::shared}));
+  EXPECT_EQ(s.segments[3], (Segment{4, 5, Topology::vertex, 1, Ownership::shared}));
+  EXPECT_EQ(s.interior_end, 3);
+  EXPECT_EQ(s.owned_end, 5);
+  EXPECT_THROW(split_segments(s, std::vector<LO>{6}), std::invalid_argument);
+  EXPECT_THROW(split_segments(s, std::vector<LO>{-1}), std::invalid_argument);
+}

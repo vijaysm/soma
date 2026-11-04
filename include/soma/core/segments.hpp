@@ -4,6 +4,7 @@
 #ifndef SOMA_CORE_SEGMENTS_HPP_
 #define SOMA_CORE_SEGMENTS_HPP_
 
+#include <array>
 #include <cstdint>
 #include <span>
 #include <vector>
@@ -47,6 +48,13 @@ struct SegmentTable {
 SegmentTable make_segments(std::span<const Ownership> ownership,
                            std::span<const Topology> topology,
                            std::span<const std::uint16_t> arity);
+
+// Kind k (an Ownership as an index) is [bounds[k], bounds[k + 1]).
+std::array<LO, 5> kind_bounds(const SegmentTable& t);
+
+// Splits each segment a cut falls strictly inside, so no segment straddles a
+// cut. Throws std::invalid_argument for a cut outside [0, t.count].
+void split_segments(SegmentTable& t, std::span<const LO> cuts);
 
 }  // namespace soma
 
