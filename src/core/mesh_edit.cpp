@@ -414,7 +414,7 @@ HostMesh live_mesh(const HostMesh& mesh) {
     // Sides derived alone that no live element has any more go with it; a
     // side given as input stays, and derivation rejects it if it is no side.
     using Access = TopologyAccess;
-    const bool prune = d < D && !Access::block(mesh, d).input && !Access::block(mesh, d).derived;
+    const bool prune = d < D && mesh.count(d) > 0 && !Access::block(mesh, d).input && !Access::block(mesh, d).derived;
     const std::vector<std::array<LO, 5>> sides = prune ? side_keys(mesh, d) : std::vector<std::array<LO, 5>>{};
     // Live entities by (topology, node count), each group in lid order.
     std::map<std::pair<std::uint8_t, LO>, std::vector<LO>> groups;
