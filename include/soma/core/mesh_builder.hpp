@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -30,6 +31,19 @@ class MeshBuilder {
   void add_polygons(std::span<const GO> gids, std::span<const Offset> offsets,
                     std::span<const GO> vertex_gids);
 
+  // Distributed meshes: the ownership of the entities of dimension `dim`
+  // named by gid (unnamed ones are interior) and a neighbour-set group, equal
+  // for entities shared with the same ranks. Within an ownership kind,
+  // topology, arity and node count, entities are ordered by group. Throws
+  // std::invalid_argument for a dimension outside [0, dim], spans of
+  // different lengths, or (at build) a gid named twice in a dimension.
+  void set_ownership(int dim, std::span<const GO> gids, std::span<const Ownership> kinds,
+                     std::span<const std::uint32_t> groups);
+  // The box of the curve keys, instead of that of the vertices here: the box
+  // of every rank's vertices makes keys comparable across ranks. Throws
+  // std::invalid_argument unless the corners are finite and lo <= hi.
+  void set_key_box(const std::array<Real, 3>& lo, const std::array<Real, 3>& hi);
+
   // Orders every dimension and translates connectivity to local ids.
   //   Ordering::file            elements (topology, arity, nodes, gid);
   //                             vertices by gid
@@ -41,8 +55,11 @@ class MeshBuilder {
   // the others, in the same order among themselves. Element
   // gids are identities within a dimension: two elements of one dimension may
   // not share a gid, whatever their topology. Ordering::tiled throws.
-  // Every entity built today is interior. Once shared and ghost entities are
-  // built, ownership will come first in the key, ahead of the topology.
+  // Ownership comes first in every key, then topology, arity and nodes, then
+  // the group set by set_ownership, then the order above, so each ownership
+  // kind is a contiguous range (soma/core/segments.hpp). Ownership other than
+  // interior on vertices of a mesh with node-only vertices throws
+  // std::invalid_argument: corners first and ownership first cannot both hold.
   HostMesh build(Ordering ordering = default_ordering) &&;
 
  private:
@@ -58,6 +75,13 @@ class MeshBuilder {
   std::vector<GO> vertex_gids_;
   std::vector<Real> xyz_;
   std::array<std::vector<Block>, 4> blocks_;
+  struct Owned {
+    GO gid;
+    Ownership kind;
+    std::uint32_t group;
+  };
+  std::array<std::vector<Owned>, 4> owned_;
+  std::optional<std::array<Real, 6>> key_box_;
 };
 
 }  // namespace soma

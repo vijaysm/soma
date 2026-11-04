@@ -122,6 +122,28 @@ void MeshBuilder::add_polygons(std::span<const GO> gids, std::span<const Offset>
                              {}});
 }
 
+void MeshBuilder::set_ownership(int dim, std::span<const GO> gids, std::span<const Ownership> kinds,
+                                std::span<const std::uint32_t> groups) {
+  if (dim < 0 || dim > dim_) {
+    throw std::invalid_argument("set_ownership: dimension " + std::to_string(dim) + " is outside [0, " +
+                                std::to_string(dim_) + "]");
+  }
+  if (kinds.size() != gids.size() || groups.size() != gids.size()) {
+    throw std::invalid_argument("set_ownership: gids, kinds and groups differ in length");
+  }
+  auto& o = owned_[static_cast<std::size_t>(dim)];
+  for (std::size_t i = 0; i < gids.size(); ++i) o.push_back(Owned{gids[i], kinds[i], groups[i]});
+}
+
+void MeshBuilder::set_key_box(const std::array<Real, 3>& lo, const std::array<Real, 3>& hi) {
+  for (std::size_t d = 0; d < 3; ++d) {
+    if (!std::isfinite(lo[d]) || !std::isfinite(hi[d]) || lo[d] > hi[d]) {
+      throw std::invalid_argument("set_key_box: the corners are not finite with lo <= hi");
+    }
+  }
+  key_box_ = std::array<Real, 6>{lo[0], lo[1], lo[2], hi[0], hi[1], hi[2]};
+}
+
 namespace {
 
 struct Keys {
@@ -167,30 +189,40 @@ void stable_sort_by_key(std::vector<R>& v, KeyOf key_of) {
   }
 }
 
-// The segments of n interior entities, sorted by (topology, arity) already:
+// The segments of n entities sorted by (ownership, topology, arity) already:
 // what make_segments returns for them, without per-entity key arrays.
 template <class KeyOf>
-SegmentTable interior_segments(std::size_t n, KeyOf key_of) {
+SegmentTable sorted_segments(std::size_t n, KeyOf key_of) {
   SegmentTable out;
   out.count = static_cast<LO>(n);
   for (std::size_t i = 0; i < n; ++i) {
-    const auto [t, arity] = key_of(i);
+    const auto [own, t, arity] = key_of(i);
     const auto at = static_cast<LO>(i);
-    if (out.segments.empty() || out.segments.back().topology != t ||
-        out.segments.back().arity != arity) {
-      out.segments.push_back(Segment{at, at, t, arity, Ownership::interior});
+    const Segment* last = out.segments.empty() ? nullptr : &out.segments.back();
+    if (!last || last->ownership != own || last->topology != t || last->arity != arity) {
+      out.segments.push_back(Segment{at, at, t, arity, own});
     }
     out.segments.back().end = static_cast<LO>(i + 1);
   }
-  out.interior_end = out.count;
-  out.owned_end = out.count;
-  out.shared_end = out.count;
+  for (const Segment& s : out.segments) {
+    if (s.ownership == Ownership::interior) out.interior_end = s.end;
+    if (s.ownership <= Ownership::shared) out.owned_end = s.end;
+    if (s.ownership <= Ownership::shared_copy) out.shared_end = s.end;
+  }
+  out.owned_end = std::max(out.owned_end, out.interior_end);
+  out.shared_end = std::max(out.shared_end, out.owned_end);
   return out;
 }
 
-Keys make_keys(Ordering ordering, const std::vector<Real>& xyz) {
+Keys make_keys(Ordering ordering, const std::vector<Real>& xyz, const std::optional<std::array<Real, 6>>& box) {
   Keys k;
-  if (ordering != Ordering::type_major_sfc || xyz.empty()) return k;
+  if (ordering != Ordering::type_major_sfc) return k;
+  if (box) {
+    k.box = sfc::KeyBox::make(box->data(), box->data() + 3);
+    k.active = true;
+    return k;
+  }
+  if (xyz.empty()) return k;
   Real lo[3] = {xyz[0], xyz[1], xyz[2]};
   Real hi[3] = {xyz[0], xyz[1], xyz[2]};
   for (std::size_t i = 0; i < xyz.size(); i += 3) {
@@ -213,7 +245,34 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
   HostMesh mesh;
   mesh.dim_ = dim_;
   mesh.ordering_ = ordering;
-  const Keys keys = make_keys(ordering, xyz_);
+  const Keys keys = make_keys(ordering, xyz_, key_box_);
+  // Per dimension, the ownership named by gid, sorted by gid; (kind, group)
+  // packed in one word, kind high, so a word sorts by kind then group.
+  std::array<std::vector<Owned>, 4> owned = owned_;
+  for (std::size_t d = 0; d < 4; ++d) {
+    auto& o = owned[d];
+    std::sort(o.begin(), o.end(), [](const Owned& a, const Owned& b) { return a.gid < b.gid; });
+    const auto dup = std::adjacent_find(o.begin(), o.end(), [](const Owned& a, const Owned& b) { return a.gid == b.gid; });
+    if (dup != o.end()) {
+      throw std::invalid_argument("set_ownership: gid " + std::to_string(dup->gid) + " of dimension " +
+                                  std::to_string(d) + " is named twice");
+    }
+  }
+  std::array<std::size_t, 4> named{};  // entities found among those named
+  const auto own_of = [&](std::size_t d, GO g) -> std::uint64_t {
+    const auto& o = owned[d];
+    const auto it = std::lower_bound(o.begin(), o.end(), g, [](const Owned& a, GO x) { return a.gid < x; });
+    if (it == o.end() || it->gid != g) return 0;
+    ++named[d];
+    return std::uint64_t{static_cast<std::uint8_t>(it->kind)} << 32 | it->group;
+  };
+  const auto check_named = [&](std::size_t d) {
+    if (named[d] != owned[d].size()) {
+      throw std::invalid_argument("set_ownership: " + std::to_string(owned[d].size() - named[d]) +
+                                  " gids of dimension " + std::to_string(d) + " name no entity");
+    }
+  };
+  const auto kind_of = [](std::uint64_t own) { return static_cast<Ownership>(own >> 32); };
 
   // Vertices: (key, gid). With Ordering::file every key is 0, so by gid.
   const std::size_t nv = vertex_gids_.size();
@@ -221,18 +280,26 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     std::uint64_t key;
     GO gid;
     std::size_t src;
+    std::uint64_t own;
   };
   std::vector<VertexRec> vrecs(nv);
   using HostRange = Kokkos::RangePolicy<Kokkos::DefaultHostExecutionSpace>;
   Kokkos::parallel_for("soma::mesh_builder::vertex_keys", HostRange(0, nv),
                        [&](const std::size_t i) {
                          const Real* x = &xyz_[3 * i];
-                         vrecs[i] = {keys(x[0], x[1], x[2]), vertex_gids_[i], i};
+                         vrecs[i] = {keys(x[0], x[1], x[2]), vertex_gids_[i], i, 0};
                        });
   // By gid, then stably by key: by (key, gid).
   sort_unless_sorted(vrecs.begin(), vrecs.end(),
                      [](const VertexRec& a, const VertexRec& b) { return a.gid < b.gid; });
   stable_sort_by_key(vrecs, [](const VertexRec& r) { return r.key; });
+  // Then stably by group and by kind: by (kind, group, key, gid).
+  if (!owned[0].empty()) {
+    for (VertexRec& r : vrecs) r.own = own_of(0, r.gid);
+    check_named(0);
+    stable_sort_by_key(vrecs, [](const VertexRec& r) { return r.own & 0xFFFFFFFFULL; });
+    stable_sort_by_key(vrecs, [](const VertexRec& r) { return r.own >> 32; });
+  }
   mesh.coords_ = CoordView<Kokkos::HostSpace>(
       Kokkos::view_alloc(std::string("soma::mesh::coords"), Kokkos::WithoutInitializing), nv);
   auto& v = mesh.ents_[0];
@@ -285,13 +352,10 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       for (const auto& [g, l] : local_of) dense_local[static_cast<std::size_t>(g - gmin)] = l;
     }
   }
-  v.segments.count = v.count;
-  if (nv > 0) {
-    v.segments.segments.push_back(Segment{0, v.count, Topology::vertex, 1, Ownership::interior});
-  }
-  v.segments.interior_end = v.count;
-  v.segments.owned_end = v.count;
-  v.segments.shared_end = v.count;
+  v.segments = sorted_segments(nv, [&](std::size_t i) {
+    return std::tuple(kind_of(vrecs[i].own), Topology::vertex, std::uint16_t{1});
+  });
+  const bool vertex_ownership = v.segments.interior_end != v.count;
 
   const auto find_vertex = [&](GO g) -> LO {
     if (!dense_local.empty()) {
@@ -324,6 +388,10 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       }
     }
     const auto node_only = static_cast<std::size_t>(std::count(role.begin(), role.end(), 2));
+    if (node_only > 0 && vertex_ownership) {
+      throw std::invalid_argument(
+          "MeshBuilder::build: vertices other than interior in a mesh with node-only vertices are not supported");
+    }
     if (node_only > 0) {
       std::vector<LO> to(nv);
       LO corner = 0;
@@ -355,6 +423,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       std::uint64_t key;
       std::size_t block;
       std::size_t index;
+      std::uint64_t own;
     };
     std::vector<Rec> recs;
     {
@@ -384,7 +453,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
           local[b][static_cast<std::size_t>(k)] = l;
         }
         const auto arity = static_cast<std::uint16_t>(last - first);
-        recs.push_back(Rec{blk.topology, arity, blk.nodes, blk.gids[i], 0, b, i});
+        recs.push_back(Rec{blk.topology, arity, blk.nodes, blk.gids[i], 0, b, i, 0});
       }
       node_local[b].resize(blk.node_gids.size());
       node_entries += blk.node_gids.size();
@@ -433,6 +502,11 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       throw std::invalid_argument("duplicate element gid " + std::to_string(q.gid));
     }
     stable_sort_by_key(recs, [](const Rec& r) { return r.key; });
+    if (!owned[d].empty()) {
+      for (Rec& r : recs) r.own = own_of(d, r.gid);
+      check_named(d);
+      stable_sort_by_key(recs, [](const Rec& r) { return r.own & 0xFFFFFFFFULL; });
+    }
     {
       std::vector<std::tuple<Topology, std::uint16_t, std::uint16_t>> groups;
       for (const Rec& r : recs) {
@@ -450,6 +524,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
         stable_sort_by_key(recs, group_of);
       }
     }
+    if (!owned[d].empty()) stable_sort_by_key(recs, [](const Rec& r) { return r.own >> 32; });
     auto& e = mesh.ents_[d];
     e.count = detail::to_lo(recs.size(), "number of elements");
     e.input = !recs.empty();
@@ -517,8 +592,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
         e.node_offsets(r + 1) = static_cast<Offset>(at);
       }
     }
-    e.segments =
-        interior_segments(ne, [&](std::size_t r) { return std::pair(recs[r].t, recs[r].arity); });
+    e.segments = sorted_segments(ne, [&](std::size_t r) { return std::tuple(kind_of(recs[r].own), recs[r].t, recs[r].arity); });
   }
   mesh.epoch_ = 1;
   mesh.attach_fields();

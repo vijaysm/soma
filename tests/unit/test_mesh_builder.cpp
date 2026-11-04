@@ -12,6 +12,7 @@
 
 #include "mesh_fixture.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/core/sfc.hpp"
 #include "soma/fields/domain.hpp"
 
 using soma::GO;
@@ -475,4 +476,119 @@ TEST(MeshBuilder, ElementDimensionMustBeInOneToTheBuilderDimension) {
   EXPECT_THROW(b1.add_polygons(std::vector<GO>{1}, std::vector<soma::Offset>{0, 3},
                                std::vector<GO>{1, 2, 3}),
                std::invalid_argument);
+}
+
+namespace {
+
+// Vertices 1..6 on a 3 x 2 grid; quads 100 and 101 and a triangle 102.
+soma::MeshBuilder grid_builder() {
+  soma::MeshBuilder b(2);
+  b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6},
+                 std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 2, 0, 0, 0, 1, 0, 1, 1, 0, 2, 1, 0});
+  b.add_elements(Topology::quad, std::vector<GO>{100, 101}, std::vector<GO>{1, 2, 5, 4, 2, 3, 6, 5});
+  b.add_elements(Topology::tri, std::vector<GO>{102}, std::vector<GO>{1, 2, 5});
+  return b;
+}
+
+std::vector<GO> gids(const soma::HostMesh& m, int d) {
+  std::vector<GO> out;
+  for (LO e = 0; e < m.count(d); ++e) out.push_back(m.gid(d)(e));
+  return out;
+}
+
+}  // namespace
+
+// Ownership first, then (for vertices) group, then the usual order.
+TEST(MeshBuilder, OwnershipOrdersVerticesByKindThenGroup) {
+  soma::MeshBuilder b = grid_builder();
+  b.set_ownership(0, std::vector<GO>{2, 5, 3, 6},
+                  std::vector<Ownership>{Ownership::shared, Ownership::shared, Ownership::shared_copy, Ownership::ghost},
+                  std::vector<std::uint32_t>{1, 0, 0, 0});
+  const soma::HostMesh m = std::move(b).build(soma::Ordering::file);
+  EXPECT_EQ(gids(m, 0), (std::vector<GO>{1, 4, 5, 2, 3, 6}));
+  const auto& t = m.segment_table(0);
+  EXPECT_EQ(t.interior_end, 2);
+  EXPECT_EQ(t.owned_end, 4);
+  EXPECT_EQ(t.shared_end, 5);
+  ASSERT_EQ(t.segments.size(), 4U);
+  EXPECT_EQ(t.segments[2], (Segment{4, 5, Topology::vertex, 1, Ownership::shared_copy}));
+  // Connectivity still names the same vertices.
+  const auto conn = m.conn(2);
+  const auto off = m.conn_offsets(2);
+  std::vector<std::vector<GO>> elems;
+  for (LO e = 0; e < m.count(2); ++e) {
+    std::vector<GO> vs;
+    for (soma::Offset k = off(e); k < off(e + 1); ++k) vs.push_back(m.gid(0)(conn(k)));
+    elems.push_back(vs);
+  }
+  EXPECT_EQ(gids(m, 2), (std::vector<GO>{102, 100, 101}));
+  EXPECT_EQ(elems[0], (std::vector<GO>{1, 2, 5}));
+  EXPECT_EQ(elems[2], (std::vector<GO>{2, 3, 6, 5}));
+}
+
+TEST(MeshBuilder, OwnershipComesBeforeTopologyForElements) {
+  soma::MeshBuilder b = grid_builder();
+  b.set_ownership(2, std::vector<GO>{102, 100}, std::vector<Ownership>{Ownership::ghost, Ownership::shared},
+                  std::vector<std::uint32_t>{0, 0});
+  const soma::HostMesh m = std::move(b).build(soma::Ordering::file);
+  EXPECT_EQ(gids(m, 2), (std::vector<GO>{101, 100, 102}));
+  const auto& t = m.segment_table(2);
+  EXPECT_EQ(t.interior_end, 1);
+  EXPECT_EQ(t.owned_end, 2);
+  EXPECT_EQ(t.shared_end, 2);
+  EXPECT_EQ(t.segments.back(), (Segment{2, 3, Topology::tri, 3, Ownership::ghost}));
+  EXPECT_EQ(m.segment_table(0).interior_end, 6);
+}
+
+TEST(MeshBuilder, OwnershipRejectsBadInput) {
+  soma::MeshBuilder b = grid_builder();
+  const std::vector<GO> one{1};
+  const std::vector<Ownership> shared{Ownership::shared};
+  const std::vector<std::uint32_t> zero{0};
+  EXPECT_THROW(b.set_ownership(3, one, shared, zero), std::invalid_argument);
+  EXPECT_THROW(b.set_ownership(-1, one, shared, zero), std::invalid_argument);
+  EXPECT_THROW(b.set_ownership(0, one, std::vector<Ownership>{}, zero), std::invalid_argument);
+  const auto fails = [](std::vector<GO> g, int d) {
+    soma::MeshBuilder x = grid_builder();
+    x.set_ownership(d, g, std::vector<Ownership>(g.size(), Ownership::shared), std::vector<std::uint32_t>(g.size(), 0));
+    EXPECT_THROW((void)std::move(x).build(), std::invalid_argument);
+  };
+  fails({2, 2}, 0);   // named twice
+  fails({7}, 0);      // no such vertex
+  fails({100, 5}, 2); // no such element
+  // Corners first and ownership first cannot both hold.
+  soma::MeshBuilder h(2);
+  h.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6},
+                 std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0.5, 0});
+  h.add_elements(Topology::tri, std::vector<GO>{9}, std::vector<GO>{1, 2, 3, 4, 5, 6}, 6);
+  h.set_ownership(0, one, shared, zero);
+  EXPECT_THROW((void)std::move(h).build(), std::invalid_argument);
+}
+
+// With one key box, ranks holding different vertices order them alike. The
+// subset lies on a line, so its own box would order it by x alone; the
+// shared box gives the 2D curve's order, which is not.
+TEST(MeshBuilder, AKeyBoxMakesCurveOrderAgreeAcrossSubsets) {
+  const soma::Real lo[3] = {0, 0, 0}, hi[3] = {9, 9, 0};
+  const auto box = soma::sfc::KeyBox::make(lo, hi);
+  std::vector<GO> g;
+  std::vector<soma::Real> xyz;
+  std::vector<std::pair<std::uint64_t, GO>> keyed;
+  for (GO i = 0; i < 10; ++i) {
+    const soma::Real x = static_cast<soma::Real>(i), y = 4.5;
+    g.push_back(i + 1);
+    xyz.insert(xyz.end(), {x, y, 0});
+    keyed.emplace_back(soma::sfc::hilbert_key(box, x, y, 0), i + 1);
+  }
+  std::sort(keyed.begin(), keyed.end());
+  std::vector<GO> want;
+  for (const auto& [k, id] : keyed) want.push_back(id);
+  ASSERT_NE(want, g) << "the curve must not follow x along this line, or the test proves nothing";
+  soma::MeshBuilder b(2);
+  b.add_vertices(g, xyz);
+  b.set_key_box({0, 0, 0}, {9, 9, 0});
+  EXPECT_EQ(gids(std::move(b).build(soma::Ordering::type_major_sfc), 0), want);
+  soma::MeshBuilder bad(2);
+  EXPECT_THROW(bad.set_key_box({0, 0, 0}, {-1, 1, 1}), std::invalid_argument);
+  EXPECT_THROW(bad.set_key_box({0, std::numeric_limits<soma::Real>::infinity(), 0}, {1, 1, 1}), std::invalid_argument);
 }
