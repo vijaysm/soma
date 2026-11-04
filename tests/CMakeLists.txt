@@ -156,6 +156,9 @@ endif()
 add_test(NAME policy.mpi_seam
   COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
           -P ${CMAKE_CURRENT_SOURCE_DIR}/policy/check_mpi_seam.cmake)
+add_test(NAME policy.device_lambdas
+  COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/policy/check_device_lambdas.cmake)
 
 if(SOMA_INSTALL)
   set(SOMA_PACKAGING_SHADOW_PREFIX "/opt/kokkos" CACHE PATH

@@ -42,6 +42,27 @@ KOKKOS_INLINE_FUNCTION double boundary_value(int i, int j, int k, int dir, int s
   return -1.0 - i - 10.0 * j - 100.0 * k - 1000.0 * (2 * dir + side);
 }
 
+// Kernels live in named functions: CUDA refuses device lambdas in a test
+// body (a private member function) or inside another lambda.
+// Fills ghost region r of box b with boundary values.
+void set_boundary(const soma::amr::LevelField<double>& f, int b, const Box& r, int dir, int side) {
+  const auto v = f.view();
+  const int ncomp = f.ncomp();
+  Kokkos::parallel_for(Kokkos::RangePolicy<Kokkos::IndexType<std::int64_t>>(0, r.num_pts()), KOKKOS_LAMBDA(std::int64_t q) {
+    const IntVect p = soma::amr::detail::point_of(r, q);
+    for (int c = 0; c < ncomp; ++c) v.patch(b)(p[0], p[1], p[2], c) = boundary_value(p[0], p[1], p[2], dir, side) - c;
+  });
+  Kokkos::fence();
+}
+
+// Valid points +value, ghost points -value.
+void set_signed(const soma::amr::LevelField<double>& a) {
+  const auto av = a.view();
+  soma::amr::for_each_point(a, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+    av.patch(b)(i, j, k) = av.valid(b).contains(IntVect{{i, j, k}}) ? value(IntVect{{i, j, k}}, 0) : -value(IntVect{{i, j, k}}, 0);
+  });
+}
+
 struct Case {
   int dim;
   IndexType type;
@@ -74,11 +95,7 @@ void check(const Case& cs) {
   int calls = 0;
   soma::amr::fill_halo(f, plan, [&](int b, const Box& r, int dir, int side) {
     ++calls;
-    Kokkos::parallel_for(Kokkos::RangePolicy<Kokkos::IndexType<std::int64_t>>(0, r.num_pts()), KOKKOS_LAMBDA(std::int64_t q) {
-      const IntVect p = soma::amr::detail::point_of(r, q);
-      for (int c = 0; c < ncomp; ++c) v.patch(b)(p[0], p[1], p[2], c) = boundary_value(p[0], p[1], p[2], dir, side) - c;
-    });
-    Kokkos::fence();
+    set_boundary(f, b, r, dir, side);
   });
   EXPECT_EQ(calls, static_cast<int>(plan.boundary().size()));
 
@@ -197,11 +214,7 @@ TEST(AmrCopy, ValidPointsThenGhostPoints) {
   const Box domain(IntVect{}, IntVect{{15, 15, 0}}, 2);
   const BoxArray src({Box(IntVect{{0, 0, 0}}, IntVect{{3, 7, 0}}, 2), Box(IntVect{{4, 0, 0}}, IntVect{{7, 7, 0}}, 2)}, domain);
   soma::amr::LevelField<double> a(src, IndexType::cell(), 1, 2);
-  const auto av = a.view();
-  // Valid points hold +value, ghost points -value.
-  soma::amr::for_each_point(a, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-    av.patch(b)(i, j, k) = av.valid(b).contains(IntVect{{i, j, k}}) ? value(IntVect{{i, j, k}}, 0) : -value(IntVect{{i, j, k}}, 0);
-  });
+  set_signed(a);
   const BoxArray dst({Box(IntVect{{2, 6, 0}}, IntVect{{11, 11, 0}}, 2)}, domain);
   soma::amr::LevelField<double> d(dst, IndexType::cell(), 1, 0);
   d.fill(sentinel);

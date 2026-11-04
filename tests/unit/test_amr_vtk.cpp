@@ -58,6 +58,16 @@ KOKKOS_INLINE_FUNCTION double value(int i, int j, int k, int c, int level) {
   return 1000.0 * level + i + 0.01 * j + 0.0001 * k + 0.1 * c + 1.0 / 3.0;
 }
 
+// Kernels live in named functions: CUDA refuses device lambdas in a test
+// body (a private member function) or inside another lambda.
+void set_values(const soma::amr::LevelField<double>& f, int level) {
+  const auto v = f.view();
+  const int ncomp = f.ncomp();
+  soma::amr::for_each_point(f, soma::amr::Region::valid, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+    for (int c = 0; c < ncomp; ++c) v.patch(b)(i, j, k, c) = value(i, j, k, c, level);
+  });
+}
+
 struct Config {
   Geometry geom;
   HierarchyOptions opts;
@@ -94,11 +104,7 @@ TEST(AmrVtk, WritesEveryBoxOfEveryLevel) {
     for (int l = 0; l < h.num_levels(); ++l) {
       for (auto* f : {&u[static_cast<std::size_t>(l)], &w[static_cast<std::size_t>(l)]}) {
         f->fill(std::numeric_limits<double>::quiet_NaN());  // ghosts are not written
-        const auto v = f->view();
-        const int ncomp = f->ncomp();
-        soma::amr::for_each_point(*f, soma::amr::Region::valid, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-          for (int c = 0; c < ncomp; ++c) v.patch(b)(i, j, k, c) = value(i, j, k, c, l);
-        });
+        set_values(*f, l);
       }
     }
     const auto path = dir / ("hier" + std::to_string(dim) + ".vthb");

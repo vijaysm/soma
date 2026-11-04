@@ -42,6 +42,30 @@ KOKKOS_INLINE_FUNCTION double noise(const IntVect& p, int c) {
   return static_cast<double>(u % 1000u) / 100.0;
 }
 
+// Kernels live in named functions: CUDA refuses device lambdas in a test
+// body (a private member function) or inside another lambda.
+void set_linear(const soma::amr::LevelField<double>& f, soma::amr::Region region, double h) {
+  const auto v = f.view();
+  const IndexType t = f.type();
+  const int ncomp = f.ncomp(), dim = f.boxes().domain().dim();
+  soma::amr::for_each_point(f, region, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+    for (int c = 0; c < ncomp; ++c) v.patch(b)(i, j, k, c) = at(IntVect{{i, j, k}}, t, h, c, dim);
+  });
+}
+
+void set_noise(const soma::amr::LevelField<double>& f, soma::amr::Region region) {
+  const auto v = f.view();
+  soma::amr::for_each_point(f, region, KOKKOS_LAMBDA(int b, int i, int j, int k) { v.patch(b)(i, j, k) = noise(IntVect{{i, j, k}}, 0); });
+}
+
+// Along x: 0 (i <= 1), 0.1 (i = 2), 1 (i = 3..5), 0.5 (i = 6), 1 (i >= 7).
+void set_steps(const soma::amr::LevelField<double>& f) {
+  const auto v = f.view();
+  soma::amr::for_each_point(f, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+    v.patch(b)(i, j, k) = i <= 1 ? 0.0 : i == 2 ? 0.1 : i == 6 ? 0.5 : 1.0;
+  });
+}
+
 struct Levels {
   BoxArray coarse, fine;
 };
@@ -103,16 +127,10 @@ TEST(AmrInterlevel, LinearRulesAreExactForLinearData) {
                                               << " linear " << (interp == Interp::linear) << " at " << region.lo(0));
               const int ncomp = 2;
               soma::amr::LevelField<double> coarse(lv.coarse, t, ncomp, 1), fine(lv.fine, t, ncomp, g);
-              const auto cv = coarse.view(), fv = fine.view();
-              const IndexType tt = t;
-              soma::amr::for_each_point(coarse, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-                for (int c = 0; c < ncomp; ++c) cv.patch(b)(i, j, k, c) = at(IntVect{{i, j, k}}, tt, 1.0, c, dim);
-              });
+              set_linear(coarse, soma::amr::Region::grown, 1.0);
               fine.fill(sentinel);
               const double hf = 1.0 / r;
-              soma::amr::for_each_point(fine, soma::amr::Region::valid, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-                for (int c = 0; c < ncomp; ++c) fv.patch(b)(i, j, k, c) = at(IntVect{{i, j, k}}, tt, hf, c, dim);
-              });
+              set_linear(fine, soma::amr::Region::valid, hf);
               const soma::amr::HaloPlan halo(lv.fine, t, g, {});
               soma::amr::fill_halo(fine, halo);
               const soma::amr::CoarseFinePlan plan(lv.fine, lv.coarse, t, g, r, {}, interp, 1);
@@ -146,11 +164,7 @@ TEST(AmrInterlevel, ProlongsIntoTargets) {
     for (const IndexType t : types(dim)) {
       SCOPED_TRACE(testing::Message() << "dim " << dim << " type " << int(t.nodal));
       soma::amr::LevelField<double> coarse(lv.coarse, t, 1, 1), fine(lv.fine, t, 1, 1);
-      const auto cv = coarse.view();
-      const IndexType tt = t;
-      soma::amr::for_each_point(coarse, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-        cv.patch(b)(i, j, k, 0) = at(IntVect{{i, j, k}}, tt, 1.0, 0, dim);
-      });
+      set_linear(coarse, soma::amr::Region::grown, 1.0);
       fine.fill(sentinel);
       // The lower half of each box's valid points, and its low ghost layer
       // in x.
@@ -194,10 +208,7 @@ TEST(AmrInterlevel, LinearCellRuleConserves) {
     for (const int r : {2, 4}) {
       const Levels lv = levels(dim, r, Box(IntVect{{3, 3, 3}}, IntVect{{4, 5, 4}}, dim));
       soma::amr::LevelField<double> coarse(lv.coarse, IndexType::cell(), 1, 1), fine(lv.fine, IndexType::cell(), 1, r);
-      const auto cv = coarse.view();
-      soma::amr::for_each_point(coarse, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-        cv.patch(b)(i, j, k) = noise(IntVect{{i, j, k}}, 0);
-      });
+      set_noise(coarse, soma::amr::Region::grown);
       fine.fill(0.0);
       const soma::amr::CoarseFinePlan plan(lv.fine, lv.coarse, IndexType::cell(), r, r, {}, Interp::linear, 1);
       soma::amr::fill_coarse_fine(fine, coarse, plan);
@@ -236,12 +247,8 @@ TEST(AmrInterlevel, AverageDownIsExactForLinearData) {
       for (const IndexType t : types(dim)) {
         SCOPED_TRACE(testing::Message() << "dim " << dim << " r " << r << " type " << int(t.nodal));
         soma::amr::LevelField<double> coarse(lv.coarse, t, 2, 1), fine(lv.fine, t, 2, 1);
-        const auto fv = fine.view();
         const double hf = 1.0 / r;
-        const IndexType tt = t;
-        soma::amr::for_each_point(fine, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-          for (int c = 0; c < 2; ++c) fv.patch(b)(i, j, k, c) = at(IntVect{{i, j, k}}, tt, hf, c, dim);
-        });
+        set_linear(fine, soma::amr::Region::grown, hf);
         coarse.fill(sentinel);
         soma::amr::average_down(fine, coarse, r);
         auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, coarse.view().data);
@@ -313,11 +320,7 @@ TEST(AmrInterlevel, SlopesAreLimited) {
   const BoxArray coarse({domain}, domain);
   const BoxArray fine({Box(IntVect{{3, 3, 0}}, IntVect{{4, 5, 0}}, 2).refine(2)}, domain.refine(2));
   soma::amr::LevelField<double> c(coarse, IndexType::cell(), 1, 1), f(fine, IndexType::cell(), 1, 2);
-  const auto cv = c.view();
-  soma::amr::for_each_point(c, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-    // x: ... 0 (i=1), 0.1 (i=2), 1 (i=3..5), 0.5 (i=6), 1 (i>=7)
-    cv.patch(b)(i, j, k) = i <= 1 ? 0.0 : i == 2 ? 0.1 : i == 6 ? 0.5 : 1.0;
-  });
+  set_steps(c);
   f.fill(sentinel);
   soma::amr::fill_coarse_fine(f, c, soma::amr::CoarseFinePlan(fine, coarse, IndexType::cell(), 2, 2, {}, Interp::linear, 1));
   auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, f.view().data);

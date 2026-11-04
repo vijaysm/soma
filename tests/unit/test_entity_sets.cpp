@@ -335,14 +335,11 @@ TEST(EntitySets, RowsTakeTheSmallestForm) {
   EXPECT_EQ(soma::Domain<HostMem>::from_set(mesh, 1, 2).info(0).kind, DomainKind::intervals);
 }
 
-// On the device, rows index, look up and iterate as on the host.
-TEST(EntitySets, ShapedRowsReadTheSameInKernels) {
-  const auto host = box_with_shaped_sets();
-  const auto dev = host.mirror<DevMem>();
-  const auto v = dev.sets().view();
-  Kokkos::View<LO**, DevMem> kth("soma::test::kth", 5, 101);
-  Kokkos::View<LO**, DevMem> row("soma::test::row", 5, 101);
-  Kokkos::View<LO*, DevMem> walked("soma::test::walked", 5);
+// The kernel lives in a named function: CUDA refuses device lambdas in a
+// test body (a private member function).
+template <class V>
+void read_shaped_rows(const V& v, const Kokkos::View<LO**, DevMem>& kth, const Kokkos::View<LO**, DevMem>& row,
+                      const Kokkos::View<LO*, DevMem>& walked) {
   Kokkos::parallel_for(
       "soma::test::shaped_rows", Kokkos::RangePolicy<DevMem::execution_space>(0, 5), KOKKOS_LAMBDA(const LO set) {
         const soma::SetRow r = v.row(2, set);
@@ -358,6 +355,16 @@ TEST(EntitySets, ShapedRowsReadTheSameInKernels) {
         }
         walked(set) = n == r.size ? sum : -1;
       });
+}
+
+// On the device, rows index, look up and iterate as on the host.
+TEST(EntitySets, ShapedRowsReadTheSameInKernels) {
+  const auto host = box_with_shaped_sets();
+  const auto dev = host.mirror<DevMem>();
+  Kokkos::View<LO**, DevMem> kth("soma::test::kth", 5, 101);
+  Kokkos::View<LO**, DevMem> row("soma::test::row", 5, 101);
+  Kokkos::View<LO*, DevMem> walked("soma::test::walked", 5);
+  read_shaped_rows(dev.sets().view(), kth, row, walked);
   const auto hk = Kokkos::create_mirror_view_and_copy(HostMem{}, kth);
   const auto hr = Kokkos::create_mirror_view_and_copy(HostMem{}, row);
   const auto hw = Kokkos::create_mirror_view_and_copy(HostMem{}, walked);

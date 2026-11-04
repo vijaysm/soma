@@ -45,10 +45,10 @@ KOKKOS_INLINE_FUNCTION double noise(const IntVect& p, int c) {
 // around (cx, 0.5, 0.5) on the unit square (cube), periodic in x if asked.
 KOKKOS_INLINE_FUNCTION bool on_ring(const IntVect& p, double h, int dim, double cx, bool periodic_x) {
   double dx = (p[0] + 0.5) * h - cx;
-  if (periodic_x) dx -= std::floor(dx + 0.5);
+  if (periodic_x) dx -= Kokkos::floor(dx + 0.5);
   const double dy = (p[1] + 0.5) * h - 0.5, dz = dim == 3 ? (p[2] + 0.5) * h - 0.5 : 0.0;
-  const double r = std::sqrt(dx * dx + dy * dy + dz * dz);
-  return std::fabs(r - 0.25) < 0.06;
+  const double r = Kokkos::sqrt(dx * dx + dy * dy + dz * dz);
+  return Kokkos::fabs(r - 0.25) < 0.06;
 }
 
 struct Config {
@@ -71,15 +71,18 @@ Config config(int dim) {
   return s;
 }
 
+// Kernels live in named functions: CUDA refuses device lambdas in a test
+// body (a private member function) or inside another lambda.
+void tag_ring(const TagField& tags, double dx, int dim, double cx, bool px) {
+  const auto v = tags.view();
+  soma::amr::for_each_point(tags, soma::amr::Region::valid, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+    if (on_ring(IntVect{{i, j, k}}, dx, dim, cx, px)) v.patch(b)(i, j, k) = 1;
+  });
+}
+
 Hierarchy::Tagger ring(const Hierarchy& h, double cx) {
   return [&h, cx](int level, const TagField& tags) {
-    const auto v = tags.view();
-    const double dx = h.dx(level, 0);
-    const int dim = h.geometry().domain.dim();
-    const bool px = h.geometry().periodic[0];
-    soma::amr::for_each_point(tags, soma::amr::Region::valid, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-      if (on_ring(IntVect{{i, j, k}}, dx, dim, cx, px)) v.patch(b)(i, j, k) = 1;
-    });
+    tag_ring(tags, h.dx(level, 0), h.geometry().domain.dim(), cx, h.geometry().periodic[0]);
   };
 }
 

@@ -137,6 +137,20 @@ TEST(HighOrder, CountsThatAreNoConfigurationAndUnknownNodesThrow) {
   }
 }
 
+// The kernel lives in a named function: CUDA refuses device lambdas in a
+// test body (a private member function).
+template <class V>
+LO weighted_node_sum(const V& v) {
+  LO sum = 0;
+  Kokkos::parallel_reduce(
+      "test::node_sum", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, v.count(2)),
+      KOKKOS_LAMBDA(const LO e, LO& s) {
+        for (LO k = 0; k < v.num_nodes(2, e); ++k) s += v.node(2, e, k) * (k + 1);
+      },
+      sum);
+  return sum;
+}
+
 TEST(HighOrder, MirrorsAndViewsCarryTheNodes) {
   const auto mesh = quad9_and_quad4(soma::Ordering::file);
   const auto clone = mesh.clone();
@@ -147,13 +161,7 @@ TEST(HighOrder, MirrorsAndViewsCarryTheNodes) {
   EXPECT_EQ(device.corners(), 7);
   ASSERT_TRUE(device.has_nodes(2));
   const auto v = device.view();
-  LO sum = 0;
-  Kokkos::parallel_reduce(
-      "test::node_sum", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace>(0, v.count(2)),
-      KOKKOS_LAMBDA(const LO e, LO& s) {
-        for (LO k = 0; k < v.num_nodes(2, e); ++k) s += v.node(2, e, k) * (k + 1);
-      },
-      sum);
+  const LO sum = weighted_node_sum(v);
   // quad4: 1, 2, 5, 4 at k = 0..3; quad9: 0, 1, 4, 3 then 7, 9, 10, 8, 11.
   EXPECT_EQ(sum, (1 + 4 + 15 + 16) + (0 + 2 + 12 + 12 + 35 + 54 + 70 + 64 + 99));
   EXPECT_EQ(v.corners, 7);

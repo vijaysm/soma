@@ -1,0 +1,40 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2022-2026, Vijay Mahadevan.
+
+# Fails if a test body holds a device lambda. TEST and TYPED_TEST bodies are
+# private member functions, where CUDA refuses extended (KOKKOS_LAMBDA)
+# lambdas; kernels belong in named free functions. A body runs from its TEST
+# line to the next line that starts with '}'.
+file(GLOB_RECURSE files RELATIVE "${SOURCE_DIR}" "${SOURCE_DIR}/tests/*.cpp")
+list(LENGTH files scanned)
+if(scanned EQUAL 0)
+  message(FATAL_ERROR "device lambda policy: no tests found under ${SOURCE_DIR}")
+endif()
+set(violations "")
+foreach(f IN LISTS files)
+  file(READ "${SOURCE_DIR}/${f}" text)
+  # Lines as a list: characters CMake lists treat specially go first.
+  string(REPLACE ";" " " text "${text}")
+  string(REPLACE "[" " " text "${text}")
+  string(REPLACE "]" " " text "${text}")
+  string(REPLACE "\\" " " text "${text}")
+  string(REPLACE "\n" ";" lines "${text}")
+  set(in_test OFF)
+  set(n 0)
+  foreach(line IN LISTS lines)
+    math(EXPR n "${n} + 1")
+    if(line MATCHES "^(TEST|TEST_F|TEST_P|TYPED_TEST)\\(")
+      set(in_test ON)
+    elseif(line MATCHES "^}")
+      set(in_test OFF)
+    endif()
+    if(in_test AND line MATCHES "KOKKOS_LAMBDA")
+      list(APPEND violations "${f}:${n}")
+      message(STATUS "device lambda in a test body: ${f}:${n}")
+    endif()
+  endforeach()
+endforeach()
+if(violations)
+  message(FATAL_ERROR "device lambdas in test bodies (${violations}); move the kernels into named functions")
+endif()
+message(STATUS "device lambda policy: OK (${scanned} files scanned)")

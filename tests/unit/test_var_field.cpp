@@ -94,17 +94,23 @@ TYPED_TEST(VarFieldTyped, WithoutADefaultNonMembersHoldNothing) {
   EXPECT_TRUE(h.value_or_default(2, 0).empty());
 }
 
-// Kernels read and write the values in place; the lengths stay.
-TYPED_TEST(VarFieldTyped, KernelsWriteTheValues) {
-  const auto f = this->add();
-  const auto off = f.offsets();
-  const auto val = f.values();
-  using Exec = typename TypeParam::execution_space;
+// The kernel lives in a named function: CUDA refuses device lambdas in a
+// test body (a private member function).
+template <class Exec, class O, class V>
+void scale_rows(const O& off, const V& val) {
   Kokkos::parallel_for(
       "soma::test::var_scale", Kokkos::RangePolicy<Exec>(0, 3), KOKKOS_LAMBDA(const int r) {
         for (Offset k = off(r); k < off(r + 1); ++k) val(k) *= 10.0 * (r + 1);
       });
   Kokkos::fence();
+}
+
+// Kernels read and write the values in place; the lengths stay.
+TYPED_TEST(VarFieldTyped, KernelsWriteTheValues) {
+  const auto f = this->add();
+  const auto off = f.offsets();
+  const auto val = f.values();
+  scale_rows<typename TypeParam::execution_space>(off, val);
   const auto again = this->reg.template get_var<double>(f.id());
   const auto hv = Kokkos::create_mirror_view_and_copy(HostMem{}, again.values());
   const std::vector<double> got(hv.data(), hv.data() + hv.extent(0));

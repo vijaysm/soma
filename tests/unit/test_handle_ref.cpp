@@ -112,6 +112,20 @@ TEST(HandleRef, ResolvesEntitiesAndSetsOnTheHost) {
   }
 }
 
+// The kernel lives in a named function: CUDA refuses device lambdas in a
+// test body (a private member function).
+template <class R, class I>
+void resolve_all(const R& ref, const I& in, const Kokkos::View<int*, DevMem>& slot,
+                 const Kokkos::View<LO*, DevMem>& lid) {
+  Kokkos::parallel_for(
+      "soma::test::resolve", Kokkos::RangePolicy<DevMem::execution_space>(0, in.extent(0)),
+      KOKKOS_LAMBDA(const std::size_t i) {
+        const soma::HandleTarget t = ref.resolve(in(i));
+        slot(i) = t.slot;
+        lid(i) = t.lid;
+      });
+}
+
 TEST(HandleRef, ResolvesInKernels) {
   using soma::make_handle;
   const auto host = mesh_with_two_sets();
@@ -123,13 +137,7 @@ TEST(HandleRef, ResolvesInKernels) {
       DevMem{}, soma::View1<const GO, HostMem>(handles.data(), handles.size()));
   Kokkos::View<int*, DevMem> slot("soma::test::slot", handles.size());
   Kokkos::View<LO*, DevMem> lid("soma::test::lid", handles.size());
-  Kokkos::parallel_for(
-      "soma::test::resolve", Kokkos::RangePolicy<DevMem::execution_space>(0, handles.size()),
-      KOKKOS_LAMBDA(const std::size_t i) {
-        const soma::HandleTarget t = ref.resolve(in(i));
-        slot(i) = t.slot;
-        lid(i) = t.lid;
-      });
+  resolve_all(ref, in, slot, lid);
   const auto hs = Kokkos::create_mirror_view_and_copy(HostMem{}, slot);
   const auto hl = Kokkos::create_mirror_view_and_copy(HostMem{}, lid);
   EXPECT_EQ((std::vector<int>{hs(0), hs(1), hs(2), hs(3), hs(4), hs(5)}),

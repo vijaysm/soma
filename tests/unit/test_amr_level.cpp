@@ -143,6 +143,33 @@ TEST(AmrDistribution, ContiguousRunsOfEqualWork) {
   EXPECT_THROW(soma::amr::Distribution::along_curve(ba, 0), std::invalid_argument);
 }
 
+namespace {
+
+// Kernels live in named functions: CUDA refuses device lambdas in a test
+// body (a private member function) or inside another lambda.
+// Adds 1 to every component of every point of `region`.
+void add_one(const soma::amr::LevelField<int>& f, soma::amr::Region region) {
+  const auto v = f.view();
+  const int ncomp = f.ncomp();
+  soma::amr::for_each_point(f, region, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+    for (int c = 0; c < ncomp; ++c) Kokkos::atomic_add(&v.patch(b)(i, j, k, c), 1);
+  });
+}
+
+// Adds 1 to component 1 of every valid point; returns how many points it met.
+std::int64_t count_valid(const soma::amr::LevelField<int>& f) {
+  const auto v = f.view();
+  Kokkos::View<std::int64_t, Kokkos::DefaultExecutionSpace::memory_space> n("n");
+  soma::amr::for_each_point(f, soma::amr::Region::valid, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+    Kokkos::atomic_add(&v.patch(b)(i, j, k, 1), 1);
+    Kokkos::atomic_add(&n(), std::int64_t{1});
+  });
+  auto nh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, n);
+  return nh();
+}
+
+}  // namespace
+
 TEST(AmrLevelField, EveryValueBelongsToOnePoint) {
   for (const int dim : {2, 3}) {
     const Box domain = dim == 2 ? box2(0, 0, 31, 31) : box3(IntVect{}, IntVect{{15, 15, 15}});
@@ -163,24 +190,16 @@ TEST(AmrLevelField, EveryValueBelongsToOnePoint) {
         ASSERT_EQ(static_cast<std::int64_t>(f.view().data.extent(0)), total);
         // Each point of each grown box adds 1 to each of its components:
         // every stored value ends at 1.
-        const auto v = f.view();
-        soma::amr::for_each_point(f, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-          for (int c = 0; c < ncomp; ++c) Kokkos::atomic_add(&v.patch(b)(i, j, k, c), 1);
-        });
-        auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, v.data);
+        add_one(f, soma::amr::Region::grown);
+        auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, f.view().data);
         for (std::size_t q = 0; q < h.extent(0); ++q) ASSERT_EQ(h(q), 1) << q;
         // The valid points: as many as the boxes hold, each once.
         f.fill(0);
-        Kokkos::View<std::int64_t, Kokkos::DefaultExecutionSpace::memory_space> n("n");
-        soma::amr::for_each_point(f, soma::amr::Region::valid, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-          Kokkos::atomic_add(&v.patch(b)(i, j, k, 1), 1);
-          Kokkos::atomic_add(&n(), std::int64_t{1});
-        });
+        const std::int64_t met = count_valid(f);
         std::int64_t valid = 0;
         for (std::size_t b = 0; b < f.num_boxes(); ++b) valid += f.valid(b).num_pts();
-        auto nh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, n);
-        EXPECT_EQ(nh(), valid);
-        Kokkos::deep_copy(h, v.data);
+        EXPECT_EQ(met, valid);
+        Kokkos::deep_copy(h, f.view().data);
         std::int64_t ones = 0;
         for (std::size_t q = 0; q < h.extent(0); ++q) {
           ASSERT_LE(h(q), 1);
