@@ -84,6 +84,22 @@ auto deep_mirror(const V& src) {
 }
 }  // namespace detail
 
+// Reorders the entities of dimension `dim` of a host mesh: entity e becomes
+// entity new_of_old[e], a permutation of [0, count(dim)), and `segments` is the
+// segment table of the reordered dimension. Everything follows the entities:
+// gids, topology, connectivity and nodes (for vertices, coordinates move and
+// every other dimension's connectivity and nodes are renamed), held graphs
+// (rows move, targets are renamed; upward and bridge rows sorted again,
+// downward rows keep their side order, codes move with their entries), set
+// members and fields; the epoch advances. Throws std::invalid_argument for
+// `dim` outside [0, mesh.dim()], a new_of_old that is not such a permutation,
+// one that moves vertices across corners() (node-only vertices stay last), or
+// a table that is not the one make_segments gives for the reordered
+// entities (with the ownership it names); std::logic_error for an edited
+// mesh (compress() it first). A throw leaves the mesh unchanged.
+void permute_entities(Mesh<Kokkos::HostSpace>& mesh, int dim, std::span<const LO> new_of_old,
+                      SegmentTable segments);
+
 // Move-only owner of one rank's mesh in one memory space. Copying is deleted
 // because Kokkos::View copies alias: a silent alias here would make every
 // before/after comparison compare an object with itself. Deep copies are
@@ -293,6 +309,8 @@ class Mesh {
   friend struct detail::TopologyAccess;
   friend Renumbering detail::compress(Mesh<Kokkos::HostSpace>& mesh);
   friend void detail::build_edited(Mesh<Kokkos::HostSpace>& mesh, AdjacencyRequest req);
+  friend void permute_entities(Mesh<Kokkos::HostSpace>& mesh, int dim, std::span<const LO> new_of_old,
+                               SegmentTable segments);
 
   AdjacencyGraph<MemSpace> graph(int slot) const {
     const auto& g = adj_.graphs[static_cast<std::size_t>(slot)];
