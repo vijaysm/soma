@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
-// Box arrays on a curve, chopping and distribution.
+// Box arrays on a curve, chopping, distribution, and the storage of level
+// fields: every stored value belongs to exactly one point of one box.
 
 #include <algorithm>
 #include <functional>
@@ -12,8 +13,10 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <Kokkos_Core.hpp>
 
 #include "soma/amr/box_array.hpp"
+#include "soma/amr/level_field.hpp"
 #include "soma/core/sfc.hpp"
 
 namespace {
@@ -138,4 +141,66 @@ TEST(AmrDistribution, ContiguousRunsOfEqualWork) {
   EXPECT_TRUE(std::is_sorted(many.begin(), many.end()));
   EXPECT_EQ(many.back(), 9);
   EXPECT_THROW(soma::amr::Distribution::along_curve(ba, 0), std::invalid_argument);
+}
+
+TEST(AmrLevelField, EveryValueBelongsToOnePoint) {
+  for (const int dim : {2, 3}) {
+    const Box domain = dim == 2 ? box2(0, 0, 31, 31) : box3(IntVect{}, IntVect{{15, 15, 15}});
+    const BoxList boxes = soma::amr::chop({domain.grow(-2)}, 7);
+    const BoxArray ba(boxes, domain);
+    for (const IndexType t : {IndexType::cell(), IndexType::node(dim), IndexType::face(0), IndexType::face(1)}) {
+      for (const int ghosts : {0, 2}) {
+        const int ncomp = 2;
+        soma::amr::LevelField<int> f(ba, t, ncomp, ghosts);
+        ASSERT_EQ(f.num_boxes(), ba.size());
+        std::int64_t total = 0;
+        for (std::size_t b = 0; b < f.num_boxes(); ++b) {
+          EXPECT_EQ(f.valid(b), ba[b].convert(t));
+          EXPECT_EQ(f.grown(b), ba[b].convert(t).grow(ghosts));
+          EXPECT_EQ(f.offset(b), total);
+          total += f.grown(b).num_pts() * ncomp;
+        }
+        ASSERT_EQ(static_cast<std::int64_t>(f.view().data.extent(0)), total);
+        // Each point of each grown box adds 1 to each of its components:
+        // every stored value ends at 1.
+        const auto v = f.view();
+        soma::amr::for_each_point(f, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+          for (int c = 0; c < ncomp; ++c) Kokkos::atomic_add(&v.patch(b)(i, j, k, c), 1);
+        });
+        auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, v.data);
+        for (std::size_t q = 0; q < h.extent(0); ++q) ASSERT_EQ(h(q), 1) << q;
+        // The valid points: as many as the boxes hold, each once.
+        f.fill(0);
+        Kokkos::View<std::int64_t, Kokkos::DefaultExecutionSpace::memory_space> n("n");
+        soma::amr::for_each_point(f, soma::amr::Region::valid, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+          Kokkos::atomic_add(&v.patch(b)(i, j, k, 1), 1);
+          Kokkos::atomic_add(&n(), std::int64_t{1});
+        });
+        std::int64_t valid = 0;
+        for (std::size_t b = 0; b < f.num_boxes(); ++b) valid += f.valid(b).num_pts();
+        auto nh = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, n);
+        EXPECT_EQ(nh(), valid);
+        Kokkos::deep_copy(h, v.data);
+        std::int64_t ones = 0;
+        for (std::size_t q = 0; q < h.extent(0); ++q) {
+          ASSERT_LE(h(q), 1);
+          ones += h(q);
+        }
+        EXPECT_EQ(ones, valid);
+      }
+    }
+  }
+}
+
+TEST(AmrLevelField, PatchIndexesTheGrownBox) {
+  const BoxArray ba({box3(IntVect{{4, 0, 2}}, IntVect{{7, 2, 3}})}, box3(IntVect{}, IntVect{{9, 9, 9}}));
+  soma::amr::LevelField<double, Kokkos::HostSpace> f(ba, IndexType::cell(), 3, 1);
+  const auto p = f.view().patch(0);
+  // Column-major from the grown box's lower corner (3, -1, 1), sizes 6 x 5 x 4.
+  EXPECT_EQ(&p(3, -1, 1, 0), f.view().data.data());
+  EXPECT_EQ(&p(4, -1, 1, 0) - &p(3, -1, 1, 0), 1);
+  EXPECT_EQ(&p(3, 0, 1, 0) - &p(3, -1, 1, 0), 6);
+  EXPECT_EQ(&p(3, -1, 2, 0) - &p(3, -1, 1, 0), 30);
+  EXPECT_EQ(&p(3, -1, 1, 1) - &p(3, -1, 1, 0), 120);
+  EXPECT_EQ(&p(8, 3, 4, 2) - f.view().data.data() + 1, 360);
 }
