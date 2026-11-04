@@ -66,7 +66,49 @@ void reduce_span(MPI_Comm comm, std::span<T> values, Op op) {
         "MPI_Allreduce");
 }
 
+int sequence_keyval = MPI_KEYVAL_INVALID;
+
+int delete_sequence(MPI_Comm, int, void* value, void*) {
+  delete static_cast<std::uint64_t*>(value);
+  return MPI_SUCCESS;
+}
+
+int source_of(int source) { return source == Comm::any_source ? MPI_ANY_SOURCE : source; }
+
 }  // namespace
+
+Request::Request() noexcept : request_(MPI_REQUEST_NULL) {}
+
+Request::Request(Request&& other) noexcept : request_(other.request_) { other.request_ = MPI_REQUEST_NULL; }
+
+Request& Request::operator=(Request&& other) noexcept {
+  if (this != &other) {
+    if (request_ != MPI_REQUEST_NULL) MPI_Wait(&request_, MPI_STATUS_IGNORE);
+    request_ = other.request_;
+    other.request_ = MPI_REQUEST_NULL;
+  }
+  return *this;
+}
+
+Request::~Request() {
+  if (request_ != MPI_REQUEST_NULL) MPI_Wait(&request_, MPI_STATUS_IGNORE);
+}
+
+bool Request::test() {
+  int done = 0;
+  check(MPI_Test(&request_, &done, MPI_STATUS_IGNORE), "MPI_Test");
+  return done != 0;
+}
+
+void Request::wait() { check(MPI_Wait(&request_, MPI_STATUS_IGNORE), "MPI_Wait"); }
+
+void Request::wait_all(std::span<Request> requests) {
+  std::vector<MPI_Request> r;
+  r.reserve(requests.size());
+  for (Request& x : requests) r.push_back(x.request_);
+  check(MPI_Waitall(checked_count(r.size()), r.data(), MPI_STATUSES_IGNORE), "MPI_Waitall");
+  for (Request& x : requests) x.request_ = MPI_REQUEST_NULL;
+}
 
 Comm::Comm(MPI_Comm comm) : comm_(comm) {
   int initialized = 0;
@@ -131,6 +173,60 @@ void Comm::alltoallv_bytes(std::span<const std::byte> send, std::span<const std:
   }
   check(MPI_Alltoallv(send.data(), sc.data(), sd.data(), MPI_BYTE, recv.data(), rc.data(), rd.data(), MPI_BYTE, comm_),
         "MPI_Alltoallv");
+}
+
+Request Comm::isend_bytes(std::span<const std::byte> buffer, int dest, int tag) const {
+  detail::check_peer("isend", dest, tag, size_, false);
+  Request r;
+  check(MPI_Isend(buffer.data(), checked_count(buffer.size()), MPI_BYTE, dest, tag, comm_, &r.request_), "MPI_Isend");
+  return r;
+}
+
+Request Comm::issend_bytes(std::span<const std::byte> buffer, int dest, int tag) const {
+  detail::check_peer("issend", dest, tag, size_, false);
+  Request r;
+  check(MPI_Issend(buffer.data(), checked_count(buffer.size()), MPI_BYTE, dest, tag, comm_, &r.request_), "MPI_Issend");
+  return r;
+}
+
+Request Comm::irecv_bytes(std::span<std::byte> buffer, int source, int tag) const {
+  detail::check_peer("irecv", source, tag, size_, true);
+  Request r;
+  check(MPI_Irecv(buffer.data(), checked_count(buffer.size()), MPI_BYTE, source_of(source), tag, comm_, &r.request_),
+        "MPI_Irecv");
+  return r;
+}
+
+std::optional<Envelope> Comm::iprobe(int source, int tag) const {
+  detail::check_peer("iprobe", source, tag, size_, true);
+  int found = 0;
+  MPI_Status status;
+  check(MPI_Iprobe(source_of(source), tag, comm_, &found, &status), "MPI_Iprobe");
+  if (!found) return std::nullopt;
+  int bytes = 0;
+  check(MPI_Get_count(&status, MPI_BYTE, &bytes), "MPI_Get_count");
+  return Envelope{status.MPI_SOURCE, status.MPI_TAG, static_cast<std::size_t>(bytes)};
+}
+
+Request Comm::ibarrier() const {
+  Request r;
+  check(MPI_Ibarrier(comm_, &r.request_), "MPI_Ibarrier");
+  return r;
+}
+
+std::uint64_t Comm::next_sequence() const {
+  if (sequence_keyval == MPI_KEYVAL_INVALID) {
+    check(MPI_Comm_create_keyval(MPI_COMM_NULL_COPY_FN, delete_sequence, &sequence_keyval, nullptr),
+          "MPI_Comm_create_keyval");
+  }
+  void* value = nullptr;
+  int found = 0;
+  check(MPI_Comm_get_attr(comm_, sequence_keyval, &value, &found), "MPI_Comm_get_attr");
+  if (!found) {
+    value = new std::uint64_t{0};
+    check(MPI_Comm_set_attr(comm_, sequence_keyval, value), "MPI_Comm_set_attr");
+  }
+  return (*static_cast<std::uint64_t*>(value))++;
 }
 
 #define SOMA_INSTANTIATE_COMM(T)                              \

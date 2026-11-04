@@ -30,6 +30,19 @@ inline void check_counts(const char* side, std::span<const std::size_t> counts, 
   }
 }
 
+constexpr int max_tag = 32767;
+
+inline void check_peer(const char* what, int peer, int tag, int size, bool any_allowed) {
+  if (!(peer >= 0 && peer < size) && !(any_allowed && peer == -1)) {
+    throw std::invalid_argument(std::string("soma::Comm::") + what + ": rank " + std::to_string(peer) + " is not in [0, " +
+                                std::to_string(size) + ")");
+  }
+  if (tag < 0 || tag > max_tag) {
+    throw std::invalid_argument(std::string("soma::Comm::") + what + ": tag " + std::to_string(tag) + " is not in [0, " +
+                                std::to_string(max_tag) + "]");
+  }
+}
+
 }  // namespace soma::detail
 
 #endif  // SOMA_SRC_PARALLEL_COMM_CHECKS_HPP_

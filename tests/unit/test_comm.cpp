@@ -5,6 +5,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <vector>
@@ -180,3 +181,120 @@ TEST(Comm, AlltoallRejectsMismatchedBuffers) {
                            std::span<std::int32_t>(whole), std::span<const std::size_t>(many)),
                std::invalid_argument);
 }
+
+using soma::Request;
+
+TEST(Comm, RingMessagesArriveWhicheverSideStartsFirst) {
+  const Comm c = Comm::world();
+  const int next = (c.rank() + 1) % c.size(), prev = (c.rank() + c.size() - 1) % c.size();
+  for (const bool receive_first : {true, false}) {
+    const std::array<std::int32_t, 3> out{c.rank(), 2 * c.rank(), receive_first ? 1 : 0};
+    std::array<std::int32_t, 3> in{-1, -1, -1};
+    std::array<Request, 2> r;
+    if (receive_first) r[0] = c.irecv(std::span<std::int32_t>(in), prev, 5);
+    r[1] = c.isend(std::span<const std::int32_t>(out), next, 5);
+    if (!receive_first) r[0] = c.irecv(std::span<std::int32_t>(in), prev, 5);
+    Request::wait_all(r);
+    EXPECT_EQ(in, (std::array<std::int32_t, 3>{prev, 2 * prev, receive_first ? 1 : 0}));
+  }
+}
+
+TEST(Comm, IprobeFindsTheSenderAndSize) {
+  const Comm c = Comm::world();
+  const int next = (c.rank() + 1) % c.size(), prev = (c.rank() + c.size() - 1) % c.size();
+  const std::vector<std::int32_t> out(static_cast<std::size_t>(c.rank() + 1), c.rank());
+  Request s = c.issend(std::span<const std::int32_t>(out), next, 7);
+  std::optional<soma::Envelope> e;
+  while (!(e = c.iprobe(Comm::any_source, 7))) {
+  }
+  EXPECT_EQ(e->source, prev);
+  EXPECT_EQ(e->tag, 7);
+  EXPECT_EQ(e->bytes, sizeof(std::int32_t) * static_cast<std::size_t>(prev + 1));
+  std::vector<std::int32_t> in(e->bytes / sizeof(std::int32_t), -1);
+  c.irecv(std::span<std::int32_t>(in), e->source, 7).wait();
+  s.wait();
+  EXPECT_EQ(in, std::vector<std::int32_t>(static_cast<std::size_t>(prev + 1), prev));
+  c.barrier();
+  EXPECT_FALSE(c.iprobe(Comm::any_source, 7).has_value());
+}
+
+// A synchronous send to oneself cannot complete before its receive is posted.
+TEST(Comm, IssendCompletesOnlyOnceReceived) {
+  const Comm c = Comm::world();
+  const std::int64_t out = 42;
+  std::int64_t in = 0;
+  Request s = c.issend(std::span<const std::int64_t>(&out, 1), c.rank(), 11);
+  EXPECT_FALSE(s.test());
+  Request r = c.irecv(std::span<std::int64_t>(&in, 1), c.rank(), 11);
+  r.wait();
+  s.wait();
+  EXPECT_TRUE(s.test());
+  EXPECT_EQ(in, 42);
+  Request plain = c.isend(std::span<const std::int64_t>(&out, 1), c.rank(), 12);
+  c.irecv(std::span<std::int64_t>(&in, 1), c.rank(), 12).wait();
+  plain.wait();
+  EXPECT_TRUE(Request{}.test());
+}
+
+TEST(Comm, MessagesWithTheSameTagArriveInOrder) {
+  const Comm c = Comm::world();
+  const std::array<std::int32_t, 2> out{1, 2};
+  std::array<std::int32_t, 2> in{};
+  std::array<Request, 4> r;
+  r[0] = c.isend(std::span<const std::int32_t>(&out[0], 1), c.rank(), 13);
+  r[1] = c.isend(std::span<const std::int32_t>(&out[1], 1), c.rank(), 13);
+  r[2] = c.irecv(std::span<std::int32_t>(&in[0], 1), c.rank(), 13);
+  r[3] = c.irecv(std::span<std::int32_t>(&in[1], 1), c.rank(), 13);
+  Request::wait_all(r);
+  EXPECT_EQ(in, out);
+}
+
+TEST(Comm, IbarrierCompletes) {
+  const Comm c = Comm::world();
+  Request b = c.ibarrier();
+  b.wait();
+  EXPECT_TRUE(b.test());
+}
+
+TEST(Comm, SequencesArePerCommunicatorAndAgree) {
+  const std::uint64_t a = Comm::world().next_sequence();
+  const std::uint64_t b = Comm::world().next_sequence();
+  EXPECT_EQ(b, a + 1);
+  const Comm c = Comm::world();
+  EXPECT_EQ(c.allreduce(a, Op::min), c.allreduce(a, Op::max));
+}
+
+TEST(Comm, PointToPointRejectsBadRanksAndTags) {
+  const Comm c = Comm::world();
+  std::array<std::byte, 1> b{};
+  EXPECT_THROW((void)c.isend_bytes(b, c.size(), 0), std::invalid_argument);
+  EXPECT_THROW((void)c.issend_bytes(b, -1, 0), std::invalid_argument);
+  EXPECT_THROW((void)c.isend_bytes(b, 0, -1), std::invalid_argument);
+  EXPECT_THROW((void)c.irecv_bytes(b, 0, 32768), std::invalid_argument);
+  EXPECT_THROW((void)c.irecv_bytes(b, -2, 0), std::invalid_argument);
+  EXPECT_THROW((void)c.iprobe(c.size(), 0), std::invalid_argument);
+}
+
+#if !SOMA_ENABLE_MPI
+// Without MPI nothing else can complete a request, so waiting is an error,
+// and a receive dropped unmatched leaves later messages queued.
+TEST(Comm, SerialWaitsThatCannotCompleteThrow) {
+  const Comm c = Comm::world();
+  std::int32_t in = 0;
+  const std::int32_t out = 3;
+  Request r = c.irecv(std::span<std::int32_t>(&in, 1), 0, 20);
+  EXPECT_FALSE(r.test());
+  EXPECT_THROW(r.wait(), std::logic_error);
+  r = Request{};
+  Request s = c.issend(std::span<const std::int32_t>(&out, 1), 0, 20);
+  EXPECT_THROW(s.wait(), std::logic_error);
+  EXPECT_EQ(in, 0);
+  c.irecv(std::span<std::int32_t>(&in, 1), 0, 20).wait();
+  EXPECT_EQ(in, 3);
+  EXPECT_TRUE(s.test());
+  std::array<std::byte, 8> big{};
+  std::array<std::byte, 4> small{};
+  c.isend_bytes(big, 0, 21).wait();
+  EXPECT_THROW(c.irecv_bytes(small, 0, 21).wait(), std::runtime_error);
+}
+#endif
