@@ -127,6 +127,7 @@ if(SOMA_ENABLE_MOAB_COMPAT AND SOMA_ENABLE_MOAB_REFERENCE)
     soma_add_test(test_compat_core_moab SOURCES reference/test_compat_core_moab.cpp
       LIBS soma_compat ${SOMA_MOAB_TARGET})
   endif()
+  include(compat/examples.cmake)
 endif()
 
 # Set to a parallel HDF5 installation to test that it is refused without MPI.
