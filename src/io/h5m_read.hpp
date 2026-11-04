@@ -29,6 +29,7 @@
 #include "soma/core/mesh.hpp"
 #include "soma/fields/domain_mesh.hpp"
 #include "soma/fields/space.hpp"
+#include "soma/topology/nodes.hpp"
 
 namespace soma::h5m_read {
 
@@ -106,7 +107,9 @@ struct Group {
   Topology topology = Topology::edge;
   GO start = 1;
   GO count = 0;
-  std::vector<Offset> offsets;  // polygons: count + 1
+  std::uint64_t arity = 0;      // entries per element; 0 for a poly_indices list
+  std::uint64_t nnz = 0;        // connectivity entries
+  std::vector<Offset> offsets;  // polygons: count + 1 (of the rows read)
   std::vector<GO> conn;         // vertex file ids
   int nodes = 0;                // an element's nodes, corners first; 0 for polygons
 };
@@ -116,6 +119,112 @@ inline Offset to_offset(std::uint64_t n, const std::string& where) {
     fail(where + " has " + str(n) + " entries, more than the Offset type of this build can index");
   }
   return static_cast<Offset>(n);
+}
+
+// A group's type, extents and start id, checked, without its connectivity.
+inline Group describe_group(hid_t elements, const std::string& name) {
+  Group g;
+  g.where = "/tstt/elements/" + name;
+  const Id grp = h5::open_group(elements, name);
+  const std::string type = element_type(grp.get(), g.where);
+  const auto t = topology_named(type);
+  if (!t) fail(g.where + " holds " + type + " elements, which SOMA does not read");
+  g.topology = *t;
+  if (!h5::exists(grp.get(), "connectivity")) fail(g.where + " has no connectivity");
+  const std::string cw = g.where + "/connectivity";
+  const Id ds = h5::open_dataset(grp.get(), "connectivity");
+  const auto ext = h5::extent(ds.get(), cw);
+  if (h5::exists(grp.get(), "poly_indices")) {
+    if (g.topology != Topology::polygon) {
+      fail(g.where + " has poly_indices, but its elements are " + type + ", not polygons");
+    }
+    if (ext.size() != 1) fail(cw + " must be one-dimensional beside poly_indices");
+    g.nnz = ext[0];
+    const std::string pw = g.where + "/poly_indices";
+    const Id pi = h5::open_dataset(grp.get(), "poly_indices");
+    const auto pext = h5::extent(pi.get(), pw);
+    if (pext.size() != 1) fail(pw + " must be one-dimensional");
+    if (pext[0] > static_cast<hsize_t>(std::numeric_limits<LO>::max())) {
+      fail(g.where + " holds more elements than the LO type of this build can number");
+    }
+    to_offset(g.nnz, cw);
+    g.count = static_cast<GO>(pext[0]);
+  } else {
+    if (ext.size() != 2) fail(cw + " must be two-dimensional (elements by vertices)");
+    if (ext[0] > static_cast<hsize_t>(std::numeric_limits<LO>::max())) {
+      fail(g.where + " holds more elements than the LO type of this build can number");
+    }
+    if (ext[1] != 0 && ext[0] > std::numeric_limits<std::uint64_t>::max() / ext[1]) {
+      fail(cw + " has more entries than an index can count");
+    }
+    to_offset(ext[0] * ext[1], cw);  // so that i * arity fits too
+    g.count = static_cast<GO>(ext[0]);
+    g.arity = ext[1];
+    if (g.topology == Topology::polygon) {
+      if (g.arity < 3) fail(cw + " has " + str(g.arity) + " vertices per polygon; polygons need 3");
+    } else if (g.arity > 27 || mid_node_bits(g.topology, static_cast<int>(g.arity)) < 0) {
+      fail(cw + " has " + str(g.arity) + " nodes per " + type + "; no " + type +
+           " has that many (its corners, with or without mid-edge, mid-face and mid-region nodes)");
+    } else {
+      g.nodes = static_cast<int>(g.arity);
+    }
+    g.nnz = ext[0] * ext[1];
+  }
+  if (g.count > 0) g.start = start_id(ds.get(), cw);
+  return g;
+}
+
+// Offsets of polygons first .. first + last.size() - 1 of a poly_indices
+// list from their last indices, `prev` the last index of the polygon before
+// (-1 for none); `final` when the last of them is the group's last.
+inline std::vector<Offset> polygon_offsets(const Group& g, std::span<const std::int64_t> last, std::uint64_t first,
+                                           std::int64_t prev, bool final) {
+  const std::string cw = g.where + "/connectivity";
+  const std::string pw = g.where + "/poly_indices";
+  std::vector<Offset> offsets(last.size() + 1, 0);
+  offsets[0] = to_offset(static_cast<std::uint64_t>(prev + 1), cw);
+  for (std::size_t i = 0; i < last.size(); ++i) {
+    // prev is in [-1, nnz), so prev + 3 cannot overflow.
+    if (last[i] < prev + 3) {
+      fail(pw + ": polygon " + str(first + i) + " ends at index " + str(last[i]) +
+           ", leaving it fewer than 3 vertices");
+    }
+    if (static_cast<std::uint64_t>(last[i]) >= g.nnz) {
+      fail(pw + ": polygon " + str(first + i) + " ends at index " + str(last[i]) + ", but " + cw + " has " +
+           str(g.nnz) + " entries");
+    }
+    prev = last[i];
+    offsets[i + 1] = to_offset(static_cast<std::uint64_t>(prev) + 1, cw);
+  }
+  if (final && static_cast<std::uint64_t>(prev + 1) != g.nnz) {
+    fail(pw + " ends at index " + str(prev) + ", but " + cw + " has " + str(g.nnz) + " entries");
+  }
+  return offsets;
+}
+
+// Connectivity entries `ids` of rows first on of a group (offsets as from
+// polygon_offsets for a poly_indices list, which start at ids[0]), checked to
+// be vertex file ids.
+inline std::vector<GO> vertex_ids(const Group& g, std::span<const std::uint64_t> ids, std::uint64_t first,
+                                  std::span<const Offset> offsets, GO vertex_start, GO vertex_count) {
+  const auto lo = static_cast<std::uint64_t>(vertex_start);
+  const auto end = lo + static_cast<std::uint64_t>(vertex_count);
+  std::vector<GO> conn(ids.size());
+  for (std::size_t j = 0; j < ids.size(); ++j) {
+    if (ids[j] < lo || ids[j] >= end) {
+      std::uint64_t row = 0;
+      if (g.arity != 0) {
+        row = j / g.arity;
+      } else {
+        const auto at = static_cast<Offset>(j) + offsets.front();
+        row = static_cast<std::uint64_t>(std::upper_bound(offsets.begin(), offsets.end(), at) - offsets.begin() - 1);
+      }
+      fail(g.where + "/connectivity: element " + str(static_cast<std::uint64_t>(g.start) + first + row) +
+           " refers to file id " + str(ids[j]) + ", which is not a vertex");
+    }
+    conn[j] = static_cast<GO>(ids[j]);
+  }
+  return conn;
 }
 
 inline void check_ranges(std::vector<IdRange> ranges, std::uint64_t max_id) {

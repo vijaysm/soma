@@ -70,97 +70,22 @@ Nodes read_nodes(hid_t tstt) {
 }
 
 Group read_group(hid_t elements, const std::string& name, const Nodes& nodes) {
-  Group g;
-  g.where = "/tstt/elements/" + name;
+  Group g = describe_group(elements, name);
   const Id grp = h5::open_group(elements, name);
-  const std::string type = element_type(grp.get(), g.where);
-  const auto t = topology_named(type);
-  if (!t) fail(g.where + " holds " + type + " elements, which SOMA does not read");
-  g.topology = *t;
-  if (!h5::exists(grp.get(), "connectivity")) fail(g.where + " has no connectivity");
   const std::string cw = g.where + "/connectivity";
-  const Id ds = h5::open_dataset(grp.get(), "connectivity");
-  const auto ext = h5::extent(ds.get(), cw);
-
-  std::uint64_t nnz = 0;
-  std::uint64_t arity = 0;  // 0: variable
-  if (h5::exists(grp.get(), "poly_indices")) {
-    if (g.topology != Topology::polygon) {
-      fail(g.where + " has poly_indices, but its elements are " + type + ", not polygons");
-    }
-    if (ext.size() != 1) fail(cw + " must be one-dimensional beside poly_indices");
-    nnz = ext[0];
+  if (g.arity == 0) {
     const std::string pw = g.where + "/poly_indices";
     const Id pi = h5::open_dataset(grp.get(), "poly_indices");
-    const auto pext = h5::extent(pi.get(), pw);
-    if (pext.size() != 1) fail(pw + " must be one-dimensional");
-    if (pext[0] > static_cast<hsize_t>(std::numeric_limits<LO>::max())) {
-      fail(g.where + " holds more elements than the LO type of this build can number");
-    }
-    to_offset(nnz, cw);
-    const auto last = h5::read_all<std::int64_t>(pi.get(), static_cast<std::size_t>(pext[0]), pw);
-    g.count = static_cast<GO>(last.size());
-    g.offsets.assign(last.size() + 1, 0);
-    std::int64_t prev = -1;
-    for (std::size_t i = 0; i < last.size(); ++i) {
-      // prev is in [-1, nnz), so prev + 3 cannot overflow.
-      if (last[i] < prev + 3) {
-        fail(pw + ": polygon " + str(std::uint64_t{i}) + " ends at index " + str(last[i]) +
-             ", leaving it fewer than 3 vertices");
-      }
-      if (static_cast<std::uint64_t>(last[i]) >= nnz) {
-        fail(pw + ": polygon " + str(std::uint64_t{i}) + " ends at index " + str(last[i]) + ", but " + cw +
-             " has " + str(nnz) + " entries");
-      }
-      prev = last[i];
-      g.offsets[i + 1] = to_offset(static_cast<std::uint64_t>(prev) + 1, cw);
-    }
-    if (static_cast<std::uint64_t>(prev + 1) != nnz) {
-      fail(pw + " ends at index " + str(prev) + ", but " + cw + " has " + str(nnz) + " entries");
-    }
-  } else {
-    if (ext.size() != 2) fail(cw + " must be two-dimensional (elements by vertices)");
-    if (ext[0] > static_cast<hsize_t>(std::numeric_limits<LO>::max())) {
-      fail(g.where + " holds more elements than the LO type of this build can number");
-    }
-    if (ext[1] != 0 && ext[0] > std::numeric_limits<std::uint64_t>::max() / ext[1]) {
-      fail(cw + " has more entries than an index can count");
-    }
-    to_offset(ext[0] * ext[1], cw);  // so that i * arity below fits too
-    g.count = static_cast<GO>(ext[0]);
-    arity = ext[1];
-    if (g.topology == Topology::polygon) {
-      if (arity < 3) fail(cw + " has " + str(arity) + " vertices per polygon; polygons need 3");
-      g.offsets.assign(static_cast<std::size_t>(g.count) + 1, 0);
-      for (std::size_t i = 0; i <= static_cast<std::size_t>(g.count); ++i) {
-        g.offsets[i] = to_offset(i * arity, cw);
-      }
-    } else if (arity > 27 || mid_node_bits(g.topology, static_cast<int>(arity)) < 0) {
-      fail(cw + " has " + str(arity) + " nodes per " + type + "; no " + type +
-           " has that many (its corners, with or without mid-edge, mid-face and mid-region nodes)");
-    } else {
-      g.nodes = static_cast<int>(arity);
-    }
-    nnz = ext[0] * ext[1];
+    const auto last = h5::read_all<std::int64_t>(pi.get(), static_cast<std::size_t>(g.count), pw);
+    g.offsets = polygon_offsets(g, last, 0, -1, true);
+  } else if (g.topology == Topology::polygon) {
+    g.offsets.assign(static_cast<std::size_t>(g.count) + 1, 0);
+    for (std::size_t i = 0; i <= static_cast<std::size_t>(g.count); ++i) g.offsets[i] = to_offset(i * g.arity, cw);
   }
   if (g.count == 0) return g;
-  g.start = start_id(ds.get(), cw);
-
-  const auto ids = h5::read_all<std::uint64_t>(ds.get(), static_cast<std::size_t>(nnz), cw);
-  const auto first = static_cast<std::uint64_t>(nodes.start);
-  const auto end = first + static_cast<std::uint64_t>(nodes.count);
-  g.conn.resize(ids.size());
-  for (std::size_t j = 0; j < ids.size(); ++j) {
-    if (ids[j] < first || ids[j] >= end) {
-      const auto row = arity != 0 ? j / arity
-                                  : static_cast<std::size_t>(std::upper_bound(g.offsets.begin(), g.offsets.end(),
-                                                                              static_cast<Offset>(j)) -
-                                                             g.offsets.begin() - 1);
-      fail(cw + ": element " + str(static_cast<std::uint64_t>(g.start) + row) + " refers to file id " + str(ids[j]) +
-           ", which is not a vertex");
-    }
-    g.conn[j] = static_cast<GO>(ids[j]);
-  }
+  const Id ds = h5::open_dataset(grp.get(), "connectivity");
+  const auto ids = h5::read_all<std::uint64_t>(ds.get(), static_cast<std::size_t>(g.nnz), cw);
+  g.conn = vertex_ids(g, ids, 0, g.offsets, nodes.start, nodes.count);
   return g;
 }
 
