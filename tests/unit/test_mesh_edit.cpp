@@ -421,3 +421,74 @@ TEST(MeshEdit, SidesDerivedAgainKeepFieldsAndSetsByGid) {
   EXPECT_EQ(graph_by_gid(m, 0, 3).at(m.gid(0)(0)), (std::vector<GO>{}));
   EXPECT_EQ(m.adjacency(0, 3).offsets(1), 0);
 }
+
+// The tail grows over several edits, one segment per run of a topology; rows
+// of carried upward graphs are sorted by edited lid, as on any mesh.
+TEST(MeshEdit, TailsAccumulateAndCarriedRowsStaySorted) {
+  HostMesh m = soma_test::two_quads_and_a_triangle();
+  soma::build_adjacencies(m, soma::AdjacencyRequest{}.add(0, 2));
+  {
+    MeshEdit edit(m);
+    const LO v = edit.add_vertices(std::vector<Real>{-1, 0.5, 0});
+    edit.add_elements(Topology::tri, std::vector<LO>{lid_of(m, 0, 10), v, lid_of(m, 0, 40)});
+    edit.add_elements(Topology::quad, std::vector<LO>{lid_of(m, 0, 40), v, lid_of(m, 0, 10), lid_of(m, 0, 50)});
+    edit.apply();
+  }
+  {
+    MeshEdit edit(m);
+    edit.add_elements(Topology::tri, std::vector<LO>{lid_of(m, 0, 20), lid_of(m, 0, 10), lid_of(m, 0, 50)});
+    edit.remove(2, std::vector<LO>{lid_of(m, 2, 3)});
+    edit.apply();
+  }
+  EXPECT_EQ(m.tail(2), 3);
+  EXPECT_EQ(m.tail(0), 1);
+  const auto segs = m.segments(2);
+  ASSERT_EQ(segs.size(), 5u);  // tri, quad; then tri, quad of the first edit, tri of the second
+  EXPECT_EQ(segs[2].topology, Topology::tri);
+  EXPECT_EQ(segs[3].topology, Topology::quad);
+  EXPECT_EQ(segs[4], (soma::Segment{5, 6, Topology::tri, 3, soma::Ownership::interior}));
+  const auto g = m.adjacency(0, 2);
+  for (LO v = 0; v < m.count(0); ++v) {
+    EXPECT_TRUE(std::is_sorted(g.targets.data() + g.offsets(static_cast<std::size_t>(v)),
+                               g.targets.data() + g.offsets(static_cast<std::size_t>(v) + 1)))
+        << v;
+  }
+  HostMesh c = m.clone();
+  c.compress();
+  EXPECT_EQ(graph_by_gid(m, 0, 2), graph_by_gid(c, 0, 2));
+  EXPECT_EQ(graph_by_gid(m, 0, 2).at(10).size(), 4u);
+}
+
+// Complete sides stay complete through compress, ordered as MeshBuilder
+// orders explicit sides (here along the curve), not derived again.
+TEST(MeshEdit, CompressKeepsCompleteSidesInBuilderOrder) {
+  HostMesh m = soma::testing::box_mesh({3, 3, 1, Topology::quad, 1, 1, 1, soma::Ordering::type_major_sfc});
+  soma::build_adjacencies(m, soma::AdjacencyRequest{}.add(2, 1));
+  MeshEdit edit(m);
+  edit.add_vertices(std::vector<Real>{5, 5, 0});
+  edit.apply();
+  ASSERT_TRUE(soma::detail::TopologyAccess::block(m, 1).derived);
+  m.compress();
+  EXPECT_TRUE(soma::detail::TopologyAccess::block(m, 1).derived);
+  soma::MeshBuilder b(2);
+  std::vector<GO> vg;
+  std::vector<Real> xyz;
+  for (LO i = 0; i < m.count(0); ++i) {
+    vg.push_back(m.gid(0)(static_cast<std::size_t>(i)));
+    for (int q = 0; q < 3; ++q) xyz.push_back(m.coords()(static_cast<std::size_t>(i), static_cast<std::size_t>(q)));
+  }
+  b.add_vertices(vg, xyz);
+  for (int d : {1, 2}) {
+    std::vector<GO> eg;
+    std::vector<GO> conn;
+    for (LO e = 0; e < m.count(d); ++e) {
+      eg.push_back(m.gid(d)(static_cast<std::size_t>(e)));
+      for (const GO g : vertex_gids(m, d, e)) conn.push_back(g);
+    }
+    b.add_elements(d == 1 ? Topology::edge : Topology::quad, eg, conn);
+  }
+  const HostMesh want = std::move(b).build(soma::Ordering::type_major_sfc);
+  for (LO e = 0; e < m.count(1); ++e) {
+    EXPECT_EQ(m.gid(1)(static_cast<std::size_t>(e)), want.gid(1)(static_cast<std::size_t>(e))) << e;
+  }
+}
