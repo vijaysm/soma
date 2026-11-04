@@ -168,6 +168,22 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_key(const KeyBox& box, Real x, Real
   return hilbert_index(c, box.n, bits_per_axis(box.n));
 }
 
+// The Morton (Z-order) key of a point in the same grid as hilbert_key: the
+// quantized coordinates of the kept axes interleaved, the first kept axis
+// most significant.
+KOKKOS_INLINE_FUNCTION std::uint64_t morton_key(const KeyBox& box, Real x, Real y, Real z) {
+  if (box.n == 0) return 0;
+  const Real p[3] = {x, y, z};
+  std::uint32_t c[3] = {0, 0, 0};
+  const std::uint32_t last = max_cell(box.n);
+  for (int i = 0; i < box.n; ++i) {
+    c[i] = quantize(box.scale * p[box.axis[i]], box.lo[i], box.extent, last);
+  }
+  if (box.n == 1) return c[0];
+  if (box.n == 2) return detail::spread2(c[0]) << 1 | detail::spread2(c[1]);
+  return detail::spread3(c[0]) << 2 | detail::spread3(c[1]) << 1 | detail::spread3(c[2]);
+}
+
 }  // namespace soma::sfc
 
 #endif  // SOMA_CORE_SFC_HPP_
