@@ -103,12 +103,13 @@ struct CoreState {
   std::string last_error;
 
   // Caches, rebuilt after a change: each element's nodes as handles, and the
-  // live entities of each dimension at each vertex (as a corner).
+  // live entities of each dimension at each vertex (as a corner), as handles
+  // sorted per vertex.
   bool caches_valid = false;
   std::array<std::vector<std::size_t>, 4> node_offsets;
   std::array<std::vector<EntityHandle>, 4> nodes;
   std::array<std::vector<std::size_t>, 4> up_offsets;
-  std::array<std::vector<LO>, 4> up;
+  std::array<std::vector<EntityHandle>, 4> up;
 
   CoreState();
 

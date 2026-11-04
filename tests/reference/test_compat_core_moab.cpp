@@ -710,3 +710,30 @@ TEST(CompatCore, TagsOnRangesMatchMoab) {
   EXPECT_EQ(b.tag_set_data(db, &gone_b, 1, twenty.data()), moab::MB_ENTITY_NOT_FOUND);
   EXPECT_EQ(a.tag_set_data(da, &gone_a, 1, twenty.data()), sc::MB_ENTITY_NOT_FOUND);
 }
+
+// A hex deleted and created again takes its old id back but sits after the
+// others in the mesh: entities at a vertex still come in handle order.
+TEST(CompatCore, AdjacenciesAfterEditsMatchMoab) {
+  sc::Core a;
+  moab::Core b;
+  ASSERT_EQ(a.load_file((data + "/64bricks_1khex.h5m").c_str()), sc::MB_SUCCESS);
+  ASSERT_EQ(b.load_file((data + "/64bricks_1khex.h5m").c_str()), moab::MB_SUCCESS);
+  sc::Range ha;
+  a.get_entities_by_type(0, sc::MBHEX, ha);
+  const H old = ha[3];
+  std::vector<H> conn;
+  a.get_connectivity(&old, 1, conn);
+  ASSERT_EQ(a.delete_entities(&old, 1), sc::MB_SUCCESS);
+  ASSERT_EQ(b.delete_entities(&old, 1), moab::MB_SUCCESS);
+  H made_a = 0, made_b = 0;
+  ASSERT_EQ(a.create_element(sc::MBHEX, conn.data(), 8, made_a), sc::MB_SUCCESS);
+  b.create_element(moab::MBHEX, conn.data(), 8, made_b);
+  ASSERT_EQ(made_a, made_b);
+  expect_same_mesh(a, b);
+  for (const H v : conn) {
+    std::vector<H> xa, xb;
+    ASSERT_EQ(a.get_adjacencies(&v, 1, 3, false, xa), sc::MB_SUCCESS);
+    b.get_adjacencies(&v, 1, 3, false, xb);
+    EXPECT_EQ(xa, xb) << "vertex " << v;
+  }
+}

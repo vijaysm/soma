@@ -211,7 +211,10 @@ void CoreState::build_caches() {
     std::vector<std::size_t> at(up_offsets[k].begin(), up_offsets[k].end() - 1);
     for (LO e = 0; e < n; ++e) {
       if (!v.alive(d, e)) continue;
-      for (LO q = 0; q < v.num_vertices(d, e); ++q) up[k][at[static_cast<std::size_t>(v.node(d, e, q))]++] = e;
+      for (LO q = 0; q < v.num_vertices(d, e); ++q) up[k][at[static_cast<std::size_t>(v.node(d, e, q))]++] = handle_of[k][static_cast<std::size_t>(e)];
+    }
+    for (std::size_t i = 0; i < static_cast<std::size_t>(nv); ++i) {
+      std::sort(up[k].begin() + static_cast<std::ptrdiff_t>(up_offsets[k][i]), up[k].begin() + static_cast<std::ptrdiff_t>(up_offsets[k][i + 1]));
     }
   }
   caches_valid = true;
@@ -509,20 +512,18 @@ namespace {
 std::vector<EntityHandle> adjacent(CoreState& s, EntityHandle h, int to) {
   const int from = s.dim_of(h);
   if (to == from) return {h};
-  const std::vector<EntityHandle> corners = s.corners(h);
-  if (to == 0) return corners;
   s.build_caches();
   const auto k = static_cast<std::size_t>(to);
   // Entities of dimension `to` at a vertex.
   const auto at = [&](EntityHandle v) {
-    const LO l = s.lid(v);
-    std::vector<EntityHandle> out;
-    for (std::size_t q = s.up_offsets[k][static_cast<std::size_t>(l)]; q < s.up_offsets[k][static_cast<std::size_t>(l) + 1]; ++q) {
-      out.push_back(s.handle_of[k][static_cast<std::size_t>(s.up[k][q])]);
-    }
-    std::sort(out.begin(), out.end());
-    return out;
+    const auto l = static_cast<std::size_t>(s.lid(v));
+    const auto first = s.up[k].begin();
+    return std::vector<EntityHandle>(first + static_cast<std::ptrdiff_t>(s.up_offsets[k][l]),
+                                     first + static_cast<std::ptrdiff_t>(s.up_offsets[k][l + 1]));
   };
+  if (from == 0) return at(h);
+  const std::vector<EntityHandle> corners = s.corners(h);
+  if (to == 0) return corners;
   if (to > from) {
     // Entities holding every corner of h.
     std::vector<EntityHandle> out = at(corners[0]);
@@ -597,6 +598,11 @@ ErrorCode Interface::get_adjacencies(const EntityHandle* from, int n, int to_dim
         s_->flush();
       }
     }
+  }
+  if (n == 1) {
+    const std::vector<EntityHandle> a = adjacent(*s_, from[0], to_dim);
+    adj.insert(adj.end(), a.begin(), a.end());
+    return MB_SUCCESS;
   }
   std::vector<EntityHandle> out;
   for (int i = 0; i < n; ++i) {
