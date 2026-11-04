@@ -16,6 +16,7 @@
 
 #include "soma/core/sfc.hpp"
 #include "soma/fields/domain.hpp"
+#include "soma/topology/nodes.hpp"
 
 namespace soma {
 
@@ -45,6 +46,11 @@ void MeshBuilder::add_vertices(std::span<const GO> gids, std::span<const Real> x
 
 void MeshBuilder::add_elements(Topology t, std::span<const GO> gids,
                                std::span<const GO> vertex_gids) {
+  add_elements(t, gids, vertex_gids, num_vertices(t));
+}
+
+void MeshBuilder::add_elements(Topology t, std::span<const GO> gids, std::span<const GO> node_gids,
+                               int nodes_per_element) {
   if (t == Topology::polyhedron) {
     throw std::invalid_argument("polyhedra need face connectivity and are not supported yet");
   }
@@ -55,12 +61,29 @@ void MeshBuilder::add_elements(Topology t, std::span<const GO> gids,
                                 ", outside [1, " + std::to_string(dim_) + "]");
   }
   const int nv = num_vertices(t);
-  if (nv == 0 || vertex_gids.size() != gids.size() * static_cast<std::size_t>(nv)) {
+  if (mid_node_bits(t, nodes_per_element) < 0) {
+    throw std::invalid_argument(std::string("add_elements: no ") + name(t) + " element has " +
+                                std::to_string(nodes_per_element) + " nodes");
+  }
+  const auto n = static_cast<std::size_t>(nodes_per_element);
+  if (node_gids.size() != gids.size() * n) {
     throw std::invalid_argument("add_elements: connectivity size does not match the topology");
   }
-  (void)detail::to_offset(vertex_gids.size(), "add_elements: connectivity size");
-  Block b{t, {gids.begin(), gids.end()}, {}, {vertex_gids.begin(), vertex_gids.end()}};
   const auto stride = static_cast<std::size_t>(nv);
+  (void)detail::to_offset(gids.size() * stride, "add_elements: connectivity size");
+  Block b{t, {gids.begin(), gids.end()}, {}, {}, static_cast<std::uint16_t>(n - stride), {}};
+  if (n == stride) {
+    b.vertex_gids.assign(node_gids.begin(), node_gids.end());
+  } else {
+    b.vertex_gids.reserve(gids.size() * stride);
+    b.node_gids.reserve(gids.size() * (n - stride));
+    for (std::size_t i = 0; i < gids.size(); ++i) {
+      const auto first = node_gids.begin() + static_cast<std::ptrdiff_t>(i * n);
+      b.vertex_gids.insert(b.vertex_gids.end(), first, first + static_cast<std::ptrdiff_t>(stride));
+      b.node_gids.insert(b.node_gids.end(), first + static_cast<std::ptrdiff_t>(stride),
+                         first + static_cast<std::ptrdiff_t>(n));
+    }
+  }
   b.offsets.resize(gids.size() + 1);
   for (std::size_t i = 0; i <= gids.size(); ++i) b.offsets[i] = static_cast<Offset>(i * stride);
   blocks_[static_cast<std::size_t>(dimension(t))].push_back(std::move(b));
@@ -94,7 +117,9 @@ void MeshBuilder::add_polygons(std::span<const GO> gids, std::span<const Offset>
   blocks_[2].push_back(Block{Topology::polygon,
                              {gids.begin(), gids.end()},
                              {offsets.begin(), offsets.end()},
-                             {vertex_gids.begin(), vertex_gids.end()}});
+                             {vertex_gids.begin(), vertex_gids.end()},
+                             0,
+                             {}});
 }
 
 namespace {
@@ -272,11 +297,57 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     const auto it = std::lower_bound(local_of.begin(), local_of.end(), std::pair<GO, LO>{g, 0});
     return (it == local_of.end() || it->first != g) ? invalid_lo : it->second;
   };
+  // Vertices that are nodes of high-order elements and no element's corner
+  // move after the others, keeping their order; unknown gids are reported
+  // with their element below.
+  mesh.corners_ = v.count;
+  {
+    std::vector<std::uint8_t> role(nv, 0);  // 1 a corner, 2 a node
+    bool any_nodes = false;
+    for (std::size_t d = 1; d <= 3; ++d) {
+      for (const Block& blk : blocks_[d]) {
+        if (blk.nodes == 0) continue;
+        any_nodes = true;
+        for (const GO g : blk.node_gids) {
+          if (const LO l = find_vertex(g); l != invalid_lo) role[static_cast<std::size_t>(l)] |= 2;
+        }
+      }
+    }
+    for (std::size_t d = 1; any_nodes && d <= 3; ++d) {
+      for (const Block& blk : blocks_[d]) {
+        for (const GO g : blk.vertex_gids) {
+          if (const LO l = find_vertex(g); l != invalid_lo) role[static_cast<std::size_t>(l)] |= 1;
+        }
+      }
+    }
+    const auto node_only = static_cast<std::size_t>(std::count(role.begin(), role.end(), 2));
+    if (node_only > 0) {
+      std::vector<LO> to(nv);
+      LO corner = 0;
+      auto node = static_cast<LO>(nv - node_only);
+      for (std::size_t i = 0; i < nv; ++i) to[i] = role[i] == 2 ? node++ : corner++;
+      mesh.corners_ = corner;
+      CoordView<Kokkos::HostSpace> xyz(
+          Kokkos::view_alloc(std::string("soma::mesh::coords"), Kokkos::WithoutInitializing), nv);
+      View1<GO, Kokkos::HostSpace> gid(
+          Kokkos::view_alloc(std::string("soma::mesh::gid0"), Kokkos::WithoutInitializing), nv);
+      for (std::size_t i = 0; i < nv; ++i) {
+        const auto j = static_cast<std::size_t>(to[i]);
+        gid(j) = v.gid(i);
+        for (std::size_t k = 0; k < 3; ++k) xyz(j, k) = mesh.coords_(i, k);
+      }
+      mesh.coords_ = xyz;
+      v.gid = gid;
+      for (LO& l : dense_local) l = to[static_cast<std::size_t>(l)];
+      for (auto& gl : local_of) gl.second = to[static_cast<std::size_t>(gl.second)];
+    }
+  }
 
   for (std::size_t d = 1; d <= 3; ++d) {
     struct Rec {
       Topology t;
       std::uint16_t arity;
+      std::uint16_t nodes;
       GO gid;
       std::uint64_t key;
       std::size_t block;
@@ -289,7 +360,9 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       recs.reserve(n);
     }
     std::vector<std::vector<LO>> local(blocks_[d].size());  // per connectivity entry
+    std::vector<std::vector<LO>> node_local(blocks_[d].size());
     std::size_t entries = 0;
+    std::size_t node_entries = 0;
     for (std::size_t b = 0; b < blocks_[d].size(); ++b) {
       const Block& blk = blocks_[d][b];
       local[b].resize(blk.vertex_gids.size());
@@ -308,7 +381,20 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
           local[b][static_cast<std::size_t>(k)] = l;
         }
         const auto arity = static_cast<std::uint16_t>(last - first);
-        recs.push_back(Rec{blk.topology, arity, blk.gids[i], 0, b, i});
+        recs.push_back(Rec{blk.topology, arity, blk.nodes, blk.gids[i], 0, b, i});
+      }
+      node_local[b].resize(blk.node_gids.size());
+      node_entries += blk.node_gids.size();
+      for (std::size_t k = 0; k < blk.node_gids.size(); ++k) {
+        const GO g = blk.node_gids[k];
+        const LO l = find_vertex(g);
+        if (l == invalid_lo) {
+          const int count = num_vertices(blk.topology) + blk.nodes;
+          throw std::invalid_argument("unknown vertex gid " + std::to_string(g) + " among the nodes of " +
+                                      name(blk.topology) + std::to_string(count) + " element " +
+                                      std::to_string(blk.gids[k / blk.nodes]));
+        }
+        node_local[b][k] = l;
       }
     }
     if (keys.active) {
@@ -328,7 +414,7 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
           });
     }
     // By (gid, topology, arity), which also finds repeated gids; then stably by
-    // key and by (topology, arity): by (topology, arity, key, gid).
+    // key and by (topology, arity, nodes): by (topology, arity, nodes, key, gid).
     sort_unless_sorted(recs.begin(), recs.end(), [](const Rec& x, const Rec& y) {
       return std::tuple(x.gid, x.t, x.arity) < std::tuple(y.gid, y.t, y.arity);
     });
@@ -345,16 +431,17 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     }
     stable_sort_by_key(recs, [](const Rec& r) { return r.key; });
     {
-      std::vector<std::pair<Topology, std::uint16_t>> groups;
+      std::vector<std::tuple<Topology, std::uint16_t, std::uint16_t>> groups;
       for (const Rec& r : recs) {
-        const auto g = std::pair(r.t, r.arity);
+        const auto g = std::tuple(r.t, r.arity, r.nodes);
         if (groups.empty() || groups.back() != g) groups.push_back(g);
       }
       std::sort(groups.begin(), groups.end());
       groups.erase(std::unique(groups.begin(), groups.end()), groups.end());
       if (groups.size() > 1) {
         const auto group_of = [&](const Rec& r) {
-          const auto it = std::lower_bound(groups.begin(), groups.end(), std::pair(r.t, r.arity));
+          const auto it =
+              std::lower_bound(groups.begin(), groups.end(), std::tuple(r.t, r.arity, r.nodes));
           return static_cast<std::uint64_t>(it - groups.begin());
         };
         stable_sort_by_key(recs, group_of);
@@ -412,6 +499,20 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       e.conn_offsets(r + 1) = static_cast<Offset>(written);
       e.topology(r) = static_cast<std::uint8_t>(recs[r].t);
       e.gid(r) = recs[r].gid;
+    }
+    if (node_entries > 0) {
+      (void)detail::to_offset(node_entries, "number of high-order nodes");
+      e.node_offsets = View1<Offset, Kokkos::HostSpace>(uninit("soma::mesh::node_offsets"), ne + 1);
+      e.nodes = View1<LO, Kokkos::HostSpace>(uninit("soma::mesh::nodes"), node_entries);
+      std::size_t at = 0;
+      e.node_offsets(0) = 0;
+      for (std::size_t r = 0; r < ne; ++r) {
+        const std::size_t n = recs[r].nodes;
+        const LO* from = node_local[recs[r].block].data() + recs[r].index * n;
+        std::copy(from, from + n, e.nodes.data() + at);
+        at += n;
+        e.node_offsets(r + 1) = static_cast<Offset>(at);
+      }
     }
     e.segments =
         interior_segments(ne, [&](std::size_t r) { return std::pair(recs[r].t, recs[r].arity); });
