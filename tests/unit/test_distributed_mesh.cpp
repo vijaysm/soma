@@ -37,8 +37,8 @@ TEST(DistributedMesh, VerticesAreOrderedByOwnershipWithTheirSharing) {
   const soma::HostMesh m = soma::build_local_part(c, local_builder(rank_of, me));
   const auto& t = m.segment_table(0);
   const auto gid = m.gid(0);
-  const auto sharing = m.fields().get_var<int>(soma::sharing_field);
-  const auto owner = m.fields().get<int>(soma::owner_field);
+  const auto sharing = m.fields().get_var<int>(soma::sharing_field, 0);
+  const auto owner = m.fields().get<int>(soma::owner_field, 0);
   ASSERT_EQ(sharing.rows(), t.shared_end - t.interior_end);
   ASSERT_EQ(owner.rows(), t.shared_end - t.owned_end);
   std::vector<int> previous;
@@ -66,6 +66,69 @@ TEST(DistributedMesh, VerticesAreOrderedByOwnershipWithTheirSharing) {
   std::int64_t owned = m.segment_table(0).owned_end;
   EXPECT_EQ(c.allreduce(owned, soma::Op::sum), static_cast<std::int64_t>((nx + 1) * (ny + 1)));
   EXPECT_EQ(m.count(2), static_cast<LO>(std::count_if(rank_of.begin(), rank_of.end(), [&](const auto& x) { return x.second == me; })));
+}
+
+// Explicit edges (the grid line x = 6, gids 5000 + j) are shared like
+// vertices from the start, and keep their gids when the other edges are
+// derived.
+TEST(DistributedMesh, ExplicitEdgesAreSharedAndKeepTheirGids) {
+  const Comm c = Comm::world();
+  const int me = c.rank();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  std::map<std::pair<GO, GO>, std::set<int>> edges;  // every grid edge and its users
+  for (const auto& [cell, r] : rank_of) {
+    const std::vector<GO> v = corners(static_cast<int>(cell - 1000));
+    for (std::size_t s = 0; s < 4; ++s) edges[{std::min(v[s], v[(s + 1) % 4]), std::max(v[s], v[(s + 1) % 4])}].insert(r);
+  }
+  const auto line = [](int j) { return std::pair<GO, GO>{vertex(6, j), vertex(6, j + 1)}; };
+  soma::MeshBuilder b = local_builder(rank_of, me);
+  std::vector<GO> eg, ev;
+  for (int j = 0; j < ny; ++j) {
+    if (!edges.at(line(j)).contains(me)) continue;
+    eg.push_back(5000 + j);
+    ev.insert(ev.end(), {line(j).first, line(j).second});
+  }
+  b.add_elements(soma::Topology::edge, eg, ev);
+  soma::HostMesh m = soma::build_local_part(c, std::move(b));
+  const auto check = [&](bool all) {
+    const auto& t = m.segment_table(1);
+    const auto gid = m.gid(1);
+    const auto off = m.conn_offsets(1);
+    const auto conn = m.conn(1);
+    const auto vgid = m.gid(0);
+    const auto sharing = m.fields().get_var<int>(soma::sharing_field, 1);
+    std::int64_t on_line = 0;
+    for (LO e = 0; e < m.count(1); ++e) {
+      const GO a = vgid(conn(off(e))), bb = vgid(conn(off(e) + 1));
+      const std::pair<GO, GO> key{std::min(a, bb), std::max(a, bb)};
+      if (key.first % (nx + 1) == 7 && key.second == key.first + nx + 1) {  // on x = 6
+        EXPECT_EQ(gid(e), 5000 + (key.first - 1) / (nx + 1)) << a << "-" << bb;
+      } else {
+        EXPECT_TRUE(all) << "edge " << gid(e);
+        EXPECT_GT(gid(e), 5000 + ny - 1);
+      }
+      if (e < t.owned_end && gid(e) >= 5000 && gid(e) < 5000 + ny) ++on_line;
+      const std::set<int>& u = edges.at(key);
+      std::vector<int> others;
+      for (const int r : u) {
+        if (r != me) others.push_back(r);
+      }
+      const Ownership want = others.empty() ? Ownership::interior : *u.begin() == me ? Ownership::shared : Ownership::shared_copy;
+      const Ownership got = e < t.interior_end ? Ownership::interior : e < t.owned_end ? Ownership::shared : Ownership::shared_copy;
+      EXPECT_EQ(got, want) << "edge " << gid(e);
+      if (got == Ownership::interior) continue;
+      const auto row = static_cast<std::size_t>(e - t.interior_end);
+      const std::vector<int> listed(sharing.values().data() + sharing.offsets()(row),
+                                    sharing.values().data() + sharing.offsets()(row + 1));
+      EXPECT_EQ(listed, others) << "edge " << gid(e);
+    }
+    EXPECT_EQ(c.allreduce(on_line, soma::Op::sum), ny);
+    std::int64_t owned = t.owned_end;
+    EXPECT_EQ(c.allreduce(owned, soma::Op::sum), all ? static_cast<std::int64_t>(edges.size()) : ny);
+  };
+  check(false);
+  soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
+  check(true);
 }
 
 // The grid as quad9s on a lattice twice as fine: point (I, J) has gid
@@ -108,7 +171,7 @@ TEST(DistributedMesh, HighOrderVerticesFollowTheCornersOfTheirKind) {
   const auto& t = m.segment_table(0);
   const auto gid = m.gid(0);
   const auto v = m.view();
-  const auto sharing = m.fields().get_var<int>(soma::sharing_field);
+  const auto sharing = m.fields().get_var<int>(soma::sharing_field, 0);
   const std::array<LO, 5> bounds = soma::kind_bounds(t);
   for (std::size_t k = 0; k < 4; ++k) {
     const LO end = m.corner_end(static_cast<Ownership>(k));

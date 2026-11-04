@@ -106,6 +106,8 @@ TEST(SharedExchange, RejectsWrongShapesAndMeshesWithoutSharing) {
   soma::View2<double, Host> wrong("wrong", static_cast<std::size_t>(m.count(0)) + 1, 1);
   EXPECT_THROW(x.update(c, wrong), std::invalid_argument);
   EXPECT_THROW(x.reduce(c, wrong, soma::Op::sum), std::invalid_argument);
-  EXPECT_THROW(soma::SharedExchange<Host>(c, m, 2), std::exception);  // no sharing on elements yet
+  EXPECT_THROW(soma::SharedExchange<Host>(c, m, 1), std::exception);  // no edges, so no sharing, yet
+  const soma::SharedExchange<Host> cells(c, m, 2);  // elements are all interior
+  EXPECT_TRUE(cells.neighbours().empty());
   EXPECT_THROW(soma::SharedExchange<Host>(c, m, 4), std::invalid_argument);
 }

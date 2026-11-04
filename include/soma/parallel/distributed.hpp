@@ -31,8 +31,10 @@ inline constexpr const char* owner_field = "soma:owner";
 
 // Collective: builds `builder` (this rank's elements and their vertices) as
 // the local part of a mesh over `comm`, with curve keys in the box of every
-// rank's vertices. Throws as MeshBuilder::build and resolve_sharing, on every
-// rank if any rank's input is invalid.
+// rank's vertices. Every dimension the builder holds on some rank gets its
+// ownership and sharing: explicit edges or faces held by several ranks are
+// shared like vertices. Throws as MeshBuilder::build and resolve_sharing, on
+// every rank if any rank's input is invalid.
 [[nodiscard]] HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder,
                                         Ordering ordering = default_ordering);
 

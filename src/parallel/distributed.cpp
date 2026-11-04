@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <exception>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <limits>
@@ -61,6 +63,15 @@ bool has_sharing(const HostMesh& mesh, int dim) {
     return true;
   } catch (const std::out_of_range&) {
     return false;
+  }
+}
+
+// Drops soma:sharing and soma:owner from dimension `dim`.
+void uninstall(HostMesh& mesh, int dim) {
+  auto& reg = mesh.fields();
+  for (const FieldInfo& f : reg.list()) {  // stale after a derivation, so not by get
+    const bool named = f.name == sharing_field || f.name == owner_field;
+    if (named && std::find(f.dims.begin(), f.dims.end(), dim) != f.dims.end()) reg.remove(f.id);
   }
 }
 
@@ -146,31 +157,47 @@ void distribute_dimension(const Comm& comm, HostMesh& mesh, int k, const std::ve
 }  // namespace
 
 void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRequest request) {
-  // Explicit entities of each dimension, and dimensions already distributed.
-  std::array<std::vector<GO>, 4> explicit_gids;
+  // Explicit entities of each dimension (in lid order, then sorted), and
+  // dimensions already distributed.
+  std::array<std::vector<GO>, 4> explicit_gids, before;
   std::array<bool, 4> done{};
   for (int k = 1; k < mesh.dim(); ++k) {
-    done[static_cast<std::size_t>(k)] = has_sharing(mesh, k);
+    const auto kk = static_cast<std::size_t>(k);
+    done[kk] = has_sharing(mesh, k);
     const auto g = mesh.gid(k);
-    for (LO e = 0; e < mesh.count(k); ++e) explicit_gids[static_cast<std::size_t>(k)].push_back(g(e));
-    std::sort(explicit_gids[static_cast<std::size_t>(k)].begin(), explicit_gids[static_cast<std::size_t>(k)].end());
+    for (LO e = 0; e < mesh.count(k); ++e) before[kk].push_back(g(e));
+    explicit_gids[kk] = before[kk];
+    std::sort(explicit_gids[kk].begin(), explicit_gids[kk].end());
   }
   collectively(comm, "build_distributed_adjacencies", [&] { build_adjacencies(mesh, request); });
   for (int k = 1; k < mesh.dim(); ++k) {
-    // Every rank takes the same branch: done[k] and the derivation agree.
+    // A distributed dimension the derivation left alone stays; one it added
+    // to or reordered is distributed again. Every rank takes the same branch.
     const auto kk = static_cast<std::size_t>(k);
-    const std::int32_t todo = !done[kk] && mesh.count(k) > 0 ? 1 : 0;
+    const auto g = mesh.gid(k);
+    const bool same = static_cast<std::size_t>(mesh.count(k)) == before[kk].size() &&
+                      std::equal(before[kk].begin(), before[kk].end(), g.data());
+    const std::int32_t todo = (!done[kk] && mesh.count(k) > 0) || (done[kk] && !same) ? 1 : 0;
     if (comm.allreduce(todo, Op::max) == 0) continue;
+    if (done[kk]) uninstall(mesh, k);
     distribute_dimension(comm, mesh, k, explicit_gids[kk]);
   }
 }
 
 HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, Ordering ordering) {
-  const std::vector<GO> gids(builder.vertex_gids().begin(), builder.vertex_gids().end());
-  const Sharing sharing = resolve_sharing(comm, gids);
-  const std::vector<std::uint32_t> groups = sharing.groups();
-  std::vector<Ownership> kinds(gids.size());
-  for (std::size_t i = 0; i < gids.size(); ++i) kinds[i] = sharing.kind(i, comm.rank());
+  // Every dimension the builder holds on some rank, the vertices always.
+  std::array<std::vector<GO>, 4> gids;
+  gids[0].assign(builder.vertex_gids().begin(), builder.vertex_gids().end());
+  std::array<std::int32_t, 4> held{1, 0, 0, 0};
+  for (int d = 1; d <= 3; ++d) {
+    gids[static_cast<std::size_t>(d)] = builder.element_gids(d);
+    held[static_cast<std::size_t>(d)] = gids[static_cast<std::size_t>(d)].empty() ? 0 : 1;
+  }
+  comm.allreduce(std::span<std::int32_t>(held), Op::max);
+  std::array<std::optional<Sharing>, 4> sharing;
+  for (std::size_t d = 0; d < 4; ++d) {
+    if (held[d]) sharing[d] = resolve_sharing(comm, gids[d]);
+  }
 
   // The box of every rank's vertices: maxima of the highs and of the negated lows.
   const auto xyz = builder.vertex_coordinates();
@@ -187,19 +214,19 @@ HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, Ordering orde
   // A failure on one rank is reported on every rank before anything else
   // collective runs.
   HostMesh mesh;
-  std::exception_ptr failure;
-  try {
-    builder.set_ownership(0, gids, kinds, groups);
+  collectively(comm, "build_local_part", [&] {
+    for (std::size_t d = 0; d < 4; ++d) {
+      if (!sharing[d]) continue;
+      std::vector<Ownership> kinds(gids[d].size());
+      for (std::size_t i = 0; i < kinds.size(); ++i) kinds[i] = sharing[d]->kind(i, comm.rank());
+      builder.set_ownership(static_cast<int>(d), gids[d], kinds, sharing[d]->groups());
+    }
     if (std::isfinite(box[3])) builder.set_key_box({-box[0], -box[1], -box[2]}, {box[3], box[4], box[5]});
     mesh = std::move(builder).build(ordering);
-    install(mesh, comm, 0, gids, sharing);
-  } catch (...) {
-    failure = std::current_exception();
-  }
-  if (comm.allreduce(static_cast<std::int32_t>(failure != nullptr), Op::max)) {
-    if (failure) std::rethrow_exception(failure);
-    throw std::runtime_error("build_local_part: building failed on another rank");
-  }
+    for (std::size_t d = 0; d < 4; ++d) {
+      if (sharing[d] && static_cast<int>(d) <= mesh.dim()) install(mesh, comm, static_cast<int>(d), gids[d], *sharing[d]);
+    }
+  });
   return mesh;
 }
 
