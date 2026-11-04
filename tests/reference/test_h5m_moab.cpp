@@ -14,6 +14,7 @@
 // shows up as coordinates, connectivity or tag values that disagree.
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
@@ -25,6 +26,7 @@
 #include <stdexcept>
 #include <string>
 #include <system_error>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -269,6 +271,77 @@ fs::path path_of(const std::string& name);
 
 // The file `name` names, read by read_h5m and written again by write_h5m at
 // the compression level.
+fs::path path_of(const std::string& name);
+
+// One element of each 3D type, apart, with a quad side of the hex, a tri side
+// of the prism and an edge of the tet as explicit entities.
+fs::path zoo_file() {
+  const fs::path p = scratch_dir() / "zoo.h5m";
+  if (fs::exists(p)) return p;
+  moab::Core mb;
+  const auto add = [&](moab::EntityType t, std::vector<std::array<double, 3>> xyz, double shift) {
+    std::vector<moab::EntityHandle> v(xyz.size());
+    for (std::size_t i = 0; i < xyz.size(); ++i) {
+      xyz[i][0] += shift;
+      check(mb.create_vertex(xyz[i].data(), v[i]), "create_vertex");
+    }
+    moab::EntityHandle e = 0;
+    check(mb.create_element(t, v.data(), static_cast<int>(v.size()), e), "create_element");
+    return v;
+  };
+  const auto side = [&](moab::EntityType t, std::vector<moab::EntityHandle> v) {
+    moab::EntityHandle e = 0;
+    check(mb.create_element(t, v.data(), static_cast<int>(v.size()), e), "create_element");
+  };
+  const auto hex = add(moab::MBHEX, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}}, 0);
+  const auto prism = add(moab::MBPRISM, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {0, 1, 1}}, 2);
+  add(moab::MBPYRAMID, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0.5, 0.5, 1}}, 4);
+  const auto tet = add(moab::MBTET, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}, 6);
+  side(moab::MBQUAD, {hex[0], hex[1], hex[5], hex[4]});
+  side(moab::MBTRI, {prism[3], prism[4], prism[5]});
+  side(moab::MBEDGE, {tet[0], tet[1]});
+  check(mb.write_file(p.c_str()), "write_file");
+  return p;
+}
+
+// "ho:<file>:<bits>": the file with the mid-edge (2), mid-face (4) and
+// mid-region (8) nodes MOAB's convert_entities adds to every entity, or with
+// bit 1 to every other element of the highest dimension only, which leaves
+// neighbours that disagree on a shared side.
+fs::path converted_file(const std::string& spec) {
+  const auto colon = spec.rfind(':');
+  const std::string base = spec.substr(0, colon);
+  const int bits = std::stoi(spec.substr(colon + 1));
+  std::string flat = base;
+  std::replace(flat.begin(), flat.end(), ':', '_');
+  if (!flat.ends_with(".h5m")) flat += ".h5m";
+  const fs::path p = scratch_dir() / ("ho" + std::to_string(bits) + "_" + flat);
+  if (fs::exists(p)) return p;
+  moab::Core mb;
+  check(mb.load_file(path_of(base).c_str()), "load_file " + base);
+  // convert_entities takes a set; the root set it does not.
+  moab::Range chosen;
+  for (int dim = 3; dim > 0; --dim) {
+    moab::Range r;
+    check(mb.get_entities_by_dimension(0, dim, r), "entities");
+    if ((bits & 1) == 0) {
+      chosen.merge(r);
+    } else if (chosen.empty()) {
+      std::size_t i = 0;
+      for (const moab::EntityHandle e : r) {
+        if (i++ % 2 == 0) chosen.insert(e);
+      }
+    }
+  }
+  moab::EntityHandle set = 0;
+  check(mb.create_meshset(moab::MESHSET_SET, set), "create_meshset");
+  check(mb.add_entities(set, chosen), "add_entities");
+  check(mb.convert_entities(set, (bits & 2) != 0, (bits & 4) != 0, (bits & 8) != 0), "convert_entities");
+  check(mb.delete_entities(&set, 1), "delete the set");
+  check(mb.write_file(p.c_str()), "write_file");
+  return p;
+}
+
 fs::path written_file(const std::string& name, int compression) {
   std::string flat = name;
   std::replace(flat.begin(), flat.end(), ':', '_');
@@ -291,6 +364,8 @@ fs::path path_of(const std::string& name) {
   if (name == "tag_kinds") return tag_kinds_file();
   if (name == "poly_indices") return poly_indices_file();
   if (name == "sets_kinds") return sets_kinds_file();
+  if (name == "zoo") return zoo_file();
+  if (name.rfind("ho:", 0) == 0) return converted_file(name.substr(3));
   return fs::path(SOMA_TEST_DATA_DIR) / name;
 }
 
@@ -327,19 +402,31 @@ struct Loaded {
     for (const moab::EntityType t : moab_types) {
       moab::Range r;
       check(mb.get_entities_by_type(0, t, r), "get_entities_by_type");
-      handles[t].assign(r.begin(), r.end());
+      // A file's groups of one type (Hex8, Hex27) load in an order of their
+      // own, each in file order: pair the two by node count, then by order.
+      std::vector<std::pair<int, moab::EntityHandle>> theirs;
+      for (const moab::EntityHandle h : r) {
+        const moab::EntityHandle* c = nullptr;
+        int n = 1;
+        if (t != moab::MBVERTEX) check(mb.get_connectivity(h, c, n), "get_connectivity");
+        theirs.emplace_back(n, h);
+      }
+      std::sort(theirs.begin(), theirs.end());
+      for (const auto& [n, h] : theirs) handles[t].push_back(h);
       const int d = moab::CN::Dimension(t);
-      std::vector<std::pair<soma::GO, soma::LO>> mine;
+      std::vector<std::tuple<int, soma::GO, soma::LO>> mine;
       if (d <= mesh.dim()) {
+        const auto v = mesh.view();
         const auto topo = mesh.topology(d);
         const auto gid = mesh.gid(d);
         for (std::size_t l = 0; l < gid.extent(0); ++l) {
+          const auto lid = static_cast<soma::LO>(l);
           // Vertices carry no topology array.
-          if (d == 0 || topo(l) == static_cast<std::uint8_t>(t)) mine.emplace_back(gid(l), static_cast<soma::LO>(l));
+          if (d == 0 || topo(l) == static_cast<std::uint8_t>(t)) mine.emplace_back(v.num_nodes(d, lid), gid(l), lid);
         }
       }
       std::sort(mine.begin(), mine.end());
-      for (const auto& [g, l] : mine) lids[t].push_back(l);
+      for (const auto& [n, g, l] : mine) lids[t].push_back(l);
       for (std::size_t i = 0; i < handles[t].size() && i < lids[t].size(); ++i) where[handles[t][i]] = {d, lids[t][i]};
     }
     moab::Range r;
@@ -517,6 +604,28 @@ TEST_P(H5mMoab, ConnectivityMatches) {
       for (int j = 0; j < n; ++j) want.push_back(f.file_id(mc[j]));
       const auto e = static_cast<std::size_t>(l[i]);
       for (auto j = off(e); j < off(e + 1); ++j) got.push_back(g0(static_cast<std::size_t>(conn(static_cast<std::size_t>(j)))));
+      ASSERT_EQ(got, want) << moab::CN::EntityTypeName(t) << " " << i;
+    }
+  }
+}
+
+// Every element's nodes, corners then the others, as MOAB lists them.
+TEST_P(H5mMoab, NodesMatch) {
+  Loaded f(path_of(GetParam()));
+  const auto v = f.mesh.view();
+  for (const moab::EntityType t : moab_types) {
+    if (t == moab::MBVERTEX) continue;
+    const auto& h = f.handles[t];
+    const auto& l = f.lids[t];
+    ASSERT_EQ(h.size(), l.size()) << moab::CN::EntityTypeName(t);
+    const int d = moab::CN::Dimension(t);
+    for (std::size_t i = 0; i < h.size(); ++i) {
+      const moab::EntityHandle* mc = nullptr;
+      int n = 0;
+      check(f.mb.get_connectivity(h[i], mc, n, false), "get_connectivity");
+      std::vector<soma::GO> want, got;
+      for (int j = 0; j < n; ++j) want.push_back(f.file_id(mc[j]));
+      for (soma::LO k = 0; k < v.num_nodes(d, l[i]); ++k) got.push_back(v.gid(0, v.node(d, l[i], k)));
       ASSERT_EQ(got, want) << moab::CN::EntityTypeName(t) << " " << i;
     }
   }
@@ -794,6 +903,11 @@ TEST(H5mMoabCached, LoadsAFileWithCachedAdjacencies) {
   EXPECT_EQ(soma::read_h5m(out).adjacencies().bits(), request.bits());
 }
 
+// Every configuration of a file's elements, and the mix of bit 1.
+#define HIGH_ORDER(prefix, file)                                                                         \
+  prefix "ho:" file ":2", prefix "ho:" file ":4", prefix "ho:" file ":6", prefix "ho:" file ":8",      \
+      prefix "ho:" file ":10", prefix "ho:" file ":12", prefix "ho:" file ":14", prefix "ho:" file ":15"
+
 INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                          ::testing::Values("64bricks_1khex.h5m", "hex_2048.h5m", "hexes_mixed.h5m",
                                            "hybrid_3quad_1tri.h5m", "moab_i.h5m", "recMeshOcn128.h5m",
@@ -806,7 +920,12 @@ INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                                            "compressed:hexes_mixed.h5m", "compressed:hybrid_3quad_1tri.h5m",
                                            "compressed:moab_i.h5m", "compressed:recMeshOcn128.h5m",
                                            "compressed:poly_indices", "compressed:tag_kinds",
-                                           "compressed:sets_kinds"),
+                                           "compressed:sets_kinds", "zoo", HIGH_ORDER("", "zoo"),
+                                           HIGH_ORDER("", "hexes_mixed.h5m"),
+                                           HIGH_ORDER("", "hybrid_3quad_1tri.h5m"),
+                                           HIGH_ORDER("written:", "zoo"),
+                                           HIGH_ORDER("written:", "hexes_mixed.h5m"),
+                                           HIGH_ORDER("written:", "hybrid_3quad_1tri.h5m")),
                          [](const auto& info) {
                            std::string n = info.param;
                            std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
@@ -816,11 +935,15 @@ INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
 INSTANTIATE_TEST_SUITE_P(Files, H5mMoabWritten,
                          ::testing::Values("64bricks_1khex.h5m", "hex_2048.h5m", "hexes_mixed.h5m",
                                            "hybrid_3quad_1tri.h5m", "moab_i.h5m", "recMeshOcn128.h5m",
-                                           "tag_kinds", "poly_indices", "sets_kinds"),
+                                           "tag_kinds", "poly_indices", "sets_kinds", "zoo",
+                                           HIGH_ORDER("", "zoo"), HIGH_ORDER("", "hexes_mixed.h5m"),
+                                           HIGH_ORDER("", "hybrid_3quad_1tri.h5m")),
                          [](const auto& info) {
                            std::string n = info.param;
                            std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');
                            return n;
                          });
+
+#undef HIGH_ORDER
 
 }  // namespace soma_test

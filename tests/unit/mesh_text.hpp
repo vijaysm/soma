@@ -32,10 +32,12 @@ using soma::HostMesh;
 using soma::LO;
 using soma::Topology;
 
-// Entities of one dimension by gid: topology and vertex gids.
+// Entities of one dimension by gid: topology, vertex gids and the gids of the
+// nodes of a high-order entity beyond its corners.
 struct Entity {
   Topology type = Topology::vertex;
   std::vector<GO> vertices;
+  std::vector<GO> nodes;
   friend bool operator==(const Entity&, const Entity&) = default;
 };
 
@@ -50,6 +52,10 @@ inline std::map<GO, Entity> entities(const HostMesh& m, int d) {
       x.type = static_cast<Topology>(m.topology(d)(e));
       const auto off = m.conn_offsets(d);
       for (auto k = off(e); k < off(e + 1); ++k) x.vertices.push_back(g0(static_cast<std::size_t>(m.conn(d)(static_cast<std::size_t>(k)))));
+      if (m.has_nodes(d)) {
+        const auto no = m.node_offsets(d);
+        for (auto k = no(e); k < no(e + 1); ++k) x.nodes.push_back(g0(static_cast<std::size_t>(m.nodes(d)(static_cast<std::size_t>(k)))));
+      }
     }
     out[gid(e)] = x;
   }
