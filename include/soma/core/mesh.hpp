@@ -96,9 +96,11 @@ auto deep_mirror(const V& src) {
 // one that moves vertices across corners() (node-only vertices stay last), or
 // a table that is not the one make_segments gives for the reordered
 // entities (with the ownership it names); std::logic_error for an edited
-// mesh (compress() it first). A throw leaves the mesh unchanged.
+// mesh (compress() it first). With `gids` (one per entity, by old id), the
+// entities take those gids, which must be unique; std::invalid_argument
+// otherwise. A throw leaves the mesh unchanged.
 void permute_entities(Mesh<Kokkos::HostSpace>& mesh, int dim, std::span<const LO> new_of_old,
-                      SegmentTable segments);
+                      SegmentTable segments, std::span<const GO> gids = {});
 
 // Move-only owner of one rank's mesh in one memory space. Copying is deleted
 // because Kokkos::View copies alias: a silent alias here would make every
@@ -310,7 +312,7 @@ class Mesh {
   friend Renumbering detail::compress(Mesh<Kokkos::HostSpace>& mesh);
   friend void detail::build_edited(Mesh<Kokkos::HostSpace>& mesh, AdjacencyRequest req);
   friend void permute_entities(Mesh<Kokkos::HostSpace>& mesh, int dim, std::span<const LO> new_of_old,
-                               SegmentTable segments);
+                               SegmentTable segments, std::span<const GO> gids);
 
   AdjacencyGraph<MemSpace> graph(int slot) const {
     const auto& g = adj_.graphs[static_cast<std::size_t>(slot)];

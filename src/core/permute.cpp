@@ -137,7 +137,8 @@ Adjacency<Host> permuted_graph(const Adjacency<Host>& g, bool rows, bool targets
 
 }  // namespace
 
-void permute_entities(HostMesh& mesh, int dim, std::span<const LO> new_of_old, SegmentTable segments) {
+void permute_entities(HostMesh& mesh, int dim, std::span<const LO> new_of_old, SegmentTable segments,
+                      std::span<const GO> gids) {
   if (dim < 0 || dim > mesh.dim()) {
     reject("dimension " + std::to_string(dim) + " is not in [0, " + std::to_string(mesh.dim()) + "]");
   }
@@ -169,12 +170,22 @@ void permute_entities(HostMesh& mesh, int dim, std::span<const LO> new_of_old, S
     }
   }
   check_segments(old, dim, old_of, segments);
+  View1<GO, Host> given;
+  if (!gids.empty()) {
+    if (gids.size() != n) reject(std::to_string(gids.size()) + " gids for " + std::to_string(n) + " entities");
+    std::vector<GO> sorted(gids.begin(), gids.end());
+    std::sort(sorted.begin(), sorted.end());
+    const auto dup = std::adjacent_find(sorted.begin(), sorted.end());
+    if (dup != sorted.end()) reject("gid " + std::to_string(*dup) + " is given twice");
+    given = uninit<GO>("soma::mesh::gid", n);
+    std::copy(gids.begin(), gids.end(), given.data());
+  }
   const std::vector<LO> map(new_of_old.begin(), new_of_old.end());
 
   // The reordered dimension.
   std::array<EntityBlock<Host>, 4> blocks = mesh.ents_;
   EntityBlock<Host>& b = blocks[d];
-  b.gid = moved(old.gid, old_of, "soma::mesh::gid");
+  b.gid = moved(gids.empty() ? old.gid : given, old_of, "soma::mesh::gid");
   b.topology = moved(old.topology, old_of, "soma::mesh::topology");
   moved_rows(old.conn_offsets, old.conn, old_of, b.conn_offsets, b.conn, "soma::mesh::conn");
   moved_rows(old.node_offsets, old.nodes, old_of, b.node_offsets, b.nodes, "soma::mesh::nodes");

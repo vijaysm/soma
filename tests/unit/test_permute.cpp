@@ -424,3 +424,21 @@ TEST(PermuteEntities, EditedMeshesAreRefused) {
 }
 
 }  // namespace
+
+// Gids given with the permutation follow their entities; repeated gids are
+// refused and change nothing.
+TEST(PermuteEntities, GivenGidsFollowTheirEntities) {
+  soma::HostMesh m = soma_test::two_quads_and_a_triangle();
+  const soma::LO n = m.count(2);
+  std::vector<soma::GO> old_gids;
+  for (soma::LO e = 0; e < n; ++e) old_gids.push_back(m.gid(2)(e));
+  const std::vector<soma::LO> identity{0, 1, 2};
+  const soma::SegmentTable table = m.segment_table(2);
+  const std::vector<soma::GO> twice{70, 70, 71};
+  EXPECT_THROW(soma::permute_entities(m, 2, identity, table, twice), std::invalid_argument);
+  EXPECT_THROW(soma::permute_entities(m, 2, identity, table, std::vector<soma::GO>{1}), std::invalid_argument);
+  for (soma::LO e = 0; e < n; ++e) EXPECT_EQ(m.gid(2)(e), old_gids[static_cast<std::size_t>(e)]);
+  const std::vector<soma::GO> fresh{-7, 900, 31};
+  soma::permute_entities(m, 2, identity, table, fresh);
+  for (soma::LO e = 0; e < n; ++e) EXPECT_EQ(m.gid(2)(e), fresh[static_cast<std::size_t>(e)]);
+}
