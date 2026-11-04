@@ -123,6 +123,10 @@ endif()
 if(SOMA_ENABLE_MOAB_COMPAT AND SOMA_ENABLE_MOAB_REFERENCE)
   soma_add_test(test_compat_range_moab SOURCES reference/test_compat_range_moab.cpp
     LIBS soma_compat ${SOMA_MOAB_TARGET})
+  if(SOMA_ENABLE_HDF5)
+    soma_add_test(test_compat_core_moab SOURCES reference/test_compat_core_moab.cpp
+      LIBS soma_compat ${SOMA_MOAB_TARGET})
+  endif()
 endif()
 
 # Set to a parallel HDF5 installation to test that it is refused without MPI.

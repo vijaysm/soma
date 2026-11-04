@@ -117,7 +117,8 @@ if(SOMA_ENABLE_HDF5)
 endif()
 
 if(SOMA_ENABLE_MOAB_COMPAT)
-  add_library(soma_compat src/compat/range.cpp src/compat/cn.cpp src/compat/error.cpp)
+  add_library(soma_compat src/compat/range.cpp src/compat/cn.cpp src/compat/error.cpp src/compat/core.cpp
+    src/compat/core_tags.cpp src/compat/core_sets.cpp src/compat/core_io.cpp src/compat/scd.cpp src/compat/prog_options.cpp)
   add_library(soma::compat ALIAS soma_compat)
   target_link_libraries(soma_compat PUBLIC soma PRIVATE $<BUILD_INTERFACE:soma_warnings>)
   # Drop-in mode: MOAB's include paths (moab/Core.hpp, ...) name soma::compat.
@@ -126,6 +127,12 @@ if(SOMA_ENABLE_MOAB_COMPAT)
   target_include_directories(soma_compat_dropin INTERFACE
     $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include/soma/compat/dropin>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/soma/compat/dropin>)
+  if(NOT SOMA_ENABLE_MPI)
+    # The serial stand-in for <mpi.h> that MOAB applications include.
+    target_include_directories(soma_compat_dropin INTERFACE
+      $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include/soma/compat/serial_mpi>
+      $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/soma/compat/serial_mpi>)
+  endif()
   target_link_libraries(soma_compat_dropin INTERFACE soma_compat)
 endif()
 
