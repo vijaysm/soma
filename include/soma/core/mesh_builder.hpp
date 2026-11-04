@@ -31,6 +31,10 @@ class MeshBuilder {
   void add_polygons(std::span<const GO> gids, std::span<const Offset> offsets,
                     std::span<const GO> vertex_gids);
 
+  // The vertices added so far: gids and coordinates (x, y, z interleaved).
+  [[nodiscard]] std::span<const GO> vertex_gids() const noexcept { return vertex_gids_; }
+  [[nodiscard]] std::span<const Real> vertex_coordinates() const noexcept { return xyz_; }
+
   // Distributed meshes: the ownership of the entities of dimension `dim`
   // named by gid (unnamed ones are interior) and a neighbour-set group, equal
   // for entities shared with the same ranks. Within an ownership kind,
