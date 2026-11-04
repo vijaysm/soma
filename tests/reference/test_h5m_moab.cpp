@@ -172,8 +172,8 @@ fs::path sets_kinds_file() {
   check(mb.create_vertices(xyz.data(), 12, verts), "create_vertices");
   const std::vector<moab::EntityHandle> v(verts.begin(), verts.end());
   std::vector<moab::EntityHandle> q;
-  for (int j = 0; j < 2; ++j) {
-    for (int i = 0; i < 3; ++i) {
+  for (std::size_t j = 0; j < 2; ++j) {
+    for (std::size_t i = 0; i < 3; ++i) {
       const moab::EntityHandle c[4] = {v[i + 4 * j], v[i + 1 + 4 * j], v[i + 1 + 4 * (j + 1)], v[i + 4 * (j + 1)]};
       moab::EntityHandle h = 0;
       check(mb.create_element(moab::MBQUAD, c, 4, h), "create quad");

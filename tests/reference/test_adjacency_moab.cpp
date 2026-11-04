@@ -347,13 +347,13 @@ TEST_P(AdjacencyMoab, RingNeighbourhoodsMatch) {
   const std::size_t step_e = std::max<std::size_t>(1, elems.size() / 50);
   for (int n : {1, 2, 3}) {
     for (std::size_t i = 0; i < verts.size(); i += step_v) {
-      const auto h = verts[i];
+      const auto h = verts[static_cast<moab::EntityID>(i)];
       std::set<LO> expected;
       for (const auto x : moab_rings(h, D, 0, n)) expected.insert(f.soma_of(0, x));
       ASSERT_EQ(rings(vv, f.soma_of(0, h), n), expected) << "vertex " << i << " rings " << n;
     }
     for (std::size_t i = 0; i < elems.size(); i += step_e) {
-      const auto h = elems[i];
+      const auto h = elems[static_cast<moab::EntityID>(i)];
       std::set<LO> expected;
       for (const auto x : moab_rings(h, 0, D, n)) expected.insert(f.soma_of(D, x));
       ASSERT_EQ(rings(ee, f.soma_of(D, h), n), expected) << "element " << i << " rings " << n;
