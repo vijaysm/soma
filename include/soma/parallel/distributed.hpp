@@ -22,6 +22,7 @@
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/ordering.hpp"
 #include "soma/parallel/comm.hpp"
+#include "soma/topology/adjacency.hpp"
 
 namespace soma {
 
@@ -34,6 +35,16 @@ inline constexpr const char* owner_field = "soma:owner";
 // rank if any rank's input is invalid.
 [[nodiscard]] HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder,
                                         Ordering ordering = default_ordering);
+
+// Collective: builds the requested graphs on a local part, then gives each
+// newly derived dimension (edges, faces) its distributed form. Entities
+// derived here take gids that do not depend on P: the largest explicit gid of
+// the dimension on any rank, plus one, plus the rank of the entity's sorted
+// corner gids among all such keys (design #67); explicit entities keep their
+// gids and must be present on every rank holding them. The dimension is then
+// ordered by ownership and neighbour set and gets soma:sharing and
+// soma:owner, as the vertices have. Throws on every rank if any rank fails.
+void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRequest request);
 
 }  // namespace soma
 
