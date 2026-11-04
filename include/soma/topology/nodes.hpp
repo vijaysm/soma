@@ -34,10 +34,9 @@ KOKKOS_INLINE_FUNCTION constexpr int num_nodes(Topology t, int bits) noexcept {
 KOKKOS_INLINE_FUNCTION constexpr int mid_node_bits(Topology t, int count) noexcept {
   const int corners = num_vertices(t);
   if (corners == 0 || t == Topology::vertex || t == Topology::knife) return count == corners && corners > 0 ? 0 : -1;
-  const int d = dimension(t);
+  // Bits a type has no sub-entities for add no nodes, so the smaller bits
+  // without them match first.
   for (int bits = 0; bits <= (mid_edge_bit | mid_face_bit | mid_region_bit); bits += 2) {
-    if ((bits & mid_face_bit) != 0 && d < 2) continue;
-    if ((bits & mid_region_bit) != 0 && d < 3) continue;
     if (num_nodes(t, bits) == count) return bits;
   }
   return -1;
@@ -53,7 +52,7 @@ struct NodeParent {
 
 KOKKOS_INLINE_FUNCTION constexpr NodeParent node_parent(Topology t, int count, int k) noexcept {
   const int bits = mid_node_bits(t, count);
-  if (bits < 0 || k < 0 || k >= count) return {};
+  if (bits < 0 || k < 0) return {};  // past the last group for k >= count
   int first = num_vertices(t);
   if (k < first) return {0, k};
   for (int d = 1; d <= 3; ++d) {

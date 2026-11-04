@@ -170,6 +170,7 @@ TEST(MidNodes, CountsOfEveryConfiguration) {
   EXPECT_EQ(soma::mid_node_bits(Topology::knife, 7), 0);
   EXPECT_EQ(soma::mid_node_bits(Topology::knife, 8), -1);
   EXPECT_EQ(soma::mid_node_bits(Topology::polygon, 5), -1);
+  EXPECT_EQ(soma::mid_node_bits(Topology::polygon, 0), -1);
   EXPECT_EQ(soma::mid_node_bits(Topology::vertex, 1), 0);
 }
 
@@ -188,5 +189,7 @@ TEST(MidNodes, ParentsFollowCornersEdgesFacesRegion) {
   EXPECT_EQ(parent(Topology::tri, 7, 6), std::pair(2, 0));    // the centre
   EXPECT_EQ(parent(Topology::edge, 3, 2), std::pair(1, 0));
   EXPECT_EQ(parent(Topology::hex, 27, 27), std::pair(-1, -1));
+  EXPECT_EQ(parent(Topology::hex, 8, 8), std::pair(-1, -1));
+  EXPECT_EQ(parent(Topology::hex, 8, -1), std::pair(-1, -1));
   EXPECT_EQ(parent(Topology::hex, 10, 8), std::pair(-1, -1));
 }
