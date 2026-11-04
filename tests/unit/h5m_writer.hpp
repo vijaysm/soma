@@ -75,10 +75,10 @@ class Writer {
   }
 
   // Fixed arity: conn holds arity vertex file ids per element.
-  void elements(const std::string& name, const std::string& type, std::int64_t start, int arity,
+  void elements(const std::string& name, const std::string& type, std::int64_t start, std::uint64_t arity,
                 const std::vector<std::uint64_t>& conn) {
     const hid_t g = element_group(name, type);
-    const hsize_t dims[2] = {conn.size() / static_cast<std::size_t>(arity), static_cast<hsize_t>(arity)};
+    const hsize_t dims[2] = {conn.size() / arity, arity};
     const hid_t ds = dataset(g, "connectivity", H5T_STD_U64LE, 2, dims);
     write(ds, H5T_NATIVE_UINT64, conn.data(), conn.size());
     scalar_attribute(ds, "start_id", H5T_NATIVE_INT64, &start);

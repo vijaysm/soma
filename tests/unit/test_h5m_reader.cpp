@@ -1090,6 +1090,13 @@ TEST_F(H5mRead, RejectsElementsItDoesNotRead) {
   }
   expect_rejected(file("quad7.h5m"), {"/tstt/elements/Quad7/connectivity", "7 nodes per Quad", "no Quad has"});
   {
+    // No rows, so nothing to read; a count that wraps to 8 in an int is still none.
+    Writer w(file("wide.h5m"));
+    square(w);
+    w.elements("Quad", "Quad", 5, (std::uint64_t{1} << 32) + 8, {});
+  }
+  expect_rejected(file("wide.h5m"), {"4294967304 nodes per Quad"});
+  {
     Writer w(file("bad.h5m"));
     w.nodes(1, 3, {0, 0, 0, 1, 0, 0, 1, 1, 0});
     w.elements("Tri3", "Tri", 4, 3, {1, 2, 3, 1, 3, 99});
