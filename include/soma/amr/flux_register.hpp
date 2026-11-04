@@ -72,9 +72,6 @@ class FluxRegister {
   void reflux(const LevelField<T>& state) const;
 
  private:
-  template <class F>
-  void for_faces(int dir, int side, const char* label, const F& f) const;
-
   int ratio_ = 2;
   int ncomp_ = 1;
   int dim_ = 3;
@@ -85,16 +82,19 @@ class FluxRegister {
   Kokkos::View<double**, Kokkos::LayoutLeft, DeviceSpace> coarse_, fine_;  // (face, component)
 };
 
+namespace detail {
+
 // f(piece, face point, register row) over the faces of one direction and
-// side (side < 0: both).
+// side (side < 0: both). A free function: CUDA refuses device lambdas in
+// private member functions.
 template <class F>
-void FluxRegister::for_faces(int dir, int side, const char* label, const F& f) const {
+void for_register_faces(const Kokkos::View<const RegisterFaces*, FluxRegister::DeviceSpace>& pieces,
+                        const Kokkos::View<const std::int64_t*, FluxRegister::DeviceSpace>& start, std::int64_t num_faces,
+                        int dir, int side, const char* label, const F& f) {
   using Exec = Kokkos::DefaultExecutionSpace;
-  const auto pieces = d_pieces_;
-  const auto start = d_start_;
-  const int n = static_cast<int>(pieces_.size());
+  const int n = static_cast<int>(pieces.extent(0));
   Kokkos::parallel_for(
-      label, Kokkos::RangePolicy<Exec, Kokkos::IndexType<std::int64_t>>(0, num_faces()), KOKKOS_LAMBDA(std::int64_t p) {
+      label, Kokkos::RangePolicy<Exec, Kokkos::IndexType<std::int64_t>>(0, num_faces), KOKKOS_LAMBDA(std::int64_t p) {
         int lo = 0, hi = n - 1;
         while (lo < hi) {
           const int mid = (lo + hi + 1) / 2;
@@ -111,6 +111,8 @@ void FluxRegister::for_faces(int dir, int side, const char* label, const F& f) c
   Kokkos::fence(label);
 }
 
+}  // namespace detail
+
 template <class T>
 void FluxRegister::set_coarse(int dir, const LevelField<T>& coarse_flux, double scale) const {
   if (!(coarse_flux.type() == IndexType::face(dir)) || coarse_flux.ncomp() < ncomp_) {
@@ -119,7 +121,7 @@ void FluxRegister::set_coarse(int dir, const LevelField<T>& coarse_flux, double 
   const auto v = coarse_flux.view();
   const auto reg = coarse_;
   const int ncomp = ncomp_;
-  for_faces(dir, -1, "amr::FluxRegister::set_coarse", KOKKOS_LAMBDA(const RegisterFaces& pc, const IntVect& q, std::int64_t row) {
+  detail::for_register_faces(d_pieces_, d_start_, num_faces(), dir, -1, "amr::FluxRegister::set_coarse", KOKKOS_LAMBDA(const RegisterFaces& pc, const IntVect& q, std::int64_t row) {
     const auto patch = v.patch(pc.coarse);
     for (int c = 0; c < ncomp; ++c) {
       reg(row, c) = scale * static_cast<double>(patch(q[0] + pc.shift[0], q[1] + pc.shift[1], q[2] + pc.shift[2], c));
@@ -135,7 +137,7 @@ void FluxRegister::add_fine(int dir, const LevelField<T>& fine_flux, double scal
   const auto v = fine_flux.view();
   const auto reg = fine_;
   const int ncomp = ncomp_, r = ratio_, dim = dim_;
-  for_faces(dir, -1, "amr::FluxRegister::add_fine", KOKKOS_LAMBDA(const RegisterFaces& pc, const IntVect& q, std::int64_t row) {
+  detail::for_register_faces(d_pieces_, d_start_, num_faces(), dir, -1, "amr::FluxRegister::add_fine", KOKKOS_LAMBDA(const RegisterFaces& pc, const IntVect& q, std::int64_t row) {
     const auto patch = v.patch(pc.fine);
     int len[3] = {1, 1, 1};
     for (int d = 0; d < dim; ++d) len[d] = d == dir ? 1 : r;
@@ -162,7 +164,7 @@ void FluxRegister::reflux(const LevelField<T>& state) const {
   const int ncomp = ncomp_;
   for (int dir = 0; dir < dim_; ++dir) {
     for (int side = 0; side < 2; ++side) {
-      for_faces(dir, side, "amr::FluxRegister::reflux", KOKKOS_LAMBDA(const RegisterFaces& pc, const IntVect& q, std::int64_t row) {
+      detail::for_register_faces(d_pieces_, d_start_, num_faces(), dir, side, "amr::FluxRegister::reflux", KOKKOS_LAMBDA(const RegisterFaces& pc, const IntVect& q, std::int64_t row) {
         IntVect cell = q + pc.shift;
         if (pc.side == 0) --cell[pc.dir];  // the cell below face q
         const auto patch = v.patch(pc.coarse);
