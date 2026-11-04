@@ -50,6 +50,10 @@ set(expected
 file(GLOB_RECURSE headers RELATIVE "${SOMA_SOURCE_DIR}/include"
   "${SOMA_SOURCE_DIR}/include/soma/*.hpp")
 foreach(h IN LISTS headers)
+  # The compat headers are installed only with SOMA_ENABLE_MOAB_COMPAT.
+  if(h MATCHES "^soma/compat/" AND NOT SOMA_COMPAT)
+    continue()
+  endif()
   list(APPEND expected "include/${h}")
 endforeach()
 if(KOKKOS_SOURCE STREQUAL "fetched")
