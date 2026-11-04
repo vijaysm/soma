@@ -31,6 +31,7 @@ set(SOMA_KOKKOS_GPU "AUTO" CACHE STRING
   "GPU backend of a fetched Kokkos: AUTO, NONE, CUDA, HIP, SYCL")
 set_property(CACHE SOMA_KOKKOS_GPU PROPERTY STRINGS AUTO NONE CUDA HIP SYCL)
 option(SOMA_ENABLE_MOAB_REFERENCE "Build MOAB reference tests and benchmarks" OFF)
+option(SOMA_ENABLE_MOAB_COMPAT "MOAB's API over SOMA meshes (soma::compat)" OFF)
 option(SOMA_LO_64 "64-bit local ordinals (ABI-breaking)" OFF)
 option(SOMA_OFFSET_64 "64-bit CSR offsets (ABI-breaking)" OFF)
 option(SOMA_DEBUG "Device-side bounds and contract checks" OFF)
@@ -115,6 +116,19 @@ if(SOMA_ENABLE_HDF5)
   target_link_libraries(soma PRIVATE HDF5::HDF5)
 endif()
 
+if(SOMA_ENABLE_MOAB_COMPAT)
+  add_library(soma_compat src/compat/range.cpp src/compat/cn.cpp src/compat/error.cpp)
+  add_library(soma::compat ALIAS soma_compat)
+  target_link_libraries(soma_compat PUBLIC soma PRIVATE $<BUILD_INTERFACE:soma_warnings>)
+  # Drop-in mode: MOAB's include paths (moab/Core.hpp, ...) name soma::compat.
+  add_library(soma_compat_dropin INTERFACE)
+  add_library(soma::compat_dropin ALIAS soma_compat_dropin)
+  target_include_directories(soma_compat_dropin INTERFACE
+    $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include/soma/compat/dropin>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/soma/compat/dropin>)
+  target_link_libraries(soma_compat_dropin INTERFACE soma_compat)
+endif()
+
 if(SOMA_ENABLE_MOAB_REFERENCE)
   include(SomaMoab)
 endif()
@@ -137,5 +151,6 @@ message(STATUS "SOMA ${PROJECT_VERSION}: Kokkos ${SOMA_KOKKOS_VERSION_FOUND}"
   " gpu=${SOMA_KOKKOS_GPU_BACKEND} [${SOMA_KOKKOS_DEVICES}]"
   " MPI=${SOMA_ENABLE_MPI} HDF5=${SOMA_ENABLE_HDF5} tests=${SOMA_ENABLE_TESTS}"
   " GPU-aware-MPI=${SOMA_GPU_AWARE_MPI_RESOLVED}"
-  " MOAB-reference=${SOMA_ENABLE_MOAB_REFERENCE} LO64=${SOMA_LO_64}"
+  " MOAB-reference=${SOMA_ENABLE_MOAB_REFERENCE} MOAB-compat=${SOMA_ENABLE_MOAB_COMPAT}"
+  " LO64=${SOMA_LO_64}"
   " build=${CMAKE_BUILD_TYPE}")

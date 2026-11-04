@@ -117,6 +117,14 @@ if(SOMA_ENABLE_MOAB_REFERENCE)
   endif()
 endif()
 
+if(SOMA_ENABLE_MOAB_COMPAT)
+  soma_add_test(test_compat_error SOURCES unit/test_compat_error.cpp LIBS soma_compat)
+endif()
+if(SOMA_ENABLE_MOAB_COMPAT AND SOMA_ENABLE_MOAB_REFERENCE)
+  soma_add_test(test_compat_range_moab SOURCES reference/test_compat_range_moab.cpp
+    LIBS soma_compat ${SOMA_MOAB_TARGET})
+endif()
+
 # Set to a parallel HDF5 installation to test that it is refused without MPI.
 set(SOMA_TEST_PARALLEL_HDF5_ROOT "" CACHE PATH "Parallel HDF5 for the configure guard test")
 if(SOMA_TEST_PARALLEL_HDF5_ROOT)
