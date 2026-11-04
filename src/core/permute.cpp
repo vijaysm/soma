@@ -69,8 +69,11 @@ bool same(const SegmentTable& a, const SegmentTable& b) {
 
 // The table must cover the entities with segments in order, and be what
 // make_segments gives for the ownership it names and the reordered entities'
-// topology and arity.
-void check_segments(const EntityBlock<Host>& b, int dim, const std::vector<LO>& old_of, const SegmentTable& t) {
+// topology and arity. Vertices must keep each kind's corners first (`corner_ends`
+// are the old ones), and the table split at the new corner ends, which it
+// returns (the old ones for other dimensions).
+std::array<LO, 4> check_segments(const EntityBlock<Host>& b, int dim, const std::vector<LO>& old_of,
+                                 const SegmentTable& t, const std::array<LO, 4>& corner_ends) {
   const auto n = old_of.size();
   if (t.count != static_cast<LO>(n)) {
     reject("the segment table counts " + std::to_string(t.count) + " entities, not " + std::to_string(n));
@@ -101,7 +104,34 @@ void check_segments(const EntityBlock<Host>& b, int dim, const std::vector<LO>& 
   } catch (const std::invalid_argument& e) {
     reject(std::string("the reordered entities do not follow the segments (") + e.what() + ")");
   }
+  std::array<LO, 4> ends = corner_ends;
+  if (dim == 0) {
+    const std::array<LO, 5> was = kind_bounds(b.segments);
+    const auto corner = [&](LO o) {
+      std::size_t k = 0;
+      while (o >= was[k + 1]) ++k;
+      return o < corner_ends[k];
+    };
+    const std::array<LO, 5> bounds = kind_bounds(want);
+    for (std::size_t k = 0; k < 4; ++k) {
+      ends[k] = bounds[k];
+      bool nodes = false;
+      for (LO i = bounds[k]; i < bounds[k + 1]; ++i) {
+        const LO o = old_of[static_cast<std::size_t>(i)];
+        if (!corner(o)) {
+          nodes = true;
+        } else if (nodes) {
+          reject("corner vertex " + std::to_string(o) + " goes to " + std::to_string(i) +
+                 ", after a node-only vertex of its kind");
+        } else {
+          ++ends[k];
+        }
+      }
+    }
+    split_segments(want, ends);
+  }
   if (!same(want, t)) reject("the segment table does not describe the reordered entities");
+  return ends;
 }
 
 // A held graph with its rows and targets in the new order.
@@ -161,15 +191,7 @@ void permute_entities(HostMesh& mesh, int dim, std::span<const LO> new_of_old, S
     }
     old_of[static_cast<std::size_t>(l)] = static_cast<LO>(i);
   }
-  if (dim == 0) {
-    for (std::size_t i = 0; i < n; ++i) {
-      if ((static_cast<LO>(i) < mesh.corners_) != (new_of_old[i] < mesh.corners_)) {
-        reject("vertex " + std::to_string(i) + " goes to " + std::to_string(new_of_old[i]) +
-               " across corners() = " + std::to_string(mesh.corners_));
-      }
-    }
-  }
-  check_segments(old, dim, old_of, segments);
+  const std::array<LO, 4> corner_ends = check_segments(old, dim, old_of, segments, mesh.corner_ends_);
   View1<GO, Host> given;
   if (!gids.empty()) {
     if (gids.size() != n) reject(std::to_string(gids.size()) + " gids for " + std::to_string(n) + " entities");
@@ -206,7 +228,7 @@ void permute_entities(HostMesh& mesh, int dim, std::span<const LO> new_of_old, S
 
   HostMesh next;
   next.dim_ = mesh.dim_;
-  next.corners_ = mesh.corners_;
+  next.corner_ends_ = corner_ends;
   next.ordering_ = mesh.ordering_;
   next.ents_ = std::move(blocks);
   next.coords_ = coords;

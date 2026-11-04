@@ -93,9 +93,10 @@ auto deep_mirror(const V& src) {
 // downward rows keep their side order, codes move with their entries), set
 // members and fields; the epoch advances. Throws std::invalid_argument for
 // `dim` outside [0, mesh.dim()], a new_of_old that is not such a permutation,
-// one that moves vertices across corners() (node-only vertices stay last), or
+// one that puts a node-only vertex before a corner of its ownership kind, or
 // a table that is not the one make_segments gives for the reordered
-// entities (with the ownership it names); std::logic_error for an edited
+// entities (with the ownership it names; for vertices, split at each kind's
+// corner end, see split_segments); std::logic_error for an edited
 // mesh (compress() it first). With `gids` (one per entity, by old id), the
 // entities take those gids, which must be unique; std::invalid_argument
 // otherwise. A throw leaves the mesh unchanged.
@@ -137,12 +138,17 @@ class Mesh {
   View1<const std::uint8_t, MemSpace> topology(int d) const { return block(d).topology; }
   View1<const GO, MemSpace> gid(int d) const { return block(d).gid; }
   // The nodes of high-order elements beyond their corners (MeshView::node
-  // gives corners and nodes together). Vertices that are only such nodes are
-  // numbered after the others: [0, corners()) are the corner vertices.
+  // gives corners and nodes together). Vertices that are only such nodes
+  // follow the others of their ownership kind: kind k's corners are
+  // [kind begin, corner_end(k)), its node-only vertices [corner_end(k), kind
+  // end), each in segments of their own. corners() is
+  // corner_end(Ownership::interior): with every vertex interior, [0, corners())
+  // are the corner vertices.
   bool has_nodes(int d) const { return block(d).node_offsets.extent(0) > 0; }
   View1<const Offset, MemSpace> node_offsets(int d) const { return block(d).node_offsets; }
   View1<const LO, MemSpace> nodes(int d) const { return block(d).nodes; }
-  LO corners() const noexcept { return corners_; }
+  LO corners() const noexcept { return corner_ends_[0]; }
+  LO corner_end(Ownership k) const noexcept { return corner_ends_[static_cast<std::size_t>(k)]; }
   // Edits (MeshEdit::apply) leave the mesh edited until compress(): removed
   // entities stay in place, masked (alive(d) is 0 for them; empty when none
   // is), and added ones follow the others (tail(d) of them). count(d) counts
@@ -257,7 +263,8 @@ class Mesh {
       v.alive_mask[d] = ents_[d].alive;
     }
     v.coords = coords_;
-    v.corners = corners_;
+    v.corners = corner_ends_[0];
+    for (std::size_t k = 0; k < 4; ++k) v.corner_ends[k] = corner_ends_[k];
     for (std::size_t s = 0; s < adj_.graphs.size(); ++s) {
       v.adj_offsets[s] = adj_.graphs[s].offsets;
       v.adj_targets[s] = adj_.graphs[s].targets;
@@ -290,7 +297,7 @@ class Mesh {
 
   void swap(Mesh& o) noexcept {
     std::swap(dim_, o.dim_);
-    std::swap(corners_, o.corners_);
+    std::swap(corner_ends_, o.corner_ends_);
     std::swap(ordering_, o.ordering_);
     for (std::size_t d = 0; d < 4; ++d) std::swap(ents_[d], o.ents_[d]);
     std::swap(coords_, o.coords_);
@@ -377,7 +384,7 @@ class Mesh {
       t.tail = s.tail;
     }
     out.ordering_ = ordering_;
-    if (o.dims[0]) out.corners_ = corners_;
+    if (o.dims[0]) out.corner_ends_ = corner_ends_;
     if (o.coordinates) transfer(out.coords_, coords_, alias);
     if (o.adj_source == TransferOptions::AdjSource::copy) {
       for (int s = 0; s < adjacency_slots; ++s) {
@@ -421,7 +428,7 @@ class Mesh {
   }
 
   int dim_ = 0;
-  LO corners_ = 0;
+  std::array<LO, 4> corner_ends_{};  // by Ownership
   Ordering ordering_ = default_ordering;
   std::array<EntityBlock<MemSpace>, 4> ents_{};
   CoordView<MemSpace> coords_;

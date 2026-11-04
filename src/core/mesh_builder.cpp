@@ -355,7 +355,6 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
   v.segments = sorted_segments(nv, [&](std::size_t i) {
     return std::tuple(kind_of(vrecs[i].own), Topology::vertex, std::uint16_t{1});
   });
-  const bool vertex_ownership = v.segments.interior_end != v.count;
 
   const auto find_vertex = [&](GO g) -> LO {
     if (!dense_local.empty()) {
@@ -364,10 +363,12 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
     const auto it = std::lower_bound(local_of.begin(), local_of.end(), std::pair<GO, LO>{g, 0});
     return (it == local_of.end() || it->first != g) ? invalid_lo : it->second;
   };
-  // Vertices that are nodes of high-order elements and no element's corner
-  // move after the others, keeping their order; unknown gids are reported
-  // with their element below.
-  mesh.corners_ = v.count;
+  // Within each ownership kind, vertices that are nodes of high-order
+  // elements and no element's corner move after the others, keeping their
+  // order, in segments of their own; unknown gids are reported with their
+  // element below.
+  const std::array<LO, 5> bounds = kind_bounds(v.segments);
+  for (std::size_t k = 0; k < 4; ++k) mesh.corner_ends_[k] = bounds[k + 1];
   {
     std::vector<std::uint8_t> role(nv, 0);  // 1 a corner, 2 a node
     bool any_nodes = false;
@@ -387,17 +388,19 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
         }
       }
     }
-    const auto node_only = static_cast<std::size_t>(std::count(role.begin(), role.end(), 2));
-    if (node_only > 0 && vertex_ownership) {
-      throw std::invalid_argument(
-          "MeshBuilder::build: vertices other than interior in a mesh with node-only vertices are not supported");
-    }
-    if (node_only > 0) {
+    if (std::find(role.begin(), role.end(), std::uint8_t{2}) != role.end()) {
       std::vector<LO> to(nv);
-      LO corner = 0;
-      auto node = static_cast<LO>(nv - node_only);
-      for (std::size_t i = 0; i < nv; ++i) to[i] = role[i] == 2 ? node++ : corner++;
-      mesh.corners_ = corner;
+      for (std::size_t k = 0; k < 4; ++k) {
+        LO next = bounds[k];
+        for (LO i = bounds[k]; i < bounds[k + 1]; ++i) {
+          if (role[static_cast<std::size_t>(i)] != 2) to[static_cast<std::size_t>(i)] = next++;
+        }
+        mesh.corner_ends_[k] = next;
+        for (LO i = bounds[k]; i < bounds[k + 1]; ++i) {
+          if (role[static_cast<std::size_t>(i)] == 2) to[static_cast<std::size_t>(i)] = next++;
+        }
+      }
+      split_segments(v.segments, mesh.corner_ends_);
       CoordView<Kokkos::HostSpace> xyz(
           Kokkos::view_alloc(std::string("soma::mesh::coords"), Kokkos::WithoutInitializing), nv);
       View1<GO, Kokkos::HostSpace> gid(

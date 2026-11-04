@@ -54,16 +54,15 @@ class MeshBuilder {
   //   Ordering::type_major_sfc  elements (topology, arity, nodes, hilbert key
   //                             of the corners' centroid, gid); vertices
   //                             (hilbert key, gid)
-  // The key uses one box, that of the vertices, for every dimension. Vertices
-  // that are nodes of high-order elements and no element's corner come after
-  // the others, in the same order among themselves. Element
+  // The key uses one box, that of the vertices, for every dimension. Element
   // gids are identities within a dimension: two elements of one dimension may
   // not share a gid, whatever their topology. Ordering::tiled throws.
   // Ownership comes first in every key, then topology, arity and nodes, then
   // the group set by set_ownership, then the order above, so each ownership
-  // kind is a contiguous range (soma/core/segments.hpp). Ownership other than
-  // interior on vertices of a mesh with node-only vertices throws
-  // std::invalid_argument: corners first and ownership first cannot both hold.
+  // kind is a contiguous range (soma/core/segments.hpp). Within each kind,
+  // vertices that are nodes of high-order elements and no element's corner
+  // come after the others, in the same order among themselves and in
+  // segments of their own (Mesh::corner_end).
   HostMesh build(Ordering ordering = default_ordering) &&;
 
  private:

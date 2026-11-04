@@ -363,7 +363,7 @@ EditReport MeshEdit::apply() {
 
   HostMesh next;
   next.dim_ = D;
-  next.corners_ = m.corners_;
+  next.corner_ends_ = m.corner_ends_;
   next.ordering_ = m.ordering_;
   next.epoch_ = m.epoch_;
   next.ents_ = std::move(blocks);

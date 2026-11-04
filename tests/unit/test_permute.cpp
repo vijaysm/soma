@@ -345,12 +345,64 @@ TEST(PermuteEntities, HighOrderNodesFollowTheVertices) {
   soma::build_adjacencies(m, soma::AdjacencyRequest{}.add(2, 1).add(0, 2));
   add_fields(m, "vertex", 0);
   const std::vector<LO> p{4, 0, 5, 2, 1, 3, 9, 6, 10, 8, 7};
-  const SegmentTable t = uniform(Topology::vertex, 1, {11, 0, 0, 0});
+  SegmentTable t = uniform(Topology::vertex, 1, {11, 0, 0, 0});
+  EXPECT_THROW(soma::permute_entities(m, 0, p, t), std::invalid_argument);  // not split at the corners
+  soma::split_segments(t, std::vector<LO>{6});
   permute_and_check(m, 0, p, t);
   EXPECT_EQ(m.corners(), 6);
   // Corners and nodes may not trade places.
   const std::vector<LO> across{6, 1, 2, 3, 4, 5, 0, 7, 8, 9, 10};
   EXPECT_THROW(soma::permute_entities(m, 0, across, t), std::invalid_argument);
+}
+
+// A tri6 whose vertices have every ownership: built as
+//   interior 3 | 6, shared 1 2 | 4, shared_copy | 5
+// (corners | node-only vertices). Vertices move within and across kinds as
+// long as each kind keeps its corners first; the corner ends follow.
+std::vector<GO> vertex_gids(const HostMesh& m) {
+  std::vector<GO> out;
+  for (LO v = 0; v < m.count(0); ++v) out.push_back(m.gid(0)(v));
+  return out;
+}
+
+TEST(PermuteEntities, EachOwnershipKindKeepsItsCornersFirst) {
+  soma::MeshBuilder b(2);
+  b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6},
+                 std::vector<Real>{0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0.5, 0});
+  b.add_elements(Topology::tri, std::vector<GO>{9}, std::vector<GO>{1, 2, 3, 4, 5, 6}, 6);
+  b.set_ownership(0, std::vector<GO>{1, 2, 4, 5},
+                  std::vector<Ownership>{Ownership::shared, Ownership::shared, Ownership::shared, Ownership::shared_copy},
+                  std::vector<std::uint32_t>(4, 0));
+  HostMesh m = std::move(b).build(soma::Ordering::file);
+  ASSERT_EQ(vertex_gids(m), (std::vector<GO>{3, 6, 1, 2, 4, 5}));
+  add_fields(m, "vertex", 0);
+  const auto table = [](std::vector<Ownership> own, std::vector<LO> cuts) {
+    SegmentTable t = soma::make_segments(own, std::vector<Topology>(own.size(), Topology::vertex),
+                                         std::vector<std::uint16_t>(own.size(), 1));
+    soma::split_segments(t, cuts);
+    return t;
+  };
+  const auto ends = [&] {
+    return std::vector<LO>{m.corner_end(Ownership::interior), m.corner_end(Ownership::shared),
+                           m.corner_end(Ownership::shared_copy), m.corner_end(Ownership::ghost)};
+  };
+  using O = Ownership;
+  // 1 and 2 trade places.
+  permute_and_check(m, 0, {0, 1, 3, 2, 4, 5}, table({O::interior, O::interior, O::shared, O::shared, O::shared, O::shared_copy}, {1, 4, 5}));
+  EXPECT_EQ(ends(), (std::vector<LO>{1, 4, 5, 6}));
+  EXPECT_EQ(vertex_gids(m), (std::vector<GO>{3, 6, 2, 1, 4, 5}));
+  // 6 becomes a shared copy: interior 3, shared 2 1 | 4, shared_copy | 6 5.
+  permute_and_check(m, 0, {0, 4, 1, 2, 3, 5}, table({O::interior, O::shared, O::shared, O::shared, O::shared_copy, O::shared_copy}, {1, 3, 4}));
+  EXPECT_EQ(ends(), (std::vector<LO>{1, 3, 4, 6}));
+  EXPECT_EQ(vertex_gids(m), (std::vector<GO>{3, 2, 1, 4, 6, 5}));
+  EXPECT_EQ(m.corners(), 1);
+  // Node 4 before corner 1 in the shared kind, whatever the table.
+  const std::vector<LO> node_first{0, 2, 3, 1, 4, 5};
+  EXPECT_THROW(soma::permute_entities(m, 0, node_first, table({O::interior, O::shared, O::shared, O::shared, O::shared_copy, O::shared_copy}, {1, 3, 4})),
+               std::invalid_argument);
+  EXPECT_THROW(soma::permute_entities(m, 0, node_first, table({O::interior, O::shared, O::shared, O::shared, O::shared_copy, O::shared_copy}, {1, 2, 4})),
+               std::invalid_argument);
+  EXPECT_EQ(ends(), (std::vector<LO>{1, 3, 4, 6}));
 }
 
 // Bad input throws std::invalid_argument and changes nothing.

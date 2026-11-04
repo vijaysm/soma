@@ -39,7 +39,10 @@ struct MeshView {
   // Empty unless the mesh is edited and holds removed entities.
   Kokkos::Array<UView1<std::uint8_t, MemSpace>, 4> alive_mask{};
   CoordsU coords{};
-  LO corners = 0;  // vertices [0, corners) are corners, the rest nodes only
+  // By Ownership: kind k's corner vertices end at corner_ends[k], its
+  // node-only vertices follow. corners is corner_ends[0].
+  Kokkos::Array<LO, 4> corner_ends{};
+  LO corners = 0;
   // Indexed by pair_slot and bridge_slot; empty where the mesh holds no graph.
   Kokkos::Array<UView1<Offset, MemSpace>, adjacency_slots> adj_offsets{};
   Kokkos::Array<UView1<LO, MemSpace>, adjacency_slots> adj_targets{};
@@ -103,6 +106,11 @@ struct MeshView {
   }
   KOKKOS_INLINE_FUNCTION bool interior(int d, LO e) const {
     return e < interior_ends[static_cast<std::size_t>(d)];
+  }
+  // A corner of some element (or of none), not only a high-order node.
+  KOKKOS_INLINE_FUNCTION bool corner(LO v) const {
+    const std::size_t k = v < interior_ends[0] ? 0 : v < owned_ends[0] ? 1 : v < shared_ends[0] ? 2 : 3;
+    return v < corner_ends[k];
   }
   // Shared with another rank, whichever owns it.
   KOKKOS_INLINE_FUNCTION bool shared(int d, LO e) const {

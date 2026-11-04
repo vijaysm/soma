@@ -556,13 +556,44 @@ TEST(MeshBuilder, OwnershipRejectsBadInput) {
   fails({2, 2}, 0);   // named twice
   fails({7}, 0);      // no such vertex
   fails({100, 5}, 2); // no such element
-  // Corners first and ownership first cannot both hold.
+}
+
+// A tri6: corners 1, 2, 3 and nodes 4, 5, 6. Each ownership kind lists its
+// corners, then its node-only vertices, in segments of their own:
+//   interior     3 | 6
+//   shared       1 2 | 4
+//   shared_copy  | 5
+TEST(MeshBuilder, HighOrderVerticesFollowTheCornersOfTheirKind) {
   soma::MeshBuilder h(2);
   h.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6},
                  std::vector<soma::Real>{0, 0, 0, 1, 0, 0, 0, 1, 0, 0.5, 0, 0, 0.5, 0.5, 0, 0, 0.5, 0});
   h.add_elements(Topology::tri, std::vector<GO>{9}, std::vector<GO>{1, 2, 3, 4, 5, 6}, 6);
-  h.set_ownership(0, one, shared, zero);
-  EXPECT_THROW((void)std::move(h).build(), std::invalid_argument);
+  h.set_ownership(0, std::vector<GO>{1, 2, 4, 5},
+                  std::vector<Ownership>{Ownership::shared, Ownership::shared, Ownership::shared, Ownership::shared_copy},
+                  std::vector<std::uint32_t>(4, 0));
+  const soma::HostMesh m = std::move(h).build(soma::Ordering::file);
+  EXPECT_EQ(gids(m, 0), (std::vector<GO>{3, 6, 1, 2, 4, 5}));
+  EXPECT_EQ(m.corners(), 1);
+  EXPECT_EQ(m.corner_end(Ownership::interior), 1);
+  EXPECT_EQ(m.corner_end(Ownership::shared), 4);
+  EXPECT_EQ(m.corner_end(Ownership::shared_copy), 5);
+  EXPECT_EQ(m.corner_end(Ownership::ghost), 6);
+  const auto& t = m.segment_table(0);
+  EXPECT_EQ(t.segments, (std::vector<Segment>{{0, 1, Topology::vertex, 1, Ownership::interior},
+                                              {1, 2, Topology::vertex, 1, Ownership::interior},
+                                              {2, 4, Topology::vertex, 1, Ownership::shared},
+                                              {4, 5, Topology::vertex, 1, Ownership::shared},
+                                              {5, 6, Topology::vertex, 1, Ownership::shared_copy}}));
+  EXPECT_EQ(t.interior_end, 2);
+  EXPECT_EQ(t.owned_end, 5);
+  EXPECT_EQ(t.shared_end, 6);
+  const auto v = m.view();
+  std::vector<bool> corner;
+  for (LO i = 0; i < m.count(0); ++i) corner.push_back(v.corner(i));
+  EXPECT_EQ(corner, (std::vector<bool>{true, false, true, true, false, false}));
+  // The connectivity names the corners, the node list the rest.
+  for (LO k = 0; k < 3; ++k) EXPECT_TRUE(v.corner(v.vertex(2, 0, k)));
+  for (LO k = 3; k < 6; ++k) EXPECT_FALSE(v.corner(v.node(2, 0, k)));
 }
 
 // With one key box, ranks holding different vertices order them alike. The
