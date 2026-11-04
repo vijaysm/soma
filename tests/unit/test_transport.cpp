@@ -5,15 +5,18 @@
 #include <cstdint>
 #include <cstring>
 #include <random>
+#include <set>
 #include <stdexcept>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "soma/parallel/comm.hpp"
+#include "soma/parallel/transport/comm_plan.hpp"
 #include "soma/parallel/transport/route.hpp"
 
 using soma::Comm;
+using soma::transport::CommPlan;
 using soma::transport::RecordBatch;
 using soma::transport::Strategy;
 
@@ -171,4 +174,60 @@ TEST(Transport, AutomaticPicksByRankCount) {
   EXPECT_EQ(resolve(Strategy::automatic, 64), Strategy::alltoallv);
   EXPECT_EQ(resolve(Strategy::automatic, 65), Strategy::crystal);
   EXPECT_EQ(resolve(Strategy::nbx, 1000), Strategy::nbx);
+}
+
+// A plan learnt from one exchange replays it: forward delivers what route()
+// did, in its order, and reverse undoes forward.
+TEST(Transport, PlansReplayTheRoutedExchange) {
+  const Comm c = Comm::world();
+  for (const Pattern pattern : {Pattern::empty, Pattern::all_to_one, Pattern::all_to_all, Pattern::ring, Pattern::random}) {
+    const std::vector<Record> mine = records(pattern, c.rank(), c.size());
+    const RecordBatch<Mem> sent = batch(mine);
+    const RecordBatch<Mem> arrived = soma::transport::route(Space{}, c, sent, Strategy::crystal);
+    const CommPlan plan = soma::transport::learn_plan(c, sent, arrived);
+    const auto routed = contents(arrived);
+    ASSERT_EQ(plan.num_sent(), mine.size());
+    ASSERT_EQ(plan.num_arrived(), routed.size());
+
+    std::set<int> to, from;
+    for (const Record& r : mine) {
+      if (r.dest != c.rank()) to.insert(r.dest);
+    }
+    for (const auto& r : routed) {
+      if (r.first != c.rank()) from.insert(r.first);
+    }
+    EXPECT_EQ(plan.send_ranks(), std::vector<int>(to.begin(), to.end()));
+    EXPECT_EQ(plan.recv_ranks(), std::vector<int>(from.begin(), from.end()));
+
+    std::vector<std::array<std::int32_t, 3>> values(mine.size()), got(routed.size());
+    for (std::size_t i = 0; i < mine.size(); ++i) values[i] = mine[i].payload;
+    plan.forward(c, std::span<const std::array<std::int32_t, 3>>(values), std::span<std::array<std::int32_t, 3>>(got));
+    for (std::size_t i = 0; i < routed.size(); ++i) EXPECT_EQ(got[i], routed[i].second);
+
+    // Answers computed where the records arrived go back to their places.
+    std::vector<double> answers(routed.size()), back(mine.size(), -1.0);
+    for (std::size_t i = 0; i < routed.size(); ++i) answers[i] = 0.5 * routed[i].second[1] + routed[i].second[0];
+    plan.reverse(c, std::span<const double>(answers), std::span<double>(back));
+    for (std::size_t i = 0; i < mine.size(); ++i) EXPECT_EQ(back[i], 0.5 * static_cast<double>(i) + c.rank());
+  }
+}
+
+TEST(Transport, PlansRejectInconsistentHalves) {
+  const Comm c = Comm::world();
+  const int me = c.rank();
+  EXPECT_THROW(CommPlan(c, std::vector<int>{c.size()}, std::vector<int>{}), std::invalid_argument);
+  EXPECT_THROW(CommPlan(c, std::vector<int>{}, std::vector<int>{-1}), std::invalid_argument);
+  if (c.size() > 1) {
+    EXPECT_THROW(CommPlan(c, std::vector<int>{}, std::vector<int>{1, 0}), std::invalid_argument);
+  }
+  EXPECT_THROW(CommPlan(c, std::vector<int>{me, me}, std::vector<int>{me}), std::invalid_argument);
+  const CommPlan plan(c, std::vector<int>{me, me}, std::vector<int>{me, me});
+  EXPECT_TRUE(plan.send_ranks().empty());
+  EXPECT_TRUE(plan.recv_ranks().empty());
+  std::vector<std::int32_t> two{1, 2}, three(3), out(2);
+  EXPECT_THROW(plan.forward(c, std::span<const std::int32_t>(two), std::span<std::int32_t>(three)), std::invalid_argument);
+  EXPECT_THROW(plan.reverse(c, std::span<const std::int32_t>(three), std::span<std::int32_t>(out)), std::invalid_argument);
+  plan.forward(c, std::span<const std::int32_t>(two), std::span<std::int32_t>(out));
+  EXPECT_EQ(out, two);
+  EXPECT_EQ(CommPlan().num_arrived(), 0U);
 }
