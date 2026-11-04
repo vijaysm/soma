@@ -40,7 +40,7 @@ inline std::filesystem::path write_box(const std::filesystem::path& dir, int n) 
   }
   moab::ScdBox* box = nullptr;
   check(scd->construct_box(moab::HomCoord(0, 0, 0), moab::HomCoord(n, n, n), xyz.data(),
-                           static_cast<int>(xyz.size()), box),
+                           static_cast<unsigned>(xyz.size()), box),
         "construct_box");
   moab::Tag gid = mb.globalId_tag();
   for (const moab::EntityType t : {moab::MBVERTEX, moab::MBHEX}) {
