@@ -244,6 +244,13 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   the epoch and returns the renumbering. `write_h5m` and `write_vtk` write an edited mesh as its
   compressed copy.
 - Set renumbering can drop members without a new local id.
+- `apply()` compresses the mesh once removed entities fill a threshold share of some
+  dimension's slots (default 0.2, measured), reporting the renumbering in
+  `EditReport::compressed`; `MeshEdit::set_compress_threshold` sets it per edit, 0 never
+  compresses. `removed_fraction(mesh)` gives the share.
+- Process-wide options (`soma/runtime/options.hpp`): the compress threshold, read from
+  `SOMA_COMPRESS_THRESHOLD` and `--soma-compress-threshold=<x>` (which wins) by `parse_options`,
+  which `ScopeGuard` calls; SOMA's arguments are removed from argv.
 
 ### MOAB-compatible API
 
@@ -256,6 +263,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - Handles keep MOAB's bit layout and MOAB's allocation of ids (blocks per type and node count,
   freed ids reused), so an application sees the handles MOAB would give it. Compat never
   compresses its own mesh; creations are staged and applied at the next query.
+- Tag reads and writes on deleted entities fail with `MB_ENTITY_NOT_FOUND`, alone or in a Range,
+  also where MOAB accepts them for dense tags. compat never compresses its mesh.
 - `load_file` rejects a high-order mesh whose elements disagree on the node of a shared edge or
   face, naming both elements, and numbers what it reads in file order.
 - Drop-in mode (`soma_compat_dropin`) puts headers at MOAB's paths first on the include path, so
@@ -274,6 +283,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   constant or conservative MC-limited linear prolongation (`CoarseFinePlan`), restriction
   (`average_down`) and refluxing (`FluxRegister`). Each point is written by one source, so
   results do not depend on the thread count.
+- Quadratic prolongation (`Interp::quadratic`): conservative for cell averages, Lagrange at
+  nodes, tensor products for faces; exact for data of degree 2 in each direction, unlimited.
 - `Hierarchy`: levels checked for alignment and proper nesting, plans cached, halos filled and
   data restricted across all levels; `regrid` tags cells, clusters them with Berger–Rigoutsos
   (`cluster`), keeps the levels nested, and moves every field to the new boxes (copied where the
@@ -282,6 +293,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   which ParaView reads with the cells under finer levels hidden.
 
 ### Testing
+
+- `policy.device_lambdas` fails when a test body holds a `KOKKOS_LAMBDA` (CUDA refuses extended
+  lambdas in private member functions); test kernels live in named functions.
 
 - GoogleTest harness with a shared `main` that creates the runtime scope first and agrees on
   the exit code across ranks. `soma_add_test` registers MPI tests at 1, 2 and 4 ranks with a
