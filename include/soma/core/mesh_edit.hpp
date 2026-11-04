@@ -6,6 +6,7 @@
 
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -16,7 +17,14 @@ namespace soma {
 struct EditReport {
   std::array<LO, 4> added{};
   std::array<LO, 4> removed{};
+  // Set when apply() compressed the mesh: the applied local ids to the
+  // compressed ones.
+  std::optional<Renumbering> compressed;
 };
+
+// The largest fraction, over the dimensions holding entities, of slots that
+// hold removed entities (0 for a mesh that is not edited).
+double removed_fraction(const HostMesh& mesh);
 
 // Batched topology edits of a host mesh. Additions and removals are recorded,
 // checked as they are given, and made visible together by apply(): existing
@@ -45,6 +53,10 @@ struct EditReport {
 // again: sides keep their gids (new ones take the next gids, and those that
 // no live element has any more go), lids are renumbered, and sets and fields
 // follow through the gids. The epoch does not change.
+// apply() then compresses the mesh when removed_fraction reaches the
+// compress threshold (the process-wide compress_threshold() of
+// soma/runtime/options.hpp unless set_compress_threshold gave another; 0
+// never compresses), and reports the renumbering.
 // A throw from apply() leaves the mesh unchanged and the edit as it was.
 class MeshEdit {
  public:
@@ -65,6 +77,9 @@ class MeshEdit {
 
   // Makes the edit visible; the edit is then empty and can be used again.
   EditReport apply();
+  // This edit's compress threshold in place of the process-wide one; throws
+  // std::invalid_argument outside [0, 1].
+  void set_compress_threshold(double t);
 
  private:
   struct Added {
@@ -84,6 +99,7 @@ class MeshEdit {
   HostMesh* mesh_;
   std::array<Added, 4> added_{};
   std::array<std::vector<LO>, 4> removed_{};
+  std::optional<double> threshold_;
 };
 
 }  // namespace soma

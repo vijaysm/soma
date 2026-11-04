@@ -24,6 +24,7 @@
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/mesh_edit.hpp"
 #include "soma/core/set_builder.hpp"
+#include "soma/runtime/options.hpp"
 #include "soma/fields/domain_mesh.hpp"
 #include "soma/fields/space.hpp"
 #include "soma/io/h5m.hpp"
@@ -125,6 +126,7 @@ TEST(MeshEdit, RemovedEntitiesAreMasked) {
   const LO v30 = lid_of(m, 0, 30);
   {
     MeshEdit edit(m);
+    edit.set_compress_threshold(0);  // the edited state is under test
     edit.remove(0, std::vector<LO>{v70});
     EXPECT_EQ(what_of([&] { edit.apply(); }),
               "MeshEdit: vertex gid 70 cannot be removed: element gid 5 of dimension 2 uses it");
@@ -139,6 +141,7 @@ TEST(MeshEdit, RemovedEntitiesAreMasked) {
   EXPECT_FALSE(m.view().alive(0, v70));
   EXPECT_TRUE(m.view().alive(0, v30));
   MeshEdit again(m);
+  again.set_compress_threshold(0);  // the edited state is under test
   EXPECT_EQ(what_of([&] { again.remove(2, std::vector<LO>{tri}); }),
             "MeshEdit: remove: entity " + std::to_string(tri) + " of dimension 2 is already removed");
   EXPECT_EQ(what_of([&] { again.remove(2, std::vector<LO>{3}); }),
@@ -254,6 +257,7 @@ TEST(MeshEdit, FieldsSetsAndGraphsFollow) {
   ASSERT_TRUE(m.has_adjacency(2, 1));
 
   MeshEdit edit(m);
+  edit.set_compress_threshold(0);  // the edited state is under test
   const LO v = edit.add_vertices(std::vector<Real>{3, 0, 0, 3, 1, 0});
   edit.add_elements(Topology::quad, std::vector<LO>{2, v, v + 1, 5});
   edit.remove(2, std::vector<LO>{0});
@@ -427,6 +431,7 @@ TEST(MeshEdit, SparseGidsAreFollowed) {
   for (LO e = 0; e < 3; ++e) f.view()(static_cast<std::size_t>(e), 0) = static_cast<double>(m.gid(2)(static_cast<std::size_t>(e)) / step);
 
   MeshEdit edit(m);
+  edit.set_compress_threshold(0);  // the edited state is under test
   edit.remove(2, std::vector<LO>{lid_of(m, 2, 2 * step)});
   edit.apply();
   // Vertex 2 (lid 1) keeps its first quad only; vertex 3 its third.
@@ -501,6 +506,7 @@ TEST(MeshEdit, SidesDerivedAgainKeepFieldsAndSetsByGid) {
   const GO first = m.gid(2)(0);
 
   MeshEdit edit(m);
+  edit.set_compress_threshold(0);  // the edited state is under test
   edit.remove(3, std::vector<LO>{0});
   edit.apply();
   EXPECT_EQ(m.epoch(), epoch);
@@ -609,6 +615,7 @@ TEST(MeshEdit, WritersWriteTheCompressedCopy) {
   auto f = m.fields().add_tag<double>("t", 2, 1);
   for (std::size_t i = 0; i < 3; ++i) f.view()(i, 0) = 1.5 * static_cast<double>(i);
   MeshEdit edit(m);
+  edit.set_compress_threshold(0);  // the edited state is under test
   const LO v = edit.add_vertices(std::vector<Real>{-1, 0.5, 0});
   edit.add_elements(Topology::tri, std::vector<LO>{lid_of(m, 0, 10), v, lid_of(m, 0, 40)});
   edit.remove(2, std::vector<LO>{lid_of(m, 2, 3)});
@@ -630,4 +637,88 @@ TEST(MeshEdit, WritersWriteTheCompressedCopy) {
   }
   EXPECT_TRUE(m.edited());
   std::filesystem::remove_all(dir);
+}
+
+namespace {
+
+// Restores the process-wide compress threshold.
+struct ThresholdGuard {
+  double saved = soma::compress_threshold();
+  ~ThresholdGuard() { soma::set_compress_threshold(saved); }
+};
+
+}  // namespace
+
+// apply() compresses once removed entities fill the threshold's fraction of
+// the slots of some dimension, and reports the renumbering; fields follow.
+TEST(MeshEdit, ApplyCompressesPastTheThreshold) {
+  const ThresholdGuard guard;
+  ASSERT_EQ(soma::compress_threshold(), soma::default_compress_threshold);
+  for (const bool reach : {false, true}) {
+    // Five quads: removing one is exactly 20 % of the quad slots.
+    HostMesh m = soma::testing::box_mesh({5, 1, 1, Topology::quad});
+    auto f = m.fields().add<double>("q", soma::make_space(m, soma::Domain<Kokkos::HostSpace>::all(m, 2), soma::Layout::per_entity()), 1);
+    for (LO l = 0; l < 5; ++l) f.view()(static_cast<std::size_t>(l), 0) = 100.0 + static_cast<double>(m.gid(2)(static_cast<std::size_t>(l)));
+    const GO gone_gid = m.gid(2)(1);
+    MeshEdit edit(m);
+    if (!reach) edit.set_compress_threshold(0.21);
+    edit.remove(2, std::vector<LO>{1});
+    EXPECT_DOUBLE_EQ(soma::removed_fraction(m), 0.0);
+    const soma::EditReport r = edit.apply();
+    if (!reach) {
+      EXPECT_FALSE(r.compressed.has_value());
+      EXPECT_TRUE(m.edited());
+      EXPECT_DOUBLE_EQ(soma::removed_fraction(m), 0.2);
+      continue;
+    }
+    ASSERT_TRUE(r.compressed.has_value());
+    EXPECT_FALSE(m.edited());
+    EXPECT_EQ(m.count(2), 4);
+    EXPECT_DOUBLE_EQ(soma::removed_fraction(m), 0.0);
+    // The renumbering maps the applied lids to the compressed ones by gid.
+    const auto& nl = r.compressed->new_lid[2];
+    ASSERT_EQ(nl.size(), 5u);
+    EXPECT_EQ(nl[1], soma::invalid_lo);
+    for (LO l = 0; l < 5; ++l) {
+      if (l == 1) continue;
+      const LO n = nl[static_cast<std::size_t>(l)];
+      ASSERT_NE(n, soma::invalid_lo);
+      EXPECT_NE(m.gid(2)(static_cast<std::size_t>(n)), gone_gid);
+    }
+    const auto q = m.fields().get<double>("q", 2);
+    for (LO l = 0; l < 4; ++l) EXPECT_EQ(q.view()(static_cast<std::size_t>(l), 0), 100.0 + static_cast<double>(m.gid(2)(static_cast<std::size_t>(l))));
+  }
+}
+
+// The process-wide threshold applies unless the edit sets its own; 0 never
+// compresses; the worst dimension decides.
+TEST(MeshEdit, CompressThresholdsAreChosenPerEditOrPerProcess) {
+  const ThresholdGuard guard;
+  const auto churn = [](HostMesh& m, int count, const std::function<void(MeshEdit&)>& set) {
+    MeshEdit edit(m);
+    set(edit);
+    std::vector<LO> lids;
+    for (LO l = 0; l < count; ++l) lids.push_back(l);
+    edit.remove(2, lids);
+    return edit.apply();
+  };
+  // 16 quads, 4 removed: 25 % of the quads, none of the vertices.
+  HostMesh a = soma::testing::box_mesh({4, 4, 1, Topology::quad});
+  soma::set_compress_threshold(0.3);
+  EXPECT_FALSE(churn(a, 4, [](MeshEdit&) {}).compressed.has_value());
+  EXPECT_DOUBLE_EQ(soma::removed_fraction(a), 0.25);
+  HostMesh b = soma::testing::box_mesh({4, 4, 1, Topology::quad});
+  EXPECT_TRUE(churn(b, 4, [](MeshEdit& e) { e.set_compress_threshold(0.25); }).compressed.has_value());
+  soma::set_compress_threshold(0.0);
+  HostMesh c = soma::testing::box_mesh({4, 4, 1, Topology::quad});
+  EXPECT_FALSE(churn(c, 16, [](MeshEdit&) {}).compressed.has_value());
+  soma::set_compress_threshold(0.25);
+  HostMesh d = soma::testing::box_mesh({4, 4, 1, Topology::quad});
+  EXPECT_TRUE(churn(d, 4, [](MeshEdit&) {}).compressed.has_value());
+  EXPECT_THROW(soma::set_compress_threshold(1.5), std::invalid_argument);
+  EXPECT_THROW(soma::set_compress_threshold(-0.1), std::invalid_argument);
+  EXPECT_THROW(soma::set_compress_threshold(std::nan("")), std::invalid_argument);
+  MeshEdit e(d);
+  EXPECT_THROW(e.set_compress_threshold(2.0), std::invalid_argument);
+  EXPECT_EQ(soma::compress_threshold(), 0.25);
 }

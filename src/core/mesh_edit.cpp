@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "soma/core/mesh_builder.hpp"
+#include "soma/runtime/options.hpp"
 #include "soma/fields/domain_mesh.hpp"
 #include "soma/topology/build.hpp"
 #include "soma/topology/nodes.hpp"
@@ -401,10 +402,30 @@ EditReport MeshEdit::apply() {
   const AdjacencyRequest dropped = AdjacencyRequest::from_bits(m.adjacencies().bits() & ~next.adjacencies().bits());
   if (!dropped.empty()) build_adjacencies(next, dropped);
 
+  // Compressed before the swap, so a throw leaves the mesh as it was.
+  const double t = threshold_.value_or(compress_threshold());
+  if (t > 0 && removed_fraction(next) >= t) report.compressed = next.compress();
+
   m.swap(next);
   added_ = {};
   removed_ = {};
   return report;
+}
+
+void MeshEdit::set_compress_threshold(double t) {
+  if (!(t >= 0.0 && t <= 1.0)) throw std::invalid_argument("MeshEdit::set_compress_threshold: " + std::to_string(t) + " is not in [0, 1]");
+  threshold_ = t;
+}
+
+double removed_fraction(const HostMesh& mesh) {
+  double worst = 0;
+  for (int d = 0; d <= 3; ++d) {
+    const LO n = mesh.count(d);
+    if (n == 0) continue;
+    const double f = static_cast<double>(n - mesh.num_live(d)) / static_cast<double>(n);
+    worst = f > worst ? f : worst;
+  }
+  return worst;
 }
 
 namespace detail {

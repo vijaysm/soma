@@ -17,6 +17,10 @@
 // a mismatch exits with status 2. Queries run serially, as MOAB does.
 //
 //   bench_edit [--json] [--repeats N] [--box n] [--fractions f,f,...]
+//
+// It ends with the removed fraction at which the field write passes twice its
+// compact cost, a value for --soma-compress-threshold on this machine (the
+// edits themselves run with automatic compression off).
 
 #include <algorithm>
 #include <cmath>
@@ -27,6 +31,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -145,12 +150,16 @@ bool run_native(soma::bench::Runner& runner, int n, const std::vector<double>& f
     }
   };
   const auto none = [] {};
+  // (removed fraction of the hex slots, field write cost over compact)
+  std::vector<std::pair<double, double>> write_cost;
+  double compact_write = 0;
   for (const double f : fractions) {
     const std::string tag = "native_" + label(f);
     HostMesh m = base.clone();
     const std::vector<LO> gone = every_kth(base.count(3), f);
     if (!gone.empty()) {
       soma::MeshEdit edit(m);
+      edit.set_compress_threshold(0);  // the edited state is what is measured
       churn(m, edit, gone);
       edit.apply();
     }
@@ -158,7 +167,12 @@ bool run_native(soma::bench::Runner& runner, int n, const std::vector<double>& f
     double fr = 0;
     runner.run(tag + "_connectivity", "soma", hexes, none, [&] { cs = conn_sum(m); });
     runner.run(tag + "_vertex_to_hex", "soma", verts, none, [&] { gs = graph_sum(m); });
-    runner.run(tag + "_field_write", "soma", hexes, none, [&] { field_write(m); });
+    const double write = runner.run(tag + "_field_write", "soma", hexes, none, [&] { field_write(m); }).max_rank_sec;
+    if (gone.empty()) {
+      compact_write = write;
+    } else if (compact_write > 0) {
+      write_cost.emplace_back(soma::removed_fraction(m), write / compact_write);
+    }
     runner.run(tag + "_field_read", "soma", hexes, none, [&] { fr = field_read(m); });
     expect("connectivity", f, static_cast<double>(cs), static_cast<double>(ref_conn));
     expect("vertex_to_hex", f, static_cast<double>(gs), static_cast<double>(ref_graph));
@@ -172,6 +186,7 @@ bool run_native(soma::bench::Runner& runner, int n, const std::vector<double>& f
                  edit.reset();
                  e = base.clone();
                  edit.emplace(e);
+                 edit->set_compress_threshold(0);
                  churn(e, *edit, gone);
                },
                [&] { edit->apply(); });
@@ -181,6 +196,20 @@ bool run_native(soma::bench::Runner& runner, int n, const std::vector<double>& f
   }
   HostMesh b;
   runner.run("native_build", "soma", hexes, none, [&] { b = base_box(n); });
+  // A compress threshold for this machine: where the field write, the query
+  // the edited state costs most, passes twice its compact cost.
+  for (std::size_t i = 0; i < write_cost.size(); ++i) {
+    if (write_cost[i].second < 2.0) continue;
+    double at = write_cost[i].first;
+    if (i > 0) {
+      const auto [x0, y0] = write_cost[i - 1];
+      const auto [x1, y1] = write_cost[i];
+      at = x0 + (2.0 - y0) * (x1 - x0) / (y1 - y0);
+    }
+    std::cout << "[bench] field write passes 2x compact at a removed fraction of " << at
+              << ": --soma-compress-threshold=" << at << "\n";
+    break;
+  }
   return ok;
 }
 

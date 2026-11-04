@@ -44,6 +44,8 @@ CoreState::CoreState() {
 
 void CoreState::flush() {
   if (!edit) return;
+  // compat never compresses: handles must stay what MOAB would give.
+  edit->set_compress_threshold(0);
   edit->apply();
   edit.reset();
   invalidate();
@@ -823,6 +825,7 @@ ErrorCode Interface::delete_entities(const EntityHandle* es, int n) {
   if (!gone.empty()) {
     try {
       MeshEdit edit(s_->mesh);
+      edit.set_compress_threshold(0);
       for (int d = 0; d <= 3; ++d) {
         if (!lids[static_cast<std::size_t>(d)].empty()) edit.remove(d, lids[static_cast<std::size_t>(d)]);
       }
