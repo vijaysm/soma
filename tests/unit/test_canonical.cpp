@@ -7,11 +7,15 @@
 #include <set>
 #include <utility>
 
+#include <utility>
+#include <vector>
+
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
 
 #include "soma/core/topology.hpp"
 #include "soma/topology/canonical.hpp"
+#include "soma/topology/nodes.hpp"
 
 using soma::Topology;
 namespace canonical = soma::canonical;
@@ -137,4 +141,52 @@ TEST(Canonical, DeviceEvaluationMatchesHost) {
   for (int k = 0; k < soma_test::code_count; ++k) {
     EXPECT_EQ(device(k), soma_test::encode_flat(k)) << "flat index " << k;
   }
+}
+
+// The node counts of MOAB's configurations, by bits 0, edges, faces, both,
+// region, edges and region, faces and region, all.
+TEST(MidNodes, CountsOfEveryConfiguration) {
+  const auto counts = [](Topology t) {
+    std::vector<int> v;
+    for (int bits = 0; bits <= 14; bits += 2) v.push_back(soma::num_nodes(t, bits));
+    return v;
+  };
+  EXPECT_EQ(counts(Topology::hex), (std::vector<int>{8, 20, 14, 26, 9, 21, 15, 27}));
+  EXPECT_EQ(counts(Topology::tet), (std::vector<int>{4, 10, 8, 14, 5, 11, 9, 15}));
+  EXPECT_EQ(counts(Topology::prism), (std::vector<int>{6, 15, 11, 20, 7, 16, 12, 21}));
+  EXPECT_EQ(counts(Topology::pyramid), (std::vector<int>{5, 13, 10, 18, 6, 14, 11, 19}));
+  EXPECT_EQ(counts(Topology::quad), (std::vector<int>{4, 8, 5, 9, 4, 8, 5, 9}));
+  EXPECT_EQ(counts(Topology::tri), (std::vector<int>{3, 6, 4, 7, 3, 6, 4, 7}));
+  EXPECT_EQ(counts(Topology::edge), (std::vector<int>{2, 3, 2, 3, 2, 3, 2, 3}));
+  // Each count names one configuration, with no bit a type cannot use.
+  EXPECT_EQ(soma::mid_node_bits(Topology::hex, 27), 14);
+  EXPECT_EQ(soma::mid_node_bits(Topology::hex, 8), 0);
+  EXPECT_EQ(soma::mid_node_bits(Topology::hex, 10), -1);
+  EXPECT_EQ(soma::mid_node_bits(Topology::quad, 9), soma::mid_edge_bit | soma::mid_face_bit);
+  EXPECT_EQ(soma::mid_node_bits(Topology::tri, 4), soma::mid_face_bit);
+  EXPECT_EQ(soma::mid_node_bits(Topology::edge, 3), soma::mid_edge_bit);
+  EXPECT_EQ(soma::mid_node_bits(Topology::edge, 4), -1);
+  // Corners only for the types without mid-nodes.
+  EXPECT_EQ(soma::mid_node_bits(Topology::knife, 7), 0);
+  EXPECT_EQ(soma::mid_node_bits(Topology::knife, 8), -1);
+  EXPECT_EQ(soma::mid_node_bits(Topology::polygon, 5), -1);
+  EXPECT_EQ(soma::mid_node_bits(Topology::vertex, 1), 0);
+}
+
+TEST(MidNodes, ParentsFollowCornersEdgesFacesRegion) {
+  const auto parent = [](Topology t, int count, int k) {
+    const soma::NodeParent p = soma::node_parent(t, count, k);
+    return std::pair(p.dim, p.index);
+  };
+  EXPECT_EQ(parent(Topology::hex, 27, 7), std::pair(0, 7));
+  EXPECT_EQ(parent(Topology::hex, 27, 8), std::pair(1, 0));
+  EXPECT_EQ(parent(Topology::hex, 27, 19), std::pair(1, 11));
+  EXPECT_EQ(parent(Topology::hex, 27, 20), std::pair(2, 0));
+  EXPECT_EQ(parent(Topology::hex, 27, 26), std::pair(3, 0));
+  EXPECT_EQ(parent(Topology::hex, 15, 8), std::pair(2, 0));   // faces and region
+  EXPECT_EQ(parent(Topology::hex, 15, 14), std::pair(3, 0));
+  EXPECT_EQ(parent(Topology::tri, 7, 6), std::pair(2, 0));    // the centre
+  EXPECT_EQ(parent(Topology::edge, 3, 2), std::pair(1, 0));
+  EXPECT_EQ(parent(Topology::hex, 27, 27), std::pair(-1, -1));
+  EXPECT_EQ(parent(Topology::hex, 10, 8), std::pair(-1, -1));
 }

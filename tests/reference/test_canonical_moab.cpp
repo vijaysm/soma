@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <string>
+
 #include <gtest/gtest.h>
 
 #include "moab/CN.hpp"
 #include "soma/core/topology.hpp"
 #include "soma/topology/canonical.hpp"
+#include "soma/topology/nodes.hpp"
 
 using soma::Topology;
 
@@ -71,4 +74,35 @@ TEST(CanonicalVsMoab, SidesMatchPositionally) {
 
 TEST(CanonicalVsMoab, PolygonTrapIsStillThere) {
   EXPECT_EQ(moab::CN::NumSubEntities(moab::MBPOLYGON, 1), 0);
+}
+
+// Every count up to MOAB's largest element: SOMA's configuration bits are
+// CN::HasMidNodes where a configuration exists, and where none does CN has
+// none either (it reports 0, as for the corners alone); every node's parent
+// sub-entity is CN::HONodeParent's.
+TEST(MidNodesVsMoab, BitsAndParentsOfEveryCount) {
+  int configurations = 0;
+  for (const Topology t : {Topology::edge, Topology::tri, Topology::quad, Topology::tet, Topology::pyramid,
+                           Topology::prism, Topology::hex}) {
+    for (int count = 0; count <= moab::CN::MAX_NODES_PER_ELEMENT; ++count) {
+      SCOPED_TRACE(std::string(soma::name(t)) + " " + std::to_string(count));
+      const int bits = soma::mid_node_bits(t, count);
+      const int cn = moab::CN::HasMidNodes(to_moab(t), count);
+      if (bits < 0) {
+        EXPECT_EQ(cn, 0);
+        continue;
+      }
+      EXPECT_EQ(bits, cn);
+      if (bits > 0) ++configurations;
+      for (int k = soma::num_vertices(t); k < count; ++k) {
+        int dim = -1;
+        int index = -1;
+        moab::CN::HONodeParent(to_moab(t), count, k, dim, index);
+        const soma::NodeParent p = soma::node_parent(t, count, k);
+        EXPECT_EQ(p.dim, dim) << k;
+        EXPECT_EQ(p.index, index) << k;
+      }
+    }
+  }
+  EXPECT_EQ(configurations, 35);
 }
