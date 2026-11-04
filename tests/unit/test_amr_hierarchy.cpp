@@ -177,9 +177,10 @@ TEST(AmrHierarchy, FillHaloIsExactForLinearData) {
           for (std::size_t b = 0; b < f.num_boxes(); ++b) set_linear(f, static_cast<int>(b), f.valid(b), h.dx(l, 0), dim);
         }
         int calls = 0;
-        h.fill_halo(u, Interp::linear, [&](int level, int box, const Box& region, int, int) {
+        h.fill_halo(u, Interp::linear, [&](const soma::amr::LevelField<double>& f, int level, int box, const Box& region, int, int) {
           ++calls;
-          set_linear(u[static_cast<std::size_t>(level)], box, region, h.dx(level, 0), dim);
+          EXPECT_EQ(&f, &u[static_cast<std::size_t>(level)]);
+          set_linear(f, box, region, h.dx(level, 0), dim);
         });
         EXPECT_GT(calls, 0);
         for (int l = 0; l < h.num_levels(); ++l) {

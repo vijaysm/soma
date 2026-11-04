@@ -3,7 +3,10 @@
 
 #include "soma/amr/hierarchy.hpp"
 
+#include <algorithm>
 #include <stdexcept>
+
+#include "soma/amr/cluster.hpp"
 
 namespace soma::amr {
 
@@ -123,6 +126,35 @@ const CoarseFinePlan& Hierarchy::coarse_fine_plan(int level, IndexType type, int
              .first;
   }
   return it->second;
+}
+
+std::vector<BoxList> Hierarchy::make_grids(const Tagger& tagger) const {
+  const HierarchyOptions& o = options_;
+  const int top = std::min(finest_level(), o.max_level - 1);
+  std::vector<BoxList> out(static_cast<std::size_t>(top + 1));
+  for (int l = top; l >= 0; --l) {
+    std::vector<IntVect> tags;
+    const TagField f(boxes(l), IndexType::cell(), 1, 0, "amr::Hierarchy.tags");
+    tagger(l, f);
+    const auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, f.view().data);
+    for (std::size_t b = 0; b < f.num_boxes(); ++b) {
+      const Box& v = f.valid(b);
+      for (std::int64_t q = 0; q < v.num_pts(); ++q) {
+        if (h(static_cast<std::size_t>(f.offset(b) + q)) != 0) tags.push_back(detail::point_of(v, q));
+      }
+    }
+    // The new level l + 2 must nest in the new level l + 1.
+    if (l < top) {
+      const BoxList& above = out[static_cast<std::size_t>(l + 1)];
+      for (const Box& c : coarsen(detail::nest_region(above, o.ratio, o.nesting, domain(l + 1), geometry_.periodic), o.ratio)) {
+        for (std::int64_t q = 0; q < c.num_pts(); ++q) tags.push_back(detail::point_of(c, q));
+      }
+    }
+    const BoxList blocks = cluster(tags, domain(l), {o.efficiency, o.blocking_factor / o.ratio});
+    out[static_cast<std::size_t>(l)] = chop(refine(blocks, o.ratio), o.max_box, o.blocking_factor);
+  }
+  while (!out.empty() && out.back().empty()) out.pop_back();
+  return out;
 }
 
 }  // namespace soma::amr

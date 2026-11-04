@@ -24,6 +24,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 #include "soma/amr/box.hpp"
@@ -69,10 +70,23 @@ BoxList nest_region(const BoxList& fine, int ratio, int nesting, const Box& coar
 template <class T>
 using MultiLevelField = std::vector<LevelField<T>>;
 
+// A byte per cell of a level, nonzero where the level should be refined.
+using TagField = LevelField<std::uint8_t>;
+
+// A physical boundary is a callable
+//   physical(const LevelField<T>& field, int level, int box, const Box& region, int dir, int side)
+// that fills the ghost points `region` of box `box` outside the domain (a
+// generic lambda serves fields of every element type). This one leaves them.
+struct NoBoundary {
+  template <class T>
+  void operator()(const LevelField<T>&, int, int, const Box&, int, int) const {}
+};
+
 class Hierarchy {
  public:
-  // physical(level, box, region, dir, side): ghost points outside the domain.
-  using Physical = std::function<void(int level, int box, const Box& region, int dir, int side)>;
+  // tagger(level, tags): marks the cells of `level` to refine (tags arrive
+  // zeroed, without ghosts).
+  using Tagger = std::function<void(int level, const TagField& tags)>;
 
   // Level 0 only, the domain chopped to max_box. With `fine`, levels 1 to
   // fine.size() take those boxes (each level's cells). Throws
@@ -111,19 +125,37 @@ class Hierarchy {
   // Level by level from 0: ghosts from the same level, then (above level 0)
   // the uncovered ones from the level below, then those outside the domain
   // through `physical`.
-  template <class T>
-  void fill_halo(const MultiLevelField<T>& u, Interp interp = Interp::linear, const Physical& physical = {}) const;
+  template <class T, class P = NoBoundary>
+  void fill_halo(const MultiLevelField<T>& u, Interp interp = Interp::linear, const P& physical = {}) const;
   // From the finest level down: each level's valid points to the level
   // below.
   template <class T>
   void average_down(const MultiLevelField<T>& u) const;
 
+  // The boxes of new levels 1, 2, ... from the tags of levels 0 to
+  // min(finest, max_level - 1), built from the top down: the tagged cells of
+  // level l, with the cells under the new level l + 2 grown by the nesting,
+  // are clustered on blocks of blocking_factor / ratio cells, refined, and
+  // chopped to max_box; empty levels on top are dropped. Level 0 stays.
+  std::vector<BoxList> make_grids(const Tagger& tagger) const;
+  // Field u of hierarchy `from` on this hierarchy's boxes (same geometry
+  // and ratio): level by level from 0, prolonged from the new level below
+  // (its halos filled first), overwritten where the old level had valid
+  // points, then restricted from the finest level down. Linear prolongation
+  // needs at least one ghost.
+  template <class T, class P = NoBoundary>
+  MultiLevelField<T> transfer(const Hierarchy& from, const MultiLevelField<T>& u, Interp interp = Interp::linear,
+                              const P& physical = {}) const;
+  // Tags, makes the new levels and moves every field to them; on an
+  // exception the hierarchy and the fields are unchanged.
+  template <class P, class... T>
+  void regrid(const Tagger& tagger, Interp interp, const P& physical, MultiLevelField<T>&... fields);
+
  private:
   template <class T>
   void check(const MultiLevelField<T>& u) const;
-  template <class T>
-  void fill_level(const LevelField<T>& u, const LevelField<T>* coarse, int level, Interp interp,
-                  const Physical& physical) const;
+  template <class T, class P>
+  void fill_level(const LevelField<T>& u, const LevelField<T>* coarse, int level, Interp interp, const P& physical) const;
 
   Geometry geometry_;
   HierarchyOptions options_;
@@ -146,20 +178,18 @@ void Hierarchy::check(const MultiLevelField<T>& u) const {
   }
 }
 
-template <class T>
+template <class T, class P>
 void Hierarchy::fill_level(const LevelField<T>& u, const LevelField<T>* coarse, int level, Interp interp,
-                           const Physical& physical) const {
+                           const P& physical) const {
   if (u.ghosts() == 0) return;
   const HaloPlan& halo = halo_plan(level, u.type(), u.ghosts());
   amr::fill_halo(u, halo);
   if (coarse != nullptr) fill_coarse_fine(u, *coarse, coarse_fine_plan(level, u.type(), u.ghosts(), interp));
-  if (physical) {
-    for (const BoundaryRegion& r : halo.boundary()) physical(level, r.box, r.region, r.dir, r.side);
-  }
+  for (const BoundaryRegion& r : halo.boundary()) physical(u, level, r.box, r.region, r.dir, r.side);
 }
 
-template <class T>
-void Hierarchy::fill_halo(const MultiLevelField<T>& u, Interp interp, const Physical& physical) const {
+template <class T, class P>
+void Hierarchy::fill_halo(const MultiLevelField<T>& u, Interp interp, const P& physical) const {
   check(u);
   for (int l = 0; l < num_levels(); ++l) {
     fill_level(u[static_cast<std::size_t>(l)], l > 0 ? &u[static_cast<std::size_t>(l - 1)] : nullptr, l, interp, physical);
@@ -172,6 +202,46 @@ void Hierarchy::average_down(const MultiLevelField<T>& u) const {
   for (int l = finest_level(); l > 0; --l) {
     amr::average_down(u[static_cast<std::size_t>(l)], u[static_cast<std::size_t>(l - 1)], options_.ratio);
   }
+}
+
+template <class T, class P>
+MultiLevelField<T> Hierarchy::transfer(const Hierarchy& from, const MultiLevelField<T>& u, Interp interp,
+                                       const P& physical) const {
+  from.check(u);
+  if (!(from.geometry_.domain == geometry_.domain) || from.options_.ratio != options_.ratio) {
+    throw std::invalid_argument("Hierarchy::transfer: the hierarchies differ in domain or ratio");
+  }
+  const IndexType type = u[0].type();
+  const int ncomp = u[0].ncomp(), ghosts = u[0].ghosts();
+  if (interp == Interp::linear && ghosts < 1) {
+    throw std::invalid_argument("Hierarchy::transfer: linear prolongation needs a field with ghosts");
+  }
+  MultiLevelField<T> out = make_field<T>(type, ncomp, ghosts, "amr::Hierarchy.transfer");
+  for (int l = 0; l < num_levels(); ++l) {
+    const auto& f = out[static_cast<std::size_t>(l)];
+    std::vector<BoxList> valid(f.num_boxes());
+    for (std::size_t b = 0; b < f.num_boxes(); ++b) valid[b] = {f.valid(b)};
+    if (l > 0) {
+      fill_level(out[static_cast<std::size_t>(l - 1)], l > 1 ? &out[static_cast<std::size_t>(l - 2)] : nullptr, l - 1,
+                 interp, physical);
+      const CoarseFinePlan plan(boxes(l), valid, boxes(l - 1), type, 0, options_.ratio, geometry_.periodic, interp,
+                                ghosts < 1 ? ghosts : 1);
+      fill_coarse_fine(f, out[static_cast<std::size_t>(l - 1)], plan);
+    }
+    if (l < from.num_levels()) {
+      copy(u[static_cast<std::size_t>(l)], f, CopyPlan(from.boxes(l), valid, type, geometry_.periodic));
+    }
+  }
+  average_down(out);
+  return out;
+}
+
+template <class P, class... T>
+void Hierarchy::regrid(const Tagger& tagger, Interp interp, const P& physical, MultiLevelField<T>&... fields) {
+  Hierarchy next(geometry_, options_, make_grids(tagger));
+  auto moved = std::make_tuple(next.transfer(*this, fields, interp, physical)...);
+  std::tie(fields...) = std::move(moved);
+  *this = std::move(next);
 }
 
 }  // namespace soma::amr
