@@ -630,3 +630,83 @@ TEST(CompatCore, HighOrderSidesMustShareNodes) {
     }
   }
 }
+
+// Tags set and read through Ranges, and through handles of two id blocks: a
+// dense tag holds its default on every entity of a block it was set in, a
+// sparse one only where set; compat refuses a Range naming a deleted entity.
+TEST(CompatCore, TagsOnRangesMatchMoab) {
+  sc::Core a;
+  moab::Core b;
+  ASSERT_EQ(a.load_file((data + "/64bricks_1khex.h5m").c_str()), sc::MB_SUCCESS);
+  ASSERT_EQ(b.load_file((data + "/64bricks_1khex.h5m").c_str()), moab::MB_SUCCESS);
+  const double xyz[] = {9, 9, 9};
+  H na[2] = {}, nb[2] = {};
+  for (int i = 0; i < 2; ++i) {
+    a.create_vertex(xyz, na[i]);
+    b.create_vertex(xyz, nb[i]);
+  }
+  ASSERT_EQ(na[1], nb[1]);
+  sc::Range ha, va;
+  moab::Range hb, vb;
+  a.get_entities_by_type(0, sc::MBHEX, ha);
+  b.get_entities_by_type(0, moab::MBHEX, hb);
+  a.get_entities_by_type(0, sc::MBVERTEX, va);
+  b.get_entities_by_type(0, moab::MBVERTEX, vb);
+  const auto tagged = [&](sc::Tag ta, moab::Tag tb, int type) {
+    sc::Range ra;
+    moab::Range rb;
+    a.get_entities_by_type_and_tag(0, static_cast<sc::EntityType>(type), &ta, nullptr, 1, ra);
+    b.get_entities_by_type_and_tag(0, static_cast<moab::EntityType>(type), &tb, nullptr, 1, rb);
+    EXPECT_EQ(vec(ra), vec(rb)) << "type " << type;
+  };
+
+  // Dense, set on ten hexes through a Range.
+  const double def = 7.5;
+  sc::Tag da = nullptr;
+  moab::Tag db = nullptr;
+  a.tag_get_handle("d", 1, sc::MB_TYPE_DOUBLE, da, sc::MB_TAG_DENSE | sc::MB_TAG_CREAT, &def);
+  b.tag_get_handle("d", 1, moab::MB_TYPE_DOUBLE, db, moab::MB_TAG_DENSE | moab::MB_TAG_CREAT, &def);
+  std::vector<double> ten{1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+  ASSERT_EQ(a.tag_set_data(da, sc::Range(ha[10], ha[19]), ten.data()), sc::MB_SUCCESS);
+  b.tag_set_data(db, moab::Range(hb[10], hb[19]), ten.data());
+  tagged(da, db, sc::MBHEX);
+  // Dense, set on a file vertex and the first created one in one call.
+  const H pa[] = {va[0], na[0]};
+  const H pb[] = {vb[0], nb[0]};
+  sc::Tag ea = nullptr;
+  moab::Tag eb = nullptr;
+  a.tag_get_handle("e", 1, sc::MB_TYPE_DOUBLE, ea, sc::MB_TAG_DENSE | sc::MB_TAG_CREAT, &def);
+  b.tag_get_handle("e", 1, moab::MB_TYPE_DOUBLE, eb, moab::MB_TAG_DENSE | moab::MB_TAG_CREAT, &def);
+  ASSERT_EQ(a.tag_set_data(ea, pa, 2, ten.data()), sc::MB_SUCCESS);
+  b.tag_set_data(eb, pb, 2, ten.data());
+  tagged(ea, eb, sc::MBVERTEX);
+  // Sparse with a default, set on five hexes, read on ten.
+  const int minus = -3;
+  sc::Tag sa = nullptr;
+  moab::Tag sb = nullptr;
+  a.tag_get_handle("s", 1, sc::MB_TYPE_INTEGER, sa, sc::MB_TAG_SPARSE | sc::MB_TAG_CREAT, &minus);
+  b.tag_get_handle("s", 1, moab::MB_TYPE_INTEGER, sb, moab::MB_TAG_SPARSE | moab::MB_TAG_CREAT, &minus);
+  const std::vector<int> five{1, 2, 3, 4, 5};
+  a.tag_set_data(sa, sc::Range(ha[0], ha[4]), five.data());
+  b.tag_set_data(sb, moab::Range(hb[0], hb[4]), five.data());
+  std::vector<int> ga(10), gb(10);
+  ASSERT_EQ(a.tag_get_data(sa, sc::Range(ha[0], ha[9]), ga.data()), sc::MB_SUCCESS);
+  b.tag_get_data(sb, moab::Range(hb[0], hb[9]), gb.data());
+  EXPECT_EQ(ga, gb);
+  std::vector<double> da10(10), db10(10);
+  a.tag_get_data(da, sc::Range(ha[5], ha[14]), da10.data());
+  b.tag_get_data(db, moab::Range(hb[5], hb[14]), db10.data());
+  EXPECT_EQ(da10, db10);
+  // A Range over a deleted hex: MOAB writes and reads a dense tag there
+  // (the hex's storage outlives it); compat refuses, as both do for a
+  // deleted handle passed alone.
+  const H gone_a = ha[50], gone_b = hb[50];
+  ASSERT_EQ(a.delete_entities(&gone_a, 1), sc::MB_SUCCESS);
+  ASSERT_EQ(b.delete_entities(&gone_b, 1), moab::MB_SUCCESS);
+  std::vector<double> twenty(21, 1.0);
+  EXPECT_EQ(b.tag_set_data(db, moab::Range(hb[40], hb[60]), twenty.data()), moab::MB_SUCCESS);
+  EXPECT_EQ(a.tag_set_data(da, sc::Range(ha[40], ha[60]), twenty.data()), sc::MB_ENTITY_NOT_FOUND);
+  EXPECT_EQ(a.tag_get_data(da, sc::Range(ha[40], ha[60]), twenty.data()), sc::MB_ENTITY_NOT_FOUND);
+  EXPECT_EQ(b.tag_set_data(db, &gone_b, 1, twenty.data()), moab::MB_ENTITY_NOT_FOUND);
+  EXPECT_EQ(a.tag_set_data(da, &gone_a, 1, twenty.data()), sc::MB_ENTITY_NOT_FOUND);
+}

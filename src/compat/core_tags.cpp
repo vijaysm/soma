@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -207,16 +208,18 @@ ErrorCode Interface::tag_get_tags_on_entity(EntityHandle e, std::vector<Tag>& ta
   return MB_SUCCESS;
 }
 
-ErrorCode Interface::tag_get_data(Tag tag, const EntityHandle* es, int n, void* data) const {
-  s_->flush();
-  const TagInfo* t = s_->own(tag);
-  if (t == nullptr) return s_->fail(MB_TAG_NOT_FOUND, "tag_get_data: no such tag");
-  if (t->varlen) return s_->fail(MB_VARIABLE_DATA_LENGTH, "tag_get_data: use tag_get_by_ptr for '" + t->name + "'");
+namespace {
+
+// tag_get_data and tag_set_data over a pointer's handles or a Range's, which
+// is walked in place.
+template <class Handles>
+ErrorCode get_data(CoreState& s, const TagInfo* t, const Handles& es, void* data) {
+  if (t == nullptr) return s.fail(MB_TAG_NOT_FOUND, "tag_get_data: no such tag");
+  if (t->varlen) return s.fail(MB_VARIABLE_DATA_LENGTH, "tag_get_data: use tag_get_by_ptr for '" + t->name + "'");
   auto* out = static_cast<unsigned char*>(data);
   const auto b = static_cast<std::size_t>(t->bytes);
-  for (int i = 0; i < n; ++i) {
-    const EntityHandle h = es[i];
-    if (!taggable(*s_, h)) return s_->fail(MB_ENTITY_NOT_FOUND, "tag_get_data: no entity " + std::to_string(h));
+  for (const EntityHandle h : es) {
+    if (!taggable(s, h)) return s.fail(MB_ENTITY_NOT_FOUND, "tag_get_data: no entity " + std::to_string(h));
     const unsigned char* src = nullptr;
     if (h == 0) {
       if (t->has_mesh) src = t->mesh_value.data();
@@ -224,45 +227,125 @@ ErrorCode Interface::tag_get_data(Tag tag, const EntityHandle* es, int n, void* 
       src = t->data[static_cast<std::size_t>(type_of(h))].data() + static_cast<std::size_t>(id_of(h) - 1) * b;
     }
     if (src == nullptr && t->has_def) src = t->def.data();
-    if (src == nullptr) return s_->fail(MB_TAG_NOT_FOUND, "tag '" + t->name + "' has no value on " + std::to_string(h));
-    std::memcpy(out + static_cast<std::size_t>(i) * b, src, b);
+    if (src == nullptr) return s.fail(MB_TAG_NOT_FOUND, "tag '" + t->name + "' has no value on " + std::to_string(h));
+    std::memcpy(out, src, b);
+    out += b;
   }
   return MB_SUCCESS;
 }
 
-ErrorCode Interface::tag_get_data(Tag tag, const Range& es, void* data) const {
-  const std::vector<EntityHandle> v(es.begin(), es.end());
-  return tag_get_data(tag, v.data(), static_cast<int>(v.size()), data);
-}
-
-ErrorCode Interface::tag_set_data(Tag tag, const EntityHandle* es, int n, const void* data) {
-  s_->flush();
-  TagInfo* t = s_->own(tag);
-  if (t == nullptr) return s_->fail(MB_TAG_NOT_FOUND, "tag_set_data: no such tag");
-  if (t->varlen) return s_->fail(MB_VARIABLE_DATA_LENGTH, "tag_set_data: use tag_set_by_ptr for '" + t->name + "'");
-  for (int i = 0; i < n; ++i) {
-    if (!taggable(*s_, es[i])) return s_->fail(MB_ENTITY_NOT_FOUND, "tag_set_data: no entity " + std::to_string(es[i]));
+template <class Handles>
+ErrorCode set_data(CoreState& s, TagInfo* t, const Handles& es, const void* data) {
+  if (t == nullptr) return s.fail(MB_TAG_NOT_FOUND, "tag_set_data: no such tag");
+  if (t->varlen) return s.fail(MB_VARIABLE_DATA_LENGTH, "tag_set_data: use tag_set_by_ptr for '" + t->name + "'");
+  for (const EntityHandle h : es) {
+    if (!taggable(s, h)) return s.fail(MB_ENTITY_NOT_FOUND, "tag_set_data: no entity " + std::to_string(h));
   }
   const auto* in = static_cast<const unsigned char*>(data);
   const auto b = static_cast<std::size_t>(t->bytes);
-  for (int i = 0; i < n; ++i) {
-    const EntityHandle h = es[i];
-    const unsigned char* src = in + static_cast<std::size_t>(i) * b;
+  // Dense storage is allocated a block at a time: once per block met.
+  EntityType block_type = MBMAXTYPE;
+  EntityID block_lo = 1, block_hi = 0;
+  for (const EntityHandle h : es) {
+    const unsigned char* src = in;
+    in += b;
     if (h == 0) {
       t->mesh_value.assign(src, src + b);
       t->has_mesh = true;
       continue;
     }
-    std::memcpy(t->slot(type_of(h), id_of(h)), src, b);
-    t->has[static_cast<std::size_t>(type_of(h))][static_cast<std::size_t>(id_of(h) - 1)] = 1;
-    detail::allocate_dense(*s_, *t, type_of(h), id_of(h));
+    const EntityType type = type_of(h);
+    const EntityID id = id_of(h);
+    std::memcpy(t->slot(type, id), src, b);
+    t->has[static_cast<std::size_t>(type)][static_cast<std::size_t>(id - 1)] = 1;
+    if (type == block_type && id >= block_lo && id <= block_hi) continue;
+    detail::allocate_dense(s, *t, type, id);
+    const detail::IdBlock* blk = s.block_of(type, id);
+    block_type = type;
+    block_lo = blk != nullptr ? blk->start : id;
+    block_hi = blk != nullptr ? blk->start + blk->capacity - 1 : id;
   }
   return MB_SUCCESS;
 }
 
+// A Range whose every run holds live entities of one type below sets: each
+// run's values are one slice of the tag's storage.
+bool slices(const CoreState& s, const Range& r) {
+  for (auto p = r.pair_begin(); p != r.pair_end(); ++p) {
+    const EntityType t = type_of(p->first);
+    if (p->first == 0 || t != type_of(p->second) || t >= MBENTITYSET) return false;
+    const auto& ids = s.lid_of[static_cast<std::size_t>(t)];
+    const auto hi = static_cast<std::size_t>(id_of(p->second));
+    if (hi > ids.size()) return false;
+    for (auto i = static_cast<std::size_t>(id_of(p->first)); i <= hi; ++i) {
+      if (ids[i - 1] == invalid_lo) return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+ErrorCode Interface::tag_get_data(Tag tag, const EntityHandle* es, int n, void* data) const {
+  s_->flush();
+  return get_data(*s_, s_->own(tag), std::span<const EntityHandle>(es, static_cast<std::size_t>(std::max(n, 0))), data);
+}
+
+ErrorCode Interface::tag_get_data(Tag tag, const Range& es, void* data) const {
+  s_->flush();
+  const TagInfo* t = s_->own(tag);
+  if (t == nullptr || t->varlen || !slices(*s_, es)) return get_data(*s_, t, es, data);
+  auto* out = static_cast<unsigned char*>(data);
+  const auto b = static_cast<std::size_t>(t->bytes);
+  for (auto p = es.pair_begin(); p != es.pair_end(); ++p) {
+    const auto k = static_cast<std::size_t>(type_of(p->first));
+    const auto lo = static_cast<std::size_t>(id_of(p->first)), hi = static_cast<std::size_t>(id_of(p->second));
+    const auto& has = t->has[k];
+    if (hi <= has.size() && std::all_of(has.begin() + static_cast<std::ptrdiff_t>(lo - 1), has.begin() + static_cast<std::ptrdiff_t>(hi), [](unsigned char x) { return x != 0; })) {
+      std::memcpy(out, t->data[k].data() + (lo - 1) * b, (hi - lo + 1) * b);
+      out += (hi - lo + 1) * b;
+      continue;
+    }
+    for (auto i = lo; i <= hi; ++i, out += b) {
+      if (i <= has.size() && has[i - 1] != 0) {
+        std::memcpy(out, t->data[k].data() + (i - 1) * b, b);
+      } else if (t->has_def) {
+        std::memcpy(out, t->def.data(), b);
+      } else {
+        return s_->fail(MB_TAG_NOT_FOUND, "tag '" + t->name + "' has no value on " + std::to_string(make_handle(type_of(p->first), static_cast<EntityID>(i))));
+      }
+    }
+  }
+  return MB_SUCCESS;
+}
+
+ErrorCode Interface::tag_set_data(Tag tag, const EntityHandle* es, int n, const void* data) {
+  s_->flush();
+  return set_data(*s_, s_->own(tag), std::span<const EntityHandle>(es, static_cast<std::size_t>(std::max(n, 0))), data);
+}
+
 ErrorCode Interface::tag_set_data(Tag tag, const Range& es, const void* data) {
-  const std::vector<EntityHandle> v(es.begin(), es.end());
-  return tag_set_data(tag, v.data(), static_cast<int>(v.size()), data);
+  s_->flush();
+  TagInfo* t = s_->own(tag);
+  if (t == nullptr || t->varlen || !slices(*s_, es)) return set_data(*s_, t, es, data);
+  const auto* in = static_cast<const unsigned char*>(data);
+  const auto b = static_cast<std::size_t>(t->bytes);
+  for (auto p = es.pair_begin(); p != es.pair_end(); ++p) {
+    const EntityType type = type_of(p->first);
+    const auto k = static_cast<std::size_t>(type);
+    const EntityID lo = id_of(p->first), hi = id_of(p->second);
+    const auto n = static_cast<std::size_t>(hi - lo + 1);
+    t->slot(type, hi);  // storage up to hi
+    std::memcpy(t->data[k].data() + static_cast<std::size_t>(lo - 1) * b, in, n * b);
+    std::fill_n(t->has[k].begin() + static_cast<std::ptrdiff_t>(lo - 1), n, static_cast<unsigned char>(1));
+    in += n * b;
+    for (EntityID x = lo; x <= hi;) {
+      detail::allocate_dense(*s_, *t, type, x);
+      const detail::IdBlock* blk = s_->block_of(type, x);
+      x = blk != nullptr ? std::max(x + 1, blk->start + blk->capacity) : hi + 1;
+    }
+  }
+  return MB_SUCCESS;
 }
 
 ErrorCode Interface::tag_get_by_ptr(Tag tag, const EntityHandle* es, int n, const void** data, int* sizes) const {
