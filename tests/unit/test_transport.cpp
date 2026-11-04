@@ -4,6 +4,7 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <random>
 #include <set>
 #include <stdexcept>
@@ -13,6 +14,7 @@
 
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/transport/comm_plan.hpp"
+#include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/route.hpp"
 
 using soma::Comm;
@@ -80,6 +82,34 @@ std::vector<std::pair<int, std::array<std::int32_t, 3>>> contents(const RecordBa
     std::memcpy(out[i].second.data(), &p(i, 0), sizeof(Record::payload));
   }
   return out;
+}
+
+// The keys rank `from` holds, some repeated, some shared with other ranks.
+std::vector<std::uint64_t> held_keys(int from, int size) {
+  std::mt19937 gen(static_cast<std::mt19937::result_type>(77 * size + from));
+  std::uniform_int_distribution<std::uint64_t> key(0, static_cast<std::uint64_t>(4 * size));
+  std::vector<std::uint64_t> out(static_cast<std::size_t>(2 * size + from));
+  for (std::uint64_t& k : out) k = key(gen);
+  return out;
+}
+
+// For each arrival: the lowest rank holding its key and how many records
+// were sent for it.
+Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem> first_holders(const Kokkos::View<std::uint64_t*, Mem>& keys,
+                                                                 const RecordBatch<Mem>& arrived) {
+  const auto k = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, keys);
+  const auto s = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, arrived.source);
+  std::map<std::uint64_t, std::array<std::int32_t, 2>> seen;
+  for (std::size_t i = 0; i < k.extent(0); ++i) {
+    auto [it, fresh] = seen.try_emplace(k(i), std::array<std::int32_t, 2>{s(i), 0});
+    it->second[0] = std::min(it->second[0], s(i));
+    ++it->second[1];
+  }
+  Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem> rows("rows", k.extent(0), 8);
+  const auto h = Kokkos::create_mirror_view(rows);
+  for (std::size_t i = 0; i < k.extent(0); ++i) std::memcpy(&h(i, 0), seen.at(k(i)).data(), 8);
+  Kokkos::deep_copy(rows, h);
+  return rows;
 }
 
 }  // namespace
@@ -230,4 +260,73 @@ TEST(Transport, PlansRejectInconsistentHalves) {
   plan.forward(c, std::span<const std::int32_t>(two), std::span<std::int32_t>(out));
   EXPECT_EQ(out, two);
   EXPECT_EQ(CommPlan().num_arrived(), 0U);
+}
+
+TEST(Transport, OwnersDependOnlyOnTheKeyAndRankCount) {
+  using soma::transport::mix;
+  using soma::transport::owner;
+  static_assert(mix(1) == 0x5692161d100b05e5ULL && mix(2) == 0xdbd238973a2b148aULL);
+  EXPECT_EQ(mix(12345), 0xf36cf1164265dd51ULL);
+  const std::array<int, 10> expected{0, 6, 1, 4, 6, 2, 4, 2, 6, 4};
+  for (std::uint64_t k = 0; k < 10; ++k) EXPECT_EQ(owner(k, 7), expected[k]);
+  EXPECT_EQ(owner(~std::uint64_t{0}, 1), 0);
+}
+
+// Every rank learns, for each key it holds, the lowest rank holding it and
+// how many records name it.
+TEST(Transport, RendezvousAnswersEachKeyInOrder) {
+  const Comm c = Comm::world();
+  const std::vector<std::uint64_t> mine = held_keys(c.rank(), c.size());
+  std::map<std::uint64_t, std::array<std::int32_t, 2>> truth;
+  for (int r = 0; r < c.size(); ++r) {
+    for (const std::uint64_t k : held_keys(r, c.size())) {
+      auto [it, fresh] = truth.try_emplace(k, std::array<std::int32_t, 2>{r, 0});
+      it->second[0] = std::min(it->second[0], r);
+      ++it->second[1];
+    }
+  }
+  Kokkos::View<std::uint64_t*, Mem> keys("keys", mine.size());
+  Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem> payload("payload", mine.size(), 0);
+  const auto hk = Kokkos::create_mirror_view(keys);
+  for (std::size_t i = 0; i < mine.size(); ++i) hk(i) = mine[i];
+  Kokkos::deep_copy(keys, hk);
+  for (const Strategy strategy : {Strategy::crystal, Strategy::alltoallv, Strategy::nbx}) {
+    const auto answers = soma::transport::rendezvous(Space{}, c, keys, payload, 8, first_holders, strategy);
+    const auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, answers);
+    ASSERT_EQ(h.extent(0), mine.size());
+    for (std::size_t i = 0; i < mine.size(); ++i) {
+      std::array<std::int32_t, 2> got;
+      std::memcpy(got.data(), &h(i, 0), 8);
+      EXPECT_EQ(got, truth.at(mine[i])) << "key " << mine[i];
+    }
+  }
+}
+
+namespace {
+
+Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem> short_rows(const Kokkos::View<std::uint64_t*, Mem>& keys,
+                                                              const RecordBatch<Mem>&) {
+  return Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem>("short", keys.extent(0) + 1, 8);
+}
+
+Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem> throw_on_rank_zero(const Kokkos::View<std::uint64_t*, Mem>& keys,
+                                                                      const RecordBatch<Mem>&) {
+  if (Comm::world().rank() == 0) throw std::domain_error("no answer");
+  return Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem>("rows", keys.extent(0), 8);
+}
+
+}  // namespace
+
+TEST(Transport, RendezvousFailuresReachEveryRank) {
+  const Comm c = Comm::world();
+  Kokkos::View<std::uint64_t*, Mem> keys("keys", 2);
+  Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem> payload("payload", c.rank() == 0 ? 3 : 2, 4);
+  EXPECT_THROW((void)soma::transport::rendezvous(Space{}, c, keys, payload, 8, first_holders), std::invalid_argument);
+  payload = Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem>("payload", 2, 4);
+  EXPECT_THROW((void)soma::transport::rendezvous(Space{}, c, keys, payload, 8, short_rows), std::invalid_argument);
+  if (c.rank() == 0) {
+    EXPECT_THROW((void)soma::transport::rendezvous(Space{}, c, keys, payload, 8, throw_on_rank_zero), std::domain_error);
+  } else {
+    EXPECT_THROW((void)soma::transport::rendezvous(Space{}, c, keys, payload, 8, throw_on_rank_zero), std::runtime_error);
+  }
 }
