@@ -16,69 +16,73 @@ namespace {
 constexpr int crystal_tag = 32000;  // + 2 * stage, + 1 for the rows
 constexpr int nbx_tag = 32700;      // + the exchange's parity
 
-// In transit a record is a row: its destination, source and place among the
-// source's records, then the payload.
+// In transit a record is a row: its destination and source, then the
+// payload. Rows of one source and destination always travel together and in
+// order (each strategy moves them by destination, stably), so ordering the
+// arrivals by source alone restores each sender's order.
 struct Header {
   std::int32_t dest;
   std::int32_t source;
-  std::int64_t seq;
 };
-static_assert(sizeof(Header) == 16);
+static_assert(sizeof(Header) == detail::Arrivals::header);
 
-class Rows {
- public:
-  explicit Rows(std::size_t width) : stride_(sizeof(Header) + width) {}
+struct Rows {
+  std::size_t stride;
+  std::vector<std::byte> bytes;
 
-  [[nodiscard]] std::size_t size() const { return bytes_.size() / stride_; }
-  [[nodiscard]] std::size_t stride() const { return stride_; }
+  [[nodiscard]] std::size_t size() const { return bytes.size() / stride; }
   [[nodiscard]] Header header(std::size_t i) const {
     Header h;
-    std::memcpy(&h, bytes_.data() + i * stride_, sizeof h);
+    std::memcpy(&h, bytes.data() + i * stride, sizeof h);
     return h;
   }
-  [[nodiscard]] std::span<const std::byte> row(std::size_t i) const { return {bytes_.data() + i * stride_, stride_}; }
-  [[nodiscard]] std::vector<std::byte>& bytes() { return bytes_; }
-  [[nodiscard]] const std::vector<std::byte>& bytes() const { return bytes_; }
-
-  void push(const Header& h, std::span<const std::byte> payload) {
-    const std::size_t at = bytes_.size();
-    bytes_.resize(at + stride_);
-    std::memcpy(bytes_.data() + at, &h, sizeof h);
-    if (!payload.empty()) std::memcpy(bytes_.data() + at + sizeof h, payload.data(), payload.size());
-  }
-  void push(std::span<const std::byte> row) { bytes_.insert(bytes_.end(), row.begin(), row.end()); }
-  void append(std::span<const std::byte> rows) { bytes_.insert(bytes_.end(), rows.begin(), rows.end()); }
-
- private:
-  std::size_t stride_;
-  std::vector<std::byte> bytes_;
 };
 
-// The rows split stably by destination: per destination rank, in order.
-std::vector<Rows> by_dest(const Rows& rows, int size) {
-  std::vector<Rows> out(static_cast<std::size_t>(size), Rows(rows.stride() - sizeof(Header)));
-  for (std::size_t i = 0; i < rows.size(); ++i) out[static_cast<std::size_t>(rows.header(i).dest)].push(rows.row(i));
+// The rows reordered stably by key(header) in [0, buckets), with where each
+// bucket starts (and the end) in `starts`.
+template <class Key>
+Rows bucket(const Rows& rows, std::size_t buckets, Key key, std::vector<std::size_t>& starts) {
+  const std::size_t n = rows.size();
+  std::vector<std::size_t> keys(n);
+  starts.assign(buckets + 1, 0);
+  for (std::size_t i = 0; i < n; ++i) {
+    keys[i] = key(rows.header(i));
+    ++starts[keys[i] + 1];
+  }
+  for (std::size_t b = 0; b < buckets; ++b) starts[b + 1] += starts[b];
+  std::vector<std::size_t> at(starts.begin(), starts.end() - 1);
+  Rows out{rows.stride, std::vector<std::byte>(rows.bytes.size())};
+  for (std::size_t i = 0; i < n; ++i) {
+    std::memcpy(out.bytes.data() + at[keys[i]]++ * rows.stride, rows.bytes.data() + i * rows.stride, rows.stride);
+  }
   return out;
 }
 
+std::span<const std::byte> part(const Rows& rows, const std::vector<std::size_t>& starts, std::size_t b) {
+  return {rows.bytes.data() + starts[b] * rows.stride, (starts[b + 1] - starts[b]) * rows.stride};
+}
+
+// Sends `outgoing` to `send_to` and appends what `recv_from` send to `rows`.
 void exchange_crystal(const Comm& comm, Rows& rows, int stage, int send_to, std::span<const int> recv_from,
-                      const Rows& outgoing) {
+                      std::span<const std::byte> outgoing) {
   const int tag = crystal_tag + 2 * stage;
-  const std::uint64_t count = outgoing.bytes().size();
+  const std::uint64_t count = outgoing.size();
   std::array<std::uint64_t, 2> counts{};
   std::vector<Request> r;
-  for (std::size_t k = 0; k < recv_from.size(); ++k) r.push_back(comm.irecv(std::span<std::uint64_t>(&counts[k], 1), recv_from[k], tag));
+  for (std::size_t k = 0; k < recv_from.size(); ++k) {
+    r.push_back(comm.irecv(std::span<std::uint64_t>(&counts[k], 1), recv_from[k], tag));
+  }
   r.push_back(comm.isend(std::span<const std::uint64_t>(&count, 1), send_to, tag));
   Request::wait_all(r);
   r.clear();
-  std::array<std::vector<std::byte>, 2> in;
+  std::size_t at = rows.bytes.size();
+  rows.bytes.resize(at + counts[0] + counts[1]);
   for (std::size_t k = 0; k < recv_from.size(); ++k) {
-    in[k].resize(counts[k]);
-    r.push_back(comm.irecv_bytes(in[k], recv_from[k], tag + 1));
+    r.push_back(comm.irecv_bytes(std::span<std::byte>(rows.bytes.data() + at, counts[k]), recv_from[k], tag + 1));
+    at += counts[k];
   }
-  r.push_back(comm.isend_bytes(outgoing.bytes(), send_to, tag + 1));
+  r.push_back(comm.isend_bytes(outgoing, send_to, tag + 1));
   Request::wait_all(r);
-  for (std::size_t k = 0; k < recv_from.size(); ++k) rows.append(in[k]);
 }
 
 void crystal(const Comm& comm, Rows& rows) {
@@ -87,8 +91,22 @@ void crystal(const Comm& comm, Rows& rows) {
   for (int stage = 0; n > 1; ++stage) {
     const int nl = (n + 1) / 2, bh = bl + nl;
     const bool low = id < bh;
-    Rows keep(rows.stride() - sizeof(Header)), send(rows.stride() - sizeof(Header));
-    for (std::size_t i = 0; i < rows.size(); ++i) ((rows.header(i).dest < bh) == low ? keep : send).push(rows.row(i));
+    // A stable partition in place: rows for this half move forward, the
+    // others are copied out.
+    std::size_t leaving = 0;
+    for (std::size_t i = 0; i < rows.size(); ++i) leaving += (rows.header(i).dest < bh) != low;
+    std::vector<std::byte> outgoing(leaving * rows.stride);
+    std::size_t kept = 0, left = 0;
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+      const std::byte* row = rows.bytes.data() + i * rows.stride;
+      if ((rows.header(i).dest < bh) == low) {
+        if (kept != i) std::memmove(rows.bytes.data() + kept * rows.stride, row, rows.stride);
+        ++kept;
+      } else {
+        std::memcpy(outgoing.data() + left++ * rows.stride, row, rows.stride);
+      }
+    }
+    rows.bytes.resize(kept * rows.stride);
     std::array<int, 2> from{};
     std::size_t nfrom = 0;
     int to = 0;
@@ -101,8 +119,7 @@ void crystal(const Comm& comm, Rows& rows) {
       from[nfrom++] = id - nl;
       if (n % 2 == 1 && id == bh) from[nfrom++] = bh - 1;
     }
-    rows = std::move(keep);
-    exchange_crystal(comm, rows, stage, to, std::span<const int>(from.data(), nfrom), send);
+    exchange_crystal(comm, rows, stage, to, std::span<const int>(from.data(), nfrom), outgoing);
     if (low) {
       n = nl;
     } else {
@@ -114,37 +131,35 @@ void crystal(const Comm& comm, Rows& rows) {
 
 void alltoallv(const Comm& comm, Rows& rows) {
   const auto p = static_cast<std::size_t>(comm.size());
-  const std::vector<Rows> parts = by_dest(rows, comm.size());
+  std::vector<std::size_t> starts;
+  const Rows out = bucket(rows, p, [](const Header& h) { return static_cast<std::size_t>(h.dest); }, starts);
   std::vector<std::uint64_t> send_counts(p), recv_counts(p);
-  Rows out(rows.stride() - sizeof(Header));
-  for (std::size_t r = 0; r < p; ++r) {
-    send_counts[r] = parts[r].size();
-    out.append(parts[r].bytes());
-  }
+  for (std::size_t r = 0; r < p; ++r) send_counts[r] = starts[r + 1] - starts[r];
   comm.alltoall(std::span<const std::uint64_t>(send_counts), std::span<std::uint64_t>(recv_counts));
   std::vector<std::size_t> sc(send_counts.begin(), send_counts.end()), rc(recv_counts.begin(), recv_counts.end());
-  rows.bytes().assign(std::accumulate(rc.begin(), rc.end(), std::size_t{0}) * rows.stride(), std::byte{});
-  comm.alltoallv_bytes(out.bytes(), sc, rows.bytes(), rc, rows.stride());
+  rows.bytes.resize(std::accumulate(rc.begin(), rc.end(), std::size_t{0}) * rows.stride);
+  comm.alltoallv_bytes(out.bytes, sc, rows.bytes, rc, rows.stride);
 }
 
 void nbx(const Comm& comm, Rows& rows) {
   const int tag = nbx_tag + static_cast<int>(comm.next_sequence() % 2);
-  const std::vector<Rows> parts = by_dest(rows, comm.size());
-  rows = parts[static_cast<std::size_t>(comm.rank())];
+  const auto me = static_cast<std::size_t>(comm.rank());
+  std::vector<std::size_t> starts;
+  const Rows out = bucket(rows, static_cast<std::size_t>(comm.size()),
+                          [](const Header& h) { return static_cast<std::size_t>(h.dest); }, starts);
+  const std::span<const std::byte> self = part(out, starts, me);
+  rows.bytes.assign(self.begin(), self.end());
   std::vector<Request> sends;
-  for (int r = 0; r < comm.size(); ++r) {
-    if (r != comm.rank() && parts[static_cast<std::size_t>(r)].size() > 0) {
-      sends.push_back(comm.issend_bytes(parts[static_cast<std::size_t>(r)].bytes(), r, tag));
-    }
+  for (std::size_t r = 0; r < starts.size() - 1; ++r) {
+    if (r != me && starts[r + 1] > starts[r]) sends.push_back(comm.issend_bytes(part(out, starts, r), static_cast<int>(r), tag));
   }
   Request barrier;
   bool barrier_started = false;
-  std::vector<std::byte> in;
   while (true) {
     if (const auto e = comm.iprobe(Comm::any_source, tag)) {
-      in.resize(e->bytes);
-      comm.irecv_bytes(in, e->source, tag).wait();
-      rows.append(in);
+      const std::size_t at = rows.bytes.size();
+      rows.bytes.resize(at + e->bytes);
+      comm.irecv_bytes(std::span<std::byte>(rows.bytes.data() + at, e->bytes), e->source, tag).wait();
     }
     if (!barrier_started) {
       if (std::all_of(sends.begin(), sends.end(), [](Request& s) { return s.test(); })) {
@@ -168,18 +183,22 @@ detail::Arrivals detail::route_host(const Comm& comm, std::span<const int> dest,
                                     std::size_t width, Strategy strategy) {
   const bool bad_dest = std::any_of(dest.begin(), dest.end(), [&](int d) { return d < 0 || d >= comm.size(); });
   const bool bad_rows = payload.size() != dest.size() * width;
-  std::array<std::uint64_t, 3> agree{static_cast<std::uint64_t>(width), static_cast<std::uint64_t>(strategy), 0};
-  comm.bcast(std::span<std::uint64_t>(agree.data(), 2), 0);
-  std::int32_t bad = bad_dest || bad_rows || agree[0] != width || agree[1] != static_cast<std::uint64_t>(strategy);
-  bad = comm.allreduce(bad, Op::max);
-  if (bad) {
+  // One reduction: the maxima of the flag, of the width and the strategy, and
+  // of their negatives, which agree only if every rank passed the same.
+  const auto w = static_cast<std::int64_t>(width), st = static_cast<std::int64_t>(strategy);
+  std::array<std::int64_t, 5> v{bad_dest || bad_rows, w, -w, st, -st};
+  comm.allreduce(std::span<std::int64_t>(v), Op::max);
+  if (v[0] != 0 || v[1] != -v[2] || v[3] != -v[4]) {
     throw std::invalid_argument(
         "transport::route: a rank names a destination outside the communicator, passes a payload that is not a row "
-        "per record, or differs from rank 0 in width or strategy");
+        "per record, or differs from another in width or strategy");
   }
-  Rows rows(width);
+  Rows rows{sizeof(Header) + width, std::vector<std::byte>(dest.size() * (sizeof(Header) + width))};
   for (std::size_t i = 0; i < dest.size(); ++i) {
-    rows.push(Header{dest[i], comm.rank(), static_cast<std::int64_t>(i)}, payload.subspan(i * width, width));
+    const Header h{dest[i], comm.rank()};
+    std::byte* row = rows.bytes.data() + i * rows.stride;
+    std::memcpy(row, &h, sizeof h);
+    if (width > 0) std::memcpy(row + sizeof h, payload.data() + i * width, width);
   }
   switch (resolve(strategy, comm.size())) {
     case Strategy::crystal: crystal(comm, rows); break;
@@ -187,22 +206,12 @@ detail::Arrivals detail::route_host(const Comm& comm, std::span<const int> dest,
     case Strategy::nbx: nbx(comm, rows); break;
     case Strategy::automatic: break;
   }
-  // Every strategy delivers the same rows; the order is fixed here.
-  std::vector<std::size_t> order(rows.size());
-  std::iota(order.begin(), order.end(), std::size_t{0});
-  std::vector<Header> h(rows.size());
-  for (std::size_t i = 0; i < rows.size(); ++i) h[i] = rows.header(i);
-  std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-    return h[a].source != h[b].source ? h[a].source < h[b].source : h[a].seq < h[b].seq;
-  });
-  Arrivals out;
-  out.source.reserve(rows.size());
-  out.payload.resize(rows.size() * width);
-  for (std::size_t k = 0; k < order.size(); ++k) {
-    out.source.push_back(h[order[k]].source);
-    if (width > 0) std::memcpy(out.payload.data() + k * width, rows.row(order[k]).data() + sizeof(Header), width);
-  }
-  return out;
+  const auto by_source = [](const Header& h) { return static_cast<std::size_t>(h.source); };
+  bool sorted = true;
+  for (std::size_t i = 1; i < rows.size() && sorted; ++i) sorted = rows.header(i - 1).source <= rows.header(i).source;
+  std::vector<std::size_t> starts;
+  Rows done = sorted ? std::move(rows) : bucket(rows, static_cast<std::size_t>(comm.size()), by_source, starts);
+  return Arrivals{done.stride, std::move(done.bytes)};
 }
 
 }  // namespace soma::transport

@@ -33,6 +33,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <span>
 #include <string>
 #include <vector>
@@ -62,17 +63,21 @@ struct RecordBatch {
 namespace detail {
 
 // The records that arrived here, grouped by source rank and in each
-// source's order.
+// source's order: rows of `stride` bytes, the destination and source ranks
+// (two std::int32_t) then the payload.
 struct Arrivals {
-  std::vector<int> source;
-  std::vector<std::byte> payload;
+  std::size_t stride = 0;
+  std::vector<std::byte> bytes;
+
+  static constexpr std::size_t header = 2 * sizeof(std::int32_t);
+  [[nodiscard]] std::size_t size() const { return stride == 0 ? 0 : bytes.size() / stride; }
 };
 
 [[nodiscard]] Strategy resolve(Strategy s, int size);
 
 // Collective. Throws std::invalid_argument on every rank if any rank names
 // a destination outside the communicator, passes a payload that is not a
-// row of `width` bytes per record, or differs from rank 0 in width or
+// row of `width` bytes per record, or differs from another rank in width or
 // strategy.
 [[nodiscard]] Arrivals route_host(const Comm& comm, std::span<const int> dest, std::span<const std::byte> payload,
                                   std::size_t width, Strategy strategy);
@@ -92,15 +97,21 @@ RecordBatch<typename ExecSpace::memory_space> route(const ExecSpace&, const Comm
   const detail::Arrivals a =
       detail::route_host(comm, std::span<const int>(dest.data(), dest.extent(0)),
                          std::span<const std::byte>(payload.data(), payload.extent(0) * width), width, strategy);
-  RecordBatch<MemSpace> out(a.source.size(), width, "transport::route");
-  const auto hd = Kokkos::create_mirror_view(out.dest);
-  const auto hs = Kokkos::create_mirror_view(out.source);
-  const auto hp = Kokkos::create_mirror_view(out.payload);
-  for (std::size_t i = 0; i < a.source.size(); ++i) {
+  const std::size_t n = a.size();
+  RecordBatch<MemSpace> out;
+  out.dest = decltype(out.dest)(Kokkos::view_alloc(Kokkos::WithoutInitializing, "transport::route.dest"), n);
+  out.source = decltype(out.source)(Kokkos::view_alloc(Kokkos::WithoutInitializing, "transport::route.source"), n);
+  out.payload =
+      decltype(out.payload)(Kokkos::view_alloc(Kokkos::WithoutInitializing, "transport::route.payload"), n, width);
+  const auto hd = Kokkos::create_mirror_view(Kokkos::WithoutInitializing, out.dest);
+  const auto hs = Kokkos::create_mirror_view(Kokkos::WithoutInitializing, out.source);
+  const auto hp = Kokkos::create_mirror_view(Kokkos::WithoutInitializing, out.payload);
+  for (std::size_t i = 0; i < n; ++i) {
+    const std::byte* row = a.bytes.data() + i * a.stride;
     hd(i) = comm.rank();
-    hs(i) = a.source[i];
+    std::memcpy(&hs(i), row + sizeof(std::int32_t), sizeof(std::int32_t));
+    if (width > 0) std::memcpy(hp.data() + i * width, row + detail::Arrivals::header, width);
   }
-  for (std::size_t i = 0; i < a.payload.size(); ++i) hp.data()[i] = a.payload[i];
   Kokkos::deep_copy(out.dest, hd);
   Kokkos::deep_copy(out.source, hs);
   Kokkos::deep_copy(out.payload, hp);
