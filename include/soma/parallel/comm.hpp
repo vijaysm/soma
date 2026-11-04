@@ -59,6 +59,30 @@ class Comm {
   // Untyped primitive behind bcast.
   void bcast_bytes(std::span<std::byte> buffer, int root) const;
 
+  // Block r of `send` (send.size() / size() elements) to rank r, block s of
+  // `recv` from rank s. Throws std::invalid_argument unless both sizes are
+  // the same multiple of size().
+  template <class T>
+  void alltoall(std::span<const T> send, std::span<T> recv) const {
+    static_assert(std::is_trivially_copyable_v<T>);
+    alltoall_bytes(std::as_bytes(send), std::as_writable_bytes(recv), sizeof(T));
+  }
+  // send_counts[r] elements to rank r and recv_counts[s] from rank s, each
+  // contiguous in rank order. Throws std::invalid_argument unless there is a
+  // count per rank and the counts add up to the buffer sizes.
+  template <class T>
+  void alltoallv(std::span<const T> send, std::span<const std::size_t> send_counts, std::span<T> recv,
+                 std::span<const std::size_t> recv_counts) const {
+    static_assert(std::is_trivially_copyable_v<T>);
+    alltoallv_bytes(std::as_bytes(send), send_counts, std::as_writable_bytes(recv), recv_counts, sizeof(T));
+  }
+
+  // Untyped primitives behind alltoall and alltoallv; counts are in elements
+  // of `width` bytes.
+  void alltoall_bytes(std::span<const std::byte> send, std::span<std::byte> recv, std::size_t width) const;
+  void alltoallv_bytes(std::span<const std::byte> send, std::span<const std::size_t> send_counts,
+                       std::span<std::byte> recv, std::span<const std::size_t> recv_counts, std::size_t width) const;
+
 #if SOMA_ENABLE_MPI
   explicit Comm(MPI_Comm comm);
   [[nodiscard]] MPI_Comm native() const noexcept { return comm_; }

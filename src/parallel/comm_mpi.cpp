@@ -7,6 +7,9 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
+
+#include "comm_checks.hpp"
 
 #if !SOMA_ENABLE_MPI
 #error "comm_mpi.cpp requires SOMA_ENABLE_MPI"
@@ -102,6 +105,32 @@ T Comm::exscan(T value) const {
 void Comm::bcast_bytes(std::span<std::byte> buffer, int root) const {
   check(MPI_Bcast(buffer.data(), checked_count(buffer.size()), MPI_BYTE, root, comm_),
         "MPI_Bcast");
+}
+
+void Comm::alltoall_bytes(std::span<const std::byte> send, std::span<std::byte> recv, std::size_t width) const {
+  detail::check_alltoall(send.size(), recv.size(), width, size_);
+  const int block = checked_count(send.size() / static_cast<std::size_t>(size_));
+  check(MPI_Alltoall(send.data(), block, MPI_BYTE, recv.data(), block, MPI_BYTE, comm_), "MPI_Alltoall");
+}
+
+void Comm::alltoallv_bytes(std::span<const std::byte> send, std::span<const std::size_t> send_counts,
+                           std::span<std::byte> recv, std::span<const std::size_t> recv_counts,
+                           std::size_t width) const {
+  detail::check_counts("send", send_counts, send.size(), width, size_);
+  detail::check_counts("receive", recv_counts, recv.size(), width, size_);
+  const auto p = static_cast<std::size_t>(size_);
+  std::vector<int> sc(p), sd(p), rc(p), rd(p);
+  std::size_t so = 0, ro = 0;
+  for (std::size_t r = 0; r < p; ++r) {
+    sc[r] = checked_count(send_counts[r] * width);
+    rc[r] = checked_count(recv_counts[r] * width);
+    sd[r] = checked_count(so);
+    rd[r] = checked_count(ro);
+    so += send_counts[r] * width;
+    ro += recv_counts[r] * width;
+  }
+  check(MPI_Alltoallv(send.data(), sc.data(), sd.data(), MPI_BYTE, recv.data(), rc.data(), rd.data(), MPI_BYTE, comm_),
+        "MPI_Alltoallv");
 }
 
 #define SOMA_INSTANTIATE_COMM(T)                              \

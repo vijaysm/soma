@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -125,4 +126,57 @@ TEST(Comm, SelfReductionsIgnoreOtherRanks) {
   EXPECT_EQ(s.allreduce(mine, Op::max), mine);
   EXPECT_EQ(s.allreduce(mine, Op::prod), mine);
   EXPECT_EQ(s.exscan<std::int64_t>(mine), 0);
+}
+
+TEST(Comm, AlltoallSendsBlockRToRankR) {
+  const Comm c = Comm::world();
+  const auto p = static_cast<std::size_t>(c.size());
+  std::vector<std::int32_t> send(2 * p), recv(2 * p, -1);
+  for (std::size_t d = 0; d < p; ++d) {
+    send[2 * d] = 100 * c.rank() + static_cast<std::int32_t>(d);
+    send[2 * d + 1] = -send[2 * d];
+  }
+  c.alltoall(std::span<const std::int32_t>(send), std::span<std::int32_t>(recv));
+  for (std::size_t s = 0; s < p; ++s) {
+    EXPECT_EQ(recv[2 * s], 100 * static_cast<std::int32_t>(s) + c.rank());
+    EXPECT_EQ(recv[2 * s + 1], -recv[2 * s]);
+  }
+}
+
+// Rank r sends (r + d) % 3 values to rank d, each naming r, d and its place.
+TEST(Comm, AlltoallvKeepsRankOrderAndCounts) {
+  const Comm c = Comm::world();
+  const int p = c.size(), me = c.rank();
+  const auto count = [](int from, int to) { return static_cast<std::size_t>((from + to) % 3); };
+  std::vector<std::size_t> sc, rc;
+  std::vector<std::int64_t> send, expected;
+  for (int r = 0; r < p; ++r) {
+    sc.push_back(count(me, r));
+    rc.push_back(count(r, me));
+    for (std::size_t k = 0; k < count(me, r); ++k) send.push_back(10000 * me + 100 * r + static_cast<std::int64_t>(k));
+    for (std::size_t k = 0; k < count(r, me); ++k) expected.push_back(10000 * r + 100 * me + static_cast<std::int64_t>(k));
+  }
+  std::vector<std::int64_t> recv(expected.size(), -1);
+  c.alltoallv(std::span<const std::int64_t>(send), std::span<const std::size_t>(sc), std::span<std::int64_t>(recv),
+              std::span<const std::size_t>(rc));
+  EXPECT_EQ(recv, expected);
+}
+
+TEST(Comm, AlltoallRejectsMismatchedBuffers) {
+  const Comm c = Comm::world();
+  const auto p = static_cast<std::size_t>(c.size());
+  std::vector<std::int32_t> send(p + 1), recv(p + 1), short_recv(p);
+  if (p > 1) {
+    EXPECT_THROW(c.alltoall(std::span<const std::int32_t>(send), std::span<std::int32_t>(recv)), std::invalid_argument);
+  }
+  std::vector<std::int32_t> whole(p);
+  EXPECT_THROW(c.alltoall(std::span<const std::int32_t>(send), std::span<std::int32_t>(short_recv)),
+               std::invalid_argument);
+  std::vector<std::size_t> counts(p, 1), few(p > 1 ? p - 1 : 0, 1), many(p, 2);
+  EXPECT_THROW(c.alltoallv(std::span<const std::int32_t>(whole), std::span<const std::size_t>(few),
+                           std::span<std::int32_t>(whole), std::span<const std::size_t>(counts)),
+               std::invalid_argument);
+  EXPECT_THROW(c.alltoallv(std::span<const std::int32_t>(whole), std::span<const std::size_t>(counts),
+                           std::span<std::int32_t>(whole), std::span<const std::size_t>(many)),
+               std::invalid_argument);
 }
