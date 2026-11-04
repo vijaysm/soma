@@ -226,6 +226,43 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   copies them.
 - `write_vtk` rejects variable-length fields.
 
+### Mesh edits
+
+- `soma::MeshEdit` records additions (vertices, elements with or without nodes, polygons) and
+  removals on a host mesh; `apply()` makes them visible together. Existing entities keep their
+  local ids, added ones follow them in tail segments, removed ones stay in place, masked
+  (`Mesh::alive`, `num_live`, `MeshView::alive`). Gids never change; entities added without
+  gids take the next ones. Removing a vertex a live element uses throws, as MOAB refuses it.
+- Elements above the mesh's dimension raise it; the old elements become explicit sides.
+- `apply` grows fields over every entity of a dimension with their default, keeps the epoch,
+  drops removed entities from sets, and builds held graphs again over the live entities, on a
+  compact copy carried back to the edited lids; sides that lost their completeness are derived
+  again, keeping their gids, with fields and sets following by gid.
+- `compress()` rebuilds the mesh from its live entities through `MeshBuilder` in its ordering,
+  so the result equals building the final mesh from scratch, carries fields
+  (`FieldRegistry::remap_into`, stale fields as they were), sets and held graphs across, bumps
+  the epoch and returns the renumbering. `write_h5m` and `write_vtk` write an edited mesh as its
+  compressed copy.
+- Set renumbering can drop members without a new local id.
+
+### MOAB-compatible API
+
+- `soma::compat` (`SOMA_ENABLE_MOAB_COMPAT`, target `soma_compat`) offers MOAB's `Core`
+  interface over a SOMA host mesh: file I/O (`.h5m`, `.vtk`), entity, coordinate, connectivity
+  and adjacency queries, creation and deletion, tags of every kind MOAB has, sets with parents
+  and children, `ScdInterface::construct_box`, `Range`, `CN`, MOAB's error macros and message
+  format, and the part of `ProgOptions` the examples use. Tags and sets live on the compat side;
+  the mesh holds topology and coordinates.
+- Handles keep MOAB's bit layout and MOAB's allocation of ids (blocks per type and node count,
+  freed ids reused), so an application sees the handles MOAB would give it. Compat never
+  compresses its own mesh; creations are staged and applied at the next query.
+- `load_file` rejects a high-order mesh whose elements disagree on the node of a shared edge or
+  face, naming both elements, and numbers what it reads in file order.
+- Drop-in mode (`soma_compat_dropin`) puts headers at MOAB's paths first on the include path, so
+  MOAB applications build unchanged; builds without MPI get a one-rank `mpi.h` stand-in.
+- Twelve of MOAB's examples, built against MOAB and against compat, give the same output and
+  files (`compat.gate.*`).
+
 ### Testing
 
 - GoogleTest harness with a shared `main` that creates the runtime scope first and agrees on
@@ -340,6 +377,10 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `write_h5m` at a deflate level (`--compression L`, default 4), and prints the file sizes;
   every written file is loaded by MOAB and checked. `bench_h5m_read` also times reading cached adjacencies
   against building them.
+- `bench/bench_edit` times queries on a mesh after `MeshEdit::apply` against the compact mesh
+  (1, 10 and 50 % of the hexes of a box removed and created again), `apply` and `compress`
+  against building the mesh, and compat's tag, connectivity and adjacency calls against MOAB's
+  on the same edits, checksummed.
 
 ### Packaging
 
