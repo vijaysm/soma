@@ -34,6 +34,9 @@ class MeshBuilder {
   // The vertices added so far: gids and coordinates (x, y, z interleaved).
   [[nodiscard]] std::span<const GO> vertex_gids() const noexcept { return vertex_gids_; }
   [[nodiscard]] std::span<const Real> vertex_coordinates() const noexcept { return xyz_; }
+  // The gids of the elements of dimension `dim` added so far, in the order
+  // added; empty for a dimension outside [1, 3].
+  [[nodiscard]] std::vector<GO> element_gids(int dim) const;
 
   // Distributed meshes: the ownership of the entities of dimension `dim`
   // named by gid (unnamed ones are interior) and a neighbour-set group, equal

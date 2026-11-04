@@ -122,6 +122,13 @@ void MeshBuilder::add_polygons(std::span<const GO> gids, std::span<const Offset>
                              {}});
 }
 
+std::vector<GO> MeshBuilder::element_gids(int dim) const {
+  std::vector<GO> out;
+  if (dim < 1 || dim > 3) return out;
+  for (const Block& blk : blocks_[static_cast<std::size_t>(dim)]) out.insert(out.end(), blk.gids.begin(), blk.gids.end());
+  return out;
+}
+
 void MeshBuilder::set_ownership(int dim, std::span<const GO> gids, std::span<const Ownership> kinds,
                                 std::span<const std::uint32_t> groups) {
   if (dim < 0 || dim > dim_) {
