@@ -138,6 +138,21 @@ TEST(CompatCore, AdjacenciesMatchMoab) {
         ASSERT_EQ(vec(ra), vec(rb)) << "entity " << h << " to dimension " << d;
       }
     }
+    // Into a Range that holds handles already: INTERSECT keeps the common ones.
+    {
+      const H v = all.front();
+      sc::Range ra(all[1], all[3]);
+      moab::Range rb(all[1], all[3]);
+      sc::Range up;
+      a.get_adjacencies(&v, 1, 1, false, up);
+      if (!up.empty()) {
+        ra.insert(up.front());
+        rb.insert(up.front());
+      }
+      a.get_adjacencies(&v, 1, 1, false, ra, sc::Interface::INTERSECT);
+      b.get_adjacencies(&v, 1, 1, false, rb, moab::Interface::INTERSECT);
+      EXPECT_EQ(vec(ra), vec(rb));
+    }
     // Two vertices of one element, intersected and united.
     sc::Range elems;
     a.get_entities_by_dimension(0, 3, elems);
@@ -266,6 +281,17 @@ TEST(CompatCore, TagsMatchMoab) {
   int v = 0;
   EXPECT_EQ(static_cast<int>(a.tag_get_data(sa, &verts.front(), 1, &v)),
             static_cast<int>(b.tag_get_data(sb, &verts.front(), 1, &v)));
+  // A sparse tag with a default gives it where no value was set.
+  sc::Tag da2 = nullptr;
+  moab::Tag db2 = nullptr;
+  const int five = 5;
+  a.tag_get_handle("mark5", 1, sc::MB_TYPE_INTEGER, da2, sc::MB_TAG_SPARSE | sc::MB_TAG_CREAT, &five);
+  b.tag_get_handle("mark5", 1, moab::MB_TYPE_INTEGER, db2, moab::MB_TAG_SPARSE | moab::MB_TAG_CREAT, &five);
+  int wa = 0, wb = 0;
+  EXPECT_EQ(a.tag_get_data(da2, &verts.front(), 1, &wa), sc::MB_SUCCESS);
+  b.tag_get_data(db2, &verts.front(), 1, &wb);
+  EXPECT_EQ(wa, wb);
+  EXPECT_EQ(wa, 5);
   const int seven = 7;
   a.tag_set_data(sa, &verts.back(), 1, &seven);
   b.tag_set_data(sb, &verts.back(), 1, &seven);
