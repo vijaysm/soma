@@ -402,6 +402,27 @@ TEST(EntitySets, RenumberedRowsTakeTheirFormAgain) {
   EXPECT_THROW((void)mesh.sets().renumbered(2, halve, 10), std::logic_error);
 }
 
+// With drop, members without a new lid leave their rows and the sequences of
+// ordered sets, whose other entries keep their order and repeats.
+TEST(EntitySets, RenumberedWithDropLeavesOutUnmappedMembers) {
+  soma::HostMesh m = soma::testing::box_mesh({4, 1, 1, soma::Topology::quad});
+  soma::SetBuilder b;
+  b.add(SetSpec{1, soma::set_ordered, {{2, 0}, {2, 2}, {0, 1}, {2, 0}, {2, 3}}, {}, {}});
+  b.add(SetSpec{2, soma::set_unique, {{2, 1}, {2, 2}, {2, 3}}, {}, {}});
+  std::move(b).install(m);
+  // Face 2 goes; 3 becomes 2 and 0, 1 stay.
+  const std::vector<LO> map{0, 1, soma::invalid_lo, 2};
+  EXPECT_THROW((void)m.sets().renumbered(2, map, 3), std::logic_error);
+  const auto out = m.sets().renumbered(2, map, 3, true);
+  std::vector<std::pair<int, LO>> seq;
+  for (const auto& e : out.sequence(0)) seq.emplace_back(e.slot, e.lid);
+  EXPECT_EQ(seq, (std::vector<std::pair<int, LO>>{{2, 0}, {0, 1}, {2, 0}, {2, 2}}));
+  EXPECT_EQ(soma_test::vec(out.members_of(0, 2)), (std::vector<LO>{0, 2}));
+  EXPECT_EQ(soma_test::vec(out.members_of(1, 2)), (std::vector<LO>{1, 2}));
+  EXPECT_EQ(soma_test::vec(out.members_of(0, 0)), (std::vector<LO>{1}));
+  EXPECT_EQ(out.entities(2), 3);
+}
+
 // Runs build rows without listing their members, merge with the contents
 // (face 7 lies inside the run 5..14), and name sets by consecutive gids.
 TEST(EntitySets, RunsBuildRowsWithoutListingThem) {

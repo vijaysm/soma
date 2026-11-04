@@ -323,14 +323,14 @@ class EntitySets {
 
   // The same sets with the members of one dimension renumbered: lid l becomes
   // new_lid[l], out of count entities. Rows are sorted and take their form
-  // again; sequences keep their order. Throws std::logic_error when a member
-  // has no new lid (invalid_lo).
-  EntitySets renumbered(int dim, const std::vector<LO>& new_lid, LO count) const {
+  // again; sequences keep their order. A member with no new lid (invalid_lo)
+  // throws std::logic_error, or with drop leaves the set, sequences included.
+  EntitySets renumbered(int dim, const std::vector<LO>& new_lid, LO count, bool drop = false) const {
     (void)held(dim);
     const auto map = [&](LO l) {
       const auto at = static_cast<std::size_t>(l);
       const LO m = at < new_lid.size() ? new_lid[at] : invalid_lo;
-      if (m == invalid_lo) {
+      if (m == invalid_lo && !drop) {
         throw std::logic_error("EntitySets: member " + std::to_string(l) + " of dimension " +
                                std::to_string(dim) + " has no counterpart after renumbering");
       }
@@ -340,13 +340,22 @@ class EntitySets {
     std::vector<LO> row;
     for (LO i = 0; i < count_; ++i) {
       row.clear();
-      for (const LO l : members_of(i, dim)) row.push_back(map(l));
+      for (const LO l : members_of(i, dim)) {
+        if (const LO m = map(l); m != invalid_lo) row.push_back(m);
+      }
       std::sort(row.begin(), row.end());
       rows[static_cast<std::size_t>(i)] = detail::runs_of(row);
     }
-    std::vector<SetEntry> seq = seq_;
-    for (SetEntry& e : seq) {
-      if (e.slot == dim) e.lid = map(e.lid);
+    std::vector<SetEntry> seq;
+    std::vector<Offset> seq_offsets(seq_offsets_.size(), 0);
+    seq.reserve(seq_.size());
+    for (std::size_t i = 0; i + 1 < seq_offsets_.size(); ++i) {
+      for (auto k = static_cast<std::size_t>(seq_offsets_[i]); k < static_cast<std::size_t>(seq_offsets_[i + 1]); ++k) {
+        SetEntry e = seq_[k];
+        if (e.slot == dim) e.lid = map(e.lid);
+        if (e.lid != invalid_lo) seq.push_back(e);
+      }
+      seq_offsets[i + 1] = static_cast<Offset>(seq.size());
     }
     EntitySets out;
     out.count_ = count_;
@@ -355,7 +364,7 @@ class EntitySets {
     out.slots_ = slots_;
     out.slots_[static_cast<std::size_t>(dim)] = Slot::packed(rows, count);
     out.flags_ = flags_;
-    out.seq_offsets_ = seq_offsets_;
+    out.seq_offsets_ = std::move(seq_offsets);
     out.seq_ = std::move(seq);
     out.child_offsets_ = child_offsets_;
     out.children_ = children_;
