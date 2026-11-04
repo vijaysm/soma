@@ -229,6 +229,37 @@ TEST_F(H5mRead, PolygonGroupsOfSeveralAritiesJoinOneDimension) {
   EXPECT_EQ(vertex_gids(m, 2, lid_of(m, 2, 101405)).size(), 4u);
 }
 
+// A quad8 and a tri6 sharing the edge 2-3 and its mid-node 7; vertex 9 is
+// on no element. The nodes are the file's vertices after the corners.
+//   1(0,0) 2(1,0) 3(1,1) 4(0,1) 5(2,0.5) 6(0.5,0) 7(1,0.5) 8(0.5,1) 9(3,3) 10(0,0.5)
+//   11(1.5,0.25) 12(1.5,0.75)
+TEST_F(H5mRead, HighOrderGroupsKeepTheirNodes) {
+  {
+    Writer w(file("quad8.h5m"));
+    w.nodes(1, 3, {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 2, 0.5, 0, 0.5, 0, 0, 1, 0.5, 0, 0.5, 1, 0,
+                   3, 3, 0, 0, 0.5, 0, 1.5, 0.25, 0, 1.5, 0.75, 0});
+    w.elements("Quad8", "Quad", 13, 8, {1, 2, 3, 4, 6, 7, 8, 10});
+    w.elements("Tri6", "Tri", 14, 6, {2, 5, 3, 11, 12, 7});
+  }
+  for (const auto ordering : {soma::Ordering::file, soma::Ordering::type_major_sfc}) {
+    const HostMesh m = soma::read_h5m(file("quad8.h5m"), {.ordering = ordering});
+    EXPECT_EQ(m.count(0), 12);
+    EXPECT_EQ(m.corners(), 6);
+    ASSERT_EQ(m.count(2), 2);
+    ASSERT_TRUE(m.has_nodes(2));
+    const auto v = m.view();
+    for (LO e = 0; e < 2; ++e) {
+      std::vector<GO> nodes;
+      for (LO k = 0; k < v.num_nodes(2, e); ++k) nodes.push_back(v.gid(0, v.node(2, e, k)));
+      if (v.gid(2, e) == 13) {
+        EXPECT_EQ(nodes, (std::vector<GO>{1, 2, 3, 4, 6, 7, 8, 10}));
+      } else {
+        EXPECT_EQ(nodes, (std::vector<GO>{2, 5, 3, 11, 12, 7}));
+      }
+    }
+  }
+}
+
 TEST_F(H5mRead, MissingCoordinateColumnsAreZero) {
   {
     Writer w(file());
@@ -1053,11 +1084,11 @@ TEST_F(H5mRead, RejectsElementsItDoesNotRead) {
   }
   expect_rejected(file("knife.h5m"), {"Knife elements, which SOMA does not read"});
   {
-    Writer w(file("quad8.h5m"));
-    w.nodes(1, 3, std::vector<double>(24, 0.0));
-    w.elements("Quad8", "Quad", 9, 8, {1, 2, 3, 4, 5, 6, 7, 8});
+    Writer w(file("quad7.h5m"));
+    w.nodes(1, 3, std::vector<double>(21, 0.0));
+    w.elements("Quad7", "Quad", 8, 7, {1, 2, 3, 4, 5, 6, 7});
   }
-  expect_rejected(file("quad8.h5m"), {"/tstt/elements/Quad8/connectivity", "8 vertices per Quad", "high-order"});
+  expect_rejected(file("quad7.h5m"), {"/tstt/elements/Quad7/connectivity", "7 nodes per Quad", "no Quad has"});
   {
     Writer w(file("bad.h5m"));
     w.nodes(1, 3, {0, 0, 0, 1, 0, 0, 1, 1, 0});

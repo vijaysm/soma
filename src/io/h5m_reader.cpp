@@ -25,6 +25,7 @@
 #include "soma/fields/space.hpp"
 #include "soma/io/h5m.hpp"
 #include "soma/topology/build.hpp"
+#include "soma/topology/nodes.hpp"
 
 namespace soma {
 
@@ -140,6 +141,7 @@ struct Group {
   GO count = 0;
   std::vector<Offset> offsets;  // polygons: count + 1
   std::vector<GO> conn;         // vertex file ids
+  int nodes = 0;                // an element's nodes, corners first; 0 for polygons
 };
 
 Offset to_offset(std::uint64_t n, const std::string& where) {
@@ -215,10 +217,11 @@ Group read_group(hid_t elements, const std::string& name, const Nodes& nodes) {
       for (std::size_t i = 0; i <= static_cast<std::size_t>(g.count); ++i) {
         g.offsets[i] = to_offset(i * arity, cw);
       }
-    } else if (arity != static_cast<std::uint64_t>(num_vertices(g.topology))) {
-      fail(cw + " has " + str(arity) + " vertices per " + type + "; SOMA reads " +
-           std::to_string(num_vertices(g.topology)) + "-vertex " + type +
-           " elements (high-order connectivity is not supported)");
+    } else if (arity > 27 || mid_node_bits(g.topology, static_cast<int>(arity)) < 0) {
+      fail(cw + " has " + str(arity) + " nodes per " + type + "; no " + type +
+           " has that many (its corners, with or without mid-edge, mid-face and mid-region nodes)");
+    } else {
+      g.nodes = static_cast<int>(arity);
     }
     nnz = ext[0] * ext[1];
   }
@@ -1187,7 +1190,7 @@ HostMesh read(const fs::path& path, const H5mReadOptions& options, H5mReport& re
     if (g.topology == Topology::polygon) {
       b.add_polygons(gids, g.offsets, g.conn);
     } else {
-      b.add_elements(g.topology, gids, g.conn);
+      b.add_elements(g.topology, gids, g.conn, g.nodes);
     }
     std::vector<GO>().swap(g.conn);
   }
