@@ -263,6 +263,24 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - Twelve of MOAB's examples, built against MOAB and against compat, give the same output and
   files (`compat.gate.*`).
 
+### Patch-based AMR
+
+- `soma::amr` (headers in `include/soma/amr/`): boxes in ijk index space for cell, node and
+  face data (`Box`, `IndexType`, `BoxList` algebra), levels of disjoint boxes ordered along a
+  Morton or Hilbert curve (`BoxArray`, `chop`, `Distribution`), and `LevelField`: all boxes of
+  a level in one allocation, with `for_each_point` running over a level in one launch.
+- Same-level halos (`HaloPlan`, faces, edges, corners, periodic images, physical boundaries
+  through a callback), copies between box sets (`CopyPlan`), coarse-fine halos by piecewise
+  constant or conservative MC-limited linear prolongation (`CoarseFinePlan`), restriction
+  (`average_down`) and refluxing (`FluxRegister`). Each point is written by one source, so
+  results do not depend on the thread count.
+- `Hierarchy`: levels checked for alignment and proper nesting, plans cached, halos filled and
+  data restricted across all levels; `regrid` tags cells, clusters them with Berger–Rigoutsos
+  (`cluster`), keeps the levels nested, and moves every field to the new boxes (copied where the
+  old ones were, prolonged elsewhere, then restricted), all fields or none.
+- `write_vtk_amr` writes a hierarchy as VTK overlapping AMR (`.vthb` and one `.vti` per box),
+  which ParaView reads with the cells under finer levels hidden.
+
 ### Testing
 
 - GoogleTest harness with a shared `main` that creates the runtime scope first and agrees on
