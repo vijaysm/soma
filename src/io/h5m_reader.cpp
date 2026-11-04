@@ -301,60 +301,13 @@ void import_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const TagKi
     }
   }
 
-  bool any = false;
+  SlotTotals totals;
   for (int d = 0; d < num_field_slots; ++d) {
-    auto& l = lids[static_cast<std::size_t>(d)];
-    if (l.empty()) continue;
-    any = true;
-    // Values by lid. Input in lid order (Ordering::file) keeps its order;
-    // otherwise each value is placed at its lid, which also finds repeats.
-    std::vector<std::size_t> order;  // value index of each member; empty: in order
-    std::vector<LO> placed;
-    std::span<const LO> sorted(l);
-    if (std::adjacent_find(l.begin(), l.end(), std::greater_equal<>()) != l.end()) {
-      constexpr auto none = std::numeric_limits<std::size_t>::max();
-      std::vector<std::size_t> at_lid(static_cast<std::size_t>(detail::slot_count(mesh, d)), none);
-      LO repeat = std::numeric_limits<LO>::max();
-      for (std::size_t i = 0; i < l.size(); ++i) {
-        std::size_t& slot = at_lid[static_cast<std::size_t>(l[i])];
-        if (slot != none) repeat = std::min(repeat, l[i]);
-        slot = i;
-      }
-      if (repeat != std::numeric_limits<LO>::max()) {
-        fail(where + " has two values on file id " + str(detail::slot_gid(mesh, d)(static_cast<std::size_t>(repeat))));
-      }
-      placed.reserve(l.size());
-      order.reserve(l.size());
-      for (std::size_t lid = 0; lid < at_lid.size(); ++lid) {
-        if (at_lid[lid] == none) continue;
-        placed.push_back(static_cast<LO>(lid));
-        order.push_back(at_lid[lid]);
-      }
-      sorted = placed;
-    }
-    // A list of every entity of d is a full domain.
-    const auto domain = sorted.size() == static_cast<std::size_t>(detail::slot_count(mesh, d))
-                            ? full.get(d)
-                            : Domain<Kokkos::HostSpace>::from_list(mesh, d, sorted);
-    const auto f = mesh.fields().add<T>(name, Space<Kokkos::HostSpace>(domain, Layout::per_entity()),
-                                        k.ncomp, options);
-    // A per_entity field has one row per member, in member order.
-    const auto view = f.view();
-    const auto& src = values[static_cast<std::size_t>(d)];
-    if (order.empty() && nc == 1) {  // one column of a LayoutLeft view is contiguous
-      std::copy(src.begin(), src.end(), view.data());
-      continue;
-    }
-    for (std::size_t i = 0; i < sorted.size(); ++i) {
-      const std::size_t from = (order.empty() ? i : order[i]) * nc;
-      for (std::size_t c = 0; c < nc; ++c) view(i, c) = src[from + c];
-    }
+    const auto k_ = static_cast<std::size_t>(d);
+    totals.entries[k_] = lids[k_].size();
+    totals.every[k_] = lids[k_].size() == static_cast<std::size_t>(detail::slot_count(mesh, d));
   }
-  if (any) {
-    mesh.fields().set_tag_format(mesh.fields().family<T>(name, k.ncomp, Layout::per_entity(), handle), format);
-  } else {
-    mesh.values().set(name, mesh_value(options, k.ncomp, format));
-  }
+  install_tag<T>(mesh, name, k, lids, values, options, handle, format, full, totals);
 }
 
 // A variable-length tag: id_list names the entities and sets, var_indices
@@ -367,11 +320,6 @@ void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const T
   if (!dense.empty()) {
     fail("/tstt/" + dense.front().path + " holds dense values of a variable-length tag, which MOAB does not write");
   }
-  struct Run {
-    LO lid;
-    std::size_t begin;
-    std::size_t end;
-  };
   std::array<std::vector<Run>, num_field_slots> runs;
   std::vector<T> values;
   const Id tag = h5::open_group(tstt, "tags/" + name);
@@ -426,37 +374,13 @@ void import_var_tag(HostMesh& mesh, hid_t tstt, const std::string& name, const T
   options.global_value = read_var_attribute<T>(tag.get(), "global", k, where);
   options.handle = handle;
   if (handle) to_handle_options(options, at, where);
-  bool any = false;
+  SlotTotals totals;
   for (int d = 0; d < num_field_slots; ++d) {
-    auto& rs = runs[static_cast<std::size_t>(d)];
-    if (rs.empty()) continue;
-    any = true;
-    std::sort(rs.begin(), rs.end(), [](const Run& a, const Run& b) { return a.lid < b.lid; });
-    const auto twice =
-        std::adjacent_find(rs.begin(), rs.end(), [](const Run& a, const Run& b) { return a.lid == b.lid; });
-    if (twice != rs.end()) {
-      fail(where + " has two values on file id " +
-           str(detail::slot_gid(mesh, d)(static_cast<std::size_t>(twice->lid))));
-    }
-    std::vector<LO> lids(rs.size());
-    std::vector<Offset> offsets(rs.size() + 1, 0);
-    std::vector<T> held;
-    for (std::size_t i = 0; i < rs.size(); ++i) {
-      lids[i] = rs[i].lid;
-      held.insert(held.end(), values.begin() + static_cast<std::ptrdiff_t>(rs[i].begin),
-                  values.begin() + static_cast<std::ptrdiff_t>(rs[i].end));
-      offsets[i + 1] = to_offset(held.size(), where + "/values");
-    }
-    const auto domain = lids.size() == static_cast<std::size_t>(detail::slot_count(mesh, d))
-                            ? full.get(d)
-                            : Domain<Kokkos::HostSpace>::from_list(mesh, d, lids);
-    mesh.fields().add_var<T>(name, Space<Kokkos::HostSpace>(domain, Layout::per_entity()), offsets, held, options);
+    const auto k_ = static_cast<std::size_t>(d);
+    totals.entries[k_] = runs[k_].size();
+    totals.every[k_] = runs[k_].size() == static_cast<std::size_t>(detail::slot_count(mesh, d));
   }
-  if (any) {
-    mesh.fields().set_tag_format(mesh.fields().family<T>(name, 0, Layout::per_entity(), handle), format);
-  } else {
-    mesh.values().set(name, mesh_value(options, 0, format));
-  }
+  install_var_tag<T>(mesh, name, runs, values, options, handle, format, full, totals);
 }
 
 void import_tags(HostMesh& mesh, hid_t tstt, const Nodes& nodes, const std::vector<Group>& groups,

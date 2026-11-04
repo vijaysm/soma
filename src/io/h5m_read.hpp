@@ -574,6 +574,129 @@ std::optional<std::vector<T>> read_var_attribute(hid_t tag, const char* name, co
   return v;
 }
 
+// Entries of a tag per slot in the whole file, and whether every entity of
+// the slot has one: a slot with entries gets a field (empty where none is
+// held), over all its entities when every one has a value.
+struct SlotTotals {
+  std::array<std::uint64_t, num_field_slots> entries{};
+  std::array<bool, num_field_slots> every{};
+};
+
+// A tag's values on the entities held here, lids[d] and values[d] (ncomp
+// per lid) per slot, installed as fields; a tag with no entries at all is a
+// mesh value.
+template <class T>
+void install_tag(HostMesh& mesh, const std::string& name, const TagKind& k,
+                 std::array<std::vector<LO>, num_field_slots>& lids, std::array<std::vector<T>, num_field_slots>& values,
+                 const FieldOptions<T>& options, bool handle, const TagFormat& format, FullDomains& full,
+                 const SlotTotals& totals) {
+  const std::string where = "/tstt/tags/" + name;
+  const auto nc = static_cast<std::size_t>(k.ncomp);
+  bool any = false;
+  for (int d = 0; d < num_field_slots; ++d) {
+    auto& l = lids[static_cast<std::size_t>(d)];
+    if (totals.entries[static_cast<std::size_t>(d)] == 0) continue;
+    any = true;
+    // Values by lid. Input in lid order (Ordering::file) keeps its order;
+    // otherwise each value is placed at its lid, which also finds repeats.
+    std::vector<std::size_t> order;  // value index of each member; empty: in order
+    std::vector<LO> placed;
+    std::span<const LO> sorted(l);
+    if (std::adjacent_find(l.begin(), l.end(), std::greater_equal<>()) != l.end()) {
+      constexpr auto none = std::numeric_limits<std::size_t>::max();
+      std::vector<std::size_t> at_lid(static_cast<std::size_t>(detail::slot_count(mesh, d)), none);
+      LO repeat = std::numeric_limits<LO>::max();
+      for (std::size_t i = 0; i < l.size(); ++i) {
+        std::size_t& slot = at_lid[static_cast<std::size_t>(l[i])];
+        if (slot != none) repeat = std::min(repeat, l[i]);
+        slot = i;
+      }
+      if (repeat != std::numeric_limits<LO>::max()) {
+        fail(where + " has two values on file id " + str(detail::slot_gid(mesh, d)(static_cast<std::size_t>(repeat))));
+      }
+      placed.reserve(l.size());
+      order.reserve(l.size());
+      for (std::size_t lid = 0; lid < at_lid.size(); ++lid) {
+        if (at_lid[lid] == none) continue;
+        placed.push_back(static_cast<LO>(lid));
+        order.push_back(at_lid[lid]);
+      }
+      sorted = placed;
+    }
+    // A tag on every entity of d is a full domain.
+    const bool every = totals.every[static_cast<std::size_t>(d)];
+    if (every && sorted.size() != static_cast<std::size_t>(detail::slot_count(mesh, d))) {
+      fail(where + " has values on every entity, but not on every one held here");
+    }
+    const auto domain = every ? full.get(d) : Domain<Kokkos::HostSpace>::from_list(mesh, d, sorted);
+    const auto f = mesh.fields().add<T>(name, Space<Kokkos::HostSpace>(domain, Layout::per_entity()),
+                                        k.ncomp, options);
+    // A per_entity field has one row per member, in member order.
+    const auto view = f.view();
+    const auto& src = values[static_cast<std::size_t>(d)];
+    if (order.empty() && nc == 1) {  // one column of a LayoutLeft view is contiguous
+      std::copy(src.begin(), src.end(), view.data());
+      continue;
+    }
+    for (std::size_t i = 0; i < sorted.size(); ++i) {
+      const std::size_t from = (order.empty() ? i : order[i]) * nc;
+      for (std::size_t c = 0; c < nc; ++c) view(i, c) = src[from + c];
+    }
+  }
+  if (any) {
+    mesh.fields().set_tag_format(mesh.fields().family<T>(name, k.ncomp, Layout::per_entity(), handle), format);
+  } else {
+    mesh.values().set(name, mesh_value(options, k.ncomp, format));
+  }
+}
+
+// A run of a variable-length tag's values: those of one entity.
+struct Run {
+  LO lid;
+  std::size_t begin;
+  std::size_t end;
+};
+
+template <class T>
+void install_var_tag(HostMesh& mesh, const std::string& name, std::array<std::vector<Run>, num_field_slots>& runs,
+                     const std::vector<T>& values, const FieldOptions<T>& options, bool handle,
+                     const TagFormat& format, FullDomains& full, const SlotTotals& totals) {
+  const std::string where = "/tstt/tags/" + name;
+  bool any = false;
+  for (int d = 0; d < num_field_slots; ++d) {
+    auto& rs = runs[static_cast<std::size_t>(d)];
+    if (totals.entries[static_cast<std::size_t>(d)] == 0) continue;
+    any = true;
+    std::sort(rs.begin(), rs.end(), [](const Run& a, const Run& b) { return a.lid < b.lid; });
+    const auto twice =
+        std::adjacent_find(rs.begin(), rs.end(), [](const Run& a, const Run& b) { return a.lid == b.lid; });
+    if (twice != rs.end()) {
+      fail(where + " has two values on file id " +
+           str(detail::slot_gid(mesh, d)(static_cast<std::size_t>(twice->lid))));
+    }
+    std::vector<LO> lids(rs.size());
+    std::vector<Offset> offsets(rs.size() + 1, 0);
+    std::vector<T> held;
+    for (std::size_t i = 0; i < rs.size(); ++i) {
+      lids[i] = rs[i].lid;
+      held.insert(held.end(), values.begin() + static_cast<std::ptrdiff_t>(rs[i].begin),
+                  values.begin() + static_cast<std::ptrdiff_t>(rs[i].end));
+      offsets[i + 1] = to_offset(held.size(), where + "/values");
+    }
+    const bool every = totals.every[static_cast<std::size_t>(d)];
+    if (every && lids.size() != static_cast<std::size_t>(detail::slot_count(mesh, d))) {
+      fail(where + " has values on every entity, but not on every one held here");
+    }
+    const auto domain = every ? full.get(d) : Domain<Kokkos::HostSpace>::from_list(mesh, d, lids);
+    mesh.fields().add_var<T>(name, Space<Kokkos::HostSpace>(domain, Layout::per_entity()), offsets, held, options);
+  }
+  if (any) {
+    mesh.fields().set_tag_format(mesh.fields().family<T>(name, 0, Layout::per_entity(), handle), format);
+  } else {
+    mesh.values().set(name, mesh_value(options, 0, format));
+  }
+}
+
 // A cached graph's group name: pair_<from>_<to> or bridge_<dim>_<via>, one
 // digit each.
 struct GraphName {
