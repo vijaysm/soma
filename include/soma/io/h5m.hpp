@@ -76,6 +76,9 @@ struct H5mReadOptions {
   Ordering ordering = Ordering::file;
   bool tags = true;
   bool adjacencies = true;  // install the graphs the file caches (write_h5m)
+  // A parallel read places elements by the file's PARALLEL_PARTITION sets
+  // when it has at least as many as ranks; false: always by the curve.
+  bool file_parts = true;
 };
 
 // What a read left out, one entry per tag (or tag part) not read.
@@ -95,15 +98,21 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 
 // Collective over comm: the local part, on each rank, of the mesh the file
 // holds (design §21.3). Every rank reads the metadata and a slice of each
-// dataset; the elements of the mesh's dimension are placed by the curve of
-// their corners' centroids (partition_by_curve), explicit entities of lower
-// dimensions on every rank holding all their corners (else on the rank that
-// read them), vertices on every rank holding an entity that uses them (else
-// on the rank that read them), and each rank builds its part with
-// build_local_part, so every dimension has its ownership and sharing. Gids
-// are file ids, as in the serial read, and each rank's entities equal the
-// serial read's by gid. Throws as the serial read, on every rank if any
-// rank's slice is invalid (std::runtime_error on the others).
+// dataset. The elements of the mesh's dimension go by the file's parts when
+// it has at least as many PARALLEL_PARTITION sets as ranks (and
+// options.file_parts): part i of n, by tag value then set id, to rank
+// floor(iP/n), an element in several parts with the first. The others go by
+// the curve of their corners' centroids (partition_by_curve). Explicit
+// entities of lower dimensions go to every rank holding all their corners,
+// vertices to every rank holding an entity that uses them, and either, where
+// no rank does, stays with the rank that read it. Each rank builds its part
+// with build_local_part, so every dimension has its ownership and sharing.
+// Sets are on every rank with the members held there; tag values reach every
+// rank holding their entity (values on sets, every rank); the graphs the file
+// caches are built on each part, over its entities, rather than read. Gids
+// are file ids, as in the serial read, and each rank's entities, members and
+// values equal the serial read's by gid. Throws as the serial read, on every
+// rank if any rank's slice is invalid (std::runtime_error on the others).
 HostMesh read_h5m(const Comm& comm, const std::filesystem::path& path, const H5mReadOptions& options = {});
 HostMesh read_h5m(const Comm& comm, const std::filesystem::path& path, const H5mReadOptions& options,
                   H5mReport& report);

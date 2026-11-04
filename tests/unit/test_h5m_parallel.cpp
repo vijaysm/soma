@@ -448,8 +448,10 @@ TEST(H5mParallel, ElementsFollowTheCurvePartition) {
   const Comm c = Comm::world();
   for (const char* name : {"hex_2048.h5m", "recMeshOcn128.h5m"}) {
     SCOPED_TRACE(name);
+    soma::H5mReadOptions curve = entities_only();
+    curve.file_parts = false;
     const HostMesh serial = soma::read_h5m(data(name), entities_only());
-    const HostMesh part = soma::read_h5m(c, data(name), entities_only());
+    const HostMesh part = soma::read_h5m(c, data(name), curve);
     const int D = serial.dim();
     const auto sv = serial.view();
     std::vector<Real> centroids;
@@ -524,6 +526,38 @@ TEST(H5mParallel, CachedGraphsAreBuiltOnEachPart) {
       }
       EXPECT_EQ(got, want) << "slot " << s << " gid " << gid_of(part, from, e);
     }
+  }
+}
+
+// With at least as many PARALLEL_PARTITION sets as ranks, part i of n (by
+// value, then set id) goes to rank floor(iP/n).
+TEST(H5mParallel, ElementsFollowTheFilesParts) {
+  const Comm c = Comm::world();
+  for (const char* name : {"64bricks_1khex.h5m", "recMeshOcn128.h5m"}) {
+    SCOPED_TRACE(name);
+    soma::H5mReadOptions o = entities_only();
+    o.tags = true;
+    const HostMesh serial = soma::read_h5m(data(name), o);
+    const HostMesh part = soma::read_h5m(c, data(name), entities_only());
+    const int D = serial.dim();
+    const auto tag = serial.fields().get<std::int32_t>("PARALLEL_PARTITION", soma::set_dim);
+    std::vector<std::pair<std::int32_t, GO>> parts;
+    for (LO s = 0; s < serial.sets().count(); ++s) {
+      const LO row = tag.domain().row(soma::set_dim, s);
+      if (row != soma::invalid_lo) parts.emplace_back(tag.view()(row, 0), serial.sets().gid()(s));
+    }
+    std::sort(parts.begin(), parts.end());
+    ASSERT_GE(parts.size(), static_cast<std::size_t>(c.size()));
+    std::map<GO, int> rank_of;  // element gid -> rank of its first part
+    for (std::size_t i = parts.size(); i-- > 0;) {
+      const LO s = *serial.sets().index_of(parts[i].second);
+      const int r = static_cast<int>(static_cast<std::int64_t>(i) * c.size() / static_cast<std::int64_t>(parts.size()));
+      for (const LO e : serial.sets().members_of(s, D)) rank_of[serial.gid(D)(e)] = r;
+    }
+    LO here = 0;
+    for (const auto& [g, r] : rank_of) here += r == c.rank() ? 1 : 0;
+    EXPECT_EQ(part.count(D), here);
+    for (LO e = 0; e < part.count(D); ++e) EXPECT_EQ(rank_of.at(part.gid(D)(e)), c.rank()) << "gid " << part.gid(D)(e);
   }
 }
 

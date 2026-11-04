@@ -873,6 +873,129 @@ void import_tags(const Comm& comm, HostMesh& mesh, hid_t tstt, const FileLayout&
   }
 }
 
+// The file's parts: the sets with a PARALLEL_PARTITION value, by (value,
+// set id); part i of n goes to rank floor(iP/n). For each element id `ids`
+// names, the rank of the first part holding it, or -1. Empty (every id -1)
+// when the file has fewer parts than ranks.
+std::vector<int> file_parts(const Comm& comm, hid_t tstt, const IdRange& sets, std::uint64_t max_id,
+                            const std::vector<GO>& ids) {
+  std::vector<int> out(ids.size(), -1);
+  const char* tag = "tags/PARALLEL_PARTITION";
+  std::vector<std::pair<std::int64_t, GO>> parts;  // (value, set id)
+  std::vector<std::int64_t> list;
+  std::uint64_t entries = 0;
+  collectively(comm, [&] {
+    if (sets.count == 0 || !h5::exists(tstt, tag)) return;
+    const Id g = h5::open_group(tstt, tag);
+    const std::string where = std::string("/tstt/") + tag;
+    if (h5::exists(g.get(), "id_list") && h5::exists(g.get(), "values")) {
+      const Id ids_ds = h5::open_dataset(g.get(), "id_list");
+      const auto n = static_cast<std::size_t>(h5::extent(ids_ds.get(), where + "/id_list").at(0));
+      const auto listed = h5::read_all<std::uint64_t>(ids_ds.get(), n, where + "/id_list");
+      const auto values = h5::read_all<std::int64_t>(h5::open_dataset(g.get(), "values").get(), n, where + "/values");
+      for (std::size_t i = 0; i < n; ++i) {
+        if (listed[i] >= static_cast<std::uint64_t>(sets.first) &&
+            listed[i] < static_cast<std::uint64_t>(sets.first + sets.count)) {
+          parts.emplace_back(values[i], static_cast<GO>(listed[i]));
+        }
+      }
+    }
+    if (h5::exists(tstt, "sets/tags/PARALLEL_PARTITION")) {
+      const auto values = h5::read_all<std::int64_t>(h5::open_dataset(tstt, "sets/tags/PARALLEL_PARTITION").get(),
+                                                     static_cast<std::size_t>(sets.count), "/tstt/sets/tags/PARALLEL_PARTITION");
+      for (std::size_t i = 0; i < values.size(); ++i) parts.emplace_back(values[i], sets.first + static_cast<GO>(i));
+    }
+    std::sort(parts.begin(), parts.end());
+    if (parts.size() < static_cast<std::size_t>(comm.size())) return;
+    list = h5::read_all<std::int64_t>(h5::open_dataset(tstt, "sets/list").get(), 4 * static_cast<std::size_t>(sets.count),
+                                      "/tstt/sets/list");
+    if (h5::exists(tstt, "sets/contents")) entries = h5::extent(h5::open_dataset(tstt, "sets/contents").get(), "/tstt/sets/contents").at(0);
+  });
+  if (parts.size() < static_cast<std::size_t>(comm.size())) return out;
+
+  // Each part's members, from this rank's slice of the contents, to the
+  // directory of their ids, which keeps the first part of each.
+  const auto size = static_cast<std::uint64_t>(comm.size());
+  const Blocks blocks{std::max<std::uint64_t>(max_id, 1), size};
+  std::vector<std::int64_t> part_of_set(static_cast<std::size_t>(sets.count), -1);
+  for (std::size_t i = 0; i < parts.size(); ++i) {
+    auto& p = part_of_set[static_cast<std::size_t>(parts[i].second - sets.first)];
+    if (p < 0) p = static_cast<std::int64_t>(i);
+  }
+  struct Claim {
+    GO first, last;
+    std::int64_t part;
+  };
+  std::vector<Claim> claims;
+  collectively(comm, [&] {
+    const Blocks rows{entries, size};
+    const std::uint64_t first = rows.first(comm.rank()), end = rows.end(comm.rank());
+    if (first == end) return;
+    const std::string where = "/tstt/sets/contents";
+    const auto got = h5::read_rows<std::uint64_t>(h5::open_dataset(tstt, "sets/contents").get(), first,
+                                                  std::min(end + 1, entries) - first, 1, where);
+    std::size_t i = 0;
+    const auto end_of = [&](std::size_t k) { return static_cast<std::uint64_t>(list[4 * k] + 1); };
+    for (std::uint64_t j = first; j < end; ++j) {
+      while (end_of(i) <= j) ++i;
+      const std::int64_t part = part_of_set[i];
+      if (part < 0) continue;
+      const std::uint64_t begin = i == 0 ? 0 : end_of(i - 1);
+      const GO id = static_cast<GO>(got[static_cast<std::size_t>(j - first)]);
+      if ((list[4 * i + 3] & 0x8) == 0) {
+        claims.push_back({id, id, part});
+      } else if ((j - begin) % 2 == 0 && j + 1 < std::min(end + 1, entries)) {
+        const auto count = static_cast<GO>(got[static_cast<std::size_t>(j + 1 - first)]);
+        if (count > 0 && id > 0 && static_cast<std::uint64_t>(id) <= max_id) {
+          const GO last = static_cast<GO>(std::min<std::uint64_t>(static_cast<std::uint64_t>(id + count - 1), max_id));
+          for (GO a = id; a <= last;) {  // split at directory blocks
+            const GO b = std::min<GO>(last, static_cast<GO>(blocks.end(blocks.owner(static_cast<std::uint64_t>(a - 1)))));
+            claims.push_back({a, b, part});
+            a = b + 1;
+          }
+        }
+      }
+    }
+  });
+  std::erase_if(claims, [&](const Claim& c) { return c.first < 1 || static_cast<std::uint64_t>(c.last) > max_id; });
+  std::vector<int> dest(claims.size());
+  for (std::size_t k = 0; k < claims.size(); ++k) dest[k] = blocks.owner(static_cast<std::uint64_t>(claims[k].first - 1));
+  const Batch arrived = route(comm, dest, sizeof(Claim), [&](std::size_t k, std::byte* row) { std::memcpy(row, &claims[k], sizeof(Claim)); });
+  const std::uint64_t lo = blocks.first(comm.rank());
+  std::vector<std::int64_t> part_at(static_cast<std::size_t>(blocks.end(comm.rank()) - lo), std::numeric_limits<std::int64_t>::max());
+  for (std::size_t k = 0; k < arrived.size(); ++k) {
+    Claim c;
+    std::memcpy(&c, &arrived.payload(k, 0), sizeof(Claim));
+    for (GO id = c.first; id <= c.last; ++id) {
+      auto& p = part_at[static_cast<std::size_t>(static_cast<std::uint64_t>(id - 1) - lo)];
+      p = std::min(p, c.part);
+    }
+  }
+  // Each id asks its directory.
+  Keys keys("read_h5m.part_ids", ids.size());
+  for (std::size_t k = 0; k < ids.size(); ++k) keys(k) = static_cast<std::uint64_t>(ids[k] - 1);
+  const Rows none("read_h5m.none", ids.size(), 0);
+  const std::int64_t n = static_cast<std::int64_t>(parts.size());
+  const auto answer = [&](const Keys& asked, const Batch&) {
+    Rows rows("read_h5m.parts", asked.extent(0), sizeof(std::int32_t));
+    for (std::size_t k = 0; k < asked.extent(0); ++k) {
+      const std::int64_t p = part_at[static_cast<std::size_t>(asked(k) - lo)];
+      const std::int32_t r = p == std::numeric_limits<std::int64_t>::max() ? -1 : static_cast<std::int32_t>(p * static_cast<std::int64_t>(size) / n);
+      std::memcpy(&rows(k, 0), &r, sizeof r);
+    }
+    return rows;
+  };
+  const Rows got = transport::rendezvous_to(HostExec{}, comm, Kokkos::View<const std::uint64_t*, Kokkos::HostSpace>(keys),
+                                            Kokkos::View<const std::byte**, Kokkos::LayoutRight, Kokkos::HostSpace>(none),
+                                            sizeof(std::int32_t), answer, [&](std::uint64_t row) { return blocks.owner(row); });
+  for (std::size_t k = 0; k < ids.size(); ++k) {
+    std::int32_t r;
+    std::memcpy(&r, &got(k, 0), sizeof r);
+    out[k] = r;
+  }
+  return out;
+}
+
 // The graphs the file caches (/tstt/soma/adjacency), named and checked as
 // the serial read checks their names, built on the part instead of read:
 // build_adjacencies over the local entities makes what installing the
@@ -1019,8 +1142,8 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
     return out;
   };
 
-  // The elements of the mesh's dimension, placed by the curve of their
-  // corners' centroids.
+  // The elements of the mesh's dimension, placed by the file's parts or the
+  // curve of their corners' centroids.
   std::vector<char> asked(my_xyz.size() / 3, 0);
   std::vector<Entity> placed;
   {
@@ -1048,7 +1171,21 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
       for (std::size_t q = 0; q < 3; ++q) centroids.push_back(sum[q] / static_cast<Real>(c.size()));
       gids.push_back(e.gid);
     }
-    const std::vector<int> dest = partition_by_curve(comm, centroids, gids);
+    // The file's parts, if it has enough; the curve for elements in none.
+    std::vector<int> dest = options.file_parts ? file_parts(comm, tstt.get(), sets, max_id, gids)
+                                               : std::vector<int>(gids.size(), -1);
+    std::vector<Real> free_centroids;
+    std::vector<GO> free_gids;
+    for (std::size_t i = 0; i < gids.size(); ++i) {
+      if (dest[i] >= 0) continue;
+      free_centroids.insert(free_centroids.end(), centroids.begin() + static_cast<std::ptrdiff_t>(3 * i),
+                            centroids.begin() + static_cast<std::ptrdiff_t>(3 * i + 3));
+      free_gids.push_back(gids[i]);
+    }
+    const std::vector<int> by_curve = partition_by_curve(comm, free_centroids, free_gids);
+    for (std::size_t i = 0, k = 0; i < gids.size(); ++i) {
+      if (dest[i] < 0) dest[i] = by_curve[k++];
+    }
     const Batch in = route(comm, dest, width, [&](std::size_t i, std::byte* row) { pack(row, top[i]); });
     for (std::size_t i = 0; i < in.size(); ++i) placed.push_back(unpack(&in.payload(i, 0)));
   }
