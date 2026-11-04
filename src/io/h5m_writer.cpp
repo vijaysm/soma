@@ -633,7 +633,7 @@ Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
       if (t == Topology::knife || t == Topology::polyhedron || t == Topology::vertex) {
         reject("dimension " + std::to_string(d) + " holds a " + name(t) + ", which write_h5m does not write");
       }
-      const int arity = view.num_nodes(d, static_cast<LO>(e));
+      const auto arity = static_cast<int>(view.num_nodes(d, static_cast<LO>(e)));
       auto g = std::find_if(found.begin(), found.end(), [&](const Group& x) { return x.type == t && x.arity == arity; });
       if (g == found.end()) g = found.insert(found.end(), Group{d, t, arity, {}, 0});
       g->rows.push_back(static_cast<LO>(e));

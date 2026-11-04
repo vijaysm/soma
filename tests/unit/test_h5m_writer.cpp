@@ -188,9 +188,9 @@ TEST(H5mWrite, FileIdsFollowGidsVerticesFirstThenGroupsInTypeOrder) {
   const auto f = [](GO g) { return g / 10; };
   const auto e = entities(back, 2);
   ASSERT_EQ(e.size(), 3u);
-  EXPECT_EQ(e.at(8), (Entity{Topology::tri, {f(40), f(70), f(10)}}));
-  EXPECT_EQ(e.at(9), (Entity{Topology::quad, {f(50), f(40), f(10), f(20)}}));
-  EXPECT_EQ(e.at(10), (Entity{Topology::quad, {f(60), f(50), f(20), f(30)}}));
+  EXPECT_EQ(e.at(8), (Entity{Topology::tri, {f(40), f(70), f(10)}, {}}));
+  EXPECT_EQ(e.at(9), (Entity{Topology::quad, {f(50), f(40), f(10), f(20)}, {}}));
+  EXPECT_EQ(e.at(10), (Entity{Topology::quad, {f(60), f(50), f(20), f(30)}, {}}));
 }
 
 TEST(H5mWrite, FileHasTheMoabLayout) {
