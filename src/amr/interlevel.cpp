@@ -47,20 +47,44 @@ Box bounding(const BoxList& l) {
 CoarseFinePlan::CoarseFinePlan(const BoxArray& fine, const BoxArray& coarse, IndexType type, int fine_ghosts, int ratio,
                                Periodicity periodic, Interp interp, int coarse_ghosts)
     : type_(type), ratio_(ratio), fine_ghosts_(fine_ghosts), interp_(interp) {
+  build(fine, HaloPlan(fine, type, fine_ghosts, periodic).uncovered(), coarse, periodic, coarse_ghosts);
+}
+
+CoarseFinePlan::CoarseFinePlan(const BoxArray& fine, const std::vector<BoxList>& targets, const BoxArray& coarse,
+                               IndexType type, int fine_ghosts, int ratio, Periodicity periodic, Interp interp,
+                               int coarse_ghosts)
+    : type_(type), ratio_(ratio), fine_ghosts_(fine_ghosts), interp_(interp) {
+  if (targets.size() != fine.size()) throw std::invalid_argument("CoarseFinePlan: one target list per fine box expected");
+  for (std::size_t b = 0; b < fine.size(); ++b) {
+    const Box grown = fine[b].convert(type).grow(fine_ghosts);
+    for (const Box& t : targets[b]) {
+      if (!grown.contains(t)) {
+        throw std::invalid_argument("CoarseFinePlan: target " + text(t) + " lies outside fine box " + text(fine[b]));
+      }
+    }
+  }
+  build(fine, targets, coarse, periodic, coarse_ghosts);
+}
+
+void CoarseFinePlan::build(const BoxArray& fine, const std::vector<BoxList>& targets_of, const BoxArray& coarse,
+                           Periodicity periodic, int coarse_ghosts) {
+  const int ratio = ratio_;
   if (ratio < 2) throw std::invalid_argument("CoarseFinePlan: the ratio must be at least 2");
   if (!(fine.domain() == coarse.domain().refine(ratio))) {
     throw std::invalid_argument("CoarseFinePlan: the fine domain is not the coarse domain refined by the ratio");
   }
-  const HaloPlan halo(fine, type, fine_ghosts, periodic);
-  // One scratch box per fine box with uncovered ghosts: the coarse points its
-  // targets need, one more for the slopes of cell directions.
+  // One scratch box per fine box with targets: the coarse points they need,
+  // one more for the slopes of cell directions.
   BoxList scratch;
   std::vector<BoxList> regions;
   std::vector<std::size_t> owner;  // the fine box of each scratch box
   for (std::size_t b = 0; b < fine.size(); ++b) {
-    const BoxList& targets = halo.uncovered()[b];
+    BoxList targets;
+    for (const Box& t : targets_of[b]) {
+      if (!t.empty()) targets.push_back(t);
+    }
     if (targets.empty()) continue;
-    const Box need = bounding(targets).coarsen(ratio).grow(interp == Interp::linear ? 1 : 0);
+    const Box need = bounding(targets).coarsen(ratio).grow(interp_ == Interp::linear ? 1 : 0);
     for (const Box& t : targets) {
       ops_.push_back(InterpOp{static_cast<int>(scratch.size()), static_cast<int>(b), t});
       start_.push_back(start_.back() + t.num_pts());
@@ -71,7 +95,7 @@ CoarseFinePlan::CoarseFinePlan(const BoxArray& fine, const BoxArray& coarse, Ind
     owner.push_back(b);
   }
   scratch_ = BoxArray::scratch(scratch, coarse.domain());
-  copy_ = CopyPlan(coarse, regions, type, periodic, coarse_ghosts);
+  copy_ = CopyPlan(coarse, regions, type_, periodic, coarse_ghosts);
   for (std::size_t s = 0; s < regions.size(); ++s) {
     if (!copy_.uncovered()[s].empty()) {
       throw std::invalid_argument("CoarseFinePlan: the coarse level does not cover the ghosts of fine box " +

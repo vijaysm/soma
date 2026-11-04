@@ -137,6 +137,57 @@ TEST(AmrInterlevel, LinearRulesAreExactForLinearData) {
   }
 }
 
+// Prolongation into given points, valid ones included, exact for linear
+// data; points outside the targets are left alone, and targets outside the
+// fine boxes are refused.
+TEST(AmrInterlevel, ProlongsIntoTargets) {
+  for (const int dim : {2, 3}) {
+    const Levels lv = levels(dim, 2, Box(IntVect{{1, 1, 1}}, IntVect{{3, 4, 3}}, dim));
+    for (const IndexType t : types(dim)) {
+      SCOPED_TRACE(testing::Message() << "dim " << dim << " type " << int(t.nodal));
+      soma::amr::LevelField<double> coarse(lv.coarse, t, 1, 1), fine(lv.fine, t, 1, 1);
+      const auto cv = coarse.view();
+      const IndexType tt = t;
+      soma::amr::for_each_point(coarse, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+        cv.patch(b)(i, j, k, 0) = at(IntVect{{i, j, k}}, tt, 1.0, 0, dim);
+      });
+      fine.fill(sentinel);
+      // The lower half of each box's valid points, and its low ghost layer
+      // in x.
+      std::vector<BoxList> targets(lv.fine.size());
+      for (std::size_t b = 0; b < lv.fine.size(); ++b) {
+        const Box v = fine.valid(b);
+        targets[b].push_back(Box(v.lo(), IntVect{{v.hi(0), v.lo(1) + (v.length(1) - 1) / 2, v.hi(2)}}, dim, t));
+        targets[b].push_back(Box(IntVect{{v.lo(0) - 1, v.lo(1), v.lo(2)}}, IntVect{{v.lo(0) - 1, v.hi(1), v.hi(2)}}, dim, t));
+        // Empty boxes ask for nothing, wherever their corners lie.
+        targets[b].push_back(Box(IntVect{{-50, -50, -50}}, IntVect{{-60, -60, -60}}, dim, t));
+      }
+      const soma::amr::CoarseFinePlan plan(lv.fine, targets, lv.coarse, t, 1, 2, {}, Interp::linear, 1);
+      soma::amr::fill_coarse_fine(fine, coarse, plan);
+      auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fine.view().data);
+      for (std::size_t b = 0; b < fine.num_boxes(); ++b) {
+        const Box g = fine.grown(b);
+        for (std::int64_t q = 0; q < g.num_pts(); ++q) {
+          const IntVect p = soma::amr::detail::point_of(g, q);
+          bool in = false;
+          for (const Box& x : targets[b]) in = in || x.contains(p);
+          const double got = h(static_cast<std::size_t>(fine.offset(b) + q));
+          if (in) {
+            ASSERT_NEAR(got, at(p, t, 0.5, 0, dim), 1e-12) << p[0] << "," << p[1] << "," << p[2];
+          } else {
+            ASSERT_EQ(got, sentinel) << p[0] << "," << p[1] << "," << p[2];
+          }
+        }
+      }
+      std::vector<BoxList> outside(lv.fine.size());
+      outside[0].push_back(fine.valid(0).grow(2));
+      EXPECT_THROW(soma::amr::CoarseFinePlan(lv.fine, outside, lv.coarse, t, 1, 2, {}, Interp::linear, 1), std::invalid_argument);
+      EXPECT_THROW(soma::amr::CoarseFinePlan(lv.fine, std::vector<BoxList>(lv.fine.size() + 1), lv.coarse, t, 1, 2, {}, Interp::linear, 1),
+                   std::invalid_argument);
+    }
+  }
+}
+
 // The fine cells of a coarse cell average to it, limiter or not.
 TEST(AmrInterlevel, LinearCellRuleConserves) {
   for (const int dim : {2, 3}) {

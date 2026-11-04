@@ -57,6 +57,11 @@ class CoarseFinePlan {
   // level (valid points, then coarse_ghosts ghost points) does not cover.
   CoarseFinePlan(const BoxArray& fine, const BoxArray& coarse, IndexType type, int fine_ghosts, int ratio,
                  Periodicity periodic, Interp interp, int coarse_ghosts = 1);
+  // Fills points `targets[b]` of fine box b (in the index type, inside its
+  // valid points grown by fine_ghosts) instead, valid points included: the
+  // prolongation of a regrid.
+  CoarseFinePlan(const BoxArray& fine, const std::vector<BoxList>& targets, const BoxArray& coarse, IndexType type,
+                 int fine_ghosts, int ratio, Periodicity periodic, Interp interp, int coarse_ghosts = 1);
 
   IndexType type() const { return type_; }
   int ratio() const { return ratio_; }
@@ -71,6 +76,9 @@ class CoarseFinePlan {
   Kokkos::View<const std::int64_t*, DeviceSpace> device_start() const { return d_start_; }
 
  private:
+  void build(const BoxArray& fine, const std::vector<BoxList>& targets, const BoxArray& coarse, Periodicity periodic,
+             int coarse_ghosts);
+
   IndexType type_{};
   int ratio_ = 2;
   int fine_ghosts_ = 0;
