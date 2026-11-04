@@ -45,7 +45,7 @@ constexpr std::array<const char*, topology_count> type_names{
 struct Group {
   int dim = 0;
   Topology type = Topology::vertex;
-  int arity = 0;
+  int arity = 0;  // nodes an element: corners, then those of high-order elements
   std::vector<LO> rows;
   std::uint64_t start = 0;
   std::string name() const { return type_names[static_cast<std::size_t>(type)] + std::to_string(arity); }
@@ -253,6 +253,15 @@ std::array<bool, 4> written_dims(const HostMesh& mesh, const H5mWriteOptions& op
   }
   for (int k = 1; off && k <= mesh.dim(); ++k) {
     if (w[static_cast<std::size_t>(k)] || mesh.count(k) == 0) continue;
+    if (mesh.has_nodes(k)) {
+      const auto no = mesh.node_offsets(k);
+      for (LO e = 0; e < mesh.count(k); ++e) {
+        if (no(static_cast<std::size_t>(e) + 1) == no(static_cast<std::size_t>(e))) continue;
+        reject("dimension " + std::to_string(k) + " cannot be left out: its entity of gid " +
+               std::to_string(mesh.gid(k)(static_cast<std::size_t>(e))) +
+               " has nodes beyond its corners, which a reader could not rebuild");
+      }
+    }
     if (const auto g = not_rebuilt(mesh, w, k)) {
       reject("dimension " + std::to_string(k) + " cannot be left out: its entity of gid " + std::to_string(*g) +
              " is not a side of a written entity of a higher dimension, so a reader could not rebuild it");
@@ -613,10 +622,10 @@ Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
   for (std::size_t l = 0; l < nv; ++l) p.nodes[l] = static_cast<LO>(l);
   sort_by_gid(p.nodes, mesh.gid(0));
 
+  const auto view = mesh.view();
   for (int d = 1; d < 4; ++d) {
     if (!p.dims[static_cast<std::size_t>(d)]) continue;
     const auto n = static_cast<std::size_t>(mesh.count(d));
-    const auto off = mesh.conn_offsets(d);
     const auto topo = mesh.topology(d);
     std::vector<Group> found;
     for (std::size_t e = 0; e < n; ++e) {
@@ -624,7 +633,7 @@ Plan plan(const HostMesh& mesh, const H5mWriteOptions& options) {
       if (t == Topology::knife || t == Topology::polyhedron || t == Topology::vertex) {
         reject("dimension " + std::to_string(d) + " holds a " + name(t) + ", which write_h5m does not write");
       }
-      const auto arity = static_cast<int>(off(e + 1) - off(e));
+      const int arity = view.num_nodes(d, static_cast<LO>(e));
       auto g = std::find_if(found.begin(), found.end(), [&](const Group& x) { return x.type == t && x.arity == arity; });
       if (g == found.end()) g = found.insert(found.end(), Group{d, t, arity, {}, 0});
       g->rows.push_back(static_cast<LO>(e));
@@ -862,17 +871,17 @@ void write_file(const std::string& name, const HostMesh& mesh, const Plan& p) {
 
   const Id elements = f.group(tstt.get(), "elements");
   const auto& fid0 = p.fid[0];
+  const auto view = mesh.view();
   for (const Group& g : p.groups) {
     const Id grp = f.group(elements.get(), g.name());
     const auto t = static_cast<std::uint8_t>(g.type);
     File::attribute(grp.get(), "element_type", types.get(), types.get(), &t);
-    const auto off = mesh.conn_offsets(g.dim);
-    const auto conn = mesh.conn(g.dim);
     const auto k = static_cast<std::size_t>(g.arity);
     std::vector<std::uint64_t> buf(g.rows.size() * k);
     for (std::size_t i = 0; i < g.rows.size(); ++i) {
-      const auto first = static_cast<std::size_t>(off(static_cast<std::size_t>(g.rows[i])));
-      for (std::size_t j = 0; j < k; ++j) buf[k * i + j] = fid0[static_cast<std::size_t>(conn(first + j))];
+      for (std::size_t j = 0; j < k; ++j) {
+        buf[k * i + j] = fid0[static_cast<std::size_t>(view.node(g.dim, g.rows[i], static_cast<LO>(j)))];
+      }
     }
     const Id ds = f.dataset(grp.get(), "connectivity", H5T_STD_U64LE, {g.rows.size(), k}, H5T_NATIVE_UINT64,
                             buf.data());

@@ -1260,6 +1260,71 @@ std::vector<T> read_column(hid_t file, const std::string& path, hid_t mem) {
   return v;
 }
 
+// High-order elements: one group per node count, the connectivity the
+// corners then the nodes. Node-only vertices keep their file ids (gids).
+//   corners 1(0,0) 2(1,0) 3(2,0) 4(0,1) 5(1,1) 6(2,1) 7(3,0) 8(3,1); nodes 9-17
+//   quad9 gid 1: 1 2 5 4 | 9 10 11 12 | 13;  quad4 gid 2: 2 3 6 5;  quad8 gid 3: 3 7 8 6 | 14 15 16 17
+TEST(H5mWrite, HighOrderElementsGetOneGroupPerNodeCount) {
+  soma::MeshBuilder b(2);
+  std::vector<GO> vg;
+  std::vector<soma::Real> xyz;
+  for (GO v = 1; v <= 17; ++v) {
+    vg.push_back(v);
+    xyz.insert(xyz.end(), {static_cast<double>(v % 4), static_cast<double>(v / 4), 0});
+  }
+  b.add_vertices(vg, xyz);
+  b.add_elements(Topology::quad, std::vector<GO>{1}, std::vector<GO>{1, 2, 5, 4, 9, 10, 11, 12, 13}, 9);
+  b.add_elements(Topology::quad, std::vector<GO>{2}, std::vector<GO>{2, 3, 6, 5});
+  b.add_elements(Topology::quad, std::vector<GO>{3}, std::vector<GO>{3, 7, 8, 6, 14, 15, 16, 17}, 8);
+  const HostMesh in = std::move(b).build();
+  const fs::path out = scratch() / "high_order.h5m";
+  soma::write_h5m(in, out);
+  const hid_t f = open_file(out);
+  EXPECT_EQ(extent(f, "/tstt/elements/Quad4/connectivity"), (std::vector<hsize_t>{1, 4}));
+  EXPECT_EQ(extent(f, "/tstt/elements/Quad8/connectivity"), (std::vector<hsize_t>{1, 8}));
+  EXPECT_EQ(extent(f, "/tstt/elements/Quad9/connectivity"), (std::vector<hsize_t>{1, 9}));
+  EXPECT_EQ(int_attribute(f, "/tstt/elements/Quad8/connectivity", "start_id"), 19);
+  EXPECT_EQ(read_column<std::uint64_t>(f, "/tstt/elements/Quad9/connectivity", H5T_NATIVE_UINT64),
+            (std::vector<std::uint64_t>{1, 2, 5, 4, 9, 10, 11, 12, 13}));
+  H5Fclose(f);
+  const HostMesh back = soma::read_h5m(out);
+  EXPECT_EQ(back.corners(), 8);
+  const auto v = back.view();
+  std::map<GO, std::vector<GO>> nodes;
+  for (LO e = 0; e < back.count(2); ++e) {
+    for (LO k = 0; k < v.num_nodes(2, e); ++k) nodes[v.gid(2, e)].push_back(v.gid(0, v.node(2, e, k)));
+  }
+  EXPECT_EQ(nodes.at(18), (std::vector<GO>{2, 3, 6, 5}));
+  EXPECT_EQ(nodes.at(19), (std::vector<GO>{3, 7, 8, 6, 14, 15, 16, 17}));
+  EXPECT_EQ(nodes.at(20), (std::vector<GO>{1, 2, 5, 4, 9, 10, 11, 12, 13}));
+}
+
+// A dimension holding entities with nodes cannot be left out: derivation
+// gives sides corners only.
+TEST(H5mWrite, RejectsLeavingOutHighOrderSides) {
+  soma::MeshBuilder b(3);
+  std::vector<soma::Real> xyz;
+  for (int v = 0; v < 12; ++v) {
+    xyz.insert(xyz.end(), {static_cast<double>(v & 1), static_cast<double>((v >> 1) & 1), static_cast<double>(v >> 2)});
+  }
+  b.add_vertices(std::vector<GO>{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}, xyz);
+  b.add_elements(Topology::hex, std::vector<GO>{1}, std::vector<GO>{1, 2, 4, 3, 5, 6, 8, 7});
+  b.add_elements(Topology::quad, std::vector<GO>{40}, std::vector<GO>{1, 2, 4, 3, 9, 10, 11, 12}, 8);
+  HostMesh m = std::move(b).build();
+  soma::build_adjacencies(m, soma::AdjacencyRequest{}.add(3, 2));
+  try {
+    soma::write_h5m(m, scratch() / "high_order_sides.h5m", with_dims({{2, false}}));
+    ADD_FAILURE() << "written without its quad8";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_EQ(std::string(e.what()), "write_h5m: dimension 2 cannot be left out: its entity of gid 40 has nodes "
+                                     "beyond its corners, which a reader could not rebuild");
+  }
+  soma::write_h5m(m, scratch() / "high_order_sides.h5m");
+  const HostMesh back = soma::read_h5m(scratch() / "high_order_sides.h5m");
+  EXPECT_EQ(back.count(2), 6);
+  EXPECT_EQ(back.corners(), 8);
+}
+
 // The graphs options.adjacencies names are cached under /tstt/soma: rows in
 // file id order, targets as file ids, codes for pairs; the connectivity is
 // not cached, and the dimensions a graph names are written.
