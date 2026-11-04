@@ -149,6 +149,13 @@ void check(const Case& cs) {
     copied += a.region.num_pts();
   }
   EXPECT_EQ(copied * ncomp, filled);
+  // What stayed as it was is what the plan lists as uncovered.
+  std::int64_t uncovered = 0;
+  for (std::size_t b = 0; b < f.num_boxes(); ++b) {
+    EXPECT_TRUE(soma::amr::disjoint(plan.uncovered()[b]));
+    uncovered += soma::amr::num_pts(plan.uncovered()[b]);
+  }
+  EXPECT_EQ(uncovered * ncomp, kept);
   EXPECT_EQ(plan.num_copied(), copied);
   if (outside == 0) EXPECT_TRUE(plan.boundary().empty());
 }
@@ -182,4 +189,51 @@ TEST(AmrHalo, RejectsAMismatchedPlan) {
   const soma::amr::HaloPlan self(ba, IndexType::cell(), 1, Periodicity{{true, true, false}});
   EXPECT_EQ(self.num_copied(), 10 * 10 - 64);
   EXPECT_TRUE(self.boundary().empty());
+}
+
+// A copy between two levels takes valid points first and the source's ghost
+// points (filled by the caller) after them; what neither covers is left.
+TEST(AmrCopy, ValidPointsThenGhostPoints) {
+  const Box domain(IntVect{}, IntVect{{15, 15, 0}}, 2);
+  const BoxArray src({Box(IntVect{{0, 0, 0}}, IntVect{{3, 7, 0}}, 2), Box(IntVect{{4, 0, 0}}, IntVect{{7, 7, 0}}, 2)}, domain);
+  soma::amr::LevelField<double> a(src, IndexType::cell(), 1, 2);
+  const auto av = a.view();
+  // Valid points hold +value, ghost points -value.
+  soma::amr::for_each_point(a, soma::amr::Region::grown, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+    av.patch(b)(i, j, k) = av.valid(b).contains(IntVect{{i, j, k}}) ? value(IntVect{{i, j, k}}, 0) : -value(IntVect{{i, j, k}}, 0);
+  });
+  const BoxArray dst({Box(IntVect{{2, 6, 0}}, IntVect{{11, 11, 0}}, 2)}, domain);
+  soma::amr::LevelField<double> d(dst, IndexType::cell(), 1, 0);
+  d.fill(sentinel);
+  for (const int ghosts : {0, 2}) {
+    d.fill(sentinel);
+    const soma::amr::CopyPlan plan(src, {{dst[0]}}, IndexType::cell(), {}, ghosts);
+    soma::amr::copy(a, d, plan);
+    auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, d.view().data);
+    std::int64_t left = 0;
+    for (std::int64_t q = 0; q < dst[0].num_pts(); ++q) {
+      const IntVect p = soma::amr::detail::point_of(dst[0], q);
+      const bool valid = p[0] <= 7 && p[1] <= 7;
+      const bool ghost = ghosts > 0 && p[0] <= 9 && p[1] <= 9;
+      const double want = valid ? value(p, 0) : ghost ? -value(p, 0) : sentinel;
+      ASSERT_EQ(h(static_cast<std::size_t>(q)), want) << p[0] << "," << p[1] << " ghosts " << ghosts;
+      left += valid || ghost ? 0 : 1;
+    }
+    EXPECT_EQ(soma::amr::num_pts(plan.uncovered()[0]), left);
+  }
+  EXPECT_THROW(soma::amr::copy(a, d, soma::amr::CopyPlan(src, {{dst[0]}}, IndexType::cell(), {}, 3)), std::invalid_argument);
+  // Ghost points reach into bins the valid points do not: a 4 x 4 box binned
+  // by 4, read two cells to its right.
+  const BoxArray small({Box(IntVect{}, IntVect{{3, 3, 0}}, 2)}, domain);
+  soma::amr::LevelField<double> s4(small, IndexType::cell(), 1, 2);
+  s4.fill(5.0);
+  const BoxArray strip({Box(IntVect{{5, 0, 0}}, IntVect{{5, 3, 0}}, 2)}, domain);
+  soma::amr::LevelField<double> t(strip, IndexType::cell(), 1, 0);
+  t.fill(sentinel);
+  const soma::amr::CopyPlan reach(small, {{strip[0]}}, IndexType::cell(), {}, 2);
+  soma::amr::copy(s4, t, reach);
+  EXPECT_TRUE(reach.uncovered()[0].empty());
+  auto th = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, t.view().data);
+  for (std::size_t q = 0; q < th.extent(0); ++q) EXPECT_EQ(th(q), 5.0);
+  EXPECT_THROW(soma::amr::CopyPlan(src, {{dst[0]}}, IndexType::cell(), {}, -1), std::invalid_argument);
 }
