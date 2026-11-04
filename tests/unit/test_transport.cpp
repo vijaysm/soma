@@ -303,6 +303,41 @@ TEST(Transport, RendezvousAnswersEachKeyInOrder) {
   }
 }
 
+// rendezvous_to sends each key where the caller says: here key % P, which
+// answers with its rank and the sender's.
+TEST(Transport, RendezvousToAChosenRank) {
+  const Comm c = Comm::world();
+  const std::vector<std::uint64_t> mine = held_keys(c.rank(), c.size());
+  Kokkos::View<std::uint64_t*, Mem> keys("keys", mine.size());
+  Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem> payload("payload", mine.size(), 0);
+  const auto hk = Kokkos::create_mirror_view(keys);
+  for (std::size_t i = 0; i < mine.size(); ++i) hk(i) = mine[i];
+  Kokkos::deep_copy(keys, hk);
+  const int me = c.rank(), size = c.size();
+  const auto who = [me](const Kokkos::View<std::uint64_t*, Mem>& arrived, const RecordBatch<Mem>& from) {
+    Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem> rows("rows", arrived.extent(0), 8);
+    const auto r = Kokkos::create_mirror_view(rows);
+    const auto s = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, from.source);
+    for (std::size_t i = 0; i < r.extent(0); ++i) {
+      const std::array<std::int32_t, 2> v{me, s(i)};
+      std::memcpy(&r(i, 0), v.data(), 8);
+    }
+    Kokkos::deep_copy(rows, r);
+    return rows;
+  };
+  const auto answers = soma::transport::rendezvous_to(
+      Space{}, c, keys, payload, 8, who, [size](std::uint64_t k) { return static_cast<int>(k % static_cast<std::uint64_t>(size)); });
+  const auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, answers);
+  ASSERT_EQ(h.extent(0), mine.size());
+  for (std::size_t i = 0; i < mine.size(); ++i) {
+    std::array<std::int32_t, 2> got;
+    std::memcpy(got.data(), &h(i, 0), 8);
+    EXPECT_EQ(got, (std::array<std::int32_t, 2>{static_cast<std::int32_t>(mine[i] % static_cast<std::uint64_t>(size)), me}));
+  }
+  EXPECT_THROW((void)soma::transport::rendezvous_to(Space{}, c, keys, payload, 8, who, [size](std::uint64_t) { return size; }),
+               std::invalid_argument);
+}
+
 namespace {
 
 Kokkos::View<std::byte**, Kokkos::LayoutRight, Mem> short_rows(const Kokkos::View<std::uint64_t*, Mem>& keys,

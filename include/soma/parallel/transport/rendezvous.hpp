@@ -42,15 +42,19 @@ namespace soma::transport {
   return static_cast<int>(mix(key) % static_cast<std::uint64_t>(size));
 }
 
+// rendezvous_to sends each key to dest_of(key), a rank of comm, instead of
+// its owner: a directory placed by the caller (blocks of ids, say).
+//
 // Collective. Throws std::invalid_argument on every rank if any rank passes
-// a payload without a row per key or returns answers that are not a row of
-// answer_width bytes per arrival; an exception from answer on one rank is
-// rethrown there and std::runtime_error is thrown on the others.
-template <class ExecSpace, class Answer>
-Kokkos::View<std::byte**, Kokkos::LayoutRight, typename ExecSpace::memory_space> rendezvous(
+// a payload without a row per key, names a rank outside comm, or returns
+// answers that are not a row of answer_width bytes per arrival; an exception
+// from answer on one rank is rethrown there and std::runtime_error is thrown
+// on the others.
+template <class ExecSpace, class Answer, class DestOf>
+Kokkos::View<std::byte**, Kokkos::LayoutRight, typename ExecSpace::memory_space> rendezvous_to(
     const ExecSpace&, const Comm& comm, const Kokkos::View<const std::uint64_t*, typename ExecSpace::memory_space>& keys,
     const Kokkos::View<const std::byte**, Kokkos::LayoutRight, typename ExecSpace::memory_space>& payload,
-    std::size_t answer_width, const Answer& answer, Strategy strategy = Strategy::automatic) {
+    std::size_t answer_width, const Answer& answer, const DestOf& dest_of, Strategy strategy = Strategy::automatic) {
   using MemSpace = typename ExecSpace::memory_space;
   using Host = Kokkos::DefaultHostExecutionSpace;
   constexpr std::size_t key_bytes = sizeof(std::uint64_t);
@@ -62,7 +66,7 @@ Kokkos::View<std::byte**, Kokkos::LayoutRight, typename ExecSpace::memory_space>
   const auto hp = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, payload);
   RecordBatch<Host::memory_space> sent(n, key_bytes + width, "transport::rendezvous");
   for (std::size_t i = 0; i < n; ++i) {
-    sent.dest(i) = owner(hk(i), comm.size());
+    sent.dest(i) = dest_of(hk(i));
     std::memcpy(&sent.payload(i, 0), &hk(i), key_bytes);
     if (width > 0) std::memcpy(&sent.payload(i, key_bytes), &hp(i, 0), width);
   }
@@ -111,6 +115,18 @@ Kokkos::View<std::byte**, Kokkos::LayoutRight, typename ExecSpace::memory_space>
                      std::span<std::byte>(ho.data(), n * answer_width), answer_width);
   Kokkos::deep_copy(out, ho);
   return out;
+}
+
+// Collective. Throws as rendezvous_to.
+template <class ExecSpace, class Answer>
+Kokkos::View<std::byte**, Kokkos::LayoutRight, typename ExecSpace::memory_space> rendezvous(
+    const ExecSpace& exec, const Comm& comm,
+    const Kokkos::View<const std::uint64_t*, typename ExecSpace::memory_space>& keys,
+    const Kokkos::View<const std::byte**, Kokkos::LayoutRight, typename ExecSpace::memory_space>& payload,
+    std::size_t answer_width, const Answer& answer, Strategy strategy = Strategy::automatic) {
+  const int size = comm.size();
+  return rendezvous_to(exec, comm, keys, payload, answer_width, answer,
+                       [size](std::uint64_t key) { return owner(key, size); }, strategy);
 }
 
 }  // namespace soma::transport
