@@ -1035,3 +1035,22 @@ TEST(FieldRemap, ElementNodeRowsMoveWithTheirElement) {
   bad.set_entities(2, 2);
   EXPECT_THROW(reg.remap_into(bad, maps, reg.epoch(), info), std::logic_error);
 }
+
+// A stale field (of an earlier epoch) is carried as it was, still stale.
+TEST(FieldRemap, StaleFieldsAreCarriedAsTheyWere) {
+  Reg reg;
+  reg.set_entities(2, 3);
+  auto old = reg.add<double>("old", Spc(Dom::all(2, 3, reg.epoch()), Layout::per_entity()), 1);
+  old.view()(2, 0) = 4.0;
+  reg.set_epoch(reg.epoch() + 1);
+  auto now = reg.add<double>("now", Spc(Dom::all(2, 3, reg.epoch()), Layout::per_entity()), 1);
+  Remaps maps;
+  maps[2] = Reg::SlotRemap{{2, 1, 0}, 3};
+  Reg out;
+  out.set_entities(2, 3);
+  reg.remap_into(out, maps, reg.epoch());
+  EXPECT_THROW((void)out.get<double>(old.id()), soma::StaleField);
+  EXPECT_EQ(out.info(old.id()).revision, reg.info(old.id()).revision);
+  EXPECT_NO_THROW((void)out.get<double>(now.id()));
+  EXPECT_TRUE(out.contains("old"));
+}

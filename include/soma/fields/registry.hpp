@@ -648,16 +648,16 @@ class FieldRegistry {
   // blocks keep their members; a block left without members stays, empty, so
   // the field keeps its dimensions. Fields keep their ids and families; their
   // revision advances, so handles taken earlier are no longer current. Pending
-  // writes are committed first; a stale live field throws StaleField before
-  // that. `info` is the renumbered mesh's (element_nodes layouts read it). A
-  // throw leaves `dst` empty and reusable.
+  // writes are committed first. A stale field (of an earlier epoch) is carried
+  // as it is and stays stale. `info` is the renumbered mesh's (element_nodes
+  // layouts read it). A throw leaves `dst` empty and reusable.
   void remap_into(FieldRegistry& dst, const std::array<std::optional<SlotRemap>, num_field_slots>& maps,
                   std::uint64_t epoch, const ElementInfo<MemSpace>& info = {}) const {
     if (!dst.entries_.empty()) throw std::logic_error("remap_into: the destination registry must be empty");
-    for (const Entry& e : entries_) {
-      if (e.alive) require_current(e);
+    const auto current = [&](const Entry& e) { return e.space.domain().epoch() == epoch_; };
+    for (Entry& e : entries_) {
+      if (e.alive && current(e)) commit_entry(e);
     }
-    commit_everything();
     FieldRegistry built;
     built.epoch_ = epoch;
     built.entities_ = dst.entities_;
@@ -670,7 +670,13 @@ class FieldRegistry {
     for (const Entry& e : entries_) {
       Entry out;
       out.info = e.info;
-      if (!e.alive) {
+      if (!e.alive || !current(e)) {
+        if (e.alive) {
+          out.space = e.space;
+          out.field = e.field;
+          out.alive = true;
+          built.families_[out.info.family].members.push_back(out.info.id);
+        }
         built.entries_.push_back(std::move(out));
         continue;
       }
