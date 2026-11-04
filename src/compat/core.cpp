@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cstdlib>
 #include <exception>
+#include <numeric>
 #include <string>
 #include <vector>
 
@@ -163,17 +164,23 @@ void CoreState::number_entities() {
   for (int d = 0; d <= 3; ++d) {
     const LO n = mesh.count(d);
     handle_of[static_cast<std::size_t>(d)].assign(static_cast<std::size_t>(n), 0);
-    LO l = 0;
-    while (l < n) {
-      const auto key = [&](LO e) {
-        return d == 0 ? std::pair<EntityType, int>{MBVERTEX, 0}
-                      : std::pair<EntityType, int>{static_cast<EntityType>(v.topology(d, e)), static_cast<int>(v.num_nodes(d, e))};
-      };
-      LO end = l + 1;
-      while (end < n && key(end) == key(l)) ++end;
+    // File order is gid order; the mesh keeps node-only vertices last and
+    // elements by type, which MOAB's numbering does not.
+    std::vector<LO> order(static_cast<std::size_t>(n));
+    std::iota(order.begin(), order.end(), LO{0});
+    std::stable_sort(order.begin(), order.end(), [&](LO a, LO b) { return v.gid(d, a) < v.gid(d, b); });
+    const auto key = [&](std::size_t q) {
+      const LO e = order[q];
+      return d == 0 ? std::pair<EntityType, int>{MBVERTEX, 0}
+                    : std::pair<EntityType, int>{static_cast<EntityType>(v.topology(d, e)), static_cast<int>(v.num_nodes(d, e))};
+    };
+    std::size_t l = 0;
+    while (l < order.size()) {
+      std::size_t end = l + 1;
+      while (end < order.size() && key(end) == key(l)) ++end;
       const auto [t, arity] = key(l);
-      const EntityID first = alloc_run(t, arity, end - l);
-      for (LO e = l; e < end; ++e) add_handle(t, d, e, first + (e - l));
+      const EntityID first = alloc_run(t, arity, static_cast<EntityID>(end - l));
+      for (std::size_t q = l; q < end; ++q) add_handle(t, d, order[q], first + static_cast<EntityID>(q - l));
       l = end;
     }
   }

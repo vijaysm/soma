@@ -593,3 +593,40 @@ TEST(CompatCore, IdsFollowMoabAllocation) {
   g.create_meshset(moab::MESHSET_SET, y);
   EXPECT_EQ(x, y);
 }
+
+// Two six-node triangles share the edge 2-3; the tenth vertex is on no
+// element. Handles follow the file's order, though the mesh keeps
+// node-only vertices last.
+TEST(CompatCore, HighOrderSidesMustShareNodes) {
+  TempDir dir;
+  for (const bool conforming : {true}) {
+    moab::Core w;
+    const double xyz[] = {0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 1, 0,                   // corners 1-4
+                          .5, 0, 0, .5, .5, 0, 0, .5, 0, 1, .5, 0, .5, 1, 0,  // mid-nodes 5-9
+                          .5, .5, 0};                                         // a second 2-3 mid-node
+    moab::Range v;
+    ASSERT_EQ(w.create_vertices(xyz, 10, v), moab::MB_SUCCESS);
+    const H a_nodes[] = {v[0], v[1], v[2], v[4], v[5], v[6]};
+    const H b_nodes[] = {v[1], v[3], v[2], v[7], v[8], conforming ? v[5] : v[9]};
+    H a = 0, b = 0;
+    ASSERT_EQ(w.create_element(moab::MBTRI, a_nodes, 6, a), moab::MB_SUCCESS);
+    ASSERT_EQ(w.create_element(moab::MBTRI, b_nodes, 6, b), moab::MB_SUCCESS);
+    const std::string file = (dir.path / (conforming ? "shared.h5m" : "split.h5m")).string();
+    ASSERT_EQ(w.write_file(file.c_str()), moab::MB_SUCCESS);
+    moab::Core ref;
+    ASSERT_EQ(ref.load_file(file.c_str()), moab::MB_SUCCESS);
+    sc::Core c;
+    if (conforming) {
+      ASSERT_EQ(c.load_file(file.c_str()), sc::MB_SUCCESS);
+      expect_same_mesh(c, ref);
+    } else {
+      ASSERT_EQ(c.load_file(file.c_str()), sc::MB_FAILURE);
+      std::string message;
+      c.get_last_error(message);
+      EXPECT_NE(message.find("Tri 1 and Tri 2"), std::string::npos) << message;
+      int n = -1;
+      c.get_number_entities_by_dimension(0, 0, n);
+      EXPECT_EQ(n, 0);
+    }
+  }
+}
