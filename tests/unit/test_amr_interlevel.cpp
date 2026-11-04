@@ -35,6 +35,26 @@ KOKKOS_INLINE_FUNCTION double linear(double x, double y, double z, int c) { retu
 KOKKOS_INLINE_FUNCTION double at(const IntVect& p, IndexType t, double h, int c, int dim) {
   return linear(pos(p[0], t.is_nodal(0), h), pos(p[1], t.is_nodal(1), h), dim == 3 ? pos(p[2], t.is_nodal(2), h) : 0.0, c);
 }
+// Quadratic data, of degree 2 in each direction, averaged over what point p
+// of index type t stands for: the point along node directions, the cell
+// [p h, (p + 1) h] along cell directions.
+KOKKOS_INLINE_FUNCTION double quad_at(const IntVect& p, IndexType t, double h, int c, int dim) {
+  double m1[3] = {0, 0, 0}, m2[3] = {0, 0, 0};  // averages of x and x^2
+  for (int d = 0; d < dim; ++d) {
+    if (t.is_nodal(d)) {
+      m1[d] = p[d] * h;
+      m2[d] = m1[d] * m1[d];
+    } else {
+      const double a = p[d] * h, b = (p[d] + 1) * h;
+      m1[d] = 0.5 * (a + b);
+      m2[d] = (a * a + a * b + b * b) / 3.0;
+    }
+  }
+  return 0.3 + 1.7 * m1[0] - 0.9 * m1[1] + 0.4 * m1[2] + 0.8 * m2[0] - 0.5 * m2[1] + 0.3 * m2[2] + 0.6 * m1[0] * m1[1] -
+         0.7 * m1[1] * m1[2] + 0.25 * m1[0] * m1[2] + 0.2 * m2[0] * m1[1] - 0.15 * m2[0] * m2[1] * (dim == 3 ? m2[2] : 1.0) +
+         10.0 * c;
+}
+
 // Deterministic data with no structure, for conservation.
 KOKKOS_INLINE_FUNCTION double noise(const IntVect& p, int c) {
   const unsigned u = static_cast<unsigned>(p[0] * 73856093) ^ static_cast<unsigned>(p[1] * 19349663) ^
@@ -50,6 +70,15 @@ void set_linear(const soma::amr::LevelField<double>& f, soma::amr::Region region
   const int ncomp = f.ncomp(), dim = f.boxes().domain().dim();
   soma::amr::for_each_point(f, region, KOKKOS_LAMBDA(int b, int i, int j, int k) {
     for (int c = 0; c < ncomp; ++c) v.patch(b)(i, j, k, c) = at(IntVect{{i, j, k}}, t, h, c, dim);
+  });
+}
+
+void set_quadratic(const soma::amr::LevelField<double>& f, soma::amr::Region region, double h) {
+  const auto v = f.view();
+  const IndexType t = f.type();
+  const int ncomp = f.ncomp(), dim = f.boxes().domain().dim();
+  soma::amr::for_each_point(f, region, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+    for (int c = 0; c < ncomp; ++c) v.patch(b)(i, j, k, c) = quad_at(IntVect{{i, j, k}}, t, h, c, dim);
   });
 }
 
@@ -155,6 +184,51 @@ TEST(AmrInterlevel, LinearRulesAreExactForLinearData) {
   }
 }
 
+// The quadratic rules reproduce quadratic data (averages over cells,
+// values at nodes); the linear ones do not.
+TEST(AmrInterlevel, QuadraticRulesAreExactForQuadraticData) {
+  for (const int dim : {2, 3}) {
+    for (const Box region : {Box(IntVect{{2, 3, 2}}, IntVect{{5, 5, 4}}, dim), Box(IntVect{{0, 0, 0}}, IntVect{{3, 2, 2}}, dim)}) {
+      for (const int r : {2, 4}) {
+        const Levels lv = levels(dim, r, region);
+        for (const IndexType t : types(dim)) {
+          for (const int g : {1, 2}) {
+            SCOPED_TRACE(testing::Message() << "dim " << dim << " r " << r << " type " << int(t.nodal) << " ghosts " << g
+                                            << " at " << region.lo(0));
+            soma::amr::LevelField<double> coarse(lv.coarse, t, 2, 1), fine(lv.fine, t, 2, g);
+            // Spacing 1/8 on the coarse level keeps the values near 1.
+            set_quadratic(coarse, soma::amr::Region::grown, 0.125);
+            fine.fill(sentinel);
+            const double hf = 0.125 / r;
+            set_quadratic(fine, soma::amr::Region::valid, hf);
+            const soma::amr::HaloPlan halo(lv.fine, t, g, {});
+            soma::amr::fill_halo(fine, halo);
+            const soma::amr::CoarseFinePlan plan(lv.fine, lv.coarse, t, g, r, {}, Interp::quadratic, 1);
+            soma::amr::fill_coarse_fine(fine, coarse, plan);
+            const auto exact = [&](const IntVect& p, int c) { return quad_at(p, t, hf, c, dim); };
+            expect_points(fine, halo, exact, exact);
+          }
+        }
+      }
+    }
+  }
+  // The linear rule misses the curvature.
+  const Levels lv = levels(2, 2, Box(IntVect{{2, 3, 0}}, IntVect{{5, 5, 0}}, 2));
+  soma::amr::LevelField<double> coarse(lv.coarse, IndexType::cell(), 1, 1), fine(lv.fine, IndexType::cell(), 1, 1);
+  set_quadratic(coarse, soma::amr::Region::grown, 0.125);
+  fine.fill(sentinel);
+  soma::amr::fill_coarse_fine(fine, coarse, soma::amr::CoarseFinePlan(lv.fine, lv.coarse, IndexType::cell(), 1, 2, {}, Interp::linear, 1));
+  auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fine.view().data);
+  const Box g = fine.grown(0);
+  double worst = 0;
+  for (std::int64_t q = 0; q < g.num_pts(); ++q) {
+    const IntVect p = soma::amr::detail::point_of(g, q);
+    if (fine.valid(0).contains(p) || h(static_cast<std::size_t>(q)) == sentinel) continue;
+    worst = std::max(worst, std::fabs(h(static_cast<std::size_t>(q)) - quad_at(p, IndexType::cell(), 0.0625, 0, 2)));
+  }
+  EXPECT_GT(worst, 1e-4);
+}
+
 // Prolongation into given points, valid ones included, exact for linear
 // data; points outside the targets are left alone, and targets outside the
 // fine boxes are refused.
@@ -203,14 +277,16 @@ TEST(AmrInterlevel, ProlongsIntoTargets) {
 }
 
 // The fine cells of a coarse cell average to it, limiter or not.
-TEST(AmrInterlevel, LinearCellRuleConserves) {
+TEST(AmrInterlevel, CellRulesConserve) {
+  for (const Interp interp : {Interp::linear, Interp::quadratic}) {
   for (const int dim : {2, 3}) {
     for (const int r : {2, 4}) {
+      SCOPED_TRACE(testing::Message() << "quadratic " << (interp == Interp::quadratic) << " dim " << dim << " r " << r);
       const Levels lv = levels(dim, r, Box(IntVect{{3, 3, 3}}, IntVect{{4, 5, 4}}, dim));
       soma::amr::LevelField<double> coarse(lv.coarse, IndexType::cell(), 1, 1), fine(lv.fine, IndexType::cell(), 1, r);
       set_noise(coarse, soma::amr::Region::grown);
       fine.fill(0.0);
-      const soma::amr::CoarseFinePlan plan(lv.fine, lv.coarse, IndexType::cell(), r, r, {}, Interp::linear, 1);
+      const soma::amr::CoarseFinePlan plan(lv.fine, lv.coarse, IndexType::cell(), r, r, {}, interp, 1);
       soma::amr::fill_coarse_fine(fine, coarse, plan);
       auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, fine.view().data);
       const soma::amr::HaloPlan halo(lv.fine, IndexType::cell(), r, {});
@@ -237,6 +313,7 @@ TEST(AmrInterlevel, LinearCellRuleConserves) {
       }
       EXPECT_GT(checked, 0);
     }
+  }
   }
 }
 

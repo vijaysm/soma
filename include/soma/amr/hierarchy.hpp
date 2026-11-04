@@ -141,8 +141,8 @@ class Hierarchy {
   // Field u of hierarchy `from` on this hierarchy's boxes (same geometry
   // and ratio): level by level from 0, prolonged from the new level below
   // (its halos filled first), overwritten where the old level had valid
-  // points, then restricted from the finest level down. Linear prolongation
-  // needs at least one ghost.
+  // points, then restricted from the finest level down. Linear and quadratic
+  // prolongation need at least one ghost.
   template <class T, class P = NoBoundary>
   MultiLevelField<T> transfer(const Hierarchy& from, const MultiLevelField<T>& u, Interp interp = Interp::linear,
                               const P& physical = {}) const;
@@ -213,8 +213,8 @@ MultiLevelField<T> Hierarchy::transfer(const Hierarchy& from, const MultiLevelFi
   }
   const IndexType type = u[0].type();
   const int ncomp = u[0].ncomp(), ghosts = u[0].ghosts();
-  if (interp == Interp::linear && ghosts < 1) {
-    throw std::invalid_argument("Hierarchy::transfer: linear prolongation needs a field with ghosts");
+  if (interp != Interp::piecewise_constant && ghosts < 1) {
+    throw std::invalid_argument("Hierarchy::transfer: linear and quadratic prolongation need a field with ghosts");
   }
   MultiLevelField<T> out = make_field<T>(type, ncomp, ghosts, "amr::Hierarchy.transfer");
   for (int l = 0; l < num_levels(); ++l) {

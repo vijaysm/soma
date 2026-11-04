@@ -74,7 +74,7 @@ void CoarseFinePlan::build(const BoxArray& fine, const std::vector<BoxList>& tar
     throw std::invalid_argument("CoarseFinePlan: the fine domain is not the coarse domain refined by the ratio");
   }
   // One scratch box per fine box with targets: the coarse points they need,
-  // one more for the slopes of cell directions.
+  // one more on each side for the linear slopes and the quadratic stencils.
   BoxList scratch;
   std::vector<BoxList> regions;
   std::vector<std::size_t> owner;  // the fine box of each scratch box
@@ -84,7 +84,7 @@ void CoarseFinePlan::build(const BoxArray& fine, const std::vector<BoxList>& tar
       if (!t.empty()) targets.push_back(t);
     }
     if (targets.empty()) continue;
-    const Box need = bounding(targets).coarsen(ratio).grow(interp_ == Interp::linear ? 1 : 0);
+    const Box need = bounding(targets).coarsen(ratio).grow(interp_ == Interp::piecewise_constant ? 0 : 1);
     for (const Box& t : targets) {
       ops_.push_back(InterpOp{static_cast<int>(scratch.size()), static_cast<int>(b), t});
       start_.push_back(start_.back() + t.num_pts());

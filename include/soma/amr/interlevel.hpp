@@ -20,6 +20,14 @@
 // the linear slopes next to the domain boundary): a fine level properly
 // nested in the coarse one does.
 //
+// Quadratic prolongation (for third-order schemes and Q2 data), per
+// direction over the coarse points q - 1, q, q + 1 around the fine one: where
+// points are nodes, the quadratic through the three nodes at the fine node;
+// where they are cells, the average over the fine cell of the quadratic whose
+// averages over the three coarse cells are theirs (conservative). Tensor
+// products of these are exact for data of degree at most 2 in each
+// direction; they are not limited, so they suit smooth data.
+//
 // Restriction (average_down) sets each coarse point under the fine valid
 // points to the average of the fine points it covers: cell averages
 // (conservative), node injection, face averages over the coincident fine
@@ -39,7 +47,7 @@
 
 namespace soma::amr {
 
-enum class Interp { piecewise_constant, linear };
+enum class Interp { piecewise_constant, linear, quadratic };
 
 // Fill region `region` of fine box `fine` from scratch box `coarse`.
 struct InterpOp {
@@ -150,6 +158,51 @@ KOKKOS_INLINE_FUNCTION T interpolate(const Patch<T>& s, const IntVect& p, int c,
   return static_cast<T>(sum);
 }
 
+// The quadratic rule's weights over the coarse offsets -1, 0, 1 in one
+// direction, for fine index p at ratio r.
+KOKKOS_INLINE_FUNCTION void quadratic_weights(int p, int r, bool nodal, double w[3]) {
+  const int rem = p - floor_div(p, r) * r;
+  if (nodal) {
+    // Lagrange through the nodes at -1, 0, 1, at x in [0, 1).
+    const double x = static_cast<double>(rem) / r;
+    w[0] = 0.5 * x * (x - 1);
+    w[1] = 1 - x * x;
+    w[2] = 0.5 * x * (x + 1);
+  } else {
+    // Averages over [-3/2, -1/2], [-1/2, 1/2], [1/2, 3/2] fix
+    // u(xi) = a + b xi + c xi^2; the fine cell's average, centred at off and
+    // 1/r wide, is u0 + b off + c (off^2 + 1/(12 r^2) - 1/12).
+    const double off = (rem + 0.5) / r - 0.5;
+    const double s = off * off + 1.0 / (12.0 * r * r) - 1.0 / 12.0;
+    w[0] = 0.5 * (s - off);
+    w[1] = 1 - s;
+    w[2] = 0.5 * (s + off);
+  }
+}
+
+// The quadratic rule's value at fine point p from coarse patch s.
+template <class T>
+KOKKOS_INLINE_FUNCTION T interpolate_quadratic(const Patch<T>& s, const IntVect& p, int c, int dim, IndexType type, int r) {
+  double w[3][3] = {{0, 1, 0}, {0, 1, 0}, {0, 1, 0}};
+  int base[3] = {0, 0, 0};
+  for (int d = 0; d < dim; ++d) {
+    base[d] = floor_div(p[d], r);
+    quadratic_weights(p[d], r, type.is_nodal(d), w[d]);
+  }
+  const int lo2 = dim > 2 ? -1 : 0, hi2 = dim > 2 ? 1 : 0;
+  double sum = 0;
+  for (int k = lo2; k <= hi2; ++k) {
+    for (int j = -1; j <= 1; ++j) {
+      for (int i = -1; i <= 1; ++i) {
+        const double wt = w[0][i + 1] * w[1][j + 1] * w[2][k + 1];
+        if (wt == 0) continue;
+        sum += wt * static_cast<double>(s(base[0] + i, base[1] + j, base[2] + k, c));
+      }
+    }
+  }
+  return static_cast<T>(sum);
+}
+
 }  // namespace detail
 
 // Fills the fine ghost points no fine box covers from the coarse level along
@@ -170,7 +223,7 @@ void fill_coarse_fine(const LevelField<T>& fine, const LevelField<T>& coarse, co
   const int n = static_cast<int>(ops.extent(0));
   const int ncomp = fine.ncomp(), dim = plan.scratch().domain().dim(), r = plan.ratio();
   const IndexType type = plan.type();
-  const bool linear = plan.interp() == Interp::linear;
+  const bool linear = plan.interp() == Interp::linear, quadratic = plan.interp() == Interp::quadratic;
   Kokkos::parallel_for(
       "amr::fill_coarse_fine", Kokkos::RangePolicy<Exec, Kokkos::IndexType<std::int64_t>>(0, plan.num_points()),
       KOKKOS_LAMBDA(std::int64_t p) {
@@ -187,7 +240,10 @@ void fill_coarse_fine(const LevelField<T>& fine, const LevelField<T>& coarse, co
         const IntVect q = detail::point_of(op.region, p - start(lo));
         const auto from = s.patch(op.coarse);
         const auto to = f.patch(op.fine);
-        for (int c = 0; c < ncomp; ++c) to(q[0], q[1], q[2], c) = detail::interpolate(from, q, c, dim, type, r, linear);
+        for (int c = 0; c < ncomp; ++c) {
+          to(q[0], q[1], q[2], c) = quadratic ? detail::interpolate_quadratic(from, q, c, dim, type, r)
+                                              : detail::interpolate(from, q, c, dim, type, r, linear);
+        }
       });
   Kokkos::fence("amr::fill_coarse_fine");
 }

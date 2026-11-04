@@ -35,10 +35,34 @@ KOKKOS_INLINE_FUNCTION double linear(double x, double y, double z, int c) { retu
 KOKKOS_INLINE_FUNCTION double at(const IntVect& p, IndexType t, double h, int c, int dim) {
   return linear(pos(p[0], t.is_nodal(0), h), pos(p[1], t.is_nodal(1), h), dim == 3 ? pos(p[2], t.is_nodal(2), h) : 0.0, c);
 }
+// Quadratic data, of degree 2 in each direction, averaged over what point p
+// of index type t stands for (the point along node directions, the cell
+// along cell directions).
+KOKKOS_INLINE_FUNCTION double quad_at(const IntVect& p, IndexType t, double h, int c, int dim) {
+  double m1[3] = {0, 0, 0}, m2[3] = {0, 0, 0};  // averages of x and x^2
+  for (int d = 0; d < dim; ++d) {
+    if (t.is_nodal(d)) {
+      m1[d] = p[d] * h;
+      m2[d] = m1[d] * m1[d];
+    } else {
+      const double a = p[d] * h, b = (p[d] + 1) * h;
+      m1[d] = 0.5 * (a + b);
+      m2[d] = (a * a + a * b + b * b) / 3.0;
+    }
+  }
+  return 0.3 + 1.7 * m1[0] - 0.9 * m1[1] + 0.4 * m1[2] + 0.8 * m2[0] - 0.5 * m2[1] + 0.3 * m2[2] + 0.6 * m1[0] * m1[1] -
+         0.7 * m1[1] * m1[2] + 0.2 * m2[0] * m1[1] - 0.15 * m2[0] * m2[1] * (dim == 3 ? m2[2] : 1.0) + 10.0 * c;
+}
 KOKKOS_INLINE_FUNCTION double noise(const IntVect& p, int c) {
   const unsigned u = static_cast<unsigned>(p[0] * 73856093) ^ static_cast<unsigned>(p[1] * 19349663) ^
                      static_cast<unsigned>(p[2] * 83492791) ^ (static_cast<unsigned>(c) * 2654435761u);
   return static_cast<double>(u % 1000u) / 100.0;
+}
+
+enum class Data { noise, linear, quadratic };
+
+KOKKOS_INLINE_FUNCTION double data_at(Data kind, const IntVect& p, IndexType t, double h, int c, int dim) {
+  return kind == Data::linear ? at(p, t, h, c, dim) : kind == Data::quadratic ? quad_at(p, t, h, c, dim) : noise(p, c);
 }
 
 // Cells whose centre lies within w of the circle (sphere) of radius 0.25
@@ -86,28 +110,30 @@ Hierarchy::Tagger ring(const Hierarchy& h, double cx) {
   };
 }
 
-void set_points(const soma::amr::LevelField<double>& f, double h, int dim, bool smooth) {
+void set_points(const soma::amr::LevelField<double>& f, double h, int dim, Data kind) {
   const auto v = f.view();
   const IndexType t = f.type();
   const int ncomp = f.ncomp();
   soma::amr::for_each_point(f, soma::amr::Region::valid, KOKKOS_LAMBDA(int b, int i, int j, int k) {
-    for (int c = 0; c < ncomp; ++c) v.patch(b)(i, j, k, c) = smooth ? at(IntVect{{i, j, k}}, t, h, c, dim) : noise(IntVect{{i, j, k}}, c);
+    for (int c = 0; c < ncomp; ++c) v.patch(b)(i, j, k, c) = data_at(kind, IntVect{{i, j, k}}, t, h, c, dim);
   });
 }
 
-// Exact linear values in the ghost regions outside the domain.
+// Exact values in the ghost regions outside the domain.
 struct ExactBoundary {
   double dx0;
   int dim;
+  Data kind;
   void operator()(const soma::amr::LevelField<double>& f, int level, int box, const Box& region, int, int) const {
     const auto v = f.view();
     const IndexType t = f.type();
     const int ncomp = f.ncomp(), d = dim;
     const double h = dx0 / (1 << level);
+    const Data k = kind;
     Kokkos::parallel_for(
         "exact_boundary", Kokkos::RangePolicy<Kokkos::IndexType<std::int64_t>>(0, region.num_pts()), KOKKOS_LAMBDA(std::int64_t q) {
           const IntVect p = soma::amr::detail::point_of(region, q);
-          for (int c = 0; c < ncomp; ++c) v.patch(box)(p[0], p[1], p[2], c) = at(p, t, h, c, d);
+          for (int c = 0; c < ncomp; ++c) v.patch(box)(p[0], p[1], p[2], c) = data_at(k, p, t, h, c, d);
         });
     Kokkos::fence();
   }
@@ -214,20 +240,23 @@ TEST(AmrRegrid, GridsCoverTagsAndNest) {
   }
 }
 
-TEST(AmrRegrid, LinearDataMoveExactly) {
+// Linear data under linear prolongation, quadratic data under quadratic.
+TEST(AmrRegrid, DataTheRuleReproducesMoveExactly) {
+  for (const Interp interp : {Interp::linear, Interp::quadratic}) {
+  const Data kind = interp == Interp::linear ? Data::linear : Data::quadratic;
   for (const int dim : {2, 3}) {
     const Config s = config(dim);
-    const ExactBoundary exact{1.0 / s.geom.domain.length(0), dim};
+    const ExactBoundary exact{1.0 / s.geom.domain.length(0), dim, kind};
     for (const IndexType t : {IndexType::cell(), IndexType::node(dim), IndexType::face(0)}) {
-      SCOPED_TRACE(testing::Message() << "dim " << dim << " type " << int(t.nodal));
+      SCOPED_TRACE(testing::Message() << "quadratic " << (interp == Interp::quadratic) << " dim " << dim << " type " << int(t.nodal));
       Hierarchy h(s.geom, s.opts);
       auto u = h.make_field<double>(t, 2, 1);
-      set_points(u[0], h.dx(0, 0), dim, true);
+      set_points(u[0], h.dx(0, 0), dim, kind);
       // The ring moves each cycle: new boxes take prolonged data, the
       // others keep theirs.
       for (int cycle = 0; cycle < 4; ++cycle) {
         // Against the low x side first, the slopes there reading ghosts.
-        h.regrid(ring(h, 0.2 + 0.1 * cycle), Interp::linear, exact, u);
+        h.regrid(ring(h, 0.2 + 0.1 * cycle), interp, exact, u);
         ASSERT_EQ(u.size(), static_cast<std::size_t>(h.num_levels()));
         for (int l = 0; l < h.num_levels(); ++l) {
           const auto& f = u[static_cast<std::size_t>(l)];
@@ -239,7 +268,7 @@ TEST(AmrRegrid, LinearDataMoveExactly) {
               const IntVect p = soma::amr::detail::point_of(g, q);
               if (!v.contains(p)) continue;
               for (int c = 0; c < 2; ++c) {
-                ASSERT_NEAR(d(static_cast<std::size_t>(f.offset(b) + q + g.num_pts() * c)), at(p, t, h.dx(l, 0), c, dim), 1e-11)
+                ASSERT_NEAR(d(static_cast<std::size_t>(f.offset(b) + q + g.num_pts() * c)), data_at(kind, p, t, h.dx(l, 0), c, dim), 1e-11)
                     << "cycle " << cycle << " level " << l << " point " << p[0] << "," << p[1] << "," << p[2];
               }
             }
@@ -248,6 +277,7 @@ TEST(AmrRegrid, LinearDataMoveExactly) {
       }
       EXPECT_EQ(h.num_levels(), 3);
     }
+  }
   }
 }
 
@@ -269,7 +299,7 @@ TEST(AmrRegrid, SameBoxesKeepTheData) {
     }
     EXPECT_GE(cycles, 2);
     ASSERT_EQ(h.num_levels(), 3);
-    for (const auto& f : u) set_points(f, 0.0, dim, false);
+    for (const auto& f : u) set_points(f, 0.0, dim, Data::noise);
     h.average_down(u);
     std::vector<std::vector<double>> before;
     for (const auto& f : u) before.push_back(host_valid(f));
@@ -278,7 +308,7 @@ TEST(AmrRegrid, SameBoxesKeepTheData) {
     // v is not restricted: after the regrid its finest level is unchanged
     // and the levels below are its averages.
     auto v = h.make_field<double>(IndexType::cell(), 1, 1);
-    for (const auto& f : v) set_points(f, 0.0, dim, false);
+    for (const auto& f : v) set_points(f, 0.0, dim, Data::noise);
     const std::vector<double> v_finest = host_valid(v.back());
     h.regrid(ring(h, 0.5), Interp::linear, soma::amr::NoBoundary{}, u, w, v);
     EXPECT_EQ(host_valid(v.back()), v_finest);
@@ -301,7 +331,7 @@ TEST(AmrRegrid, FailedRegridChangesNothing) {
   h.regrid(ring(h, 0.5), Interp::linear, soma::amr::NoBoundary{});
   auto u = h.make_field<double>(IndexType::cell(), 1, 1);
   auto bare = h.make_field<double>(IndexType::cell(), 1, 0);
-  for (const auto& f : u) set_points(f, 0.0, 2, false);
+  for (const auto& f : u) set_points(f, 0.0, 2, Data::noise);
   const auto before = host_valid(u[1]);
   const BoxList level1 = h.boxes(1).boxes();
   // Linear prolongation needs ghosts: the second field throws after the
@@ -310,12 +340,14 @@ TEST(AmrRegrid, FailedRegridChangesNothing) {
     h.regrid(ring(h, 0.5), Interp::linear, soma::amr::NoBoundary{}, u, bare);
     ADD_FAILURE() << "no exception";
   } catch (const std::invalid_argument& e) {
-    EXPECT_NE(std::string(e.what()).find("needs a field with ghosts"), std::string::npos) << e.what();
+    EXPECT_NE(std::string(e.what()).find("need a field with ghosts"), std::string::npos) << e.what();
   }
   EXPECT_EQ(h.num_levels(), 2);
   EXPECT_EQ(h.boxes(1).boxes(), level1);
   EXPECT_EQ(u[1].boxes().boxes(), level1);
   EXPECT_EQ(host_valid(u[1]), before);
+  EXPECT_THROW(h.transfer(h, bare, Interp::quadratic), std::invalid_argument);
+  EXPECT_NO_THROW(h.transfer(h, bare, Interp::piecewise_constant));
   // A field of another hierarchy, and hierarchies over other domains.
   EXPECT_THROW(h.transfer(h, Hierarchy(s.geom, s.opts).make_field<double>(IndexType::cell(), 1, 1)), std::invalid_argument);
   Hierarchy moved(s.geom, s.opts);
