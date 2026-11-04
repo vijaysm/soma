@@ -74,6 +74,14 @@ All notable changes to SOMA are recorded here. The format follows
   explicit entities or a live field is defined on it; `FieldRegistry::uses_dimension` tells.
 - CSR scans sum in 64 bits and throw `std::length_error` when a total does not fit `Offset`.
 
+- `soma/topology/nodes.hpp`: MOAB's mid-node configurations. `mid_node_bits(t, count)` gives
+  the mid-edge (2), mid-face (4) and mid-region (8) bits of a node count, as `CN::HasMidNodes`,
+  or -1 for a count that is none; `num_nodes(t, bits)` the count; `node_parent(t, count, k)` the
+  sub-entity node k sits on, as `CN::HONodeParent`. Checked against MOAB for every type and
+  every count up to 27 (35 configurations beyond the linear ones).
+- Derivation keeps the nodes of the high-order sides it adopts (a Quad8 face of a hex);
+  derived sides have none.
+
 ### Node tables
 
 - Reference-element node coordinates for edge, triangle, quad, tetrahedron, prism, hex and
@@ -164,6 +172,17 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `soma::vertex_span_report(mesh, dim)` gives the mean and largest vertex span (max - min
   vertex local id) of the elements of one dimension, a host-side measure of how well an
   ordering keeps the vertices of an element close in memory.
+- High-order elements, MOAB's way: the connectivity keeps the corners, and each element's other
+  nodes (mid-edge, mid-face, mid-region, in MOAB's order) are vertices listed in
+  `EntityBlock::node_offsets`/`nodes` (`Mesh::has_nodes`, `node_offsets`, `nodes`;
+  `MeshView::num_nodes` and `node`, corners first). Vertices that are nodes and no element's
+  corner are numbered after the others, so `[0, Mesh::corners())` are the corners; a hanging
+  node that is another element's corner stays among them. Neighbours need not agree on a
+  shared side's nodes. Mirrors, clones and moves carry the nodes.
+- `MeshBuilder::add_elements(t, gids, node_gids, nodes_per_element)` takes the corners then
+  the other nodes of each element; a count that is no configuration of `t`, or an unknown node
+  gid, throws. Elements are ordered by (topology, arity, node count, key, gid), so each node
+  count is contiguous within its segment; the curve key is the corners' centroid.
 - `Domain::all`, `Domain::segments` (with `SegmentFilter` on topology, arity and ownership)
   and `Domain::from_list` take a mesh, and `make_space` builds spaces from the mesh topology.
 
@@ -254,8 +273,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   with the file's default and global values: 8-, 32- and 64-bit integers, f32, f64, arrays,
   opaque tags (`u8`, one component per byte) and bit tags (one `u8`). Value types it does not
   read are listed in an `H5mReport` instead. Files
-  that are not MOAB meshes, element types it does not read (Polyhedron, Knife, high-order
-  connectivity), out-of-range or overlapping ids, malformed `poly_indices` and duplicate tag
+  that are not MOAB meshes, element types it does not read (Polyhedron, Knife), node counts
+  that are no configuration of their type, out-of-range or overlapping ids, malformed `poly_indices` and duplicate tag
   values throw `std::runtime_error` naming the file and the dataset; HDF5 prints nothing.
 - `read_h5m` reads entity sets, with or without tags: contents id by id or as ranges that may
   cross groups, children, parents and flags; a set's gid is its file id. Tag values on sets
@@ -298,6 +317,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   (`FieldRegistry::tag_format`, `set_tag_format`, checked against the value type); `read_h5m`
   records it for fields and mesh values (`MeshValue::format`), and rejects classes MOAB does
   not have.
+- `read_h5m` reads high-order groups (`Hex27`, `Tri6`, ...) in every configuration MOAB
+  writes, mixed and non-conforming ones too; `write_h5m` writes each node count as its own
+  `<Type><count>` group with the corners then the nodes, and rejects leaving out a dimension
+  whose entities have nodes. MOAB parity: every configuration of the bundled hexes, 2D and
+  one-of-each-type meshes, converted by MOAB, reads with MOAB's counts, coordinates and node
+  lists, and MOAB loads SOMA's copies alike.
 - `EntityBlock::input` and `Mesh::input(d)` mark the dimensions `MeshBuilder` was given;
   derivation and mirrors keep the mark.
 
