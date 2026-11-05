@@ -12,6 +12,7 @@
 #include <tuple>
 #include <utility>
 
+#include "soma/core/mesh_builder.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/route.hpp"
@@ -230,6 +231,182 @@ detail::Placement detail::place_closure(const Comm& comm, const HostMesh& mesh, 
   }
   fill_rows(static_cast<std::size_t>(mesh.count(0)), vpairs, out.offsets[0], out.ranks[0]);
   return out;
+}
+
+namespace {
+
+// An entity on its way: gid, topology, corner count, node count beyond the
+// corners, then the corners' and nodes' gids, padded to the widest.
+constexpr std::size_t entity_header = sizeof(GO) + 3 * sizeof(std::int32_t);
+
+struct Received {
+  GO gid = 0;
+  Topology topology = Topology::vertex;
+  std::int32_t corners = 0;
+  std::int32_t extra = 0;
+  std::vector<GO> nodes;
+};
+
+// Fields other than the internal sharing ones.
+bool has_user_fields(const HostMesh& mesh) {
+  for (const FieldInfo& f : mesh.fields().list()) {
+    if (f.name != sharing_field && f.name != owner_field) return true;
+  }
+  return false;
+}
+
+// The graphs held on any rank, and a downward graph to each dimension that
+// some rank holds, none was given to the builder and no held graph builds.
+AdjacencyRequest graphs_to_rebuild(const Comm& comm, const HostMesh& mesh) {
+  std::array<std::int32_t, adjacency_slots + 8> f{};
+  const std::uint32_t bits = mesh.adjacencies().bits();
+  for (int s = 0; s < adjacency_slots; ++s) f[static_cast<std::size_t>(s)] = (bits >> s) & 1u;
+  for (int d = 0; d < 4; ++d) {
+    const bool here = d <= mesh.dim() && mesh.count(d) > 0;
+    f[adjacency_slots + static_cast<std::size_t>(d)] = here ? 1 : 0;
+    f[adjacency_slots + 4 + static_cast<std::size_t>(d)] = here && mesh.input(d) ? 1 : 0;
+  }
+  comm.allreduce(std::span<std::int32_t>(f), Op::max);
+  std::uint32_t held = 0;
+  std::array<bool, 4> built{};
+  for (int s = 0; s < adjacency_slots; ++s) {
+    if (f[static_cast<std::size_t>(s)] == 0) continue;
+    held |= 1u << s;
+    const int a = s < 16 ? s / 4 : (s - 16) / 4, b = s < 16 ? s % 4 : (s - 16) % 4;
+    built[static_cast<std::size_t>(a)] = built[static_cast<std::size_t>(b)] = true;
+  }
+  AdjacencyRequest r = AdjacencyRequest::from_bits(held);
+  for (int d = 1; d < mesh.dim(); ++d) {
+    const auto k = static_cast<std::size_t>(d);
+    if (f[adjacency_slots + k] != 0 && f[adjacency_slots + 4 + k] == 0 && !built[k]) r.add(mesh.dim(), d);
+  }
+  return r;
+}
+
+}  // namespace
+
+HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> dest, Ordering ordering) {
+  const int p = comm.size(), top = mesh.dim();
+  const auto n_top = static_cast<std::size_t>(mesh.count(top));
+  std::array<std::int32_t, 3> flags{
+      dest.size() != n_top || std::any_of(dest.begin(), dest.end(), [p](int r) { return r < 0 || r >= p; }) ? 1 : 0,
+      mesh.edited() ? 1 : 0, has_user_fields(mesh) || mesh.sets().count() > 0 ? 1 : 0};
+  comm.allreduce(std::span<std::int32_t>(flags), Op::max);
+  if (flags[0] != 0) throw std::invalid_argument("migrate: a rank's dest does not give one rank of the communicator per element");
+  if (flags[1] != 0) throw std::logic_error("migrate: a rank's mesh holds edits; compress() it first");
+  if (flags[2] != 0) throw std::invalid_argument("migrate: a rank's mesh has fields or sets, which migrate does not carry yet");
+
+  std::vector<std::size_t> offsets(n_top + 1);
+  for (std::size_t i = 0; i <= n_top; ++i) offsets[i] = i;
+  const detail::Placement where = detail::place_closure(comm, mesh, offsets, dest);
+
+  // Vertices with their coordinates.
+  const auto vgid = mesh.gid(0);
+  const auto xyz = mesh.coords();
+  std::vector<int> to;
+  std::vector<LO> which;
+  for (LO e = 0; e < mesh.count(0); ++e) {
+    for (const int r : where.of(0, e)) {
+      to.push_back(r);
+      which.push_back(e);
+    }
+  }
+  const Batch vin = route(comm, to, sizeof(GO) + 3 * sizeof(Real), [&](std::size_t i, std::byte* row) {
+    const LO e = which[i];
+    put(row, 0, vgid(e));
+    for (std::size_t q = 0; q < 3; ++q) put(row, sizeof(GO) + q * sizeof(Real), xyz(e, q));
+  });
+
+  // Entities of every other dimension, padded to the widest.
+  std::vector<std::pair<int, LO>> sent;
+  std::int64_t widest = 0;
+  to.clear();
+  for (int d = 1; d <= top; ++d) {
+    const auto off = mesh.conn_offsets(d);
+    const auto noff = mesh.node_offsets(d);
+    for (LO e = 0; e < mesh.count(d); ++e) {
+      const std::span<const int> rs = where.of(d, e);
+      if (rs.empty()) continue;
+      const Offset n = off(e + 1) - off(e) + (mesh.has_nodes(d) ? noff(e + 1) - noff(e) : 0);
+      widest = std::max<std::int64_t>(widest, static_cast<std::int64_t>(n));
+      for (const int r : rs) {
+        to.push_back(r);
+        sent.emplace_back(d, e);
+      }
+    }
+  }
+  widest = comm.allreduce(widest, Op::max);
+  const std::size_t width = entity_header + static_cast<std::size_t>(widest) * sizeof(GO);
+  const Batch ein = route(comm, to, width, [&](std::size_t i, std::byte* row) {
+    const auto [d, e] = sent[i];
+    const auto off = mesh.conn_offsets(d);
+    const auto conn = mesh.conn(d);
+    const auto corners = static_cast<std::int32_t>(off(e + 1) - off(e));
+    std::int32_t extra = 0;
+    std::size_t at = entity_header;
+    for (Offset k = off(e); k < off(e + 1); ++k, at += sizeof(GO)) put(row, at, vgid(conn(k)));
+    if (mesh.has_nodes(d)) {
+      const auto noff = mesh.node_offsets(d);
+      const auto nodes = mesh.nodes(d);
+      extra = static_cast<std::int32_t>(noff(e + 1) - noff(e));
+      for (Offset k = noff(e); k < noff(e + 1); ++k, at += sizeof(GO)) put(row, at, vgid(nodes(k)));
+    }
+    put(row, 0, mesh.gid(d)(e));
+    put(row, sizeof(GO), static_cast<std::int32_t>(mesh.topology(d)(e)));
+    put(row, sizeof(GO) + sizeof(std::int32_t), corners);
+    put(row, sizeof(GO) + 2 * sizeof(std::int32_t), extra);
+  });
+
+  // The builder takes what arrived: vertices, then each kind of entity.
+  MeshBuilder b(top);
+  {
+    std::vector<GO> g(vin.size());
+    std::vector<Real> c(3 * vin.size());
+    for (std::size_t i = 0; i < vin.size(); ++i) {
+      g[i] = take<GO>(&vin.payload(i, 0), 0);
+      for (std::size_t q = 0; q < 3; ++q) c[3 * i + q] = take<Real>(&vin.payload(i, 0), sizeof(GO) + q * sizeof(Real));
+    }
+    b.add_vertices(g, c);
+  }
+  std::vector<Received> got(ein.size());
+  for (std::size_t i = 0; i < ein.size(); ++i) {
+    const std::byte* row = &ein.payload(i, 0);
+    Received& r = got[i];
+    r.gid = take<GO>(row, 0);
+    r.topology = static_cast<Topology>(take<std::int32_t>(row, sizeof(GO)));
+    r.corners = take<std::int32_t>(row, sizeof(GO) + sizeof(std::int32_t));
+    r.extra = take<std::int32_t>(row, sizeof(GO) + 2 * sizeof(std::int32_t));
+    r.nodes.resize(static_cast<std::size_t>(r.corners + r.extra));
+    for (std::size_t k = 0; k < r.nodes.size(); ++k) r.nodes[k] = take<GO>(row, entity_header + k * sizeof(GO));
+  }
+  std::stable_sort(got.begin(), got.end(), [](const Received& x, const Received& y) {
+    return std::tuple(x.topology, x.corners, x.extra) < std::tuple(y.topology, y.corners, y.extra);
+  });
+  for (std::size_t i = 0; i < got.size();) {
+    std::size_t j = i;
+    std::vector<GO> gids, nodes;
+    std::vector<Offset> offs{0};
+    for (; j < got.size() && got[j].topology == got[i].topology &&
+           (got[i].topology == Topology::polygon || (got[j].corners == got[i].corners && got[j].extra == got[i].extra));
+         ++j) {
+      gids.push_back(got[j].gid);
+      nodes.insert(nodes.end(), got[j].nodes.begin(), got[j].nodes.end());
+      offs.push_back(static_cast<Offset>(nodes.size()));
+    }
+    if (got[i].topology == Topology::polygon) {
+      b.add_polygons(gids, offs, nodes);
+    } else if (got[i].extra == 0) {
+      b.add_elements(got[i].topology, gids, nodes);
+    } else {
+      b.add_elements(got[i].topology, gids, nodes, got[i].corners + got[i].extra);
+    }
+    i = j;
+  }
+  const AdjacencyRequest graphs = graphs_to_rebuild(comm, mesh);
+  HostMesh part = build_local_part(comm, std::move(b), ordering);
+  if (!graphs.empty()) build_distributed_adjacencies(comm, part, graphs);
+  part.values() = mesh.values();
+  return part;
 }
 
 }  // namespace soma

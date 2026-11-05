@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "soma/core/mesh.hpp"
+#include "soma/core/ordering.hpp"
 #include "soma/parallel/comm.hpp"
 
 namespace soma {
@@ -47,6 +48,21 @@ struct Placement {
                                       std::span<const int> to_ranks);
 
 }  // namespace detail
+
+// Moves each element of the mesh's dimension to rank dest[e] (one per
+// element, by lid; a copy of a shared element follows its owner's) with its
+// closure, placed as detail::place_closure places it, and returns the new
+// part (design §21.9). Entities keep their gids, topology, corners and
+// nodes, vertices their coordinates; the dimensions given to the builder on
+// any rank are given again, the others are derived again with the graphs held
+// on any rank (derived gids do not depend on the partition), and
+// build_local_part resolves the sharing. Mesh values are copied. Collective;
+// the mesh given is not changed. Throws on every rank: std::invalid_argument
+// for a dest without one rank of comm per element, or a mesh with fields or
+// sets, which are not carried yet; std::logic_error for an edited mesh
+// (compress it first).
+[[nodiscard]] HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> dest,
+                               Ordering ordering = default_ordering);
 
 }  // namespace soma
 
