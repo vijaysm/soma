@@ -12,11 +12,14 @@
 //
 //   soma:sharing  variable-length int on the shared entities of both kinds:
 //                 the other ranks holding each, ascending; row e - interior_end.
-//   soma:owner    int on the shared copies (and, later, ghosts): the owning
-//                 rank; row e - owned_end.
+//   soma:owner    int on the shared copies and ghosts: the owning rank;
+//                 row e - owned_end.
 //
 // Kernels test ownership by segment ends and never read these fields;
 // exchanges are built from them once.
+
+#include <array>
+#include <vector>
 
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_builder.hpp"
@@ -36,6 +39,16 @@ inline constexpr const char* owner_field = "soma:owner";
 // shared like vertices. Throws as MeshBuilder::build and resolve_sharing, on
 // every rank if any rank's input is invalid.
 [[nodiscard]] HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder,
+                                        Ordering ordering = default_ordering);
+
+// As above, with the gids of each dimension that this rank holds only as
+// ghosts (through ghost elements): they are never shared, come after the
+// shared copies ordered by owner, and soma:owner gives their owner, the
+// lowest rank holding them otherwise. Throws std::invalid_argument on every
+// rank if a rank names a ghost it does not hold or one no rank holds
+// otherwise.
+[[nodiscard]] HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder,
+                                        const std::array<std::vector<GO>, 4>& ghosts,
                                         Ordering ordering = default_ordering);
 
 // Collective: builds the requested graphs on a local part, then gives each

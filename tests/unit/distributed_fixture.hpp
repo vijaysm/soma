@@ -49,12 +49,11 @@ inline std::map<GO, int> cell_ranks(const Comm& c) {
   return out;
 }
 
-inline soma::MeshBuilder local_builder(const std::map<GO, int>& rank_of, int me) {
+// The cells named (gids 1000 + cell) with their vertices.
+inline soma::MeshBuilder cells_builder(const std::vector<GO>& cells) {
   std::set<GO> used;
-  std::vector<GO> cells, conn;
-  for (const auto& [cell, r] : rank_of) {
-    if (r != me) continue;
-    cells.push_back(cell);
+  std::vector<GO> conn;
+  for (const GO cell : cells) {
     for (const GO v : corners(static_cast<int>(cell - 1000))) {
       conn.push_back(v);
       used.insert(v);
@@ -67,6 +66,14 @@ inline soma::MeshBuilder local_builder(const std::map<GO, int>& rank_of, int me)
   b.add_vertices(vg, xyz);
   b.add_elements(soma::Topology::quad, cells, conn);
   return b;
+}
+
+inline soma::MeshBuilder local_builder(const std::map<GO, int>& rank_of, int me) {
+  std::vector<GO> cells;
+  for (const auto& [cell, r] : rank_of) {
+    if (r == me) cells.push_back(cell);
+  }
+  return cells_builder(cells);
 }
 
 

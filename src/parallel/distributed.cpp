@@ -46,14 +46,17 @@ void install(HostMesh& mesh, const Comm& comm, int dim, std::span<const GO> gids
   std::vector<int> owners;
   for (LO e = t.owned_end; e < t.shared_end; ++e) owners.push_back(sharing.owner(find(gid(e)), comm.rank()));
 
-  SegmentFilter shared, copies;
+  for (LO e = t.shared_end; e < mesh.count(dim); ++e) owners.push_back(sharing.owner(find(gid(e)), comm.rank()));
+
+  SegmentFilter shared;
   shared.ownership = SegmentFilter::Own::shared;
-  copies.ownership = SegmentFilter::Own::shared_copy;
+  std::vector<LO> others(static_cast<std::size_t>(mesh.count(dim) - t.owned_end));
+  std::iota(others.begin(), others.end(), t.owned_end);
   auto& reg = mesh.fields();
   reg.add_var<int>(sharing_field, make_space(mesh, Domain<Kokkos::HostSpace>::segments(mesh, dim, shared), Layout::per_entity()),
                    offsets, ranks);
   auto owner = reg.add<int>(owner_field,
-                            make_space(mesh, Domain<Kokkos::HostSpace>::segments(mesh, dim, copies), Layout::per_entity()), 1);
+                            make_space(mesh, Domain<Kokkos::HostSpace>::from_list(mesh, dim, others), Layout::per_entity()), 1);
   for (std::size_t r = 0; r < owners.size(); ++r) owner.view()(r, 0) = owners[r];
 }
 
@@ -185,6 +188,11 @@ void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRe
 }
 
 HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, Ordering ordering) {
+  return build_local_part(comm, std::move(builder), std::array<std::vector<GO>, 4>{}, ordering);
+}
+
+HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, const std::array<std::vector<GO>, 4>& ghosts,
+                          Ordering ordering) {
   // Every dimension the builder holds on some rank, the vertices always.
   std::array<std::vector<GO>, 4> gids;
   gids[0].assign(builder.vertex_gids().begin(), builder.vertex_gids().end());
@@ -194,9 +202,25 @@ HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, Ordering orde
     held[static_cast<std::size_t>(d)] = gids[static_cast<std::size_t>(d)].empty() ? 0 : 1;
   }
   comm.allreduce(std::span<std::int32_t>(held), Op::max);
+  // Ghost flags per gid given; a ghost the builder does not hold fails.
+  std::array<std::vector<std::uint8_t>, 4> flags;
+  bool stray = false;
+  for (std::size_t d = 0; d < 4; ++d) {
+    if (ghosts[d].empty()) continue;
+    std::vector<GO> g = ghosts[d];
+    std::sort(g.begin(), g.end());
+    std::vector<GO> h = gids[d];
+    std::sort(h.begin(), h.end());
+    stray = stray || !std::includes(h.begin(), h.end(), g.begin(), g.end());
+    flags[d].resize(gids[d].size());
+    for (std::size_t i = 0; i < gids[d].size(); ++i) flags[d][i] = std::binary_search(g.begin(), g.end(), gids[d][i]) ? 1 : 0;
+  }
+  if (comm.allreduce(static_cast<std::int32_t>(stray), Op::max)) {
+    throw std::invalid_argument("build_local_part: a rank names a ghost it does not hold");
+  }
   std::array<std::optional<Sharing>, 4> sharing;
   for (std::size_t d = 0; d < 4; ++d) {
-    if (held[d]) sharing[d] = resolve_sharing(comm, gids[d]);
+    if (held[d]) sharing[d] = resolve_sharing(comm, gids[d], flags[d]);
   }
 
   // The box of every rank's vertices: maxima of the highs and of the negated lows.
