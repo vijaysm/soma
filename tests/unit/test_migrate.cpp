@@ -16,11 +16,13 @@
 #include <gtest/gtest.h>
 
 #include "distributed_fixture.hpp"
+#include "soma/core/handle_ref.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/mesh_edit.hpp"
 #include "soma/core/mesh_values.hpp"
 #include "soma/core/set_builder.hpp"
 #include "soma/core/sets.hpp"
+#include "soma/fields/domain_mesh.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/migrate.hpp"
@@ -639,4 +641,210 @@ TEST(Migrate, SetsOfDerivedEntitiesFollowThem) {
   }
   EXPECT_EQ(in_order, want);
   EXPECT_EQ(seq.size(), want.size());
+}
+
+namespace {
+
+// The lowest corner gid of entity (d, e).
+GO low_corner(const soma::HostMesh& m, int d, LO e) {
+  const std::vector<GO> c = nodes_of(m, d, e);
+  return *std::min_element(c.begin(), c.end());
+}
+
+// The rows of entity (d, e) in field f.
+template <class F>
+soma::RowRange rows_of(const F& f, int d, LO e) {
+  return f.space().entity_rows(d, e);
+}
+
+constexpr GO field_set = 500;
+
+// Fields of every kind, valued by gid: on all vertices (two components,
+// default, global value, tag format), on even cells, on all derived edges, on
+// cell nodes (order 2), variable length on every third vertex, handles on
+// cells, one field over vertices and every third cell, and one on sets.
+void add_fields(soma::HostMesh& m) {
+  soma::SetSpec s;
+  s.gid = field_set;
+  soma::SetBuilder sb;
+  sb.add(std::move(s));
+  std::move(sb).install(m);
+  auto& reg = m.fields();
+  const auto list = [&](int d, auto keep) {
+    std::vector<LO> out;
+    for (LO e = 0; e < m.count(d); ++e) {
+      if (keep(m.gid(d)(e))) out.push_back(e);
+    }
+    return out;
+  };
+  {
+    soma::FieldOptions<double> o;
+    o.default_value = std::vector<double>{-1, -2};
+    o.global_value = std::vector<double>{7, 8};
+    auto f = reg.add_tag<double>("temp", 0, 2, o);
+    for (LO e = 0; e < m.count(0); ++e) {
+      f.view()(e, 0) = static_cast<double>(m.gid(0)(e));
+      f.view()(e, 1) = 2.0 * static_cast<double>(m.gid(0)(e));
+    }
+    reg.set_tag_format(reg.family<double>("temp", 2), soma::TagFormat{2, soma::TagFormat::Kind::plain, 0});
+  }
+  {
+    const auto lids = list(2, [](GO g) { return g % 2 == 0; });
+    auto f = reg.add<std::int32_t>("flag", soma::Space<Kokkos::HostSpace>(soma::Domain<Kokkos::HostSpace>::from_list(m, 2, lids), soma::Layout::per_entity()), 1);
+    for (LO e : lids) f.view()(rows_of(f, 2, e).begin, 0) = static_cast<std::int32_t>(3 * m.gid(2)(e));
+  }
+  {
+    auto f = reg.add_tag<float>("low", 1, 1);
+    for (LO e = 0; e < m.count(1); ++e) f.view()(e, 0) = static_cast<float>(low_corner(m, 1, e));
+  }
+  {
+    const auto sp = soma::make_space(m, soma::Domain<Kokkos::HostSpace>::all(m, 2), soma::Layout::element_nodes(soma::NodeFamily::gll, 2));
+    auto f = reg.add<double>("q", sp, 1);
+    for (LO e = 0; e < m.count(2); ++e) {
+      const auto r = rows_of(f, 2, e);
+      for (LO k = r.begin; k < r.end; ++k) f.view()(k, 0) = 100.0 * static_cast<double>(m.gid(2)(e)) + (k - r.begin);
+    }
+  }
+  {
+    const auto lids = list(0, [](GO g) { return g % 3 == 0; });
+    std::vector<soma::Offset> off{0};
+    std::vector<std::int64_t> v;
+    for (LO e : lids) {
+      const GO g = m.gid(0)(e);
+      for (GO k = 0; k < g % 4; ++k) v.push_back(g + k);
+      off.push_back(static_cast<soma::Offset>(v.size()));
+    }
+    soma::FieldOptions<std::int64_t> o;
+    o.default_value = std::vector<std::int64_t>{};
+    reg.add_var<std::int64_t>("hist", soma::Space<Kokkos::HostSpace>(soma::Domain<Kokkos::HostSpace>::from_list(m, 0, lids), soma::Layout::per_entity()), off, v, o);
+  }
+  {
+    soma::FieldOptions<GO> o;
+    o.handle = true;
+    auto f = reg.add_tag<GO>("ref", 2, 1, o);
+    for (LO e = 0; e < m.count(2); ++e) f.view()(e, 0) = soma::make_handle(0, low_corner(m, 2, e));
+  }
+  {
+    const auto lids = list(2, [](GO g) { return g % 3 == 0; });
+    const auto d = soma::Domain<Kokkos::HostSpace>::combine(soma::Domain<Kokkos::HostSpace>::all(m, 0),
+                                                           soma::Domain<Kokkos::HostSpace>::from_list(m, 2, lids));
+    auto f = reg.add<std::int32_t>("multi", soma::Space<Kokkos::HostSpace>(d, soma::Layout::per_entity()), 1);
+    for (LO e = 0; e < m.count(0); ++e) f.view()(rows_of(f, 0, e).begin, 0) = static_cast<std::int32_t>(m.gid(0)(e) + 1);
+    for (LO e : lids) f.view()(rows_of(f, 2, e).begin, 0) = static_cast<std::int32_t>(m.gid(2)(e) + 1);
+  }
+  {
+    auto f = reg.add_tag<std::int32_t>("on_sets", soma::set_dim, 1);
+    f.view()(0, 0) = 11;
+  }
+}
+
+}  // namespace
+
+// Fields keep their options, layout and tag format; each entity's values
+// follow it; a domain over every entity stays full, one over some holds the
+// members that arrived.
+TEST(Migrate, FieldsFollowTheirEntities) {
+  const Comm c = Comm::world();
+  const int me = c.rank(), p = c.size();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  soma::HostMesh m = soma::build_local_part(c, local_builder(rank_of, me));
+  soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
+  add_fields(m);
+  const soma::HostMesh part = soma::migrate(c, m, one_rank_up(m, rank_of, p));
+  const auto& reg = part.fields();
+  const auto members = [&](const auto& f, int d) {
+    std::vector<GO> out;
+    for (LO e = 0; e < part.count(d); ++e) {
+      if (rows_of(f, d, e).valid()) out.push_back(part.gid(d)(e));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+  };
+  const auto every = [&](int d, auto keep) {
+    std::vector<GO> out;
+    for (LO e = 0; e < part.count(d); ++e) {
+      if (keep(part.gid(d)(e))) out.push_back(part.gid(d)(e));
+    }
+    std::sort(out.begin(), out.end());
+    return out;
+  };
+  const auto all = [](GO) { return true; };
+
+  const auto temp = reg.get<double>("temp");
+  EXPECT_EQ(temp.default_value(), (std::vector<double>{-1, -2}));
+  EXPECT_EQ(temp.global_value(), (std::vector<double>{7, 8}));
+  EXPECT_EQ(temp.domain().info(0).kind, soma::DomainKind::full);
+  EXPECT_EQ(reg.tag_format(reg.family<double>("temp", 2)), (soma::TagFormat{2, soma::TagFormat::Kind::plain, 0}));
+  for (LO e = 0; e < part.count(0); ++e) {
+    EXPECT_EQ(temp.value_or_default(0, e, 0), static_cast<double>(part.gid(0)(e)));
+    EXPECT_EQ(temp.value_or_default(0, e, 1), 2.0 * static_cast<double>(part.gid(0)(e)));
+  }
+
+  const auto flag = reg.get<std::int32_t>("flag");
+  EXPECT_FALSE(flag.has_default());
+  EXPECT_EQ(members(flag, 2), every(2, [](GO g) { return g % 2 == 0; }));
+  for (LO e = 0; e < part.count(2); ++e) {
+    if (part.gid(2)(e) % 2 == 0) EXPECT_EQ(flag.value_or_default(2, e), 3 * part.gid(2)(e));
+  }
+
+  const auto low = reg.get<float>("low");
+  EXPECT_EQ(low.domain().info(0).kind, soma::DomainKind::full);
+  for (LO e = 0; e < part.count(1); ++e) EXPECT_EQ(low.value_or_default(1, e), static_cast<float>(low_corner(part, 1, e)));
+
+  const auto q = reg.get<double>("q");
+  EXPECT_EQ(q.space().layout(), soma::Layout::element_nodes(soma::NodeFamily::gll, 2));
+  for (LO e = 0; e < part.count(2); ++e) {
+    const auto r = rows_of(q, 2, e);
+    ASSERT_EQ(r.end - r.begin, 9);
+    for (LO k = r.begin; k < r.end; ++k) EXPECT_EQ(q.view()(k, 0), 100.0 * static_cast<double>(part.gid(2)(e)) + (k - r.begin));
+  }
+
+  const auto hist = reg.get_var<std::int64_t>("hist");
+  EXPECT_TRUE(hist.has_default());
+  EXPECT_EQ(members(hist, 0), every(0, [](GO g) { return g % 3 == 0; }));
+  for (LO e = 0; e < part.count(0); ++e) {
+    const GO g = part.gid(0)(e);
+    if (g % 3 != 0) continue;
+    const LO r = hist.domain().row(0, e);
+    std::vector<std::int64_t> want, got;
+    for (GO k = 0; k < g % 4; ++k) want.push_back(g + k);
+    for (auto k = hist.offsets()(r); k < hist.offsets()(r + 1); ++k) got.push_back(hist.values()(k));
+    EXPECT_EQ(got, want);
+  }
+
+  const auto ref = reg.get<GO>("ref");
+  EXPECT_TRUE(reg.info(ref.id()).handle);
+  for (LO e = 0; e < part.count(2); ++e) EXPECT_EQ(ref.value_or_default(2, e), soma::make_handle(0, low_corner(part, 2, e)));
+
+  const auto multi = reg.get<std::int32_t>("multi");
+  EXPECT_EQ(members(multi, 0), every(0, all));
+  EXPECT_EQ(members(multi, 2), every(2, [](GO g) { return g % 3 == 0; }));
+  for (LO e = 0; e < part.count(0); ++e) EXPECT_EQ(multi.value_or_default(0, e), part.gid(0)(e) + 1);
+  for (LO e = 0; e < part.count(2); ++e) {
+    if (part.gid(2)(e) % 3 == 0) EXPECT_EQ(multi.value_or_default(2, e), part.gid(2)(e) + 1);
+  }
+
+  const auto on_sets = reg.get<std::int32_t>("on_sets");
+  EXPECT_EQ(on_sets.value_or_default(soma::set_dim, *part.sets().index_of(field_set)), 11);
+}
+
+// A field or mesh value the last rank declares differently.
+TEST(Migrate, FieldsThatDifferBetweenRanksThrowOnEveryRank) {
+  const Comm c = Comm::world();
+  if (c.size() == 1) GTEST_SKIP() << "needs two ranks";
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  const bool last = c.rank() == c.size() - 1;
+  for (int change = 0; change < 5; ++change) {
+    SCOPED_TRACE(change);
+    soma::HostMesh m = grid_with_extras(c, rank_of);
+    soma::FieldOptions<double> o;
+    if (last && change == 1) o.default_value = std::vector<double>{1};
+    if (last && change == 2) o.global_value = std::vector<double>{1};
+    (void)m.fields().add_tag<double>(last && change == 3 ? "other" : "x", 0, last && change == 0 ? 2 : 1, o);
+    soma::MeshValue v;
+    v.type = soma::DataType::i32;
+    v.default_value = soma::MeshValue::bytes_of<std::int32_t>(std::vector<std::int32_t>{last && change == 4 ? 1 : 0});
+    m.values().set("answer", v);
+    EXPECT_THROW((void)soma::migrate(c, m, one_rank_up(m, rank_of, c.size())), std::invalid_argument);
+  }
 }

@@ -8,12 +8,15 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <stdexcept>
+#include <string>
 #include <tuple>
 #include <utility>
 
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/set_builder.hpp"
+#include "soma/fields/domain_mesh.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/route.hpp"
@@ -248,12 +251,90 @@ struct Received {
   std::vector<GO> nodes;
 };
 
-// Fields other than the internal sharing ones.
-bool has_user_fields(const HostMesh& mesh) {
-  for (const FieldInfo& f : mesh.fields().list()) {
-    if (f.name != sharing_field && f.name != owner_field) return true;
+bool internal(const std::string& name) { return name == sharing_field || name == owner_field; }
+
+// A running hash of words and bytes.
+struct Hash {
+  std::uint64_t h = 0;
+  void add(std::uint64_t x) { h = transport::mix(h ^ transport::mix(x)); }
+  void bytes(const void* p, std::size_t n) {
+    add(n);
+    const auto* b = static_cast<const unsigned char*>(p);
+    for (std::size_t i = 0; i < n; i += sizeof(std::uint64_t)) {
+      std::uint64_t w = 0;
+      std::memcpy(&w, b + i, std::min(sizeof(std::uint64_t), n - i));
+      add(w);
+    }
   }
-  return false;
+  template <class T>
+  void values(const std::optional<std::vector<T>>& v) {
+    add(v.has_value());
+    if (v) bytes(v->data(), v->size() * sizeof(T));
+  }
+};
+
+// What every rank's fields and mesh values must agree on, internal fields
+// aside: per field in id order its name, value type, components, layout,
+// dimensions, flags, default, global value, tag format and values on sets;
+// per mesh value all of it.
+std::uint64_t field_list_hash(const HostMesh& mesh) {
+  Hash h;
+  const auto& reg = mesh.fields();
+  for (const FieldInfo& f : reg.list()) {
+    if (internal(f.name)) continue;
+    h.bytes(f.name.data(), f.name.size());
+    h.add(static_cast<std::uint64_t>(f.type));
+    h.add(static_cast<std::uint64_t>(f.ncomp));
+    h.add(f.variable);
+    h.add(f.handle);
+    const Layout& l = f.layout;
+    for (const int x : {static_cast<int>(l.kind), static_cast<int>(l.family), l.order, static_cast<int>(l.ordering),
+                        static_cast<int>(l.serendipity), l.quad_rule}) {
+      h.add(static_cast<std::uint64_t>(x));
+    }
+    for (const int d : f.dims) h.add(static_cast<std::uint64_t>(d));
+    h.add(~std::uint64_t{0});
+    const TagFormat& t = reg.tag_format(f.family);
+    for (const int x : {t.storage_class, static_cast<int>(t.kind), t.nbits}) h.add(static_cast<std::uint64_t>(x));
+    dispatch_data_type(f.type, [&]<class T>() {
+      if (f.variable) {
+        const auto v = reg.template get_var<T>(f.id);
+        h.values(v.default_value());
+        h.values(v.global_value());
+        const int b = v.domain().find_block(set_dim);
+        if (b < 0) return;
+        for (const LO l : v.domain().members(b)) {
+          const auto x = v.value_or_default(set_dim, l);
+          h.bytes(x.data(), x.size_bytes());
+        }
+        return;
+      }
+      const auto v = reg.template get<T>(f.id);
+      h.values(v.has_default() ? std::optional(v.default_value()) : std::nullopt);
+      h.values(v.has_global() ? std::optional(v.global_value()) : std::nullopt);
+      const int b = v.domain().find_block(set_dim);
+      if (b < 0) return;
+      for (const LO l : v.domain().members(b)) {
+        const RowRange r = v.space().entity_rows(set_dim, l);
+        for (LO k = r.begin; k < r.end; ++k) {
+          for (int c = 0; c < v.ncomp(); ++c) h.bytes(&v.view()(k, c), sizeof(T));
+        }
+      }
+    });
+  }
+  for (const std::string& n : mesh.values().names()) {
+    const MeshValue& v = mesh.values().at(n);
+    h.bytes(n.data(), n.size());
+    h.add(static_cast<std::uint64_t>(v.type));
+    h.add(static_cast<std::uint64_t>(v.ncomp));
+    h.add(v.handle);
+    for (const int x : {v.format.storage_class, static_cast<int>(v.format.kind), v.format.nbits}) {
+      h.add(static_cast<std::uint64_t>(x));
+    }
+    h.values(v.default_value);
+    h.values(v.global_value);
+  }
+  return h.h;
 }
 
 // The graphs held on any rank, and the connectivity (never held) of each
@@ -491,21 +572,205 @@ void move_sets(const Comm& comm, const HostMesh& mesh, HostMesh& part) {
   std::move(b).install(part);
 }
 
+// The domain of a field on the part, block by block: on sets as here; on a
+// dimension where it was full on every rank, full; else the members that
+// arrived (`arrived` per dimension, sorted and unique).
+Domain<Kokkos::HostSpace> part_domain(const Comm& comm, const HostMesh& part, const Domain<Kokkos::HostSpace>& old,
+                                      const std::array<std::vector<LO>, 4>& arrived) {
+  using HostDomain = Domain<Kokkos::HostSpace>;
+  std::array<std::int32_t, num_field_slots> full{};
+  for (int b = 0; b < old.num_blocks(); ++b) {
+    full[static_cast<std::size_t>(old.info(b).dim)] = old.info(b).kind == DomainKind::full ? 1 : 0;
+  }
+  comm.allreduce(std::span<std::int32_t>(full), Op::min);
+  HostDomain out;
+  for (int b = 0; b < old.num_blocks(); ++b) {
+    const int d = old.info(b).dim;
+    HostDomain blk;
+    if (full[static_cast<std::size_t>(d)] != 0) {
+      blk = HostDomain::all(part, d);
+    } else if (d == set_dim) {
+      const std::vector<LO> m = old.members(b);
+      blk = HostDomain::from_list(part, d, m);
+    } else {
+      blk = HostDomain::from_list(part, d, arrived[static_cast<std::size_t>(d)]);
+    }
+    out = b == 0 ? std::move(blk) : HostDomain::combine(out, blk);
+  }
+  return out;
+}
+
+void sort_unique(std::vector<LO>& v) {
+  std::sort(v.begin(), v.end());
+  v.erase(std::unique(v.begin(), v.end()), v.end());
+}
+
+// A field of fixed length: each value point row of an entity is deposited by
+// the entity's owner as (row within the entity, its components).
+template <class T>
+void move_field(const Comm& comm, const HostMesh& mesh, const FieldInfo& info, HostMesh& part) {
+  const auto f = mesh.fields().template get<T>(info.id);
+  const Domain<Kokkos::HostSpace>& dom = f.domain();
+  const auto nc = static_cast<std::size_t>(f.ncomp());
+  std::vector<std::uint64_t> keys;
+  std::vector<std::pair<LO, LO>> rows;  // (row, row within the entity)
+  for (int b = 0; b < dom.num_blocks(); ++b) {
+    const int d = dom.info(b).dim;
+    if (d == set_dim) continue;
+    for (const LO l : dom.members(b)) {
+      if (!owned(mesh, d, l)) continue;
+      const RowRange r = f.space().entity_rows(d, l);
+      for (LO k = r.begin; k < r.end; ++k) {
+        keys.push_back(key_of(d, mesh.gid(d)(l)));
+        rows.emplace_back(k, k - r.begin);
+      }
+    }
+  }
+  const std::size_t width = sizeof(std::int32_t) + nc * sizeof(T);
+  const Batch in = deliver(comm, part, keys, width, [&](std::size_t i, std::byte* row) {
+    put(row, 0, static_cast<std::int32_t>(rows[i].second));
+    for (std::size_t c = 0; c < nc; ++c) put(row, sizeof(std::int32_t) + c * sizeof(T), f.view()(rows[i].first, c));
+  });
+  std::array<std::vector<LO>, 4> arrived;
+  for (std::size_t i = 0; i < in.size(); ++i) {
+    const std::byte* row = &in.payload(i, 0);
+    arrived[static_cast<std::size_t>(take<std::int32_t>(row, 0))].push_back(take<std::int32_t>(row, sizeof(std::int32_t)));
+  }
+  for (auto& a : arrived) sort_unique(a);
+  FieldOptions<T> options;
+  if (f.has_default()) options.default_value = f.default_value();
+  if (f.has_global()) options.global_value = f.global_value();
+  options.handle = info.handle;
+  const auto g = part.fields().template add<T>(
+      info.name, make_space(part, part_domain(comm, part, dom, arrived), info.layout), f.ncomp(), options);
+  for (std::size_t i = 0; i < in.size(); ++i) {
+    const std::byte* row = &in.payload(i, 0);
+    const int d = take<std::int32_t>(row, 0);
+    const LO at = g.space().entity_rows(d, take<std::int32_t>(row, sizeof(std::int32_t))).begin +
+                  take<std::int32_t>(row, delivered_header);
+    for (std::size_t c = 0; c < nc; ++c) {
+      g.view()(at, c) = take<T>(row, delivered_header + sizeof(std::int32_t) + c * sizeof(T));
+    }
+  }
+  const int sb = dom.find_block(set_dim);
+  if (sb < 0) return;
+  for (const LO l : dom.members(sb)) {
+    const RowRange from = f.space().entity_rows(set_dim, l), to = g.space().entity_rows(set_dim, l);
+    for (LO k = 0; k < from.end - from.begin; ++k) {
+      for (std::size_t c = 0; c < nc; ++c) g.view()(to.begin + k, c) = f.view()(from.begin + k, c);
+    }
+  }
+}
+
+// A field of variable length: an entity's owner deposits (-1, nothing) for
+// the entity, then (k, value k) for each of its values.
+template <class T>
+void move_var_field(const Comm& comm, const HostMesh& mesh, const FieldInfo& info, HostMesh& part) {
+  const auto f = mesh.fields().template get_var<T>(info.id);
+  const Domain<Kokkos::HostSpace>& dom = f.domain();
+  std::vector<std::uint64_t> keys;
+  std::vector<std::pair<std::int32_t, T>> recs;
+  for (int b = 0; b < dom.num_blocks(); ++b) {
+    const int d = dom.info(b).dim;
+    if (d == set_dim) continue;
+    for (const LO l : dom.members(b)) {
+      if (!owned(mesh, d, l)) continue;
+      const std::uint64_t key = key_of(d, mesh.gid(d)(l));
+      keys.push_back(key);
+      recs.emplace_back(-1, T{});
+      const auto v = f.value_or_default(d, l);
+      for (std::size_t k = 0; k < v.size(); ++k) {
+        keys.push_back(key);
+        recs.emplace_back(static_cast<std::int32_t>(k), v[k]);
+      }
+    }
+  }
+  const Batch in = deliver(comm, part, keys, sizeof(std::int32_t) + sizeof(T), [&](std::size_t i, std::byte* row) {
+    put(row, 0, recs[i].first);
+    put(row, sizeof(std::int32_t), recs[i].second);
+  });
+  struct Value {
+    int d;
+    LO lid;
+    std::int32_t k;
+    T v;
+  };
+  std::vector<Value> got(in.size());
+  std::array<std::vector<LO>, 4> arrived;
+  for (std::size_t i = 0; i < in.size(); ++i) {
+    const std::byte* row = &in.payload(i, 0);
+    got[i] = {take<std::int32_t>(row, 0), take<std::int32_t>(row, sizeof(std::int32_t)),
+              take<std::int32_t>(row, delivered_header), take<T>(row, delivered_header + sizeof(std::int32_t))};
+    arrived[static_cast<std::size_t>(got[i].d)].push_back(got[i].lid);
+  }
+  for (auto& a : arrived) sort_unique(a);
+  std::sort(got.begin(), got.end(), [](const Value& x, const Value& y) {
+    return std::tuple(x.d, x.lid, x.k) < std::tuple(y.d, y.lid, y.k);
+  });
+  const Domain<Kokkos::HostSpace> nd = part_domain(comm, part, dom, arrived);
+  std::vector<Offset> offsets{0};
+  std::vector<T> values;
+  std::size_t i = 0;
+  for (int b = 0; b < nd.num_blocks(); ++b) {
+    const int d = nd.info(b).dim;
+    for (const LO l : nd.members(b)) {
+      if (d == set_dim) {
+        const auto v = f.value_or_default(set_dim, l);
+        values.insert(values.end(), v.begin(), v.end());
+      } else {
+        while (i < got.size() && std::pair(got[i].d, got[i].lid) < std::pair(d, l)) ++i;
+        for (; i < got.size() && got[i].d == d && got[i].lid == l; ++i) {
+          if (got[i].k >= 0) values.push_back(got[i].v);
+        }
+      }
+      offsets.push_back(static_cast<Offset>(values.size()));
+    }
+  }
+  FieldOptions<T> options;
+  options.default_value = f.default_value();
+  options.global_value = f.global_value();
+  options.handle = info.handle;
+  (void)part.fields().template add_var<T>(info.name, Space<Kokkos::HostSpace>(nd, info.layout), offsets, values,
+                                          options);
+}
+
+// Every field but the internal ones, in id order, with its tag format.
+void move_fields(const Comm& comm, const HostMesh& mesh, HostMesh& part) {
+  const auto& from = mesh.fields();
+  for (const FieldInfo& info : from.list()) {
+    if (internal(info.name)) continue;
+    dispatch_data_type(info.type, [&]<class T>() {
+      if (info.variable) {
+        move_var_field<T>(comm, mesh, info, part);
+      } else {
+        move_field<T>(comm, mesh, info, part);
+      }
+      const TagFormat& t = from.tag_format(info.family);
+      if (t != TagFormat{}) {
+        auto& reg = part.fields();
+        reg.set_tag_format(reg.template family<T>(info.name, info.ncomp, info.layout, info.handle), t);
+      }
+    });
+  }
+}
+
 }  // namespace
 
 HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> dest, Ordering ordering) {
   const int p = comm.size(), top = mesh.dim();
   const auto n_top = static_cast<std::size_t>(mesh.count(top));
-  const std::uint64_t h = set_list_hash(mesh.sets());
-  std::array<std::uint64_t, 5> flags{
+  const std::uint64_t hs = set_list_hash(mesh.sets()), hf = field_list_hash(mesh);
+  std::array<std::uint64_t, 6> flags{
       dest.size() != n_top || std::any_of(dest.begin(), dest.end(), [p](int r) { return r < 0 || r >= p; }) ? 1u : 0u,
-      mesh.edited() ? 1u : 0u, has_user_fields(mesh) ? 1u : 0u, h, ~h};
+      mesh.edited() ? 1u : 0u, hs, ~hs, hf, ~hf};
   comm.allreduce(std::span<std::uint64_t>(flags), Op::max);
   if (flags[0] != 0) throw std::invalid_argument("migrate: a rank's dest does not give one rank of the communicator per element");
   if (flags[1] != 0) throw std::logic_error("migrate: a rank's mesh holds edits; compress() it first");
-  if (flags[2] != 0) throw std::invalid_argument("migrate: a rank's mesh has fields, which migrate does not carry yet");
-  if (flags[3] != ~flags[4]) {
+  if (flags[2] != ~flags[3]) {
     throw std::invalid_argument("migrate: the ranks' sets differ (gids, flags, children, parents or sets they contain)");
+  }
+  if (flags[4] != ~flags[5]) {
+    throw std::invalid_argument("migrate: the ranks' fields or mesh values differ (beyond their values on entities)");
   }
 
   std::vector<std::size_t> offsets(n_top + 1);
@@ -618,6 +883,7 @@ HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> de
   HostMesh part = build_local_part(comm, std::move(b), ordering);
   if (!graphs.empty()) build_distributed_adjacencies(comm, part, graphs);
   move_sets(comm, mesh, part);
+  move_fields(comm, mesh, part);
   part.values() = mesh.values();
   return part;
 }
