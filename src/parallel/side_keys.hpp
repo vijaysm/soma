@@ -11,6 +11,8 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <span>
+#include <vector>
 
 #include "soma/core/mesh.hpp"
 #include "soma/topology/canonical.hpp"
@@ -20,25 +22,21 @@ namespace soma::detail {
 // Sorted corner gids, padded with the largest GO.
 using SideKey = std::array<GO, 4>;
 
-// Calls f(key) for each side of dimension k of element e of dimension d: its
-// corners for k = 0, a polygon's edges between consecutive corners.
+// Calls f(key) for each side of dimension k of an element of topology t with
+// corners `corners` (gids): its corners for k = 0, a polygon's edges between
+// consecutive corners.
 template <class F>
-void for_each_side(const HostMesh& mesh, int d, LO e, int k, F&& f) {
-  const auto off = mesh.conn_offsets(d);
-  const auto conn = mesh.conn(d);
-  const auto vgid = mesh.gid(0);
-  const Offset b = off(e), n = off(e + 1) - off(e);
+void for_each_side(Topology t, std::span<const GO> corners, int k, F&& f) {
   constexpr GO pad = std::numeric_limits<GO>::max();
-  const auto at = [&](Offset q) { return vgid(conn(b + q)); };
+  const std::size_t n = corners.size();
   if (k == 0) {
-    for (Offset q = 0; q < n; ++q) f(SideKey{at(q), pad, pad, pad});
+    for (const GO v : corners) f(SideKey{v, pad, pad, pad});
     return;
   }
-  const auto t = static_cast<Topology>(mesh.topology(d)(e));
   if (t == Topology::polygon) {
     if (k != 1) return;
-    for (Offset q = 0; q < n; ++q) {
-      SideKey key{at(q), at((q + 1) % n), pad, pad};
+    for (std::size_t q = 0; q < n; ++q) {
+      SideKey key{corners[q], corners[(q + 1) % n], pad, pad};
       std::sort(key.begin(), key.end());
       f(key);
     }
@@ -47,10 +45,27 @@ void for_each_side(const HostMesh& mesh, int d, LO e, int k, F&& f) {
   for (int i = 0; i < canonical::num_sides(t, k); ++i) {
     const canonical::SideDef s = canonical::side(t, k, i);
     SideKey key{pad, pad, pad, pad};
-    for (int j = 0; j < s.num_vertices; ++j) key[static_cast<std::size_t>(j)] = at(s.v[j]);
+    for (int j = 0; j < s.num_vertices; ++j) key[static_cast<std::size_t>(j)] = corners[s.v[j]];
     std::sort(key.begin(), key.end());
     f(key);
   }
+}
+
+// The corner gids of element e of dimension d.
+inline std::vector<GO> corner_gids(const HostMesh& mesh, int d, LO e) {
+  const auto off = mesh.conn_offsets(d);
+  const auto conn = mesh.conn(d);
+  const auto vgid = mesh.gid(0);
+  std::vector<GO> out;
+  for (Offset q = off(e); q < off(e + 1); ++q) out.push_back(vgid(conn(q)));
+  return out;
+}
+
+// As above for element e of dimension d of the mesh.
+template <class F>
+void for_each_side(const HostMesh& mesh, int d, LO e, int k, F&& f) {
+  const std::vector<GO> c = corner_gids(mesh, d, e);
+  for_each_side(static_cast<Topology>(mesh.topology(d)(e)), std::span<const GO>(c), k, f);
 }
 
 // The key of entity e of dimension k from its own corners.
