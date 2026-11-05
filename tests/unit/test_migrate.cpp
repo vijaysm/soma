@@ -683,7 +683,8 @@ void add_fields(soma::HostMesh& m) {
     o.global_value = std::vector<double>{7, 8};
     auto f = reg.add_tag<double>("temp", 0, 2, o);
     for (LO e = 0; e < m.count(0); ++e) {
-      f.view()(e, 0) = static_cast<double>(m.gid(0)(e));
+      const bool copy = e >= m.segment_table(0).owned_end;  // only owners' values count
+      f.view()(e, 0) = copy ? -9.0 : static_cast<double>(m.gid(0)(e));
       f.view()(e, 1) = 2.0 * static_cast<double>(m.gid(0)(e));
     }
     reg.set_tag_format(reg.family<double>("temp", 2), soma::TagFormat{2, soma::TagFormat::Kind::plain, 0});
@@ -735,6 +736,9 @@ void add_fields(soma::HostMesh& m) {
   {
     auto f = reg.add_tag<std::int32_t>("on_sets", soma::set_dim, 1);
     f.view()(0, 0) = 11;
+    const std::vector<soma::Offset> off{0, 3};
+    const std::vector<std::int32_t> v{1, 2, 3};
+    reg.add_var<std::int32_t>("var_on_sets", soma::Space<Kokkos::HostSpace>(soma::Domain<Kokkos::HostSpace>::all(m, soma::set_dim), soma::Layout::per_entity()), off, v);
   }
 }
 
@@ -826,21 +830,44 @@ TEST(Migrate, FieldsFollowTheirEntities) {
 
   const auto on_sets = reg.get<std::int32_t>("on_sets");
   EXPECT_EQ(on_sets.value_or_default(soma::set_dim, *part.sets().index_of(field_set)), 11);
+  const auto var_on_sets = reg.get_var<std::int32_t>("var_on_sets").value_or_default(soma::set_dim, *part.sets().index_of(field_set));
+  EXPECT_EQ(std::vector<std::int32_t>(var_on_sets.begin(), var_on_sets.end()), (std::vector<std::int32_t>{1, 2, 3}));
 }
 
-// A field or mesh value the last rank declares differently.
+// A field or mesh value the last rank declares differently: components,
+// default, global value, name, mesh value, dimension, tag format, values on
+// sets, layout, value type.
 TEST(Migrate, FieldsThatDifferBetweenRanksThrowOnEveryRank) {
   const Comm c = Comm::world();
   if (c.size() == 1) GTEST_SKIP() << "needs two ranks";
   const std::map<GO, int> rank_of = cell_ranks(c);
   const bool last = c.rank() == c.size() - 1;
-  for (int change = 0; change < 5; ++change) {
+  for (int change = 0; change < 10; ++change) {
     SCOPED_TRACE(change);
     soma::HostMesh m = grid_with_extras(c, rank_of);
+    auto& reg = m.fields();
     soma::FieldOptions<double> o;
     if (last && change == 1) o.default_value = std::vector<double>{1};
     if (last && change == 2) o.global_value = std::vector<double>{1};
-    (void)m.fields().add_tag<double>(last && change == 3 ? "other" : "x", 0, last && change == 0 ? 2 : 1, o);
+    const int dim = last && change == 5 ? 2 : 0;
+    if (last && change == 9) {
+      (void)reg.add_tag<float>("x", dim, 1);
+    } else {
+      (void)reg.add_tag<double>(last && change == 3 ? "other" : "x", dim, last && change == 0 ? 2 : 1, o);
+    }
+    if (last && change == 6) reg.set_tag_format(reg.family<double>("x", 1), soma::TagFormat{1, soma::TagFormat::Kind::plain, 0});
+    if (change == 7) {
+      soma::SetSpec s;
+      s.gid = field_set;
+      soma::SetBuilder sb;
+      sb.add(std::move(s));
+      std::move(sb).install(m);
+      reg.add_tag<std::int32_t>("on_sets", soma::set_dim, 1).view()(0, 0) = last ? 1 : 0;
+    }
+    if (change == 8) {
+      const auto l = soma::Layout::element_nodes(soma::NodeFamily::gll, last ? 2 : 1);
+      (void)reg.add<double>("y", soma::make_space(m, soma::Domain<Kokkos::HostSpace>::all(m, 2), l), 1);
+    }
     soma::MeshValue v;
     v.type = soma::DataType::i32;
     v.default_value = soma::MeshValue::bytes_of<std::int32_t>(std::vector<std::int32_t>{last && change == 4 ? 1 : 0});
