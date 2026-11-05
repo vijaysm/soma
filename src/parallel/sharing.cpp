@@ -4,6 +4,7 @@
 #include "soma/parallel/sharing.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <limits>
 #include <numeric>
@@ -15,18 +16,27 @@
 
 namespace soma {
 
+namespace {
+
+bool is_ghost(const Sharing& s, std::size_t i) { return !s.ghost_owner.empty() && s.ghost_owner[i] >= 0; }
+
+}  // namespace
+
 Ownership Sharing::kind(std::size_t i, int me) const {
+  if (is_ghost(*this, i)) return Ownership::ghost;
   if (offsets[i] == offsets[i + 1]) return Ownership::interior;
   return owner(i, me) == me ? Ownership::shared : Ownership::shared_copy;
 }
 
 int Sharing::owner(std::size_t i, int me) const {
+  if (is_ghost(*this, i)) return ghost_owner[i];
   return offsets[i] == offsets[i + 1] ? me : std::min(me, ranks[offsets[i]]);
 }
 
 std::vector<std::uint32_t> Sharing::groups() const {
   const std::size_t n = offsets.empty() ? 0 : offsets.size() - 1;
   const auto row = [&](std::size_t i) {
+    if (is_ghost(*this, i)) return std::span<const int>(&ghost_owner[i], 1);
     return std::span<const int>(ranks.data() + offsets[i], offsets[i + 1] - offsets[i]);
   };
   std::vector<std::size_t> order(n);
@@ -45,7 +55,7 @@ std::vector<std::uint32_t> Sharing::groups() const {
   return out;
 }
 
-Sharing resolve_sharing(const Comm& comm, std::span<const GO> gids) {
+Sharing resolve_sharing(const Comm& comm, std::span<const GO> gids, std::span<const std::uint8_t> ghost) {
   using Host = Kokkos::DefaultHostExecutionSpace;
   using Batch = transport::RecordBatch<Kokkos::HostSpace>;
   std::vector<GO> sorted(gids.begin(), gids.end());
@@ -54,53 +64,87 @@ Sharing resolve_sharing(const Comm& comm, std::span<const GO> gids) {
   if (comm.allreduce(static_cast<std::int32_t>(repeated), Op::max)) {
     throw std::invalid_argument("resolve_sharing: a rank names a gid twice");
   }
-  // Every gid to its directory rank.
-  Batch sent(gids.size(), sizeof(GO), "soma::resolve_sharing");
+  const bool bad_flags = !ghost.empty() && ghost.size() != gids.size();
+  const std::int32_t any_ghost = std::any_of(ghost.begin(), ghost.end(), [](std::uint8_t g) { return g != 0; }) ? 1 : 0;
+  std::array<std::int32_t, 2> f{bad_flags ? 1 : 0, any_ghost};
+  comm.allreduce(std::span<std::int32_t>(f), Op::max);
+  if (f[0] != 0) throw std::invalid_argument("resolve_sharing: a rank gives ghost flags but not one per gid");
+  const auto ghost_at = [&](std::size_t i) { return !ghost.empty() && ghost[i] != 0; };
+  // Every gid to its directory rank, with whether it is a ghost here.
+  constexpr std::size_t row = sizeof(GO) + sizeof(std::int32_t);
+  Batch sent(gids.size(), row, "soma::resolve_sharing");
   for (std::size_t i = 0; i < gids.size(); ++i) {
     sent.dest(i) = transport::owner(static_cast<std::uint64_t>(gids[i]), comm.size());
+    const std::int32_t g = ghost_at(i) ? 1 : 0;
     std::memcpy(&sent.payload(i, 0), &gids[i], sizeof(GO));
+    std::memcpy(&sent.payload(i, sizeof(GO)), &g, sizeof(g));
   }
   const Batch at_directory = transport::route(Host{}, comm, sent);
-  // Holders of each gid (arrivals come by source, so ascending).
-  std::vector<std::pair<GO, int>> held(at_directory.size());
+  // Holders of each gid, other holders before ghost holders, each ascending
+  // (arrivals come by source).
+  std::vector<std::tuple<GO, std::int32_t, int>> held(at_directory.size());
   for (std::size_t i = 0; i < held.size(); ++i) {
-    std::memcpy(&held[i].first, &at_directory.payload(i, 0), sizeof(GO));
-    held[i].second = at_directory.source(i);
+    GO g;
+    std::int32_t k;
+    std::memcpy(&g, &at_directory.payload(i, 0), sizeof(GO));
+    std::memcpy(&k, &at_directory.payload(i, sizeof(GO)), sizeof(k));
+    held[i] = {g, k, at_directory.source(i)};
   }
-  std::stable_sort(held.begin(), held.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-  // To each holder of a shared gid, one record (gid, other holder) per other holder.
-  std::vector<std::tuple<int, GO, int>> notes;
+  std::sort(held.begin(), held.end());
+  // To each holder of a shared gid, one record (gid, other holder, 0) per
+  // other holder; to each ghost holder one record (gid, owner, 1).
+  std::vector<std::tuple<int, GO, int, std::int32_t>> notes;
+  bool orphan = false;
   for (std::size_t a = 0; a < held.size();) {
-    std::size_t b = a;
-    while (b < held.size() && held[b].first == held[a].first) ++b;
-    for (std::size_t h = a; b - a > 1 && h < b; ++h) {
-      for (std::size_t o = a; o < b; ++o) {
-        if (o != h) notes.emplace_back(held[h].second, held[a].first, held[o].second);
+    const GO g = std::get<0>(held[a]);
+    std::size_t b = a, m = a;  // [a, m) hold it, [m, b) ghost it
+    while (b < held.size() && std::get<0>(held[b]) == g) ++b;
+    while (m < b && std::get<1>(held[m]) == 0) ++m;
+    for (std::size_t h = a; m - a > 1 && h < m; ++h) {
+      for (std::size_t o = a; o < m; ++o) {
+        if (o != h) notes.emplace_back(std::get<2>(held[h]), g, std::get<2>(held[o]), 0);
       }
     }
+    if (m == a && b > m) orphan = true;
+    for (std::size_t h = m; m > a && h < b; ++h) notes.emplace_back(std::get<2>(held[h]), g, std::get<2>(held[a]), 1);
     a = b;
   }
-  Batch back(notes.size(), sizeof(GO) + sizeof(int), "soma::resolve_sharing.back");
+  if (comm.allreduce(static_cast<std::int32_t>(orphan), Op::max)) {
+    throw std::invalid_argument("resolve_sharing: a rank holds as a ghost a gid no rank holds otherwise");
+  }
+  Batch back(notes.size(), sizeof(GO) + sizeof(int) + sizeof(std::int32_t), "soma::resolve_sharing.back");
   for (std::size_t i = 0; i < notes.size(); ++i) {
-    const auto& [to, gid, other] = notes[i];
+    const auto& [to, gid, other, k] = notes[i];
     back.dest(i) = to;
     std::memcpy(&back.payload(i, 0), &gid, sizeof(GO));
     std::memcpy(&back.payload(i, sizeof(GO)), &other, sizeof(int));
+    std::memcpy(&back.payload(i, sizeof(GO) + sizeof(int)), &k, sizeof(k));
   }
   const Batch told = transport::route(Host{}, comm, back);
-  std::vector<std::pair<GO, int>> others(told.size());
-  for (std::size_t i = 0; i < others.size(); ++i) {
-    std::memcpy(&others[i].first, &told.payload(i, 0), sizeof(GO));
-    std::memcpy(&others[i].second, &told.payload(i, sizeof(GO)), sizeof(int));
+  std::vector<std::pair<GO, int>> others, owners;
+  for (std::size_t i = 0; i < told.size(); ++i) {
+    GO g;
+    int other;
+    std::int32_t k;
+    std::memcpy(&g, &told.payload(i, 0), sizeof(GO));
+    std::memcpy(&other, &told.payload(i, sizeof(GO)), sizeof(int));
+    std::memcpy(&k, &told.payload(i, sizeof(GO) + sizeof(int)), sizeof(k));
+    (k != 0 ? owners : others).emplace_back(g, other);
   }
   std::sort(others.begin(), others.end());
+  std::sort(owners.begin(), owners.end());
   // Rows in the order of the gids given.
   Sharing out;
   out.offsets.assign(gids.size() + 1, 0);
   out.ranks.reserve(others.size());
+  if (f[1] != 0) out.ghost_owner.assign(gids.size(), -1);
   for (std::size_t i = 0; i < gids.size(); ++i) {
-    auto it = std::lower_bound(others.begin(), others.end(), std::pair<GO, int>{gids[i], -1});
-    for (; it != others.end() && it->first == gids[i]; ++it) out.ranks.push_back(it->second);
+    if (ghost_at(i)) {
+      out.ghost_owner[i] = std::lower_bound(owners.begin(), owners.end(), std::pair<GO, int>{gids[i], -1})->second;
+    } else {
+      auto it = std::lower_bound(others.begin(), others.end(), std::pair<GO, int>{gids[i], -1});
+      for (; it != others.end() && it->first == gids[i]; ++it) out.ranks.push_back(it->second);
+    }
     if (out.ranks.size() > std::numeric_limits<std::uint32_t>::max()) {
       throw std::length_error("resolve_sharing: more than 2^32 - 1 sharing entries on one rank");
     }
