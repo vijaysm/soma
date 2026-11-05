@@ -164,10 +164,12 @@ struct Read {
 // before any data moves.
 void read_all(const Comm& comm, const File& f, std::vector<Read>& reads) {
   std::vector<Id> ds;
+  std::vector<bool> empty;  // no rows on any rank: not read
   std::string error;
   for (Read& r : reads) {
     ds.push_back(h5::open_dataset(f.root(), r.path));
     const auto dims = h5::extent(ds.back().get(), r.path);
+    empty.push_back(dims.size() == 2 && dims[0] == 0);
     const bool fits = dims.size() == 2 && dims[1] == r.width && r.first <= dims[0] && r.rows <= dims[0] - r.first;
     if (!fits && error.empty()) error = "/soma/" + r.path + " does not hold the rows its part table gives";
   }
@@ -180,6 +182,7 @@ void read_all(const Comm& comm, const File& f, std::vector<Read>& reads) {
   for (std::size_t k = 0; k < reads.size(); ++k) {
     Read& r = reads[k];
     r.out->resize(r.rows * r.width * soma_file::value_size(r.type));
+    if (empty[k]) continue;
     Id space = h5::check(H5Dget_space(ds[k].get()), "get a dataspace");
     Id memory;
     if (r.rows == 0) {

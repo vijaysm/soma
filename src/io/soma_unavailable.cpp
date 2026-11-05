@@ -31,6 +31,8 @@ HostMesh read_soma(const Comm&, const std::filesystem::path& path, const SomaRea
 
 HostMesh read_soma(const std::filesystem::path& path, const SomaReadOptions&) { unavailable("read_soma", path); }
 
+void detail::soma_streamed_sink(bool) noexcept {}
+
 MeshFormat detect_format(const std::filesystem::path&) { return MeshFormat::unknown; }
 
 }  // namespace soma

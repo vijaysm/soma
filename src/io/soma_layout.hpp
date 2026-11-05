@@ -76,13 +76,6 @@ constexpr bool parallel_hdf5() {
 #endif
 }
 
-// Test hook: with a parallel HDF5, write through rank 0 as with a serial
-// one, so tests can compare the two sinks.
-inline bool& force_streamed_sink() {
-  static bool force = false;
-  return force;
-}
-
 // A collective (MPI-IO) file over `comm` when `collective`, else the default
 // driver; metadata is read and written collectively.
 inline h5::Id file_access(const Comm& comm, bool collective) {

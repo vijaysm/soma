@@ -73,6 +73,12 @@ void write_soma(const HostMesh& mesh, const std::filesystem::path& path, const S
 HostMesh read_soma(const Comm& comm, const std::filesystem::path& path, const SomaReadOptions& options = {});
 HostMesh read_soma(const std::filesystem::path& path, const SomaReadOptions& options = {});
 
+namespace detail {
+// Test hook: while on, write_soma with a parallel HDF5 writes through rank 0
+// as with a serial one, so that tests can compare the two.
+void soma_streamed_sink(bool on) noexcept;
+}  // namespace detail
+
 // The format of an HDF5 file by its content (/tstt or /soma); unknown for
 // any other file, or one that cannot be opened.
 MeshFormat detect_format(const std::filesystem::path& path);

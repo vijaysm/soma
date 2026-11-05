@@ -132,6 +132,8 @@ struct Image {
   }
 };
 
+bool streamed = false;  // detail::soma_streamed_sink
+
 bool internal(const std::string& name) { return name == sharing_field || name == owner_field; }
 
 bool has_sharing(const HostMesh& mesh, int d) {
@@ -380,13 +382,19 @@ void lay_out_field(const HostMesh& mesh, const FieldInfo& info, std::size_t inde
     auto& members = img.column(dg + "/domain", DataType::i64);
     auto& values = img.column(dg + "/values", info.type, nc);
     Dataset* counts = counted ? &img.column(dg + "/counts", DataType::i64) : nullptr;
+    // The part's members among its owned entities, listed unless they are
+    // all of them.
     const bool here = d <= mesh.dim() && mesh.count(d) > 0 && b >= 0;
-    const bool full_here = here && dom->info(b).kind == DomainKind::full;
+    std::vector<LO> owned_members;
+    if (here) {
+      const LO owned = mesh.segment_table(d).owned_end;
+      for (const LO l : dom->members(b)) {
+        if (l < owned) owned_members.push_back(l);
+      }
+    }
+    const bool full_here = here && static_cast<LO>(owned_members.size()) == mesh.segment_table(d).owned_end;
     append(part_full.data, static_cast<std::uint8_t>(full_here ? 1 : 0));
-    if (!here) continue;
-    const LO owned = mesh.segment_table(d).owned_end;
-    for (const LO l : dom->members(b)) {
-      if (l >= owned) continue;
+    for (const LO l : owned_members) {
       if (!full_here) append(members.data, static_cast<std::int64_t>(l));
       put_values(d, l, values, counts);
     }
@@ -468,17 +476,20 @@ void lay_out_sets(const Comm& comm, const HostMesh& mesh, Image& img) {
     };
     if (sets.ordered(i)) {
       append(mcount.data, std::int64_t{0});
-      const auto seq = sets.sequence(i);
-      for (std::size_t k = 0; k < seq.size(); ++k) {
-        const SetEntry& x = seq[k];
-        const auto pos = static_cast<std::int64_t>(k);
+      // Positions among the entries this rank writes (owned entities, and
+      // on rank 0 set entries), so that copies and ghosts do not change them.
+      std::int64_t pos = -1;
+      for (const SetEntry& x : sets.sequence(i)) {
+        const bool written =
+            x.slot == set_dim ? comm.rank() == 0 : x.lid < mesh.segment_table(x.slot).owned_end;
+        if (written) ++pos;
         if (x.slot == set_dim) {
           if (comm.rank() == 0) {
             for (const std::int64_t y : {std::int64_t{i}, pos, static_cast<std::int64_t>(sgid(x.lid))}) {
               append(entries.data, y);
             }
           }
-        } else if (x.lid < mesh.segment_table(x.slot).owned_end) {
+        } else if (written) {
           member(x.slot, x.lid, pos);
         }
       }
@@ -633,7 +644,12 @@ struct Writes {
   std::vector<const void*> buffers;
 };
 
-void add(Writes& w, hid_t ds, hid_t mem, Slab s, const void* data) {
+// A dataset without rows on any rank is left alone; HDF5 wants a buffer
+// even where a rank selects nothing.
+void add(Writes& w, hid_t ds, hid_t mem, Slab s, const void* data, std::uint64_t total) {
+  static const std::uint64_t none = 0;
+  if (total == 0) return;
+  if (data == nullptr) data = &none;
   w.datasets.push_back(ds);
   w.types.push_back(mem);
   w.slabs.push_back(std::move(s));
@@ -674,15 +690,15 @@ void write_part(const Created& c, const Image& img, const Placement& at, std::ui
   for (std::size_t k = 0; k < img.columns.size(); ++k) {
     const Dataset& d = img.columns[k];
     add(w, c.columns[k].get(), soma_file::memory_type(d.type), slab(c.columns[k].get(), at.first[k], d.rows(), d.width),
-        d.data.data());
+        d.data.data(), at.total[k]);
   }
   const std::vector<std::uint64_t> table = table_rows(at, last);
   add(w, c.table.get(), H5T_NATIVE_UINT64,
-      slab(c.table.get(), part, img.columns.empty() ? 0 : (last ? 2 : 1), img.columns.size()), table.data());
+      slab(c.table.get(), part, img.columns.empty() ? 0 : (last ? 2 : 1), img.columns.size()), table.data(), 1);
   for (std::size_t k = 0; k < img.once.size(); ++k) {
     const Dataset& d = img.once[k];
     add(w, c.once[k].get(), soma_file::memory_type(d.type), slab(c.once[k].get(), 0, once ? d.rows() : 0, d.width),
-        d.data.data());
+        d.data.data(), d.rows());
   }
   run(w, dxpl);
 }
@@ -854,7 +870,7 @@ void write_soma(const Comm& comm, const HostMesh& mesh, const fs::path& path, co
     throw std::runtime_error(io::cannot_write(who, path, "rank 0 could not create the file"));
   }
   const std::string temporary(name.data());
-  const bool collective = soma_file::parallel_hdf5() && comm.size() > 1 && !soma_file::force_streamed_sink();
+  const bool collective = soma_file::parallel_hdf5() && comm.size() > 1 && !streamed;
   collectively(comm, path, [&] {
     const h5::Session quiet;
     if (collective) {
@@ -879,6 +895,8 @@ void write_soma(const Comm& comm, const HostMesh& mesh, const fs::path& path, co
     throw std::runtime_error(io::cannot_write(who, path, "rank 0 could not rename the file"));
   }
 }
+
+void detail::soma_streamed_sink(bool on) noexcept { streamed = on; }
 
 void write_soma(const HostMesh& mesh, const fs::path& path, const SomaWriteOptions& options) {
   write_soma(Comm::self(), mesh, path, options);
