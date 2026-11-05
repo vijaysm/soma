@@ -21,35 +21,16 @@
 #include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/route.hpp"
 
+#include "records.hpp"
+
 namespace soma {
 
 namespace {
 
-using Batch = transport::RecordBatch<Kokkos::HostSpace>;
-using HostExec = Kokkos::DefaultHostExecutionSpace;
-
-template <class T>
-void put(std::byte* row, std::size_t at, const T& v) {
-  std::memcpy(row + at, &v, sizeof(T));
-}
-
-template <class T>
-T take(const std::byte* row, std::size_t at) {
-  T v;
-  std::memcpy(&v, row + at, sizeof(T));
-  return v;
-}
-
-// Rows of payload `width` to the ranks `dest`, filled by fill(i, row).
-template <class Fill>
-Batch route(const Comm& comm, const std::vector<int>& dest, std::size_t width, Fill&& fill) {
-  Batch out(dest.size(), width, "soma::migrate");
-  for (std::size_t i = 0; i < dest.size(); ++i) {
-    out.dest(i) = dest[i];
-    fill(i, &out.payload(i, 0));
-  }
-  return transport::route(HostExec{}, comm, out);
-}
+using detail::Batch;
+using detail::put;
+using detail::route;
+using detail::take;
 
 int directory(GO gid, int p) { return transport::owner(static_cast<std::uint64_t>(gid), p); }
 
