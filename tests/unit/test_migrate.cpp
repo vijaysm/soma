@@ -567,15 +567,75 @@ TEST(Migrate, SetsFollowTheirMembers) {
   EXPECT_EQ(got, want);
 }
 
+// Two sets, 100 and 101, that the last rank changes one way at a time.
 TEST(Migrate, SetsThatDifferBetweenRanksThrowOnEveryRank) {
   const Comm c = Comm::world();
   if (c.size() == 1) GTEST_SKIP() << "needs two ranks";
   const std::map<GO, int> rank_of = cell_ranks(c);
-  soma::HostMesh m = grid_with_extras(c, rank_of);
+  const bool last = c.rank() == c.size() - 1;
+  for (int change = 0; change < 5; ++change) {
+    SCOPED_TRACE(change);
+    soma::HostMesh m = grid_with_extras(c, rank_of);
+    soma::SetSpec x, y;
+    x.gid = last && change == 0 ? 200 : 100;
+    y.gid = 101;
+    if (last && change == 1) y.flags = soma::set_ordered;
+    if (!(last && change == 2)) x.children = {101};
+    if (!(last && change == 3)) y.parents = {x.gid};
+    if (last && change == 4) x.contents.push_back({soma::set_dim, 101});
+    soma::SetBuilder sb;
+    sb.add(std::move(x));
+    sb.add(std::move(y));
+    std::move(sb).install(m);
+    EXPECT_THROW((void)soma::migrate(c, m, one_rank_up(m, rank_of, c.size())), std::invalid_argument);
+  }
+}
+
+// Members of a dimension only derived follow their entities: the edges of
+// even lowest corner gid, an unordered set, and the same edges in an ordered
+// one (by decreasing lowest corner on each rank).
+TEST(Migrate, SetsOfDerivedEntitiesFollowThem) {
+  const Comm c = Comm::world();
+  const int me = c.rank(), p = c.size();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  soma::HostMesh m = soma::build_local_part(c, local_builder(rank_of, me));
+  soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
+  const auto low = [](const soma::HostMesh& x, LO e) {
+    const std::vector<GO> ends = nodes_of(x, 1, e);
+    return std::min(ends[0], ends[1]);
+  };
+  const auto chosen = [&](const soma::HostMesh& x) {
+    std::vector<std::pair<GO, LO>> out;  // (lowest corner, lid), decreasing
+    for (LO e = 0; e < x.count(1); ++e) {
+      if (low(x, e) % 2 == 0) out.emplace_back(low(x, e), e);
+    }
+    std::sort(out.rbegin(), out.rend());
+    return out;
+  };
+  soma::SetSpec u, o;
+  u.gid = 300;
+  o.gid = 301;
+  o.flags = soma::set_ordered;
+  for (const auto& [g, e] : chosen(m)) {
+    u.contents.push_back({1, e});
+    if (e < m.segment_table(1).owned_end) o.contents.push_back({1, e});
+  }
   soma::SetBuilder sb;
-  soma::SetSpec s;
-  s.gid = c.rank() == c.size() - 1 ? 200 : 100;
-  sb.add(std::move(s));
+  sb.add(std::move(u));
+  sb.add(std::move(o));
   std::move(sb).install(m);
-  EXPECT_THROW((void)soma::migrate(c, m, one_rank_up(m, rank_of, c.size())), std::invalid_argument);
+
+  const soma::HostMesh part = soma::migrate(c, m, one_rank_up(m, rank_of, p));
+  ASSERT_FALSE(part.input(1));
+  std::set<GO> want;
+  for (const auto& [g, e] : chosen(part)) want.insert(part.gid(1)(e));
+  EXPECT_EQ(member_gids(part, 300, 1), want);
+  const auto seq = part.sets().sequence(*part.sets().index_of(301));
+  std::set<GO> in_order;
+  for (const soma::SetEntry& x : seq) {
+    ASSERT_EQ(x.slot, 1);
+    in_order.insert(part.gid(1)(x.lid));
+  }
+  EXPECT_EQ(in_order, want);
+  EXPECT_EQ(seq.size(), want.size());
 }

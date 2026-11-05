@@ -313,29 +313,108 @@ std::vector<std::pair<GO, LO>> lids_by_gid(const HostMesh& mesh, int d) {
   return out;
 }
 
-// The sets of `mesh` on `part`: each entity member travels from its owner
-// with the entity (set index, slot, gid, position in an ordered set); an
-// ordered set lists the entries of each sending rank in its order, ranks in
-// order, its set entries as rank 0 has them.
-void move_sets(const Comm& comm, const HostMesh& mesh, const detail::Placement& where, HostMesh& part) {
+// The directory key of entity (d, gid): gids are below 2^62.
+std::uint64_t key_of(int d, GO g) { return static_cast<std::uint64_t>(g) << 2 | static_cast<std::uint64_t>(d); }
+
+// Records of `width` bytes about entities, each deposited by the rank that
+// owned the entity, handed to every rank of the new part holding it. A
+// delivered row is (dimension, lid on the part, depositing rank) as int32,
+// then the record; rows come in no particular order.
+constexpr std::size_t delivered_header = 3 * sizeof(std::int32_t);
+
+template <class Fill>
+Batch deliver(const Comm& comm, const HostMesh& part, const std::vector<std::uint64_t>& keys, std::size_t width,
+              Fill&& fill) {
+  const int p = comm.size();
+  std::array<std::int32_t, 4> dims{};
+  for (const std::uint64_t k : keys) dims[k & 3u] = 1;
+  comm.allreduce(std::span<std::int32_t>(dims), Op::max);
+  const auto directory_of = [p](std::uint64_t k) { return transport::owner(k, p); };
+
+  std::vector<int> to(keys.size());
+  for (std::size_t i = 0; i < keys.size(); ++i) to[i] = directory_of(keys[i]);
+  const Batch deposits = route(comm, to, sizeof(std::uint64_t) + width, [&](std::size_t i, std::byte* row) {
+    put(row, 0, keys[i]);
+    fill(i, row + sizeof(std::uint64_t));
+  });
+  std::vector<std::uint64_t> asked;
+  to.clear();
+  for (int d = 0; d <= part.dim(); ++d) {
+    if (dims[static_cast<std::size_t>(d)] == 0) continue;
+    for (LO e = 0; e < part.count(d); ++e) {
+      asked.push_back(key_of(d, part.gid(d)(e)));
+      to.push_back(directory_of(asked.back()));
+    }
+  }
+  const Batch asks = route(comm, to, sizeof(std::uint64_t), [&](std::size_t i, std::byte* row) { put(row, 0, asked[i]); });
+
+  // The directory: each ask gets every deposit of its key.
+  std::vector<std::pair<std::uint64_t, std::size_t>> held(deposits.size());
+  for (std::size_t i = 0; i < deposits.size(); ++i) held[i] = {take<std::uint64_t>(&deposits.payload(i, 0), 0), i};
+  std::sort(held.begin(), held.end());
+  std::vector<std::pair<std::size_t, std::size_t>> answers;  // (ask, deposit)
+  to.clear();
+  for (std::size_t a = 0; a < asks.size(); ++a) {
+    const auto k = take<std::uint64_t>(&asks.payload(a, 0), 0);
+    for (auto it = std::lower_bound(held.begin(), held.end(), std::pair<std::uint64_t, std::size_t>{k, 0});
+         it != held.end() && it->first == k; ++it) {
+      answers.emplace_back(a, it->second);
+      to.push_back(asks.source(a));
+    }
+  }
+  const Batch got = route(comm, to, sizeof(std::uint64_t) + sizeof(std::int32_t) + width,
+                          [&](std::size_t i, std::byte* row) {
+                            const auto [a, k] = answers[i];
+                            std::memcpy(row, &deposits.payload(k, 0), sizeof(std::uint64_t));
+                            put(row, sizeof(std::uint64_t), static_cast<std::int32_t>(deposits.source(k)));
+                            if (width > 0) {
+                              std::memcpy(row + sizeof(std::uint64_t) + sizeof(std::int32_t),
+                                          &deposits.payload(k, sizeof(std::uint64_t)), width);
+                            }
+                          });
+
+  std::array<std::vector<std::pair<GO, LO>>, 4> lid;
+  for (int d = 0; d <= part.dim(); ++d) {
+    if (dims[static_cast<std::size_t>(d)] != 0) lid[static_cast<std::size_t>(d)] = lids_by_gid(part, d);
+  }
+  Batch out(got.size(), delivered_header + width, "soma::migrate");
+  for (std::size_t i = 0; i < got.size(); ++i) {
+    const std::byte* row = &got.payload(i, 0);
+    const auto k = take<std::uint64_t>(row, 0);
+    const int d = static_cast<int>(k & 3u);
+    const auto g = static_cast<GO>(k >> 2);
+    const auto& v = lid[static_cast<std::size_t>(d)];
+    const auto it = std::lower_bound(v.begin(), v.end(), std::pair<GO, LO>{g, std::numeric_limits<LO>::min()});
+    std::byte* o = &out.payload(i, 0);
+    put(o, 0, static_cast<std::int32_t>(d));
+    put(o, sizeof(std::int32_t), static_cast<std::int32_t>(it->second));
+    std::memcpy(o + 2 * sizeof(std::int32_t), row + sizeof(std::uint64_t), sizeof(std::int32_t) + width);
+  }
+  return out;
+}
+
+bool owned(const HostMesh& mesh, int d, LO e) { return e < mesh.segment_table(d).owned_end; }
+
+// The sets of `mesh` on `part`. An entity member is deposited by the
+// entity's owner (set index, position in an ordered set); an ordered set
+// lists the entries of each depositing rank in its order, ranks in order,
+// with its set entries as rank 0 has them.
+void move_sets(const Comm& comm, const HostMesh& mesh, HostMesh& part) {
   const auto& sets = mesh.sets();
   if (sets.count() == 0) return;
   const auto sgid = sets.gid();
-  struct Out {
-    std::int32_t set, slot;
-    GO gid;
+  struct Member {
+    std::int32_t set;
     std::int64_t pos;
   };
-  std::vector<Out> out;
-  std::vector<int> to;
-  const auto send = [&](const Out& o, std::span<const int> ranks) {
-    for (const int r : ranks) {
-      out.push_back(o);
-      to.push_back(r);
-    }
+  std::vector<std::uint64_t> keys;
+  std::vector<Member> members;
+  struct Entry {
+    std::int32_t set;
+    std::int64_t pos;
+    GO gid;
   };
-  std::vector<int> everyone(static_cast<std::size_t>(comm.size()));
-  for (int r = 0; r < comm.size(); ++r) everyone[static_cast<std::size_t>(r)] = r;
+  std::vector<Entry> entries;  // set entries of ordered sets, from rank 0
   for (LO i = 0; i < sets.count(); ++i) {
     const auto si = static_cast<std::int32_t>(i);
     if (sets.ordered(i)) {
@@ -344,40 +423,57 @@ void move_sets(const Comm& comm, const HostMesh& mesh, const detail::Placement& 
         const SetEntry& x = seq[k];
         const auto pos = static_cast<std::int64_t>(k);
         if (x.slot == set_dim) {
-          if (comm.rank() == 0) send({si, set_dim, sgid(x.lid), pos}, everyone);
-        } else {
-          send({si, x.slot, mesh.gid(x.slot)(x.lid), pos}, where.of(x.slot, x.lid));
+          if (comm.rank() == 0) entries.push_back({si, pos, sgid(x.lid)});
+        } else if (owned(mesh, x.slot, x.lid)) {
+          keys.push_back(key_of(x.slot, mesh.gid(x.slot)(x.lid)));
+          members.push_back({si, pos});
         }
       }
       continue;
     }
     for (int d = 0; d <= mesh.dim(); ++d) {
       if (!sets.has_members(d)) continue;
-      for (const LO l : sets.members_of(i, d)) send({si, d, mesh.gid(d)(l), -1}, where.of(d, l));
+      for (const LO l : sets.members_of(i, d)) {
+        if (!owned(mesh, d, l)) continue;
+        keys.push_back(key_of(d, mesh.gid(d)(l)));
+        members.push_back({si, -1});
+      }
     }
   }
-  const Batch in = route(comm, to, sizeof(Out), [&](std::size_t k, std::byte* row) { std::memcpy(row, &out[k], sizeof(Out)); });
+  const Batch in = deliver(comm, part, keys, sizeof(Member),
+                           [&](std::size_t k, std::byte* row) { std::memcpy(row, &members[k], sizeof(Member)); });
+  std::vector<int> to;
+  std::vector<Entry> sent;
+  for (int r = 0; r < comm.size(); ++r) {
+    for (const Entry& x : entries) {
+      to.push_back(r);
+      sent.push_back(x);
+    }
+  }
+  const Batch ein = route(comm, to, sizeof(Entry), [&](std::size_t k, std::byte* row) { std::memcpy(row, &sent[k], sizeof(Entry)); });
 
   struct In {
-    int source;
-    Out o;
+    std::int32_t set, from;
+    std::int64_t pos;
+    SetItem item;
   };
-  std::vector<In> got(in.size());
+  std::vector<In> got;
+  got.reserve(in.size() + ein.size());
   for (std::size_t k = 0; k < in.size(); ++k) {
-    got[k].source = in.source(k);
-    std::memcpy(&got[k].o, &in.payload(k, 0), sizeof(Out));
+    const std::byte* row = &in.payload(k, 0);
+    Member m;
+    std::memcpy(&m, row + delivered_header, sizeof(Member));
+    got.push_back({m.set, take<std::int32_t>(row, 2 * sizeof(std::int32_t)), m.pos,
+                   {take<std::int32_t>(row, 0), GO{take<std::int32_t>(row, sizeof(std::int32_t))}}});
   }
-  std::stable_sort(got.begin(), got.end(), [](const In& x, const In& y) {
-    return std::tuple(x.o.set, x.source, x.o.pos) < std::tuple(y.o.set, y.source, y.o.pos);
+  for (std::size_t k = 0; k < ein.size(); ++k) {
+    Entry x;
+    std::memcpy(&x, &ein.payload(k, 0), sizeof(Entry));
+    got.push_back({x.set, 0, x.pos, {set_dim, x.gid}});
+  }
+  std::sort(got.begin(), got.end(), [](const In& x, const In& y) {
+    return std::tuple(x.set, x.from, x.pos) < std::tuple(y.set, y.from, y.pos);
   });
-  std::array<std::vector<std::pair<GO, LO>>, 4> lid;
-  for (int d = 0; d <= part.dim(); ++d) lid[static_cast<std::size_t>(d)] = lids_by_gid(part, d);
-  const auto lid_of = [&](int d, GO g) {
-    const auto& v = lid[static_cast<std::size_t>(d)];
-    const auto it = std::lower_bound(v.begin(), v.end(), std::pair<GO, LO>{g, std::numeric_limits<LO>::min()});
-    if (it == v.end() || it->first != g) throw std::logic_error("migrate: a set member did not arrive with its entity");
-    return it->second;
-  };
   SetBuilder b;
   std::size_t k = 0;
   for (LO i = 0; i < sets.count(); ++i) {
@@ -386,10 +482,7 @@ void move_sets(const Comm& comm, const HostMesh& mesh, const detail::Placement& 
     spec.flags = sets.flags(i);
     for (const LO l : sets.children(i)) spec.children.push_back(sgid(l));
     for (const LO l : sets.parents(i)) spec.parents.push_back(sgid(l));
-    for (; k < got.size() && got[k].o.set == i; ++k) {
-      const Out& o = got[k].o;
-      spec.contents.push_back({o.slot, o.slot == set_dim ? o.gid : GO{lid_of(o.slot, o.gid)}});
-    }
+    for (; k < got.size() && got[k].set == i; ++k) spec.contents.push_back(got[k].item);
     if (!sets.ordered(i)) {
       for (const LO l : sets.members_of(i, set_dim)) spec.contents.push_back({set_dim, sgid(l)});
     }
@@ -524,7 +617,7 @@ HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> de
   const AdjacencyRequest graphs = graphs_to_rebuild(comm, mesh);
   HostMesh part = build_local_part(comm, std::move(b), ordering);
   if (!graphs.empty()) build_distributed_adjacencies(comm, part, graphs);
-  move_sets(comm, mesh, where, part);
+  move_sets(comm, mesh, part);
   part.values() = mesh.values();
   return part;
 }
