@@ -593,7 +593,8 @@ TEST(Migrate, SetsThatDifferBetweenRanksThrowOnEveryRank) {
 
 // Members of a dimension only derived follow their entities: the edges of
 // even lowest corner gid, an unordered set, and the same edges in an ordered
-// one (by decreasing lowest corner on each rank).
+// one (by decreasing lowest corner on each rank, copies too, which only their
+// owners send).
 TEST(Migrate, SetsOfDerivedEntitiesFollowThem) {
   const Comm c = Comm::world();
   const int me = c.rank(), p = c.size();
@@ -618,7 +619,7 @@ TEST(Migrate, SetsOfDerivedEntitiesFollowThem) {
   o.flags = soma::set_ordered;
   for (const auto& [g, e] : chosen(m)) {
     u.contents.push_back({1, e});
-    if (e < m.segment_table(1).owned_end) o.contents.push_back({1, e});
+    o.contents.push_back({1, e});
   }
   soma::SetBuilder sb;
   sb.add(std::move(u));
