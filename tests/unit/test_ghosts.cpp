@@ -515,3 +515,17 @@ TEST(Ghosts, UpdateReachesGhostsAndReduceDoesNot) {
     }
   }
 }
+
+// A ghost whose recorded owner does not own it is refused on every rank.
+TEST(Ghosts, HaloExchangeRefusesAGhostItsOwnerDoesNotOwn) {
+  const Comm c = Comm::world();
+  if (c.size() < 3) GTEST_SKIP() << "needs a rank that does not own the ghost";
+  soma::HostMesh m = soma::build_local_part(c, local_builder(cell_ranks(c), c.rank()));
+  m.add_ghosts(c, soma::GhostOptions{1, 0, false});
+  if (c.rank() == 0 && m.count(2) > m.segment_table(2).shared_end) {
+    auto owner = m.fields().get<int>(soma::owner_field, 2);
+    const auto row = static_cast<std::size_t>(m.segment_table(2).shared_end - m.segment_table(2).owned_end);
+    owner.view()(row, 0) = (owner.view()(row, 0) + 1) % c.size() == 0 ? 1 : (owner.view()(row, 0) + 1) % c.size();
+  }
+  EXPECT_THROW((soma::HaloExchange<Kokkos::HostSpace>(c, m, 2)), std::invalid_argument);
+}
