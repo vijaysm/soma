@@ -155,3 +155,78 @@ TEST(Migrate, PlacementRejectsBadDestinations) {
   std::vector<int> none;
   EXPECT_THROW((void)soma::detail::place_closure(c, m, short_off, none), std::invalid_argument);
 }
+
+namespace {
+
+// Rows sending each element of m to the rank `moved` names for its gid.
+std::pair<std::vector<std::size_t>, std::vector<int>> rows_to(const soma::HostMesh& m, const std::map<GO, int>& moved) {
+  const int d = m.dim();
+  const auto egid = m.gid(d);
+  std::vector<std::size_t> off{0};
+  std::vector<int> to;
+  for (LO e = 0; e < m.count(d); ++e) {
+    to.push_back(moved.at(egid(e)));
+    off.push_back(to.size());
+  }
+  return {off, to};
+}
+
+}  // namespace
+
+// Edge midpoints and centres go wherever a cell using them goes.
+TEST(Migrate, PlacementCarriesHighOrderNodes) {
+  const Comm c = Comm::world();
+  const int p = c.size();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  const soma::HostMesh m = soma::build_local_part(c, quad9_builder(rank_of, c.rank()));
+  std::map<GO, int> moved;
+  std::map<GO, std::set<int>> holders;
+  for (const auto& [cell, r] : rank_of) {
+    moved[cell] = (r + 1) % p;
+    for (const GO v : quad9(static_cast<int>(cell - 1000))) holders[v].insert((r + 1) % p);
+  }
+  const auto [off, to] = rows_to(m, moved);
+  const soma::detail::Placement where = soma::detail::place_closure(c, m, off, to);
+  const auto gid = m.gid(0);
+  std::int64_t nodes = 0;
+  for (LO e = 0; e < m.segment_table(0).owned_end; ++e) {
+    const std::set<int>& h = holders.at(gid(e));
+    EXPECT_EQ(sorted_ranks(where.of(0, e)), std::vector<int>(h.begin(), h.end())) << "point " << gid(e);
+    const auto [i, j] = lattice(gid(e));
+    if (i % 2 != 0 || j % 2 != 0) ++nodes;
+  }
+  EXPECT_EQ(c.allreduce(nodes, soma::Op::sum), static_cast<std::int64_t>((2 * nx + 1) * (2 * ny + 1) - (nx + 1) * (ny + 1)));
+}
+
+// An element held by two ranks is placed once, by its owner.
+TEST(Migrate, CopiesOfElementsPlaceNothing) {
+  const Comm c = Comm::world();
+  const int me = c.rank(), last = c.size() - 1;
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  soma::MeshBuilder b = local_builder(rank_of, me);
+  if (me == last && rank_of.at(1000) != me) {  // a copy of the first cell
+    const std::set<GO> here(b.vertex_gids().begin(), b.vertex_gids().end());
+    std::vector<GO> add;
+    std::vector<soma::Real> xyz;
+    for (const GO v : corners(0)) {
+      if (here.contains(v)) continue;
+      add.push_back(v);
+      xyz.insert(xyz.end(), {static_cast<soma::Real>((v - 1) % (nx + 1)), static_cast<soma::Real>((v - 1) / (nx + 1)), 0});
+    }
+    b.add_vertices(add, xyz);
+    b.add_elements(soma::Topology::quad, std::vector<GO>{1000}, corners(0));
+  }
+  const soma::HostMesh m = soma::build_local_part(c, std::move(b));
+  std::map<GO, int> moved;
+  for (const auto& [cell, r] : rank_of) moved[cell] = (r + 1) % c.size();
+  const auto [off, to] = rows_to(m, moved);
+  const soma::detail::Placement where = soma::detail::place_closure(c, m, off, to);
+  const auto gid = m.gid(2);
+  std::int64_t placed = 0;
+  for (LO e = 0; e < m.count(2); ++e) {
+    if (where.of(2, e).empty()) continue;
+    ++placed;
+    EXPECT_EQ(sorted_ranks(where.of(2, e)), std::vector<int>{moved.at(gid(e))});
+  }
+  EXPECT_EQ(c.allreduce(placed, soma::Op::sum), static_cast<std::int64_t>(nx * ny));
+}

@@ -9,6 +9,7 @@
 
 #include <map>
 #include <set>
+#include <utility>
 #include <vector>
 
 #include "soma/core/mesh_builder.hpp"
@@ -68,6 +69,39 @@ inline soma::MeshBuilder local_builder(const std::map<GO, int>& rank_of, int me)
   return b;
 }
 
+
+// The grid as quad9s on a lattice twice as fine: point (I, J) has gid
+// 1 + I + (2 nx + 1) J, corners at even I and J. A cell lists its corners,
+// its edge midpoints (01, 12, 23, 30) and its centre.
+inline GO point(int i, int j) { return 1 + i + (2 * nx + 1) * j; }
+inline std::pair<int, int> lattice(GO v) {
+  return {static_cast<int>((v - 1) % (2 * nx + 1)), static_cast<int>((v - 1) / (2 * nx + 1))};
+}
+inline std::vector<GO> quad9(int c) {
+  const int i = 2 * (c % nx), j = 2 * (c / nx);
+  return {point(i, j),         point(i + 2, j),     point(i + 2, j + 2), point(i, j + 2),    point(i + 1, j),
+          point(i + 2, j + 1), point(i + 1, j + 2), point(i, j + 1),     point(i + 1, j + 1)};
+}
+
+inline soma::MeshBuilder quad9_builder(const std::map<GO, int>& rank_of, int me) {
+  std::set<GO> used;
+  std::vector<GO> cells, conn;
+  for (const auto& [cell, r] : rank_of) {
+    if (r != me) continue;
+    cells.push_back(cell);
+    for (const GO v : quad9(static_cast<int>(cell - 1000))) {
+      conn.push_back(v);
+      used.insert(v);
+    }
+  }
+  std::vector<GO> vg(used.rbegin(), used.rend());
+  std::vector<Real> xyz;
+  for (const GO v : vg) xyz.insert(xyz.end(), {0.5 * lattice(v).first, 0.5 * lattice(v).second, 0});
+  soma::MeshBuilder b(2);
+  b.add_vertices(vg, xyz);
+  b.add_elements(soma::Topology::quad, cells, conn, 9);
+  return b;
+}
 
 // Every rank using each vertex.
 inline std::map<GO, std::set<int>> vertex_users(const std::map<GO, int>& rank_of) {

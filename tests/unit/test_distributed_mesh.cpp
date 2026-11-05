@@ -132,16 +132,6 @@ TEST(DistributedMesh, ExplicitEdgesAreSharedAndKeepTheirGids) {
   check(true);
 }
 
-// The grid as quad9s on a lattice twice as fine: point (I, J) has gid
-// 1 + I + (2 nx + 1) J, corners at even I and J. A cell lists its corners,
-// its edge midpoints (01, 12, 23, 30) and its centre.
-GO point(int i, int j) { return 1 + i + (2 * nx + 1) * j; }
-std::vector<GO> quad9(int c) {
-  const int i = 2 * (c % nx), j = 2 * (c / nx);
-  return {point(i, j),         point(i + 2, j),     point(i + 2, j + 2), point(i, j + 2),    point(i + 1, j),
-          point(i + 2, j + 1), point(i + 1, j + 2), point(i, j + 1),     point(i + 1, j + 1)};
-}
-
 // Node-only vertices (edge midpoints, centres) take their ownership and
 // sharing like corners, and follow the corners of their kind.
 TEST(DistributedMesh, HighOrderVerticesFollowTheCornersOfTheirKind) {
@@ -149,25 +139,10 @@ TEST(DistributedMesh, HighOrderVerticesFollowTheCornersOfTheirKind) {
   const int me = c.rank();
   const std::map<GO, int> rank_of = cell_ranks(c);
   std::map<GO, std::set<int>> users;
-  std::set<GO> used;
-  std::vector<GO> cells, conn;
   for (const auto& [cell, r] : rank_of) {
-    for (const GO v : quad9(static_cast<int>(cell - 1000))) {
-      users[v].insert(r);
-      if (r != me) continue;
-      conn.push_back(v);
-      used.insert(v);
-    }
-    if (r == me) cells.push_back(cell);
+    for (const GO v : quad9(static_cast<int>(cell - 1000))) users[v].insert(r);
   }
-  std::vector<GO> vg(used.rbegin(), used.rend());
-  std::vector<Real> xyz;
-  const auto lattice = [](GO v) { return std::pair<int, int>((v - 1) % (2 * nx + 1), (v - 1) / (2 * nx + 1)); };
-  for (const GO v : vg) xyz.insert(xyz.end(), {0.5 * lattice(v).first, 0.5 * lattice(v).second, 0});
-  soma::MeshBuilder b(2);
-  b.add_vertices(vg, xyz);
-  b.add_elements(soma::Topology::quad, cells, conn, 9);
-  const soma::HostMesh m = soma::build_local_part(c, std::move(b));
+  const soma::HostMesh m = soma::build_local_part(c, quad9_builder(rank_of, me));
 
   const auto& t = m.segment_table(0);
   const auto gid = m.gid(0);
