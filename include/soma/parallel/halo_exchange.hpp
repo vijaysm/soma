@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
-#ifndef SOMA_PARALLEL_SHARED_EXCHANGE_HPP_
-#define SOMA_PARALLEL_SHARED_EXCHANGE_HPP_
+#ifndef SOMA_PARALLEL_HALO_EXCHANGE_HPP_
+#define SOMA_PARALLEL_HALO_EXCHANGE_HPP_
 
 // Exchange and reduction over the shared entities of one dimension of a
 // distributed mesh (soma/parallel/distributed.hpp), built once from its
@@ -47,7 +47,7 @@ void pack_rows(const View2<T, MemSpace>& values, const Kokkos::View<const LO*, M
   using Exec = typename MemSpace::execution_space;
   const auto ncomp = static_cast<LO>(values.extent(1));
   Kokkos::parallel_for(
-      "soma::SharedExchange::pack", Kokkos::RangePolicy<Exec>(0, lids.extent(0)), KOKKOS_LAMBDA(const std::size_t k) {
+      "soma::HaloExchange::pack", Kokkos::RangePolicy<Exec>(0, lids.extent(0)), KOKKOS_LAMBDA(const std::size_t k) {
         for (LO c = 0; c < ncomp; ++c) buf(k, c) = values(lids(k), c);
       });
 }
@@ -58,7 +58,7 @@ void unpack_rows(const View2<T, MemSpace>& values, const Kokkos::View<const LO*,
   using Exec = typename MemSpace::execution_space;
   const auto ncomp = static_cast<LO>(values.extent(1));
   Kokkos::parallel_for(
-      "soma::SharedExchange::unpack", Kokkos::RangePolicy<Exec>(0, lids.extent(0)), KOKKOS_LAMBDA(const std::size_t k) {
+      "soma::HaloExchange::unpack", Kokkos::RangePolicy<Exec>(0, lids.extent(0)), KOKKOS_LAMBDA(const std::size_t k) {
         for (LO c = 0; c < ncomp; ++c) values(lids(k), c) = buf(k, c);
       });
 }
@@ -86,7 +86,7 @@ void combine_rows(const View2<T, MemSpace>& values, LO first, const View1<const 
   const auto ncomp = static_cast<LO>(values.extent(1));
   const auto n = offsets.extent(0) == 0 ? std::size_t{0} : offsets.extent(0) - 1;
   Kokkos::parallel_for(
-      "soma::SharedExchange::combine", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(const std::size_t i) {
+      "soma::HaloExchange::combine", Kokkos::RangePolicy<Exec>(0, n), KOKKOS_LAMBDA(const std::size_t i) {
         const LO e = first + static_cast<LO>(i);
         for (LO c = 0; c < ncomp; ++c) {
           const T own = values(e, c);
@@ -111,12 +111,12 @@ void combine_rows(const View2<T, MemSpace>& values, LO first, const View1<const 
 }  // namespace detail
 
 template <class MemSpace>
-class SharedExchange {
+class HaloExchange {
  public:
   // Throws std::invalid_argument if the mesh has no sharing fields on `dim`
   // (it was not built by build_local_part) or `dim` is out of range.
-  SharedExchange(const Comm& comm, const Mesh<MemSpace>& mesh, int dim) : dim_(dim), me_(comm.rank()) {
-    if (dim < 0 || dim > 3) throw std::invalid_argument("SharedExchange: dimension " + std::to_string(dim));
+  HaloExchange(const Comm& comm, const Mesh<MemSpace>& mesh, int dim) : dim_(dim), me_(comm.rank()) {
+    if (dim < 0 || dim > 3) throw std::invalid_argument("HaloExchange: dimension " + std::to_string(dim));
     const SegmentTable& t = mesh.segment_table(dim);
     count_ = mesh.count(dim);
     first_ = t.interior_end;
@@ -126,7 +126,7 @@ class SharedExchange {
     const auto gid = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.gid(dim));
     const LO nshared = t.shared_end - t.interior_end;
     if (static_cast<LO>(sharing.rows()) != nshared) {
-      throw std::invalid_argument("SharedExchange: soma:sharing does not cover the shared entities");
+      throw std::invalid_argument("HaloExchange: soma:sharing does not cover the shared entities");
     }
     // Per neighbour, (gid, entity) of what is sent and received.
     std::vector<int> nbrs(val.data(), val.data() + val.extent(0));
@@ -165,7 +165,7 @@ class SharedExchange {
     }
     combine_offsets_ = sharing.offsets();
     combine_ranks_ = sharing.values();
-    combine_at_ = to_space(at, "soma::SharedExchange::at");
+    combine_at_ = to_space(at, "soma::HaloExchange::at");
   }
 
   [[nodiscard]] const std::vector<int>& neighbours() const noexcept { return nbrs_; }
@@ -199,13 +199,13 @@ class SharedExchange {
       for (const auto& [g, e] : l) flat.push_back(e);
       off.push_back(flat.size());
     }
-    lids = to_space(flat, "soma::SharedExchange::lids");
+    lids = to_space(flat, "soma::HaloExchange::lids");
   }
 
   template <class T>
   void check(const View2<T, MemSpace>& values) const {
     if (static_cast<LO>(values.extent(0)) != count_) {
-      throw std::invalid_argument("SharedExchange: the values have " + std::to_string(values.extent(0)) +
+      throw std::invalid_argument("HaloExchange: the values have " + std::to_string(values.extent(0)) +
                                   " rows, dimension " + std::to_string(dim_) + " has " + std::to_string(count_));
     }
   }
@@ -215,10 +215,10 @@ class SharedExchange {
                 const Lids& recv, const std::vector<std::size_t>& recv_off, int tag, bool combine, Op op) const {
     using Buf = Kokkos::View<T**, Kokkos::LayoutRight, MemSpace>;
     const std::size_t ncomp = values.extent(1);
-    Buf out(Kokkos::view_alloc("soma::SharedExchange::send", Kokkos::WithoutInitializing), send.extent(0), ncomp);
-    Buf in(Kokkos::view_alloc("soma::SharedExchange::recv", Kokkos::WithoutInitializing), recv.extent(0), ncomp);
+    Buf out(Kokkos::view_alloc("soma::HaloExchange::send", Kokkos::WithoutInitializing), send.extent(0), ncomp);
+    Buf in(Kokkos::view_alloc("soma::HaloExchange::recv", Kokkos::WithoutInitializing), recv.extent(0), ncomp);
     detail::pack_rows(values, send, out);
-    Kokkos::fence("soma::SharedExchange::pack");
+    Kokkos::fence("soma::HaloExchange::pack");
     const auto hout = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, out);
     auto hin = Kokkos::create_mirror_view(Kokkos::WithoutInitializing, in);
     std::vector<Request> r;
@@ -237,7 +237,7 @@ class SharedExchange {
     } else {
       detail::unpack_rows(values, recv, in);
     }
-    Kokkos::fence("soma::SharedExchange::unpack");
+    Kokkos::fence("soma::HaloExchange::unpack");
   }
 
   int dim_;
@@ -254,4 +254,4 @@ class SharedExchange {
 
 }  // namespace soma
 
-#endif  // SOMA_PARALLEL_SHARED_EXCHANGE_HPP_
+#endif  // SOMA_PARALLEL_HALO_EXCHANGE_HPP_

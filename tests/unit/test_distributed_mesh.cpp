@@ -18,7 +18,7 @@
 #include "soma/fields/domain_mesh.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
-#include "soma/parallel/shared_exchange.hpp"
+#include "soma/parallel/halo_exchange.hpp"
 #include "soma/parallel/partition.hpp"
 
 using soma::Comm;
@@ -209,7 +209,7 @@ TEST(DistributedMesh, HighOrderVerticesFollowTheCornersOfTheirKind) {
   // Every point is owned once; the update reaches node-only copies too.
   std::int64_t owned = t.owned_end;
   EXPECT_EQ(c.allreduce(owned, soma::Op::sum), static_cast<std::int64_t>((2 * nx + 1) * (2 * ny + 1)));
-  const soma::SharedExchange<Kokkos::HostSpace> x(c, m, 0);
+  const soma::HaloExchange<Kokkos::HostSpace> x(c, m, 0);
   soma::View2<double, Kokkos::HostSpace> value("value", static_cast<std::size_t>(m.count(0)), 1);
   for (LO e = 0; e < m.count(0); ++e) value(e, 0) = e < t.owned_end ? static_cast<double>(gid(e)) : -1.0;
   x.update(c, value);
@@ -323,7 +323,7 @@ TEST(DistributedMesh, DerivedEdgesTakeGlobalGidsAndSharing) {
     }
   }
   // An exchange over edges counts each edge's holders.
-  const soma::SharedExchange<Kokkos::HostSpace> x(c, m, 1);
+  const soma::HaloExchange<Kokkos::HostSpace> x(c, m, 1);
   soma::View2<std::int64_t, Kokkos::HostSpace> ones("ones", static_cast<std::size_t>(m.count(1)), 1);
   Kokkos::deep_copy(ones, 1);
   x.reduce(c, ones, soma::Op::sum);

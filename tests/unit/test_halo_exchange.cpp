@@ -11,7 +11,7 @@
 
 #include "distributed_fixture.hpp"
 #include "soma/parallel/distributed.hpp"
-#include "soma/parallel/shared_exchange.hpp"
+#include "soma/parallel/halo_exchange.hpp"
 
 using namespace soma_test;
 using soma::LO;
@@ -30,11 +30,11 @@ double contribution(GO g, int r, int comp) { return 0.1 * r + 1e-3 * static_cast
 }  // namespace
 
 // After update every rank holds its owners' values on its copies.
-TEST(SharedExchange, UpdateCopiesTheOwnersValues) {
+TEST(HaloExchange, UpdateCopiesTheOwnersValues) {
   const Comm c = Comm::world();
   const auto rank_of = cell_ranks(c);
   const soma::HostMesh m = local_mesh(c, rank_of);
-  const soma::SharedExchange<Host> x(c, m, 0);
+  const soma::HaloExchange<Host> x(c, m, 0);
   const auto& t = m.segment_table(0);
   const auto gid = m.gid(0);
   soma::View2<double, Host> v("v", static_cast<std::size_t>(m.count(0)), 2);
@@ -57,12 +57,12 @@ TEST(SharedExchange, UpdateCopiesTheOwnersValues) {
 }
 
 // reduce combines in ascending rank order, so every holder gets the same bits.
-TEST(SharedExchange, ReduceGivesEveryHolderTheSameBits) {
+TEST(HaloExchange, ReduceGivesEveryHolderTheSameBits) {
   const Comm c = Comm::world();
   const auto rank_of = cell_ranks(c);
   const auto users = vertex_users(rank_of);
   const soma::HostMesh m = local_mesh(c, rank_of);
-  const soma::SharedExchange<Host> x(c, m, 0);
+  const soma::HaloExchange<Host> x(c, m, 0);
   const auto gid = m.gid(0);
   const std::size_t n = static_cast<std::size_t>(m.count(0));
   soma::View2<double, Host> sum("sum", n, 3);
@@ -99,15 +99,15 @@ TEST(SharedExchange, ReduceGivesEveryHolderTheSameBits) {
   }
 }
 
-TEST(SharedExchange, RejectsWrongShapesAndMeshesWithoutSharing) {
+TEST(HaloExchange, RejectsWrongShapesAndMeshesWithoutSharing) {
   const Comm c = Comm::world();
   const soma::HostMesh m = local_mesh(c, cell_ranks(c));
-  const soma::SharedExchange<Host> x(c, m, 0);
+  const soma::HaloExchange<Host> x(c, m, 0);
   soma::View2<double, Host> wrong("wrong", static_cast<std::size_t>(m.count(0)) + 1, 1);
   EXPECT_THROW(x.update(c, wrong), std::invalid_argument);
   EXPECT_THROW(x.reduce(c, wrong, soma::Op::sum), std::invalid_argument);
-  EXPECT_THROW(soma::SharedExchange<Host>(c, m, 1), std::exception);  // no edges, so no sharing, yet
-  const soma::SharedExchange<Host> cells(c, m, 2);  // elements are all interior
+  EXPECT_THROW(soma::HaloExchange<Host>(c, m, 1), std::exception);  // no edges, so no sharing, yet
+  const soma::HaloExchange<Host> cells(c, m, 2);  // elements are all interior
   EXPECT_TRUE(cells.neighbours().empty());
-  EXPECT_THROW(soma::SharedExchange<Host>(c, m, 4), std::invalid_argument);
+  EXPECT_THROW(soma::HaloExchange<Host>(c, m, 4), std::invalid_argument);
 }

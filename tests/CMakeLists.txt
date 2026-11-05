@@ -52,7 +52,7 @@ soma_add_test(test_key_ranks SOURCES unit/test_key_ranks.cpp RANKS 1 2 3 4 5 7 8
 soma_add_test(test_partition SOURCES unit/test_partition.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_sharing SOURCES unit/test_sharing.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_distributed_mesh SOURCES unit/test_distributed_mesh.cpp RANKS 1 2 3 4 5 7 8)
-soma_add_test(test_shared_exchange SOURCES unit/test_shared_exchange.cpp RANKS 1 2 3 4 5 7 8)
+soma_add_test(test_halo_exchange SOURCES unit/test_halo_exchange.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_canonical SOURCES unit/test_canonical.cpp)
 soma_add_test(test_vtk_writer SOURCES unit/test_vtk_writer.cpp)
 soma_add_test(test_vtk_reader SOURCES unit/test_vtk_reader.cpp)
