@@ -7,12 +7,14 @@
 #include <iterator>
 #include <map>
 #include <set>
+#include <string>
 #include <stdexcept>
 #include <vector>
 
 #include <gtest/gtest.h>
 
 #include "distributed_fixture.hpp"
+#include "soma/core/mesh_builder.hpp"
 #include "soma/core/mesh_edit.hpp"
 #include "soma/core/set_builder.hpp"
 #include "soma/fields/domain_mesh.hpp"
@@ -152,7 +154,13 @@ TEST(Ghosts, BadOptionsThrowOnEveryRank) {
   EXPECT_THROW((void)soma::detail::ghost_targets(c, m, soma::GhostOptions{-1, 0}), std::invalid_argument);
   EXPECT_THROW((void)soma::detail::ghost_targets(c, m, soma::GhostOptions{1, 2}), std::invalid_argument);
   const int layers = c.rank() == c.size() - 1 ? 2 : 1;
-  if (c.size() > 1) EXPECT_THROW((void)soma::detail::ghost_targets(c, m, soma::GhostOptions{layers, 0}), std::invalid_argument);
+  if (c.size() == 1) return;
+  try {
+    (void)soma::detail::ghost_targets(c, m, soma::GhostOptions{layers, 0});
+    ADD_FAILURE() << "options that differ were accepted";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_NE(std::string(e.what()).find("options differ"), std::string::npos) << e.what();
+  }
 }
 
 // Entities held only through ghost cells come last, owned elsewhere; the
@@ -446,4 +454,65 @@ TEST(Ghosts, AnEditedMeshIsRefusedOnEveryRank) {
     edit.apply();
   }
   EXPECT_THROW(m.add_ghosts(c, soma::GhostOptions{}), std::logic_error);
+}
+
+// A part reordered after its build keeps that order: ghosting restores each
+// entity's id, with its values.
+TEST(Ghosts, AddGhostsKeepsTheIdsOfAReorderedPart) {
+  const Comm c = Comm::world();
+  const int me = c.rank();
+  for (int kind = 0; kind < 4; ++kind) {
+    SCOPED_TRACE(testing::Message() << "partition " << kind);
+    const std::map<GO, int> rank_of = partition(c, kind);
+    soma::HostMesh m = soma::build_local_part(c, local_builder(rank_of, me));
+    soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
+    for (int d = 0; d <= 2; ++d) {  // each segment reversed
+      const soma::SegmentTable t = m.segment_table(d);
+      std::vector<LO> p(static_cast<std::size_t>(m.count(d)));
+      for (const soma::Segment& g : t.segments) {
+        for (LO e = g.begin; e < g.end; ++e) p[static_cast<std::size_t>(e)] = g.begin + (g.end - 1 - e);
+      }
+      soma::permute_entities(m, d, p, t);
+    }
+    decorate(m);
+    const Held before = held(m);
+    m.add_ghosts(c, soma::GhostOptions{2, 0, false});
+    expect_held(m, before);
+    const auto twice = m.fields().get<double>("twice");
+    for (LO e = 0; e < m.count(0); ++e) EXPECT_EQ(twice.value_or_default(0, e), 2.0 * static_cast<double>(m.gid(0)(e)));
+  }
+}
+
+// Explicit edges (the horizontal ones) and derived ones (the vertical):
+// those of ghost cells only are ghosts either way, and stay so when the
+// edges are derived again.
+TEST(Ghosts, ExplicitAndDerivedSidesOfGhostsAreGhosts) {
+  const Comm c = Comm::world();
+  const int me = c.rank();
+  for (int kind = 0; kind < 4; ++kind) {
+    SCOPED_TRACE(testing::Message() << "partition " << kind);
+    const std::map<GO, int> rank_of = partition(c, kind);
+    std::vector<GO> cells;
+    for (const auto& [cell, r] : rank_of) {
+      if (r == me) cells.push_back(cell);
+    }
+    soma::HostMesh m = soma::build_local_part(c, cells_with_edges_builder(cells));
+    soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
+    const Held before = held(m);
+    m.add_ghosts(c, soma::GhostOptions{1, 0, false});
+    expect_held(m, before);
+    const std::set<GO> ring1 = ring(rank_of, me, 1, 0);
+    const auto key = [](GO a, GO b2) { return std::min(a, b2) * 100000 + std::max(a, b2); };
+    std::set<GO> own, theirs, got;
+    for (const auto& [cell, r] : rank_of) {
+      if (r != me && !ring1.contains(cell)) continue;
+      const auto q = corners(static_cast<int>(cell - 1000));
+      for (int i = 0; i < 4; ++i) (r == me ? own : theirs).insert(key(q[static_cast<std::size_t>(i)], q[static_cast<std::size_t>((i + 1) % 4)]));
+    }
+    std::set<GO> want;
+    std::set_difference(theirs.begin(), theirs.end(), own.begin(), own.end(), std::inserter(want, want.end()));
+    const auto off = m.conn_offsets(1);
+    for (LO e = m.segment_table(1).shared_end; e < m.count(1); ++e) got.insert(key(m.gid(0)(m.conn(1)(off(e))), m.gid(0)(m.conn(1)(off(e) + 1))));
+    EXPECT_EQ(got, want);
+  }
 }

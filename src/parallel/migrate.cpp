@@ -23,6 +23,7 @@
 
 #include "closure.hpp"
 #include "records.hpp"
+#include "side_keys.hpp"
 
 namespace soma {
 
@@ -839,24 +840,6 @@ HostMesh detail::build_placed(const Comm& comm, const HostMesh& mesh, const Plac
     }
     b.add_vertices(g, c);
   }
-  // Ghosts: what arrived that was not held here before (other than as ghosts).
-  std::array<std::vector<GO>, 4> marked;
-  if (ghosts != nullptr) {
-    std::array<std::vector<GO>, 4> before;
-    for (int d = 0; d <= top; ++d) {
-      auto& v = before[static_cast<std::size_t>(d)];
-      for (LO e = 0; e < mesh.segment_table(d).shared_end; ++e) v.push_back(mesh.gid(d)(e));
-      std::sort(v.begin(), v.end());
-    }
-    const auto add = [&](int d, GO g) {
-      const auto& v = before[static_cast<std::size_t>(d)];
-      if (!std::binary_search(v.begin(), v.end(), g)) marked[static_cast<std::size_t>(d)].push_back(g);
-    };
-    for (std::size_t i = 0; i < vin.size(); ++i) add(0, take<GO>(&vin.payload(i, 0), 0));
-    for (std::size_t i = 0; i < ein.size(); ++i) {
-      add(dimension(static_cast<Topology>(take<std::int32_t>(&ein.payload(i, 0), sizeof(GO)))), take<GO>(&ein.payload(i, 0), 0));
-    }
-  }
   std::vector<Received> got(ein.size());
   for (std::size_t i = 0; i < ein.size(); ++i) {
     const std::byte* row = &ein.payload(i, 0);
@@ -867,6 +850,51 @@ HostMesh detail::build_placed(const Comm& comm, const HostMesh& mesh, const Plac
     r.extra = take<std::int32_t>(row, sizeof(GO) + 2 * sizeof(std::int32_t));
     r.nodes.resize(static_cast<std::size_t>(r.corners + r.extra));
     for (std::size_t k = 0; k < r.nodes.size(); ++k) r.nodes[k] = take<GO>(row, entity_header + k * sizeof(GO));
+  }
+  // Ghosts: what arrived that was not held here before (other than as
+  // ghosts). A lower entity stays only as a side of an element that arrived.
+  std::array<std::vector<GO>, 4> marked;
+  if (ghosts != nullptr) {
+    std::array<std::vector<GO>, 4> before;
+    for (int d = 0; d <= top; ++d) {
+      auto& v = before[static_cast<std::size_t>(d)];
+      for (LO e = 0; e < mesh.segment_table(d).shared_end; ++e) v.push_back(mesh.gid(d)(e));
+      std::sort(v.begin(), v.end());
+    }
+    const auto fresh = [&](int d, GO g) {
+      const auto& v = before[static_cast<std::size_t>(d)];
+      return !std::binary_search(v.begin(), v.end(), g);
+    };
+    for (std::size_t i = 0; i < vin.size(); ++i) {
+      const GO g = take<GO>(&vin.payload(i, 0), 0);
+      if (fresh(0, g)) marked[0].push_back(g);
+    }
+    std::array<std::vector<detail::SideKey>, 4> sides;
+    for (const Received& r : got) {
+      if (dimension(r.topology) != top) continue;
+      const std::span<const GO> c(r.nodes.data(), static_cast<std::size_t>(r.corners));
+      for (int k = 1; k < top; ++k) {
+        detail::for_each_side(r.topology, c, k, [&](const detail::SideKey& key) { sides[static_cast<std::size_t>(k)].push_back(key); });
+      }
+    }
+    for (auto& v : sides) std::sort(v.begin(), v.end());
+    std::vector<Received> kept;
+    for (Received& r : got) {
+      const int d = dimension(r.topology);
+      if (fresh(d, r.gid)) {
+        if (d < top) {
+          detail::SideKey key;
+          key.fill(std::numeric_limits<GO>::max());
+          for (std::size_t q = 0; q < static_cast<std::size_t>(r.corners) && q < key.size(); ++q) key[q] = r.nodes[q];
+          std::sort(key.begin(), key.end());
+          const auto& v = sides[static_cast<std::size_t>(d)];
+          if (!std::binary_search(v.begin(), v.end(), key)) continue;
+        }
+        marked[static_cast<std::size_t>(d)].push_back(r.gid);
+      }
+      kept.push_back(std::move(r));
+    }
+    got = std::move(kept);
   }
   std::stable_sort(got.begin(), got.end(), [](const Received& x, const Received& y) {
     return std::tuple(x.topology, x.corners, x.extra) < std::tuple(y.topology, y.corners, y.extra);
