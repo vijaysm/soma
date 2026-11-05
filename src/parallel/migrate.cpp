@@ -21,6 +21,7 @@
 #include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/route.hpp"
 
+#include "closure.hpp"
 #include "records.hpp"
 
 namespace soma {
@@ -460,8 +461,9 @@ bool owned(const HostMesh& mesh, int d, LO e) { return e < mesh.segment_table(d)
 // The sets of `mesh` on `part`. An entity member is deposited by the
 // entity's owner (set index, position in an ordered set); an ordered set
 // lists the entries of each depositing rank in its order, ranks in order,
-// with its set entries as rank 0 has them.
-void move_sets(const Comm& comm, const HostMesh& mesh, HostMesh& part) {
+// with its set entries as rank 0 has them. Members that are ghosts on the
+// part are kept only with `ghost_members`.
+void move_sets(const Comm& comm, const HostMesh& mesh, HostMesh& part, bool ghost_members) {
   const auto& sets = mesh.sets();
   if (sets.count() == 0) return;
   const auto sgid = sets.gid();
@@ -544,7 +546,10 @@ void move_sets(const Comm& comm, const HostMesh& mesh, HostMesh& part) {
     spec.flags = sets.flags(i);
     for (const LO l : sets.children(i)) spec.children.push_back(sgid(l));
     for (const LO l : sets.parents(i)) spec.parents.push_back(sgid(l));
-    for (; k < got.size() && got[k].set == i; ++k) spec.contents.push_back(got[k].item);
+    for (; k < got.size() && got[k].set == i; ++k) {
+      const SetItem& x = got[k].item;
+      if (ghost_members || x.slot == set_dim || x.id < GO{part.segment_table(x.slot).shared_end}) spec.contents.push_back(x);
+    }
     if (!sets.ordered(i)) {
       for (const LO l : sets.members_of(i, set_dim)) spec.contents.push_back({set_dim, sgid(l)});
     }
@@ -737,27 +742,35 @@ void move_fields(const Comm& comm, const HostMesh& mesh, HostMesh& part) {
 
 }  // namespace
 
+void detail::check_movable(const Comm& comm, const HostMesh& mesh, const char* who, bool bad, const char* what) {
+  const std::uint64_t hs = set_list_hash(mesh.sets()), hf = field_list_hash(mesh);
+  std::array<std::uint64_t, 6> flags{bad ? 1u : 0u, mesh.edited() ? 1u : 0u, hs, ~hs, hf, ~hf};
+  comm.allreduce(std::span<std::uint64_t>(flags), Op::max);
+  const std::string w(who);
+  if (flags[0] != 0) throw std::invalid_argument(w + ": " + what);
+  if (flags[1] != 0) throw std::logic_error(w + ": a rank's mesh holds edits; compress() it first");
+  if (flags[2] != ~flags[3]) {
+    throw std::invalid_argument(w + ": the ranks' sets differ (gids, flags, children, parents or sets they contain)");
+  }
+  if (flags[4] != ~flags[5]) {
+    throw std::invalid_argument(w + ": the ranks' fields or mesh values differ (beyond their values on entities)");
+  }
+}
+
 HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> dest, Ordering ordering) {
   const int p = comm.size(), top = mesh.dim();
   const auto n_top = static_cast<std::size_t>(mesh.count(top));
-  const std::uint64_t hs = set_list_hash(mesh.sets()), hf = field_list_hash(mesh);
-  std::array<std::uint64_t, 6> flags{
-      dest.size() != n_top || std::any_of(dest.begin(), dest.end(), [p](int r) { return r < 0 || r >= p; }) ? 1u : 0u,
-      mesh.edited() ? 1u : 0u, hs, ~hs, hf, ~hf};
-  comm.allreduce(std::span<std::uint64_t>(flags), Op::max);
-  if (flags[0] != 0) throw std::invalid_argument("migrate: a rank's dest does not give one rank of the communicator per element");
-  if (flags[1] != 0) throw std::logic_error("migrate: a rank's mesh holds edits; compress() it first");
-  if (flags[2] != ~flags[3]) {
-    throw std::invalid_argument("migrate: the ranks' sets differ (gids, flags, children, parents or sets they contain)");
-  }
-  if (flags[4] != ~flags[5]) {
-    throw std::invalid_argument("migrate: the ranks' fields or mesh values differ (beyond their values on entities)");
-  }
-
+  detail::check_movable(comm, mesh, "migrate",
+                        dest.size() != n_top || std::any_of(dest.begin(), dest.end(), [p](int r) { return r < 0 || r >= p; }),
+                        "a rank's dest does not give one rank of the communicator per element");
   std::vector<std::size_t> offsets(n_top + 1);
   for (std::size_t i = 0; i <= n_top; ++i) offsets[i] = i;
-  const detail::Placement where = detail::place_closure(comm, mesh, offsets, dest);
+  return detail::build_placed(comm, mesh, detail::place_closure(comm, mesh, offsets, dest), ordering, nullptr);
+}
 
+HostMesh detail::build_placed(const Comm& comm, const HostMesh& mesh, const Placement& where, Ordering ordering,
+                              const GhostMarks* ghosts) {
+  const int top = mesh.dim();
   // Vertices with their coordinates.
   const auto vgid = mesh.gid(0);
   const auto xyz = mesh.coords();
@@ -826,6 +839,24 @@ HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> de
     }
     b.add_vertices(g, c);
   }
+  // Ghosts: what arrived that was not held here before (other than as ghosts).
+  std::array<std::vector<GO>, 4> marked;
+  if (ghosts != nullptr) {
+    std::array<std::vector<GO>, 4> before;
+    for (int d = 0; d <= top; ++d) {
+      auto& v = before[static_cast<std::size_t>(d)];
+      for (LO e = 0; e < mesh.segment_table(d).shared_end; ++e) v.push_back(mesh.gid(d)(e));
+      std::sort(v.begin(), v.end());
+    }
+    const auto add = [&](int d, GO g) {
+      const auto& v = before[static_cast<std::size_t>(d)];
+      if (!std::binary_search(v.begin(), v.end(), g)) marked[static_cast<std::size_t>(d)].push_back(g);
+    };
+    for (std::size_t i = 0; i < vin.size(); ++i) add(0, take<GO>(&vin.payload(i, 0), 0));
+    for (std::size_t i = 0; i < ein.size(); ++i) {
+      add(dimension(static_cast<Topology>(take<std::int32_t>(&ein.payload(i, 0), sizeof(GO)))), take<GO>(&ein.payload(i, 0), 0));
+    }
+  }
   std::vector<Received> got(ein.size());
   for (std::size_t i = 0; i < ein.size(); ++i) {
     const std::byte* row = &ein.payload(i, 0);
@@ -861,9 +892,9 @@ HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> de
     i = j;
   }
   const AdjacencyRequest graphs = graphs_to_rebuild(comm, mesh);
-  HostMesh part = build_local_part(comm, std::move(b), ordering);
+  HostMesh part = build_local_part(comm, std::move(b), marked, ordering);
   if (!graphs.empty()) build_distributed_adjacencies(comm, part, graphs);
-  move_sets(comm, mesh, part);
+  move_sets(comm, mesh, part, ghosts == nullptr || ghosts->sets);
   move_fields(comm, mesh, part);
   part.values() = mesh.values();
   return part;
