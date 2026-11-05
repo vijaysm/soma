@@ -77,18 +77,22 @@ constexpr bool parallel_hdf5() {
 }
 
 // A collective (MPI-IO) file over `comm` when `collective`, else the default
-// driver; metadata is read and written collectively.
-inline h5::Id file_access(const Comm& comm, bool collective) {
+// driver; metadata is read and written collectively too unless
+// `independent_metadata` (when ranks open different datasets).
+inline h5::Id file_access(const Comm& comm, bool collective, bool independent_metadata = false) {
   h5::Id fapl = h5::check(H5Pcreate(H5P_FILE_ACCESS), "make a file access property list");
 #ifdef H5_HAVE_PARALLEL
   if (collective) {
     h5::check(H5Pset_fapl_mpio(fapl.get(), comm.native(), MPI_INFO_NULL), "use MPI-IO");
-    h5::check(H5Pset_all_coll_metadata_ops(fapl.get(), true), "read metadata collectively");
-    h5::check(H5Pset_coll_metadata_write(fapl.get(), true), "write metadata collectively");
+    if (!independent_metadata) {
+      h5::check(H5Pset_all_coll_metadata_ops(fapl.get(), true), "read metadata collectively");
+      h5::check(H5Pset_coll_metadata_write(fapl.get(), true), "write metadata collectively");
+    }
   }
 #else
   (void)comm;
   (void)collective;
+  (void)independent_metadata;
 #endif
   return fapl;
 }

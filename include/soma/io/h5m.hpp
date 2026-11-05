@@ -79,6 +79,10 @@ struct H5mReadOptions {
   // A parallel read places elements by the file's PARALLEL_PARTITION sets
   // when it has at least as many as ranks; false: always by the curve.
   bool file_parts = true;
+  // A parallel read opens the file with MPI-IO and reads its slices with
+  // collective transfers; unset: when the HDF5 is parallel. The serial read
+  // ignores it.
+  std::optional<bool> collective;
 };
 
 // What a read left out, one entry per tag (or tag part) not read.
@@ -111,8 +115,11 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
 // rank holding their entity (values on sets, every rank); the graphs the file
 // caches are built on each part, over its entities, rather than read. Gids
 // are file ids, as in the serial read, and each rank's entities, members and
-// values equal the serial read's by gid. Throws as the serial read, on every
-// rank if any rank's slice is invalid (std::runtime_error on the others).
+// values equal the serial read's by gid. With options.collective (by default
+// with a parallel HDF5) every rank takes part in every slice read, rows or
+// none; the mesh is the same either way. Throws as the serial read, on every
+// rank if any rank's slice is invalid (std::runtime_error on the others), and
+// std::invalid_argument for collective reads with a serial HDF5.
 HostMesh read_h5m(const Comm& comm, const std::filesystem::path& path, const H5mReadOptions& options = {});
 HostMesh read_h5m(const Comm& comm, const std::filesystem::path& path, const H5mReadOptions& options,
                   H5mReport& report);

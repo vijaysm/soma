@@ -26,6 +26,7 @@
 
 #include "h5m_read.hpp"
 #include "hdf5.hpp"
+#include "soma_layout.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/set_builder.hpp"
 #include "soma/io/h5m.hpp"
@@ -366,11 +367,12 @@ void read_sets(const Comm& comm, HostMesh& mesh, hid_t tstt, const IdRange& sets
   std::vector<Member> to_directory, to_all;
   collectively(comm, [&] {
     const std::uint64_t first = rows.first(comm.rank()), end = rows.end(comm.rank());
-    if (first == end) return;
+    if (entries == 0) return;
     const std::string where = "/tstt/sets/contents";
     const Id ds = h5::open_dataset(tstt, "sets/contents");
-    const std::uint64_t upto = std::min(end + 1, entries);
-    const auto got = h5::read_rows<std::uint64_t>(ds.get(), first, upto - first, 1, where);
+    const std::uint64_t upto = first == end ? first : std::min(end + 1, entries);
+    const auto got = h5::read_rows<std::uint64_t>(ds.get(), first, upto - first, 1, where);  // every rank reads
+    if (first == end) return;
     // The set of each entry: the first whose contents end after it.
     std::size_t i = 0;
     while (end_of(i) <= first) ++i;
@@ -692,26 +694,36 @@ void import_var_tag(const Comm& comm, HostMesh& mesh, hid_t tstt, const std::str
       const auto last = h5::read_rows<std::int64_t>(x_ds.get(), first - before, n + before, 1, xw);
       std::int64_t prev = before ? last[0] : -1;
       const std::int64_t base = prev + 1;
-      for (std::size_t i = 0; i < n; ++i) {
-        const std::int64_t end = last[i + before];
-        if (end < prev) {
-          fail(xw + ": file id " + str(listed[i]) + " ends its values at index " + str(end) +
-               "; the ends must be at least -1 and never decrease");
-        }
-        prev = end;
-      }
-      const std::uint64_t held = static_cast<std::uint64_t>(prev) + 1;  // prev >= -1
-      if (held > static_cast<std::uint64_t>(std::numeric_limits<GO>::max())) {
-        fail(xw + " ends at index " + str(prev) + ", beyond what an index can count");
-      }
       const std::string vw = where + "/values";
       const Id vs = h5::open_dataset(tag.get(), "values");
-      const auto vext = h5::extent(vs.get(), vw);
-      if (first + n == ext[0] && (vext.size() != 1 || vext[0] != held)) {
-        fail(vw + " must hold one value per entity (" + str(held) + ")");
+      // A failure here is raised after the values are read, which every rank
+      // takes part in with collective reads.
+      std::exception_ptr deferred;
+      try {
+        for (std::size_t i = 0; i < n; ++i) {
+          const std::int64_t end = last[i + before];
+          if (end < prev) {
+            fail(xw + ": file id " + str(listed[i]) + " ends its values at index " + str(end) +
+                 "; the ends must be at least -1 and never decrease");
+          }
+          prev = end;
+        }
+        const std::uint64_t held = static_cast<std::uint64_t>(prev) + 1;  // prev >= -1
+        if (held > static_cast<std::uint64_t>(std::numeric_limits<GO>::max())) {
+          fail(xw + " ends at index " + str(prev) + ", beyond what an index can count");
+        }
+        const auto vext = h5::extent(vs.get(), vw);
+        if (first + n == ext[0] && (vext.size() != 1 || vext[0] != held)) {
+          fail(vw + " must hold one value per entity (" + str(held) + ")");
+        }
+        values.resize(static_cast<std::size_t>(held - static_cast<std::uint64_t>(base)));
+      } catch (...) {
+        deferred = std::current_exception();
+        values.clear();
       }
-      values.resize(static_cast<std::size_t>(held - static_cast<std::uint64_t>(base)));
-      h5::read_rows(vs.get(), k.mem.get(), static_cast<hsize_t>(base), values.size(), values.data(), vw);
+      h5::read_rows(vs.get(), k.mem.get(), deferred ? 0 : static_cast<hsize_t>(base), values.size(), values.data(),
+                    vw);
+      if (deferred) std::rethrow_exception(deferred);
       for (std::size_t i = 0; i < n; ++i) {
         const std::uint64_t id = listed[i];
         const IdRange* r = id <= static_cast<std::uint64_t>(std::numeric_limits<GO>::max()) ? at.range_of(static_cast<GO>(id))
@@ -930,10 +942,12 @@ std::vector<int> file_parts(const Comm& comm, hid_t tstt, const IdRange& sets, s
   collectively(comm, [&] {
     const Blocks rows{entries, size};
     const std::uint64_t first = rows.first(comm.rank()), end = rows.end(comm.rank());
-    if (first == end) return;
+    if (entries == 0) return;
     const std::string where = "/tstt/sets/contents";
     const auto got = h5::read_rows<std::uint64_t>(h5::open_dataset(tstt, "sets/contents").get(), first,
-                                                  std::min(end + 1, entries) - first, 1, where);
+                                                  first == end ? 0 : std::min(end + 1, entries) - first, 1,
+                                                  where);  // every rank reads
+    if (first == end) return;
     std::size_t i = 0;
     const auto end_of = [&](std::size_t k) { return static_cast<std::uint64_t>(list[4 * k] + 1); };
     for (std::uint64_t j = first; j < end; ++j) {
@@ -1027,6 +1041,13 @@ AdjacencyRequest cached_graphs(hid_t tstt, int dim) {
 
 HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& options, H5mReport& report) {
   const h5::Session session;
+  // Collective reads: MPI-IO, every rank in every slice read (metadata
+  // stays independent, as ranks open different datasets).
+  const bool collective = options.collective.value_or(soma_file::parallel_hdf5());
+  const Id fapl = soma_file::file_access(comm, collective, true);
+  const Id dxpl = soma_file::transfer(collective);
+  std::optional<h5::CollectiveReads> in_step;
+  if (collective) in_step.emplace(dxpl.get());
   const int me = comm.rank();
   const auto size = static_cast<std::uint64_t>(comm.size());
 
@@ -1041,7 +1062,7 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
   std::vector<IdRange> ranges;
   collectively(comm, [&] {
     if (H5Fis_accessible(path.c_str(), H5P_DEFAULT) <= 0) fail("it is not an HDF5 file, or cannot be opened");
-    file = h5::check(H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT), "open the file");
+    file = h5::check(H5Fopen(path.c_str(), H5F_ACC_RDONLY, fapl.get()), "open the file");
     if (!h5::exists(file.get(), "tstt")) fail("it has no /tstt group, so it is not a MOAB .h5m file");
     tstt = h5::open_group(file.get(), "tstt");
     if (!h5::has_attribute(tstt.get(), "max_id")) fail("/tstt has no max_id attribute");
@@ -1086,6 +1107,7 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
       for (std::size_t c = 0; c < nodes.columns; ++c) my_xyz[3 * i + c] = raw[nodes.columns * i + c];
     }
     const Id el = groups.empty() ? Id() : h5::open_group(tstt.get(), "elements");
+    std::exception_ptr deferred;
     for (std::size_t k = 0; k < groups.size(); ++k) {
       const Group& g = groups[k];
       GroupSlice& s = slices[k];
@@ -1095,6 +1117,17 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
       const Id grp = h5::open_group(el.get(), names[k]);
       const std::string cw = g.where + "/connectivity";
       std::vector<std::uint64_t> ids;
+      // Every rank reads every group, rows or none, so that collective reads
+      // stay in step: a failure is raised once all are read.
+      const auto deferring = [&](auto&& f) {
+        if (deferred) return;
+        try {
+          f();
+        } catch (...) {
+          deferred = std::current_exception();
+        }
+      };
+      const Id ds = h5::open_dataset(grp.get(), "connectivity");
       if (g.arity == 0) {
         // The last index of the polygon before the slice, then the slice's.
         const std::string pw = g.where + "/poly_indices";
@@ -1102,30 +1135,35 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
         const std::uint64_t before = s.first > 0 ? 1 : 0;
         const auto last = h5::read_rows<std::int64_t>(pi.get(), s.first - before, n + before, 1, pw);
         const std::int64_t prev = before ? last[0] : -1;
-        std::vector<Offset> at = polygon_offsets(g, std::span<const std::int64_t>(last).subspan(before), s.first, prev,
-                                                 s.first + n == static_cast<std::uint64_t>(g.count));
-        if (n > 0) {
-          const Id ds = h5::open_dataset(grp.get(), "connectivity");
-          ids = h5::read_rows<std::uint64_t>(ds.get(), static_cast<hsize_t>(at.front()),
-                                             static_cast<hsize_t>(at.back() - at.front()), 1, cw);
-        }
-        s.conn = vertex_ids(g, ids, s.first, at, nodes.start, nodes.count);
-        const Offset base = at.front();
-        for (Offset& o : at) o -= base;
-        s.offsets = std::move(at);
+        std::vector<Offset> at;
+        deferring([&] {
+          at = polygon_offsets(g, std::span<const std::int64_t>(last).subspan(before), s.first, prev,
+                               s.first + n == static_cast<std::uint64_t>(g.count));
+        });
+        const bool some = !deferred && n > 0;
+        ids = h5::read_rows<std::uint64_t>(ds.get(), some ? static_cast<hsize_t>(at.front()) : 0,
+                                           some ? static_cast<hsize_t>(at.back() - at.front()) : 0, 1, cw);
+        deferring([&] {
+          s.conn = vertex_ids(g, ids, s.first, at, nodes.start, nodes.count);
+          const Offset base = at.front();
+          for (Offset& o : at) o -= base;
+          s.offsets = std::move(at);
+        });
       } else {
-        if (n > 0) {
-          const Id ds = h5::open_dataset(grp.get(), "connectivity");
-          ids = h5::read_rows<std::uint64_t>(ds.get(), s.first, n, static_cast<std::size_t>(g.arity), cw);
-        }
-        if (g.topology == Topology::polygon) {
-          s.offsets.resize(n + 1);
-          for (std::size_t i = 0; i <= n; ++i) s.offsets[i] = static_cast<Offset>(i * g.arity);
-        }
-        s.conn = vertex_ids(g, ids, s.first, s.offsets, nodes.start, nodes.count);
+        ids = h5::read_rows<std::uint64_t>(ds.get(), s.first, n, static_cast<std::size_t>(g.arity), cw);
+        deferring([&] {
+          if (g.topology == Topology::polygon) {
+            s.offsets.resize(n + 1);
+            for (std::size_t i = 0; i <= n; ++i) s.offsets[i] = static_cast<Offset>(i * g.arity);
+          }
+          s.conn = vertex_ids(g, ids, s.first, s.offsets, nodes.start, nodes.count);
+        });
       }
-      for (std::size_t i = 0; i < s.rows(g); ++i) widest = std::max<std::uint64_t>(widest, s.nodes(g, i).size());
+      deferring([&] {
+        for (std::size_t i = 0; i < s.rows(g); ++i) widest = std::max<std::uint64_t>(widest, s.nodes(g, i).size());
+      });
     }
+    if (deferred) std::rethrow_exception(deferred);
   });
   widest = static_cast<std::uint64_t>(comm.allreduce(static_cast<std::int64_t>(widest), Op::max));
   const std::size_t width = record_width(static_cast<std::size_t>(widest));
@@ -1263,6 +1301,9 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
 
 HostMesh read_h5m(const Comm& comm, const fs::path& path, const H5mReadOptions& options, H5mReport& report) {
   report = {};
+  if (options.collective.value_or(false) && !soma_file::parallel_hdf5()) {
+    throw std::invalid_argument("read_h5m: " + path.string() + ": collective reads need a parallel HDF5");
+  }
   try {
     return read(comm, path, options, report);
   } catch (const std::bad_alloc&) {

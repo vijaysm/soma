@@ -19,6 +19,7 @@
 #include <gtest/gtest.h>
 
 #include "h5m_writer.hpp"
+#include "mesh_text.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/set_builder.hpp"
 #include "soma/fields/data_type.hpp"
@@ -581,4 +582,102 @@ TEST(H5mParallel, AFileThatCannotBeReadThrowsOnEveryRank) {
   const Comm c = Comm::world();
   EXPECT_THROW((void)soma::read_h5m(c, data("no_such_file.h5m")), std::runtime_error);
   EXPECT_THROW((void)soma::read_h5m(c, data("hexes_mixed.vtk")), std::runtime_error);
+}
+
+namespace {
+
+// A row of 40 quads with a variable-length tag on its 82 vertices (vertex i
+// holds i % 3 values) and a set of the quads, which each rank reads slices
+// of. `defect` 1: the tag's var_indices decrease at vertex 50; 2: the set
+// lists file id 0 among its quads. Either sits in one rank's slice.
+void write_tagged_row(const fs::path& p, int defect) {
+  constexpr int n = 40;
+  std::vector<double> xyz;
+  for (int i = 0; i <= n; ++i) xyz.insert(xyz.end(), {double(i), 0, 0, double(i), 1, 0});
+  std::vector<std::uint64_t> conn;
+  for (int i = 0; i < n; ++i) {
+    const auto b = static_cast<std::uint64_t>(1 + 2 * i);
+    conn.insert(conn.end(), {b, b + 2, b + 3, b + 1});
+  }
+  const std::uint64_t nv = 2 * (n + 1), first_quad = nv + 1;
+  soma_test::h5m::Writer w(p);
+  w.nodes(1, 3, xyz);
+  w.elements("Quad4", "Quad", static_cast<std::int64_t>(first_quad), 4, conn);
+  std::vector<std::uint64_t> ids;
+  std::vector<std::int64_t> last;
+  std::vector<std::int32_t> values;
+  for (std::uint64_t v = 1; v <= nv; ++v) {
+    for (std::uint64_t k = 0; k < v % 3; ++k) values.push_back(static_cast<std::int32_t>(v * 10 + k));
+    ids.push_back(v);
+    last.push_back(static_cast<std::int64_t>(values.size()) - 1);
+  }
+  if (defect == 1) last[49] = last[48] - 1;
+  w.tag("hist", 1, H5T_NATIVE_INT32);
+  w.int_attribute("tags/hist", "variable_length", 1);
+  w.var_sparse("hist", ids, last, values.data(), values.size());
+  soma_test::h5m::Writer::Set quads;
+  for (std::uint64_t q = 0; q < n; ++q) quads.contents.push_back(first_quad + q);
+  if (defect == 2) quads.contents[25] = 0;
+  w.sets(static_cast<std::int64_t>(first_quad + n), std::vector<soma_test::h5m::Writer::Set>{quads});
+}
+
+// Every rank throws reading p; exactly one names `what`.
+void expect_named_once(const Comm& c, const fs::path& p, const soma::H5mReadOptions& o, const std::string& what) {
+  try {
+    (void)soma::read_h5m(c, p, o);
+    ADD_FAILURE() << "the reader accepted " << p;
+  } catch (const std::runtime_error& e) {
+    const std::int32_t naming = std::string(e.what()).find(what) != std::string::npos ? 1 : 0;
+    EXPECT_EQ(c.allreduce(naming, soma::Op::sum), 1) << e.what();
+  }
+}
+
+}  // namespace
+
+// Collective reads (MPI-IO, every rank in every slice read) give the same
+// parts as independent ones; asked for with a serial HDF5 they throw.
+TEST(H5mParallel, CollectiveReadsGiveTheSameParts) {
+  const Comm c = Comm::world();
+  for (const char* name : {"64bricks_1khex.h5m", "hex_2048.h5m", "hexes_mixed.h5m", "hybrid_3quad_1tri.h5m",
+                           "moab_i.h5m", "recMeshOcn128.h5m"}) {
+    for (const soma::Ordering ordering : {soma::Ordering::file, soma::Ordering::type_major_sfc}) {
+      SCOPED_TRACE(std::string(name) + " " + std::to_string(static_cast<int>(ordering)));
+      soma::H5mReadOptions independent{.ordering = ordering};
+      independent.collective = false;
+      soma::H5mReadOptions collective = independent;
+      collective.collective = true;
+#ifdef H5_HAVE_PARALLEL
+      EXPECT_EQ(soma_test::mesh_difference(soma::read_h5m(c, data(name), collective),
+                                           soma::read_h5m(c, data(name), independent)),
+                "");
+#else
+      EXPECT_THROW((void)soma::read_h5m(c, data(name), collective), std::invalid_argument);
+#endif
+    }
+  }
+}
+
+// A bad slice of a variable-length tag or of a set's contents, read
+// collectively or not, throws on every rank, named by the rank reading it.
+TEST(H5mParallel, BadSlicesThrowOnEveryRankReadCollectivelyOrNot) {
+  const Comm c = Comm::world();
+  const Scratch scratch(c);
+  if (c.rank() == 0) {
+    write_tagged_row(scratch.path("good.h5m"), 0);
+    write_tagged_row(scratch.path("indices.h5m"), 1);
+    write_tagged_row(scratch.path("contents.h5m"), 2);
+  }
+  c.barrier();
+  std::vector<bool> modes{false};
+#ifdef H5_HAVE_PARALLEL
+  modes.push_back(true);
+#endif
+  for (const bool collective : modes) {
+    SCOPED_TRACE(collective);
+    soma::H5mReadOptions o;
+    o.collective = collective;
+    EXPECT_NO_THROW((void)soma::read_h5m(c, scratch.path("good.h5m"), o));
+    expect_named_once(c, scratch.path("indices.h5m"), o, "never decrease");
+    expect_named_once(c, scratch.path("contents.h5m"), o, "names no entity");
+  }
 }

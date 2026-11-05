@@ -134,15 +134,51 @@ hid_t native() {
   else static_assert(sizeof(T) == 0, "no native HDF5 type");
 }
 
+// The transfer property list of the reads below: H5P_DEFAULT, or a
+// collective one while a CollectiveReads lives, when every rank makes every
+// read, rows or none.
+struct Transfer {
+  hid_t dxpl = H5P_DEFAULT;
+  bool collective = false;
+};
+
+inline Transfer& transfer() {
+  static thread_local Transfer t;
+  return t;
+}
+
+class CollectiveReads {
+ public:
+  explicit CollectiveReads(hid_t dxpl) noexcept : saved_(transfer()) { transfer() = {dxpl, true}; }
+  CollectiveReads(const CollectiveReads&) = delete;
+  CollectiveReads& operator=(const CollectiveReads&) = delete;
+  ~CollectiveReads() { transfer() = saved_; }
+
+ private:
+  Transfer saved_;
+};
+
 // Reads a whole dataset into out, which holds it in memory type `mem`.
 inline void read(hid_t dataset, hid_t mem, void* out, const std::string& where) {
-  check(H5Dread(dataset, mem, H5S_ALL, H5S_ALL, H5P_DEFAULT, out), "read " + where);
+  static std::uint64_t none = 0;  // HDF5 wants a buffer even for no values
+  check(H5Dread(dataset, mem, H5S_ALL, H5S_ALL, transfer().dxpl, out != nullptr ? out : &none), "read " + where);
 }
 
 // Rows [first, first + count) of a dataset of rank 1 or 2 (every column)
-// into out, which holds them in memory type `mem`.
+// into out, which holds them in memory type `mem`. With collective reads a
+// rank reading no rows still takes part.
 inline void read_rows(hid_t dataset, hid_t mem, hsize_t first, hsize_t count, void* out, const std::string& where) {
-  if (count == 0) return;
+  if (count == 0) {
+    if (!transfer().collective) return;
+    const Id file = check(H5Dget_space(dataset), "get the dataspace of " + where);
+    check(H5Sselect_none(file.get()), "select no rows of " + where);
+    const Id memory = check(H5Scopy(file.get()), "copy the dataspace of " + where);
+    check(H5Sselect_none(memory.get()), "select no rows of " + where);
+    static std::uint64_t none = 0;
+    check(H5Dread(dataset, mem, memory.get(), file.get(), transfer().dxpl, out != nullptr ? out : &none),
+          "read no rows of " + where);
+    return;
+  }
   const Id file = check(H5Dget_space(dataset), "get the dataspace of " + where);
   const int rank = H5Sget_simple_extent_ndims(file.get());
   if (rank != 1 && rank != 2) throw Error(where + " must have rank 1 or 2 to be read in rows");
@@ -153,7 +189,7 @@ inline void read_rows(hid_t dataset, hid_t mem, hsize_t first, hsize_t count, vo
   const hsize_t extent[2] = {count, rank == 2 ? dims[1] : 1};
   check(H5Sselect_hyperslab(file.get(), H5S_SELECT_SET, start, nullptr, extent, nullptr), "select rows of " + where);
   const Id memory = check(H5Screate_simple(rank, extent, nullptr), "make a dataspace for rows of " + where);
-  check(H5Dread(dataset, mem, memory.get(), file.get(), H5P_DEFAULT, out), "read rows of " + where);
+  check(H5Dread(dataset, mem, memory.get(), file.get(), transfer().dxpl, out), "read rows of " + where);
 }
 
 template <class T>
@@ -166,7 +202,7 @@ std::vector<T> read_rows(hid_t dataset, hsize_t first, hsize_t count, std::size_
 template <class T>
 std::vector<T> read_all(hid_t dataset, std::size_t count, const std::string& where) {
   std::vector<T> out(count);
-  if (count > 0) read(dataset, native<T>(), out.data(), where);
+  if (count > 0 || transfer().collective) read(dataset, native<T>(), count > 0 ? out.data() : nullptr, where);
   return out;
 }
 
