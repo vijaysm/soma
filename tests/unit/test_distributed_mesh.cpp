@@ -9,6 +9,7 @@
 #include <set>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -239,7 +240,13 @@ TEST(DistributedMesh, GivenSharingThatMissesGidsThrowsOnEveryRank) {
   const std::map<GO, int> rank_of = cell_ranks(c);
   std::array<std::optional<soma::Sharing>, 4> given;
   if (c.rank() == c.size() - 1) given[0] = soma::Sharing{{0}, {}, {}};
-  EXPECT_THROW((void)soma::build_local_part(c, local_builder(rank_of, c.rank()), given), std::invalid_argument);
+  std::string what;
+  try {
+    (void)soma::build_local_part(c, local_builder(rank_of, c.rank()), given);
+  } catch (const std::invalid_argument& e) {
+    what = e.what();
+  }
+  EXPECT_NE(what.find("does not cover its gids"), std::string::npos) << what;
 }
 
 // Derived edges: gids that do not depend on P, and ownership like vertices.
