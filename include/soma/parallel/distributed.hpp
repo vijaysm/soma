@@ -59,7 +59,8 @@ inline constexpr const char* owner_field = "soma:owner";
 // element_gids(d)), the other ranks holding it, so resolve_sharing, and its
 // gid directory, is not used for d. The lowest rank holding an entity owns
 // it, as resolve_sharing makes it. The ranks must agree: what one rank says
-// it shares with another, that one says too; this is not checked.
+// it shares with another, that one says too; this is not checked. A given
+// sharing without one row per gid throws std::invalid_argument on every rank.
 [[nodiscard]] HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder,
                                         const std::array<std::optional<Sharing>, 4>& sharing,
                                         Ordering ordering = default_ordering);

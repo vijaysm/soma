@@ -565,4 +565,8 @@ TEST(SomaFile, ConvertsBothWaysFromEveryRank) {
   }
   EXPECT_TRUE(throws<std::invalid_argument>([&] { (void)soma::convert_mesh_file(c, data("hexes_mixed.vtk"), dir.path("x")); },
                                             "neither"));
+  // Rank 0 writes the legacy file alone; its failure reaches every rank.
+  const fs::path soma = dir.path("hexes_mixed.h5m.soma");
+  EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::convert_mesh_file(c, soma, dir.path("missing") / "x.h5m"); },
+                                         "x.h5m"));
 }

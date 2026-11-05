@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <map>
+#include <optional>
 #include <set>
 #include <span>
 #include <stdexcept>
@@ -231,6 +232,14 @@ TEST(DistributedMesh, AFailureOnOneRankThrowsOnEvery) {
   } else {
     EXPECT_THROW((void)soma::build_local_part(c, std::move(b)), std::runtime_error);
   }
+}
+
+TEST(DistributedMesh, GivenSharingThatMissesGidsThrowsOnEveryRank) {
+  const Comm c = Comm::world();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  std::array<std::optional<soma::Sharing>, 4> given;
+  if (c.rank() == c.size() - 1) given[0] = soma::Sharing{{0}, {}, {}};
+  EXPECT_THROW((void)soma::build_local_part(c, local_builder(rank_of, c.rank()), given), std::invalid_argument);
 }
 
 // Derived edges: gids that do not depend on P, and ownership like vertices.
