@@ -301,4 +301,16 @@ TEST(Comm, SerialWaitsThatCannotCompleteThrow) {
   c.isend_bytes(big, 0, 21).wait();
   EXPECT_THROW(c.irecv_bytes(small, 0, 21).wait(), std::runtime_error);
 }
+
+// Rank 0 is its only peer: what it sends itself must be what it receives,
+// even when each side's counts add up to its own buffer.
+TEST(Comm, SerialAlltoallvSelfCountsMustAgree) {
+  const Comm c = Comm::world();
+  const std::vector<std::int32_t> one{7};
+  std::vector<std::int32_t> two(2, 0);
+  const std::vector<std::size_t> sc{1}, rc{2};
+  EXPECT_THROW(c.alltoallv(std::span<const std::int32_t>(one), std::span<const std::size_t>(sc),
+                           std::span<std::int32_t>(two), std::span<const std::size_t>(rc)),
+               std::invalid_argument);
+}
 #endif
