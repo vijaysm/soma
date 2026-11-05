@@ -57,6 +57,39 @@ TEST(Comm, ExscanIsExclusive) {
   EXPECT_EQ(c.exscan<std::int64_t>(r + 1), r * (r + 1) / 2);
 }
 
+TEST(Comm, ExscanSpanIsExclusivePerEntry) {
+  const Comm c = Comm::world();
+  const auto r = static_cast<std::uint64_t>(c.rank());
+  std::array<std::uint64_t, 3> v{1, r + 1, 0};
+  c.exscan(std::span<std::uint64_t>(v));
+  EXPECT_EQ(v[0], r);
+  EXPECT_EQ(v[1], r * (r + 1) / 2);
+  EXPECT_EQ(v[2], 0u);
+}
+
+TEST(Comm, CountsEveryCollectiveCall) {
+  const Comm c = Comm::world();
+  const auto before = soma::detail::comm_counts();
+  c.barrier();
+  (void)c.allreduce(std::int32_t{1}, Op::sum);
+  std::array<std::int64_t, 2> two{1, 2};
+  c.allreduce(std::span<std::int64_t>(two), Op::max);
+  (void)c.exscan(std::int64_t{1});
+  std::array<std::uint64_t, 2> scan{1, 2};
+  c.exscan(std::span<std::uint64_t>(scan));
+  std::array<int, 1> b{3};
+  c.bcast(std::span<int>(b), 0);
+  std::vector<int> send(static_cast<std::size_t>(c.size()), 1), recv(send.size());
+  c.alltoall(std::span<const int>(send), std::span<int>(recv));
+  std::vector<std::size_t> counts(send.size(), 1);
+  c.alltoallv(std::span<const int>(send), std::span<const std::size_t>(counts), std::span<int>(recv),
+              std::span<const std::size_t>(counts));
+  c.ibarrier().wait();
+  const auto after = soma::detail::comm_counts();
+  EXPECT_EQ(after.collectives - before.collectives, 9u);
+  EXPECT_EQ(after.routes, before.routes);
+}
+
 TEST(Comm, BcastDeliversRootBuffer) {
   const Comm c = Comm::world();
   std::array<std::byte, 4> b{};

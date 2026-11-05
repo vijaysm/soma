@@ -30,7 +30,19 @@ enum class Op : std::uint8_t { sum, min, max, prod };
 
 namespace detail {
 struct RequestState;
-}
+
+// What this process has called since it started, for tests that check how
+// many collectives an operation makes: `collectives` counts every collective
+// call of Comm (barrier, allreduce, exscan, bcast, alltoall, alltoallv,
+// ibarrier), `routes` every transport::route.
+struct CommCounts {
+  std::uint64_t collectives = 0;
+  std::uint64_t routes = 0;
+};
+[[nodiscard]] CommCounts comm_counts() noexcept;
+void count_collective() noexcept;
+void count_route() noexcept;
+}  // namespace detail
 
 // A non-blocking operation in flight. Move-only; destroying one that has
 // not completed waits for it. Tests and waits throw std::runtime_error when
@@ -89,6 +101,9 @@ class Comm {
   // Exclusive prefix sum. Rank 0 receives T{}.
   template <class T>
   [[nodiscard]] T exscan(T value) const;
+  // Exclusive prefix sums of each entry, in place, in one call.
+  template <class T>
+  void exscan(std::span<T> values) const;
 
   template <class T>
   void bcast(std::span<T> buffer, int root) const {

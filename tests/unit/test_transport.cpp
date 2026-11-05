@@ -178,6 +178,17 @@ TEST(Transport, RecordsWithoutPayloadCarryTheirSource) {
   }
 }
 
+TEST(Transport, EachRouteIsCountedOnce) {
+  const Comm c = Comm::world();
+  RecordBatch<Mem> in(1, 0);
+  Kokkos::deep_copy(in.dest, 0);
+  for (const Strategy strategy : {Strategy::crystal, Strategy::alltoallv, Strategy::nbx}) {
+    const auto before = soma::detail::comm_counts().routes;
+    (void)soma::transport::route(Space{}, c, in, strategy);
+    EXPECT_EQ(soma::detail::comm_counts().routes - before, 1u);
+  }
+}
+
 // A bad argument on one rank throws on every rank instead of hanging.
 TEST(Transport, BadArgumentsThrowOnEveryRank) {
   const Comm c = Comm::world();

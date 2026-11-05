@@ -124,32 +124,50 @@ Comm::Comm(MPI_Comm comm) : comm_(comm) {
 Comm Comm::world() { return Comm(MPI_COMM_WORLD); }
 Comm Comm::self() { return Comm(MPI_COMM_SELF); }
 
-void Comm::barrier() const { check(MPI_Barrier(comm_), "MPI_Barrier"); }
+void Comm::barrier() const {
+  detail::count_collective();
+  check(MPI_Barrier(comm_), "MPI_Barrier");
+}
 
 template <class T>
 T Comm::allreduce(T value, Op op) const {
+  detail::count_collective();
   return reduce_one(comm_, value, op);
 }
 
 template <class T>
 void Comm::allreduce(std::span<T> values, Op op) const {
+  detail::count_collective();
   reduce_span(comm_, values, op);
 }
 
 template <class T>
 T Comm::exscan(T value) const {
+  detail::count_collective();
   T out = std::numeric_limits<T>::max();
   check(MPI_Exscan(&value, &out, 1, datatype<T>(), MPI_SUM, comm_), "MPI_Exscan");
   // MPI leaves rank 0's receive buffer undefined.
   return rank_ == 0 ? T{} : out;
 }
 
+template <class T>
+void Comm::exscan(std::span<T> values) const {
+  detail::count_collective();
+  std::vector<T> out(values.size(), T{});
+  check(MPI_Exscan(values.data(), out.data(), checked_count(values.size()), datatype<T>(), MPI_SUM, comm_),
+        "MPI_Exscan");
+  // MPI leaves rank 0's receive buffer undefined.
+  for (std::size_t i = 0; i < values.size(); ++i) values[i] = rank_ == 0 ? T{} : out[i];
+}
+
 void Comm::bcast_bytes(std::span<std::byte> buffer, int root) const {
+  detail::count_collective();
   check(MPI_Bcast(buffer.data(), checked_count(buffer.size()), MPI_BYTE, root, comm_),
         "MPI_Bcast");
 }
 
 void Comm::alltoall_bytes(std::span<const std::byte> send, std::span<std::byte> recv, std::size_t width) const {
+  detail::count_collective();
   detail::check_alltoall(send.size(), recv.size(), width, size_);
   const int block = checked_count(send.size() / static_cast<std::size_t>(size_));
   check(MPI_Alltoall(send.data(), block, MPI_BYTE, recv.data(), block, MPI_BYTE, comm_), "MPI_Alltoall");
@@ -158,6 +176,7 @@ void Comm::alltoall_bytes(std::span<const std::byte> send, std::span<std::byte> 
 void Comm::alltoallv_bytes(std::span<const std::byte> send, std::span<const std::size_t> send_counts,
                            std::span<std::byte> recv, std::span<const std::size_t> recv_counts,
                            std::size_t width) const {
+  detail::count_collective();
   detail::check_counts("send", send_counts, send.size(), width, size_);
   detail::check_counts("receive", recv_counts, recv.size(), width, size_);
   const auto p = static_cast<std::size_t>(size_);
@@ -209,6 +228,7 @@ std::optional<Envelope> Comm::iprobe(int source, int tag) const {
 }
 
 Request Comm::ibarrier() const {
+  detail::count_collective();
   Request r;
   check(MPI_Ibarrier(comm_, &r.request_), "MPI_Ibarrier");
   return r;
@@ -232,7 +252,8 @@ std::uint64_t Comm::next_sequence() const {
 #define SOMA_INSTANTIATE_COMM(T)                              \
   template T Comm::allreduce<T>(T, Op) const;                 \
   template void Comm::allreduce<T>(std::span<T>, Op) const;   \
-  template T Comm::exscan<T>(T) const;
+  template T Comm::exscan<T>(T) const;                        \
+  template void Comm::exscan<T>(std::span<T>) const;
 
 SOMA_INSTANTIATE_COMM(std::int32_t)
 SOMA_INSTANTIATE_COMM(std::int64_t)

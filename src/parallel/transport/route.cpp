@@ -208,6 +208,7 @@ Strategy detail::resolve(Strategy s, int size) {
 
 detail::Arrivals detail::route_host(const Comm& comm, std::span<const int> dest, std::span<const std::byte> payload,
                                     std::size_t width, Strategy strategy) {
+  soma::detail::count_route();
   const bool bad_dest = std::any_of(dest.begin(), dest.end(), [&](int d) { return d < 0 || d >= comm.size(); });
   const bool bad_rows = payload.size() != dest.size() * width;
   // One reduction: the maxima of the flag, of the width and the strategy, and

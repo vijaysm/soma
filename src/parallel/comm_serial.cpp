@@ -98,24 +98,33 @@ void Request::wait_all(std::span<Request> requests) {
 Comm Comm::world() { return Comm(0, 1); }
 Comm Comm::self() { return Comm(0, 1); }
 
-void Comm::barrier() const {}
+void Comm::barrier() const { detail::count_collective(); }
 
 template <class T>
 T Comm::allreduce(T value, Op) const {
+  detail::count_collective();
   return value;
 }
 
 template <class T>
-void Comm::allreduce(std::span<T>, Op) const {}
+void Comm::allreduce(std::span<T>, Op) const { detail::count_collective(); }
 
 template <class T>
 T Comm::exscan(T) const {
+  detail::count_collective();
   return T{};
 }
 
-void Comm::bcast_bytes(std::span<std::byte>, int) const {}
+template <class T>
+void Comm::exscan(std::span<T> values) const {
+  detail::count_collective();
+  std::fill(values.begin(), values.end(), T{});
+}
+
+void Comm::bcast_bytes(std::span<std::byte>, int) const { detail::count_collective(); }
 
 void Comm::alltoall_bytes(std::span<const std::byte> send, std::span<std::byte> recv, std::size_t width) const {
+  detail::count_collective();
   detail::check_alltoall(send.size(), recv.size(), width, size_);
   if (!send.empty()) std::memmove(recv.data(), send.data(), send.size());
 }
@@ -123,6 +132,7 @@ void Comm::alltoall_bytes(std::span<const std::byte> send, std::span<std::byte> 
 void Comm::alltoallv_bytes(std::span<const std::byte> send, std::span<const std::size_t> send_counts,
                            std::span<std::byte> recv, std::span<const std::size_t> recv_counts,
                            std::size_t width) const {
+  detail::count_collective();
   detail::check_counts("send", send_counts, send.size(), width, size_);
   detail::check_counts("receive", recv_counts, recv.size(), width, size_);
   if (send_counts[0] != recv_counts[0]) {
@@ -166,14 +176,18 @@ std::optional<Envelope> Comm::iprobe(int source, int tag) const {
   return Envelope{0, tag, it->bytes.size()};
 }
 
-Request Comm::ibarrier() const { return Request{}; }
+Request Comm::ibarrier() const {
+  detail::count_collective();
+  return Request{};
+}
 
 std::uint64_t Comm::next_sequence() const { return sequence++; }
 
 #define SOMA_INSTANTIATE_COMM(T)                              \
   template T Comm::allreduce<T>(T, Op) const;                 \
   template void Comm::allreduce<T>(std::span<T>, Op) const;   \
-  template T Comm::exscan<T>(T) const;
+  template T Comm::exscan<T>(T) const;                        \
+  template void Comm::exscan<T>(std::span<T>) const;
 
 SOMA_INSTANTIATE_COMM(std::int32_t)
 SOMA_INSTANTIATE_COMM(std::int64_t)
