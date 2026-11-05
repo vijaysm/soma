@@ -758,6 +758,10 @@ void detail::check_movable(const Comm& comm, const HostMesh& mesh, const char* w
   }
 }
 
+std::uint64_t detail::sets_hash(const HostMesh& mesh) { return set_list_hash(mesh.sets()); }
+
+std::uint64_t detail::fields_hash(const HostMesh& mesh) { return field_list_hash(mesh); }
+
 HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> dest, Ordering ordering) {
   const int p = comm.size(), top = mesh.dim();
   const auto n_top = static_cast<std::size_t>(mesh.count(top));

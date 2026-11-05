@@ -94,9 +94,10 @@ else()
   list(APPEND SOMA_SOURCES src/parallel/comm_serial.cpp)
 endif()
 if(SOMA_ENABLE_HDF5)
-  list(APPEND SOMA_SOURCES src/io/h5m_reader.cpp src/io/h5m_parallel_reader.cpp src/io/h5m_writer.cpp)
+  list(APPEND SOMA_SOURCES src/io/h5m_reader.cpp src/io/h5m_parallel_reader.cpp src/io/h5m_writer.cpp
+                           src/io/soma_writer.cpp src/io/soma_reader.cpp)
 else()
-  list(APPEND SOMA_SOURCES src/io/h5m_unavailable.cpp)
+  list(APPEND SOMA_SOURCES src/io/h5m_unavailable.cpp src/io/soma_unavailable.cpp)
 endif()
 
 add_library(soma ${SOMA_SOURCES})

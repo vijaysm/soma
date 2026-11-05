@@ -19,6 +19,12 @@ namespace soma::detail {
 // (std::invalid_argument).
 void check_movable(const Comm& comm, const HostMesh& mesh, const char* who, bool bad, const char* what);
 
+// The hashes check_movable compares: of the sets (gids, flags, children,
+// parents, the sets each contains) and of the fields and mesh values beyond
+// their values on entities (internal fields aside).
+[[nodiscard]] std::uint64_t sets_hash(const HostMesh& mesh);
+[[nodiscard]] std::uint64_t fields_hash(const HostMesh& mesh);
+
 // How a rebuilt part marks ghosts: entities a rank did not hold before (other
 // than as ghosts) are ghosts there; set members are kept on them only with
 // `sets`.

@@ -271,8 +271,11 @@ HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, Ordering orde
   return build_local_part(comm, std::move(builder), std::array<std::vector<GO>, 4>{}, ordering);
 }
 
-HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, const std::array<std::vector<GO>, 4>& ghosts,
-                          Ordering ordering) {
+namespace {
+
+// build_local_part with the sharing of some dimensions given.
+HostMesh build_part(const Comm& comm, MeshBuilder&& builder, const std::array<std::vector<GO>, 4>& ghosts,
+                    const std::array<std::optional<Sharing>, 4>& given, Ordering ordering) {
   // Every dimension the builder holds on some rank, the vertices always.
   std::array<std::vector<GO>, 4> gids;
   gids[0].assign(builder.vertex_gids().begin(), builder.vertex_gids().end());
@@ -299,8 +302,16 @@ HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, const std::ar
     throw std::invalid_argument("build_local_part: a rank names a ghost it does not hold");
   }
   std::array<std::optional<Sharing>, 4> sharing;
+  bool bad = false;
   for (std::size_t d = 0; d < 4; ++d) {
-    if (held[d]) sharing[d] = resolve_sharing(comm, gids[d], flags[d]);
+    if (!held[d] || !given[d]) continue;
+    bad = bad || given[d]->offsets.size() != gids[d].size() + 1 || given[d]->offsets.back() != given[d]->ranks.size();
+  }
+  if (comm.allreduce(static_cast<std::int32_t>(bad), Op::max)) {
+    throw std::invalid_argument("build_local_part: a rank's given sharing does not cover its gids");
+  }
+  for (std::size_t d = 0; d < 4; ++d) {
+    if (held[d]) sharing[d] = given[d] ? *given[d] : resolve_sharing(comm, gids[d], flags[d]);
   }
 
   // The box of every rank's vertices: maxima of the highs and of the negated lows.
@@ -332,6 +343,18 @@ HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, const std::ar
     }
   });
   return mesh;
+}
+
+}  // namespace
+
+HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, const std::array<std::vector<GO>, 4>& ghosts,
+                          Ordering ordering) {
+  return build_part(comm, std::move(builder), ghosts, {}, ordering);
+}
+
+HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, const std::array<std::optional<Sharing>, 4>& sharing,
+                          Ordering ordering) {
+  return build_part(comm, std::move(builder), {}, sharing, ordering);
 }
 
 }  // namespace soma

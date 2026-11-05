@@ -19,12 +19,14 @@
 // exchanges are built from them once.
 
 #include <array>
+#include <optional>
 #include <vector>
 
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/ordering.hpp"
 #include "soma/parallel/comm.hpp"
+#include "soma/parallel/sharing.hpp"
 #include "soma/topology/adjacency.hpp"
 
 namespace soma {
@@ -49,6 +51,17 @@ inline constexpr const char* owner_field = "soma:owner";
 // otherwise.
 [[nodiscard]] HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder,
                                         const std::array<std::vector<GO>, 4>& ghosts,
+                                        Ordering ordering = default_ordering);
+
+// As above, with the sharing of some dimensions known already (a file read
+// back at its part count): sharing[d], when given, lists for each gid of
+// dimension d the builder holds, in the builder's order (vertex_gids(),
+// element_gids(d)), the other ranks holding it, so resolve_sharing, and its
+// gid directory, is not used for d. The lowest rank holding an entity owns
+// it, as resolve_sharing makes it. The ranks must agree: what one rank says
+// it shares with another, that one says too; this is not checked.
+[[nodiscard]] HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder,
+                                        const std::array<std::optional<Sharing>, 4>& sharing,
                                         Ordering ordering = default_ordering);
 
 // Collective: builds the requested graphs on a local part, then gives each
