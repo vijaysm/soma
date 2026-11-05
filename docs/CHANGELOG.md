@@ -339,6 +339,17 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   again; set memberships and field values (layouts, options, tag formats) follow from each
   entity's owner through a gid directory; mesh values are copied. Sets, fields and mesh values
   that differ between ranks, a bad `dest` or an edited mesh throw on every rank.
+- Ghost layers: `mesh.add_ghosts(comm, GhostOptions{layers, bridge_dim, sets})` and
+  `mesh.remove_ghosts(comm)`, in place and chained. Layer i is every element held elsewhere
+  sharing a `bridge_dim` side with layer i - 1, whatever the partition (sliver parts, empty
+  ranks, layers deeper than a part), found by one round per layer over the holders of each
+  side's lowest vertex. Entities held before keep their ids; ghosts keep their gids and follow
+  the shared copies, by topology and owner; `soma:owner` covers them. Fields come from the
+  owners, set membership with `sets`. `resolve_sharing` and `build_local_part` take ghosts;
+  derived sides of ghost elements only are ghosts. `HaloExchange::update` writes ghosts,
+  `reduce` leaves them. Parity with MOAB's `exchange_ghost_cells` for the first layer.
+- `build_distributed_adjacencies` keeps the sharing of the dimensions it does not extend when
+  deriving beside explicit entities renews the epoch.
 - `permute_entities(mesh, dim, new_of_old, table, gids)` reorders one dimension with
   everything that refers to it (connectivity, graphs, sets, fields), optionally with new gids.
 - `read_h5m(comm, path, options)` reads a file in parallel: every rank reads the metadata and
