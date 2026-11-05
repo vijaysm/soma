@@ -68,6 +68,25 @@ inline soma::MeshBuilder cells_builder(const std::vector<GO>& cells) {
   return b;
 }
 
+// The cells named with their vertices and, as explicit edges, their
+// horizontal edges (gid 5000 + the left vertex).
+inline soma::MeshBuilder cells_with_edges_builder(const std::vector<GO>& cells) {
+  soma::MeshBuilder b = cells_builder(cells);
+  std::set<GO> lefts;
+  for (const GO cell : cells) {
+    const auto q = corners(static_cast<int>(cell - 1000));
+    lefts.insert(q[0]);
+    lefts.insert(q[3]);
+  }
+  std::vector<GO> gids, conn;
+  for (const GO v : lefts) {
+    gids.push_back(5000 + v);
+    conn.insert(conn.end(), {v, v + 1});
+  }
+  b.add_elements(soma::Topology::edge, gids, conn);
+  return b;
+}
+
 inline soma::MeshBuilder local_builder(const std::map<GO, int>& rank_of, int me) {
   std::vector<GO> cells;
   for (const auto& [cell, r] : rank_of) {

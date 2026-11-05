@@ -405,3 +405,36 @@ TEST(DistributedMesh, DerivedFacesAndEdgesOfHexesDoNotDependOnP) {
     EXPECT_EQ(c.allreduce(owned, soma::Op::sum), static_cast<std::int64_t>(sides.size())) << "dimension " << dim;
   }
 }
+
+// Deriving edges beside explicit ones renews the mesh's epoch: the sharing of
+// the vertices and cells stays readable and as it was.
+TEST(DistributedMesh, DerivingBesideExplicitEdgesKeepsTheOtherSharing) {
+  const Comm c = Comm::world();
+  const int me = c.rank();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  std::vector<GO> cells;
+  for (const auto& [cell, r] : rank_of) {
+    if (r == me) cells.push_back(cell);
+  }
+  soma::HostMesh m = soma::build_local_part(c, cells_with_edges_builder(cells));
+  const soma::HostMesh ref = soma::build_local_part(c, cells_builder(cells));
+  const std::uint64_t epoch = m.epoch();
+  soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
+  EXPECT_NE(m.epoch(), epoch);
+  for (const int d : {0, 2}) {
+    ASSERT_EQ(m.count(d), ref.count(d));
+    const soma::SegmentTable& t = m.segment_table(d);
+    const auto s = m.fields().get_var<int>(soma::sharing_field, d);
+    const auto rs = ref.fields().get_var<int>(soma::sharing_field, d);
+    const auto o = m.fields().get<int>(soma::owner_field, d);
+    const auto ro = ref.fields().get<int>(soma::owner_field, d);
+    for (LO e = t.interior_end; e < m.count(d); ++e) {
+      ASSERT_EQ(m.gid(d)(e), ref.gid(d)(e));
+      if (e < t.shared_end) {
+        const auto a = s.value_or_default(d, e), b = rs.value_or_default(d, e);
+        EXPECT_EQ(std::vector<int>(a.begin(), a.end()), std::vector<int>(b.begin(), b.end()));
+      }
+      if (e >= t.owned_end) EXPECT_EQ(o.value_or_default(d, e), ro.value_or_default(d, e));
+    }
+  }
+}

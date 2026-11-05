@@ -27,6 +27,9 @@ namespace soma {
 
 namespace {
 
+void add_sharing_fields(HostMesh& mesh, int dim, const std::vector<Offset>& offsets, const std::vector<int>& ranks,
+                        const std::vector<int>& owners);
+
 // Installs soma:sharing and soma:owner on dimension `dim` from the sharing of
 // `gids` (the gids given to resolve_sharing, in its order).
 void install(HostMesh& mesh, const Comm& comm, int dim, std::span<const GO> gids, const Sharing& sharing) {
@@ -47,9 +50,15 @@ void install(HostMesh& mesh, const Comm& comm, int dim, std::span<const GO> gids
   }
   std::vector<int> owners;
   for (LO e = t.owned_end; e < t.shared_end; ++e) owners.push_back(sharing.owner(find(gid(e)), comm.rank()));
-
   for (LO e = t.shared_end; e < mesh.count(dim); ++e) owners.push_back(sharing.owner(find(gid(e)), comm.rank()));
+  add_sharing_fields(mesh, dim, offsets, ranks, owners);
+}
 
+// soma:sharing (rows over the shared entities) and soma:owner (over the
+// copies and ghosts) of dimension `dim`.
+void add_sharing_fields(HostMesh& mesh, int dim, const std::vector<Offset>& offsets, const std::vector<int>& ranks,
+                        const std::vector<int>& owners) {
+  const SegmentTable& t = mesh.segment_table(dim);
   SegmentFilter shared;
   shared.ownership = SegmentFilter::Own::shared;
   std::vector<LO> others(static_cast<std::size_t>(mesh.count(dim) - t.owned_end));
@@ -78,6 +87,31 @@ void uninstall(HostMesh& mesh, int dim) {
     const bool named = f.name == sharing_field || f.name == owner_field;
     if (named && std::find(f.dims.begin(), f.dims.end(), dim) != f.dims.end()) reg.remove(f.id);
   }
+}
+
+// A dimension's soma:sharing and soma:owner by lid, to install again when a
+// derivation renews the epoch without changing the dimension.
+struct Kept {
+  std::vector<GO> gids;
+  std::vector<Offset> offsets{0};
+  std::vector<int> ranks;
+  std::vector<int> owners;
+};
+
+Kept keep(const HostMesh& mesh, int dim) {
+  Kept k;
+  const SegmentTable& t = mesh.segment_table(dim);
+  const auto g = mesh.gid(dim);
+  k.gids.assign(g.data(), g.data() + mesh.count(dim));
+  const auto s = mesh.fields().get_var<int>(sharing_field, dim);
+  for (LO e = t.interior_end; e < t.shared_end; ++e) {
+    const auto row = s.value_or_default(dim, e);
+    k.ranks.insert(k.ranks.end(), row.begin(), row.end());
+    k.offsets.push_back(static_cast<Offset>(k.ranks.size()));
+  }
+  const auto o = mesh.fields().get<int>(owner_field, dim);
+  for (LO e = t.owned_end; e < mesh.count(dim); ++e) k.owners.push_back(o.value_or_default(dim, e));
+  return k;
 }
 
 // Runs f, then reports a failure on any rank on every rank.
@@ -190,6 +224,11 @@ void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRe
   // dimensions already distributed.
   std::array<std::vector<GO>, 4> explicit_gids, before, ghosts;
   std::array<bool, 4> done{};
+  std::array<std::optional<Kept>, 4> kept;
+  const std::uint64_t epoch = mesh.epoch();
+  for (int d = 0; d <= mesh.dim(); ++d) {
+    if (has_sharing(mesh, d)) kept[static_cast<std::size_t>(d)] = keep(mesh, d);
+  }
   for (int k = 1; k < mesh.dim(); ++k) {
     const auto kk = static_cast<std::size_t>(k);
     done[kk] = has_sharing(mesh, k);
@@ -212,6 +251,19 @@ void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRe
     if (comm.allreduce(todo, Op::max) == 0) continue;
     if (done[kk]) uninstall(mesh, k);
     distribute_dimension(comm, mesh, k, explicit_gids[kk], ghosts[kk]);
+    kept[kk].reset();
+  }
+  // Dimensions left alone keep their sharing at the new epoch.
+  if (mesh.epoch() == epoch) return;
+  for (int d = 0; d <= mesh.dim(); ++d) {
+    const auto& k = kept[static_cast<std::size_t>(d)];
+    if (!k) continue;
+    const auto g = mesh.gid(d);
+    if (static_cast<std::size_t>(mesh.count(d)) != k->gids.size() || !std::equal(k->gids.begin(), k->gids.end(), g.data())) {
+      throw std::logic_error("build_distributed_adjacencies: a derivation changed a distributed dimension it did not extend");
+    }
+    uninstall(mesh, d);
+    add_sharing_fields(mesh, d, k->offsets, k->ranks, k->owners);
   }
 }
 
