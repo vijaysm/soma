@@ -46,6 +46,9 @@ All notable changes to SOMA are recorded here. The format follows
 - `soma::ScopeGuard` initializes MPI and then Kokkos, and tears them down in reverse order.
 - The fixed-width types `LO`, `Offset`, `GO` and `Real` are defined in `soma/core/types.hpp`.
   `SOMA_LO_64` and `SOMA_OFFSET_64` select 64-bit widths.
+- `Comm::exscan` on a span scans each entry on its own (one call for a vector of counts).
+- `detail::comm_counts()` counts the collectives and routed exchanges this process has
+  entered, for tests that bound them.
 
 ### Topology
 
@@ -357,7 +360,38 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   at least as many as ranks (`H5mReadOptions::file_parts`), else by the curve; explicit
   entities of lower dimensions go to every rank holding all their corners; sets, tags and
   cached graphs follow (graphs are built on each part). Each rank's entities, set members and
-  values equal the serial read's by gid.
+  values equal the serial read's by gid. With a parallel HDF5 the slices are read collectively
+  over MPI-IO (`H5mReadOptions::collective`, default on there; asking for it with a serial
+  HDF5 throws `std::invalid_argument`); every rank joins each read, empty slices too, and a
+  bad slice throws on every rank after the reads that must stay in step.
+- `build_local_part(comm, builder, sharing, ordering)` takes the sharing of each dimension
+  instead of resolving it through a gid directory.
+
+### SOMA files
+
+- `write_soma(comm, mesh, path, SomaWriteOptions{compression})` writes a native SOMA file
+  (`/soma`, `format_version` 1): part p is what rank p owned, each per-part dataset the parts'
+  rows concatenated, located by one part table. Per written dimension: gids, topology,
+  corners and nodes as gids, coordinates, and the parts holding copies of each owned shared
+  entity; fields per part with their options and domains; sets with each part's members;
+  mesh values. Ghosts and copies are not written. A write takes 7 collectives and no routed
+  exchange whatever the rank count or the number of fields and sets. With a parallel HDF5 the
+  ranks write collectively over MPI-IO in one multi-dataset write; with a serial one each
+  rank's rows go to rank 0 in turn. The file appears whole or not at all (temporary and
+  rename); the same mesh at the same rank count gives the same bytes through either sink.
+- `read_soma(comm, path, SomaReadOptions{ordering, rebalance, adjacencies})` reads a file of
+  N parts at P ranks, part q on rank floor(qP/N). Owners send their shared entities, with
+  field values and set memberships, to the ranks holding copies, and the sharing comes from
+  the file: a restart read (N = P) gives each rank the part it wrote with 13 collectives and
+  one routed exchange. With N < P, `rebalance` migrates elements by the curve so every rank
+  gets some. The result equals the mesh written by gid: entities, coordinates, connectivity,
+  nodes, sets in order, fields with domains, defaults, global values and formats, mesh values;
+  derived dimensions are derived again.
+- Meshes that cannot be written and files that cannot be read throw on every rank.
+- `detect_format(path)` tells a MOAB `.h5m` file from a SOMA file by content;
+  `convert_mesh_file(comm, in, out, compression)` and the `soma-convert` tool convert either
+  way (legacy files are read in parallel; SOMA files are gathered on rank 0 and written by
+  `write_h5m`, which stays serial).
 
 ### Patch-based AMR
 
