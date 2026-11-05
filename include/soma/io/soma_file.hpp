@@ -73,6 +73,17 @@ void write_soma(const HostMesh& mesh, const std::filesystem::path& path, const S
 HostMesh read_soma(const Comm& comm, const std::filesystem::path& path, const SomaReadOptions& options = {});
 HostMesh read_soma(const std::filesystem::path& path, const SomaReadOptions& options = {});
 
+// Converts a MOAB .h5m file into a SOMA file, or a SOMA file into a MOAB
+// .h5m file, by the input's content, collectively over comm (soma-convert):
+// a legacy file is read in parallel (read_h5m) and written with write_soma;
+// a SOMA file is read with read_soma, gathered on rank 0 and written there
+// by write_h5m, without soma:sharing and soma:owner. `compression` is the
+// deflate level of the file written. Returns the format written. Throws
+// std::invalid_argument on every rank for an input of neither format, and
+// as the readers and writers do.
+MeshFormat convert_mesh_file(const Comm& comm, const std::filesystem::path& in, const std::filesystem::path& out,
+                             int compression = 0);
+
 namespace detail {
 // Test hook: while on, write_soma with a parallel HDF5 writes through rank 0
 // as with a serial one, so that tests can compare the two.

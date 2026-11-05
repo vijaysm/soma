@@ -31,6 +31,10 @@ HostMesh read_soma(const Comm&, const std::filesystem::path& path, const SomaRea
 
 HostMesh read_soma(const std::filesystem::path& path, const SomaReadOptions&) { unavailable("read_soma", path); }
 
+MeshFormat convert_mesh_file(const Comm&, const std::filesystem::path& in, const std::filesystem::path&, int) {
+  unavailable("convert_mesh_file", in);
+}
+
 void detail::soma_streamed_sink(bool) noexcept {}
 
 MeshFormat detect_format(const std::filesystem::path&) { return MeshFormat::unknown; }

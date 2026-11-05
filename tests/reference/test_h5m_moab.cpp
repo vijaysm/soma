@@ -6,7 +6,8 @@
 // vertices and elements, value by value, with its default and global value.
 // The "written:" files are those files read by read_h5m and written again by
 // write_h5m, so MOAB is checked to read what SOMA writes; the "compressed:"
-// ones are written so at deflate level 6.
+// ones are written so at deflate level 6; the "converted:" ones are converted
+// to SOMA files and back by convert_mesh_file (soma-convert).
 //
 // MOAB numbers a freshly loaded file's entities of one type in file id
 // order, so the i-th handle of a type is the entity with the i-th smallest
@@ -44,6 +45,8 @@
 #include "soma/fields/space.hpp"
 #include "soma/fields/var_field.hpp"
 #include "soma/io/h5m.hpp"
+#include "soma/io/soma_file.hpp"
+#include "soma/parallel/comm.hpp"
 #include "soma/topology/build.hpp"
 
 namespace fs = std::filesystem;
@@ -350,9 +353,23 @@ fs::path written_file(const std::string& name, int compression) {
   return p;
 }
 
-// The file a test parameter names without its "written:" or "compressed:".
+// The file converted to a SOMA file and back.
+fs::path round_trip_file(const std::string& name) {
+  std::string flat = name;
+  std::replace(flat.begin(), flat.end(), ':', '_');
+  const fs::path p = scratch_dir() / ("converted_" + flat);
+  if (!fs::exists(p)) {
+    const fs::path soma = scratch_dir() / ("converted_" + flat + ".soma");
+    soma::convert_mesh_file(soma::Comm::self(), path_of(name), soma);
+    soma::convert_mesh_file(soma::Comm::self(), soma, p);
+  }
+  return p;
+}
+
+// The file a test parameter names without its "written:", "compressed:" or
+// "converted:".
 std::string original_of(const std::string& name) {
-  for (const std::string prefix : {"written:", "compressed:"}) {
+  for (const std::string prefix : {"written:", "compressed:", "converted:"}) {
     if (name.rfind(prefix, 0) == 0) return name.substr(prefix.size());
   }
   return name;
@@ -361,6 +378,7 @@ std::string original_of(const std::string& name) {
 fs::path path_of(const std::string& name) {
   if (name.rfind("written:", 0) == 0) return written_file(name.substr(8), 0);
   if (name.rfind("compressed:", 0) == 0) return written_file(name.substr(11), 6);
+  if (name.rfind("converted:", 0) == 0) return round_trip_file(name.substr(10));
   if (name == "tag_kinds") return tag_kinds_file();
   if (name == "poly_indices") return poly_indices_file();
   if (name == "sets_kinds") return sets_kinds_file();
@@ -875,7 +893,7 @@ class H5mMoabWritten : public ::testing::TestWithParam<std::string> {};
 
 TEST_P(H5mMoabWritten, ReadsAsTheOriginal) {
   const soma::HostMesh original = soma::read_h5m(path_of(GetParam()));
-  for (const std::string prefix : {"written:", "compressed:"}) {
+  for (const std::string prefix : {"written:", "compressed:", "converted:"}) {
     SCOPED_TRACE(prefix);
     soma::HostMesh written = soma::read_h5m(path_of(prefix + GetParam()));
     drop_added_global_id(written, original);
@@ -925,7 +943,12 @@ INSTANTIATE_TEST_SUITE_P(Files, H5mMoab,
                                            HIGH_ORDER("", "hybrid_3quad_1tri.h5m"),
                                            HIGH_ORDER("written:", "zoo"),
                                            HIGH_ORDER("written:", "hexes_mixed.h5m"),
-                                           HIGH_ORDER("written:", "hybrid_3quad_1tri.h5m")),
+                                           HIGH_ORDER("written:", "hybrid_3quad_1tri.h5m"),
+                                           "converted:64bricks_1khex.h5m", "converted:hex_2048.h5m",
+                                           "converted:hexes_mixed.h5m", "converted:hybrid_3quad_1tri.h5m",
+                                           "converted:moab_i.h5m", "converted:recMeshOcn128.h5m",
+                                           "converted:poly_indices", "converted:tag_kinds",
+                                           "converted:sets_kinds", "converted:zoo", HIGH_ORDER("converted:", "zoo")),
                          [](const auto& info) {
                            std::string n = info.param;
                            std::replace_if(n.begin(), n.end(), [](char c) { return !std::isalnum(static_cast<unsigned char>(c)); }, '_');

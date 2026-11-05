@@ -544,3 +544,25 @@ TEST(SomaFile, CollectivesDoNotGrowWithFieldsOrRanks) {
   EXPECT_EQ(v[2], -v[3]);
   if (c.rank() == 0) std::printf("collectives: write %llu, read %llu\n", static_cast<unsigned long long>(w1.first), static_cast<unsigned long long>(r1.first));
 }
+
+// A legacy file converted to a SOMA file and back from every rank reads as
+// the original.
+TEST(SomaFile, ConvertsBothWaysFromEveryRank) {
+  const Comm c = Comm::world();
+  const Scratch dir(c);
+  for (const char* name : {"hexes_mixed.h5m", "hybrid_3quad_1tri.h5m", "recMeshOcn128.h5m"}) {
+    SCOPED_TRACE(name);
+    const fs::path soma = dir.path(std::string(name) + ".soma"), back = dir.path(std::string(name) + ".back.h5m");
+    EXPECT_EQ(soma::convert_mesh_file(c, data(name), soma), soma::MeshFormat::soma);
+    EXPECT_EQ(soma::convert_mesh_file(c, soma, back, 4), soma::MeshFormat::legacy_h5m);
+    if (c.rank() == 0) {
+      const HostMesh original = soma::read_h5m(data(name));
+      HostMesh converted = soma::read_h5m(back);
+      drop_added_global_id(converted, original);
+      EXPECT_EQ(mesh_difference(converted, original), "");
+    }
+    c.barrier();
+  }
+  EXPECT_TRUE(throws<std::invalid_argument>([&] { (void)soma::convert_mesh_file(c, data("hexes_mixed.vtk"), dir.path("x")); },
+                                            "neither"));
+}
