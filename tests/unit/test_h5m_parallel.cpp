@@ -395,8 +395,10 @@ TEST(H5mParallel, ExplicitEdgesFreeVerticesAndHighOrderNodes) {
 }
 
 // A strip of 37 polygons of 4 to 6 vertices in a poly_indices list, which
-// each rank reads a slice of. With `bad`, polygon 29 ends with 2 vertices.
-void write_strip(const fs::path& p, bool bad) {
+// each rank reads a slice of. With `bad`, polygon 29 ends with 2 vertices;
+// with `stray`, polygon 31 starts at file id 0, not a vertex. Returns the
+// file id of polygon 0.
+std::int64_t write_strip(const fs::path& p, bool bad, bool stray = false) {
   constexpr int n = 37;
   std::vector<double> xyz;
   for (int i = 0; i <= n; ++i) xyz.insert(xyz.end(), {double(i), 0, 0, double(i), 1, 0});  // b_i = 1 + 2i, t_i = 2 + 2i
@@ -408,7 +410,7 @@ void write_strip(const fs::path& p, bool bad) {
     if (bad && i == 29) {
       conn.insert(conn.end(), {b, b + 2});
     } else {
-      conn.insert(conn.end(), {b, b + 2, b + 3, b + 1});
+      conn.insert(conn.end(), {stray && i == 31 ? 0 : b, b + 2, b + 3, b + 1});
       for (int k = 0; k < i % 3; ++k) {
         conn.push_back(extra++);
         xyz.insert(xyz.end(), {i + 0.5, -1.0 - k, 0});
@@ -416,19 +418,23 @@ void write_strip(const fs::path& p, bool bad) {
     }
     last.push_back(static_cast<std::int64_t>(conn.size()) - 1);
   }
+  const auto start = static_cast<std::int64_t>(xyz.size() / 3) + 1;
   soma_test::h5m::Writer w(p);
   w.nodes(1, 3, xyz);
-  w.poly_elements("Polygon", "Polygon", static_cast<std::int64_t>(xyz.size() / 3) + 1, conn, last);
+  w.poly_elements("Polygon", "Polygon", start, conn, last);
+  return start;
 }
 
 TEST(H5mParallel, PolyIndicesAreReadInSlices) {
   const Comm c = Comm::world();
   const Scratch scratch(c);
+  std::int64_t start = 0;
   if (c.rank() == 0) {
-    write_strip(scratch.path("strip.h5m"), false);
-    write_strip(scratch.path("bad.h5m"), true);
+    (void)write_strip(scratch.path("strip.h5m"), false);
+    (void)write_strip(scratch.path("bad.h5m"), true);
+    start = write_strip(scratch.path("stray.h5m"), false, true);
   }
-  c.barrier();
+  start = c.allreduce(start, soma::Op::max);
   expect_parity(c, scratch.path("strip.h5m"));
   // The rank whose slice holds the bad polygon names it; the others fail too.
   try {
@@ -437,6 +443,16 @@ TEST(H5mParallel, PolyIndicesAreReadInSlices) {
   } catch (const std::runtime_error& e) {
     const std::string what = e.what();
     const bool named = what.find("polygon 29") != std::string::npos && what.find("fewer than 3") != std::string::npos;
+    std::int32_t naming = named ? 1 : 0;
+    EXPECT_EQ(c.allreduce(naming, soma::Op::sum), 1) << what;
+  }
+  // A stray vertex id is named with its element's file id.
+  try {
+    (void)soma::read_h5m(c, scratch.path("stray.h5m"));
+    ADD_FAILURE() << "the reader accepted stray.h5m";
+  } catch (const std::runtime_error& e) {
+    const std::string what = e.what();
+    const bool named = what.find("element " + std::to_string(start + 31) + " refers to file id 0") != std::string::npos;
     std::int32_t naming = named ? 1 : 0;
     EXPECT_EQ(c.allreduce(naming, soma::Op::sum), 1) << what;
   }

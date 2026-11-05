@@ -548,6 +548,7 @@ TEST(MeshBuilder, OwnershipRejectsBadInput) {
   EXPECT_THROW(b.set_ownership(3, one, shared, zero), std::invalid_argument);
   EXPECT_THROW(b.set_ownership(-1, one, shared, zero), std::invalid_argument);
   EXPECT_THROW(b.set_ownership(0, one, std::vector<Ownership>{}, zero), std::invalid_argument);
+  EXPECT_THROW(b.set_ownership(0, one, shared, std::vector<std::uint32_t>{}), std::invalid_argument);
   const auto fails = [](std::vector<GO> g, int d) {
     soma::MeshBuilder x = grid_builder();
     x.set_ownership(d, g, std::vector<Ownership>(g.size(), Ownership::shared), std::vector<std::uint32_t>(g.size(), 0));

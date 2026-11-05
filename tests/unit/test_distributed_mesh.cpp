@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <map>
 #include <set>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -213,6 +214,36 @@ TEST(DistributedMesh, HighOrderVerticesFollowTheCornersOfTheirKind) {
   for (LO e = 0; e < m.count(0); ++e) value(e, 0) = e < t.owned_end ? static_cast<double>(gid(e)) : -1.0;
   x.update(c, value);
   for (LO e = 0; e < m.count(0); ++e) EXPECT_EQ(value(e, 0), static_cast<double>(gid(e))) << "vertex " << gid(e);
+}
+
+// The key box is every rank's, so two ranks list the vertices only they share
+// in the same order: a hash of each rank's list per partner, compared across.
+TEST(DistributedMesh, RanksListTheVerticesTheyShareInTheSameOrder) {
+  const Comm c = Comm::world();
+  const int me = c.rank(), p = c.size();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  const std::map<GO, std::set<int>> users = vertex_users(rank_of);
+  const soma::HostMesh m = soma::build_local_part(c, local_builder(rank_of, me));
+  const auto gid = m.gid(0);
+  std::vector<std::uint64_t> hash(static_cast<std::size_t>(p), 0), count(static_cast<std::size_t>(p), 0);
+  for (LO e = 0; e < m.count(0); ++e) {
+    const std::set<int>& u = users.at(gid(e));
+    if (u.size() != 2) continue;
+    const auto other = static_cast<std::size_t>(*u.begin() == me ? *u.rbegin() : *u.begin());
+    hash[other] = hash[other] * 1000003u + static_cast<std::uint64_t>(gid(e));
+    ++count[other];
+  }
+  // Row me of a P x P table; every other entry is zero, so the sums are the rows.
+  std::vector<std::int64_t> table(static_cast<std::size_t>(p * p), 0);
+  for (std::size_t r = 0; r < hash.size(); ++r) table[static_cast<std::size_t>(me * p) + r] = static_cast<std::int64_t>(hash[r]);
+  c.allreduce(std::span<std::int64_t>(table), soma::Op::sum);
+  std::uint64_t pairs = 0;
+  for (std::size_t r = 0; r < hash.size(); ++r) {
+    const auto i = static_cast<std::size_t>(me * p) + r, j = r * static_cast<std::size_t>(p) + static_cast<std::size_t>(me);
+    EXPECT_EQ(table[i], table[j]) << "ranks " << me << " and " << r;
+    if (count[r] > 1) ++pairs;
+  }
+  if (p > 1) EXPECT_GT(c.allreduce(pairs, soma::Op::sum), 0u) << "no two ranks share two vertices";
 }
 
 TEST(DistributedMesh, AFailureOnOneRankThrowsOnEvery) {
