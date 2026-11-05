@@ -4,13 +4,13 @@
 #ifndef SOMA_PARALLEL_HALO_EXCHANGE_HPP_
 #define SOMA_PARALLEL_HALO_EXCHANGE_HPP_
 
-// Exchange and reduction over the shared entities of one dimension of a
-// distributed mesh (soma/parallel/distributed.hpp), built once from its
-// soma:sharing field:
+// Exchange and reduction over the shared entities and ghosts of one
+// dimension of a distributed mesh (soma/parallel/distributed.hpp), built once
+// from its soma:sharing and soma:owner fields:
 //
-//   update(values)       each owner's values overwrite its copies;
+//   update(values)       each owner's values overwrite its copies and ghosts;
 //   reduce(values, op)   every holder's values are combined, the result on
-//                        every holder.
+//                        every holder; ghosts take no part.
 //
 // values is a View2 of count(dim) rows by any number of components. Both
 // sides list the entities they share with a neighbour by gid, so the lists
@@ -29,6 +29,9 @@
 // dropped unfinished completes its messages and writes nothing.
 
 #include <algorithm>
+#include <cstring>
+#include <limits>
+#include <tuple>
 #include <cstdint>
 #include <span>
 #include <stdexcept>
@@ -42,6 +45,7 @@
 #include "soma/core/types.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
+#include "soma/parallel/transport/route.hpp"
 
 namespace soma {
 
@@ -122,8 +126,10 @@ void combine_rows(const View2<T, MemSpace>& values, LO first, const View1<const 
 template <class MemSpace>
 class HaloExchange {
  public:
-  // Throws std::invalid_argument if the mesh has no sharing fields on `dim`
-  // (it was not built by build_local_part) or `dim` is out of range.
+  // Collective: ghost holders tell each owner which of its entities they
+  // hold. Throws std::invalid_argument if the mesh has no sharing fields on
+  // `dim` (it was not built by build_local_part) or `dim` is out of range,
+  // and on every rank if a rank holds a ghost its owner does not own.
   HaloExchange(const Comm& comm, const Mesh<MemSpace>& mesh, int dim) : dim_(dim), me_(comm.rank()) {
     if (dim < 0 || dim > 3) throw std::invalid_argument("HaloExchange: dimension " + std::to_string(dim));
     const SegmentTable& t = mesh.segment_table(dim);
@@ -137,8 +143,41 @@ class HaloExchange {
     if (static_cast<LO>(sharing.rows()) != nshared) {
       throw std::invalid_argument("HaloExchange: soma:sharing does not cover the shared entities");
     }
+    // Each ghost's gid to its owner, which answers its updates.
+    const auto owner = Kokkos::create_mirror_view_and_copy(
+        Kokkos::HostSpace{}, mesh.fields().template get<int>(owner_field, dim).view());
+    const auto owner_of = [&](LO e) { return owner(static_cast<std::size_t>(e - t.owned_end), 0); };
+    using Batch = transport::RecordBatch<Kokkos::HostSpace>;
+    Batch asks(static_cast<std::size_t>(count_ - t.shared_end), sizeof(GO), "soma::HaloExchange::ghosts");
+    for (LO e = t.shared_end; e < count_; ++e) {
+      const auto i = static_cast<std::size_t>(e - t.shared_end);
+      asks.dest(i) = owner_of(e);
+      std::memcpy(&asks.payload(i, 0), &gid(e), sizeof(GO));
+    }
+    const Batch asked = transport::route(Kokkos::DefaultHostExecutionSpace{}, comm, asks);
+    std::vector<std::pair<GO, LO>> owned(static_cast<std::size_t>(t.owned_end));
+    for (LO e = 0; e < t.owned_end; ++e) owned[static_cast<std::size_t>(e)] = {gid(e), e};
+    std::sort(owned.begin(), owned.end());
+    std::vector<std::tuple<int, GO, LO>> ghosted;  // (holder, gid, entity) of owned entities ghosted elsewhere
+    bool stray = false;
+    for (std::size_t i = 0; i < asked.size(); ++i) {
+      GO g;
+      std::memcpy(&g, &asked.payload(i, 0), sizeof(GO));
+      const auto it = std::lower_bound(owned.begin(), owned.end(), std::pair<GO, LO>{g, std::numeric_limits<LO>::min()});
+      if (it == owned.end() || it->first != g) {
+        stray = true;
+        continue;
+      }
+      ghosted.emplace_back(asked.source(i), g, it->second);
+    }
+    if (comm.allreduce(static_cast<std::int32_t>(stray), Op::max)) {
+      throw std::invalid_argument("HaloExchange: a rank holds a ghost its owner does not own");
+    }
+
     // Per neighbour, (gid, entity) of what is sent and received.
     std::vector<int> nbrs(val.data(), val.data() + val.extent(0));
+    for (LO e = t.shared_end; e < count_; ++e) nbrs.push_back(owner_of(e));
+    for (const auto& x : ghosted) nbrs.push_back(std::get<0>(x));
     std::sort(nbrs.begin(), nbrs.end());
     nbrs.erase(std::unique(nbrs.begin(), nbrs.end()), nbrs.end());
     const auto slot = [&](int r) { return static_cast<std::size_t>(std::lower_bound(nbrs.begin(), nbrs.end(), r) - nbrs.begin()); };
@@ -154,6 +193,8 @@ class HaloExchange {
       // A copy's owner is the lowest other holder (copies are owned below this rank).
       if (e >= t.owned_end) up_recv[slot(val(static_cast<std::size_t>(off(row))))].emplace_back(gid(e), e);
     }
+    for (LO e = t.shared_end; e < count_; ++e) up_recv[slot(owner_of(e))].emplace_back(gid(e), e);
+    for (const auto& [r, g, e] : ghosted) up_send[slot(r)].emplace_back(g, e);
     for (auto* lists : {&up_send, &up_recv, &all}) {
       for (auto& l : *lists) std::sort(l.begin(), l.end());
     }

@@ -21,6 +21,7 @@
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/ghosts.hpp"
+#include "soma/parallel/halo_exchange.hpp"
 #include "soma/topology/build.hpp"
 
 using namespace soma_test;
@@ -514,5 +515,45 @@ TEST(Ghosts, ExplicitAndDerivedSidesOfGhostsAreGhosts) {
     const auto off = m.conn_offsets(1);
     for (LO e = m.segment_table(1).shared_end; e < m.count(1); ++e) got.insert(key(m.gid(0)(m.conn(1)(off(e))), m.gid(0)(m.conn(1)(off(e) + 1))));
     EXPECT_EQ(got, want);
+  }
+}
+
+// update writes ghosts from their owners, as copies; reduce leaves them, and
+// combines only the holders other than ghosts. Split or not.
+TEST(Ghosts, UpdateReachesGhostsAndReduceDoesNot) {
+  const Comm c = Comm::world();
+  const int me = c.rank();
+  for (int kind = 0; kind < 4; ++kind) {
+    SCOPED_TRACE(testing::Message() << "partition " << kind);
+    soma::HostMesh m = soma::build_local_part(c, local_builder(partition(c, kind), me));
+    soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
+    m.add_ghosts(c, soma::GhostOptions{2, 0, false});
+    for (int d = 0; d <= 2; ++d) {
+      const soma::HaloExchange<Kokkos::HostSpace> x(c, m, d);
+      const soma::SegmentTable& t = m.segment_table(d);
+      soma::View2<double, Kokkos::HostSpace> v("v", static_cast<std::size_t>(m.count(d)), 2);
+      for (LO e = 0; e < m.count(d); ++e) {
+        const double g = static_cast<double>(m.gid(d)(e));
+        v(e, 0) = e < t.owned_end ? g : -1.0;
+        v(e, 1) = e < t.owned_end ? 3 * g : -1.0;
+      }
+      if (d == 1) {
+        x.begin_update(c, v).end();
+      } else {
+        x.update(c, v);
+      }
+      for (LO e = 0; e < m.count(d); ++e) {
+        const double g = static_cast<double>(m.gid(d)(e));
+        EXPECT_EQ(v(e, 0), g) << "dimension " << d << ", gid " << m.gid(d)(e);
+        EXPECT_EQ(v(e, 1), 3 * g) << "dimension " << d << ", gid " << m.gid(d)(e);
+      }
+      soma::View2<int, Kokkos::HostSpace> n("n", static_cast<std::size_t>(m.count(d)), 1);
+      Kokkos::deep_copy(n, 1);
+      x.reduce(c, n, soma::Op::sum);
+      for (LO e = 0; e < m.count(d); ++e) {
+        const int holders = e < t.interior_end || e >= t.shared_end ? 1 : 1 + static_cast<int>(sharing_of(m, d, e).size());
+        EXPECT_EQ(n(e, 0), holders) << "dimension " << d << ", gid " << m.gid(d)(e);
+      }
+    }
   }
 }
