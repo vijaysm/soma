@@ -329,8 +329,16 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   derived edges and faces gids that do not depend on P (the largest explicit gid plus the rank
   of their sorted corner gids), sharing and ownership order; a distributed dimension that the
   derivation extends is distributed again.
-- `SharedExchange(comm, mesh, dim)`: `update` (owners to copies) and `reduce` (every holder
-  gets the same bits, combined in ascending rank order) over the shared entities.
+- `HaloExchange(comm, mesh, dim)`: `update` (owners to copies) and `reduce` (every holder
+  gets the same bits, combined in ascending rank order) over the shared entities, each also
+  split into `begin_update` / `begin_reduce`, which return a move-only `Pending` with `test()`
+  and `end()`; several may be in flight and end in any order.
+- `migrate(comm, mesh, dest, ordering)` moves each element to a given rank with its closure
+  and returns the new part: entities keep their gids, corners, nodes and coordinates;
+  dimensions only derived are derived again (same gids); graphs held on any rank are built
+  again; set memberships and field values (layouts, options, tag formats) follow from each
+  entity's owner through a gid directory; mesh values are copied. Sets, fields and mesh values
+  that differ between ranks, a bad `dest` or an edited mesh throw on every rank.
 - `permute_entities(mesh, dim, new_of_old, table, gids)` reorders one dimension with
   everything that refers to it (connectivity, graphs, sets, fields), optionally with new gids.
 - `read_h5m(comm, path, options)` reads a file in parallel: every rank reads the metadata and
