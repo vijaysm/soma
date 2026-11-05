@@ -21,6 +21,8 @@
 #include "soma/parallel/transport/sort.hpp"
 #include "soma/topology/build.hpp"
 
+#include "side_keys.hpp"
+
 namespace soma {
 
 namespace {
@@ -96,7 +98,11 @@ void collectively(const Comm& comm, const char* what, F&& f) {
 constexpr std::size_t key_words = 4;  // corners of a derived entity at most
 
 // Gives derived dimension k global gids, shares it, orders it by ownership.
-void distribute_dimension(const Comm& comm, HostMesh& mesh, int k, const std::vector<GO>& explicit_gids) {
+// An explicit entity is a ghost if it was one before (`explicit_ghosts`,
+// sorted), a derived one if it is a side of no element held other than as a
+// ghost.
+void distribute_dimension(const Comm& comm, HostMesh& mesh, int k, const std::vector<GO>& explicit_gids,
+                          const std::vector<GO>& explicit_ghosts) {
   const LO n = mesh.count(k);
   const auto gid = mesh.gid(k);
   const auto off = mesh.conn_offsets(k);
@@ -131,7 +137,27 @@ void distribute_dimension(const Comm& comm, HostMesh& mesh, int k, const std::ve
     gids[static_cast<std::size_t>(fresh[i])] = base + 1 + static_cast<GO>(ranks.index[i]);
   }
 
-  const Sharing sharing = resolve_sharing(comm, gids);
+  // Ghosts: only with ghost elements on some rank.
+  const int top = mesh.dim();
+  const LO elements = mesh.count(top), held_elements = mesh.segment_table(top).shared_end;
+  std::vector<std::uint8_t> ghost;
+  if (comm.allreduce(static_cast<std::int32_t>(held_elements < elements || !explicit_ghosts.empty()), Op::max)) {
+    std::vector<detail::SideKey> sides;
+    for (LO e = 0; e < held_elements; ++e) {
+      detail::for_each_side(mesh, top, e, k, [&](const detail::SideKey& key) { sides.push_back(key); });
+    }
+    std::sort(sides.begin(), sides.end());
+    ghost.resize(static_cast<std::size_t>(n));
+    std::size_t f = 0;
+    for (LO e = 0; e < n; ++e) {
+      const bool derived = f < fresh.size() && fresh[f] == e;
+      if (derived) ++f;
+      ghost[static_cast<std::size_t>(e)] =
+          derived ? !std::binary_search(sides.begin(), sides.end(), detail::key_of(mesh, k, e))
+                  : std::binary_search(explicit_ghosts.begin(), explicit_ghosts.end(), gid(e));
+    }
+  }
+  const Sharing sharing = resolve_sharing(comm, gids, ghost);
   const std::vector<std::uint32_t> groups = sharing.groups();
   collectively(comm, "build_distributed_adjacencies", [&] {
     // By (kind, topology, arity, group), the derived order within.
@@ -162,7 +188,7 @@ void distribute_dimension(const Comm& comm, HostMesh& mesh, int k, const std::ve
 void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRequest request) {
   // Explicit entities of each dimension (in lid order, then sorted), and
   // dimensions already distributed.
-  std::array<std::vector<GO>, 4> explicit_gids, before;
+  std::array<std::vector<GO>, 4> explicit_gids, before, ghosts;
   std::array<bool, 4> done{};
   for (int k = 1; k < mesh.dim(); ++k) {
     const auto kk = static_cast<std::size_t>(k);
@@ -171,6 +197,8 @@ void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRe
     for (LO e = 0; e < mesh.count(k); ++e) before[kk].push_back(g(e));
     explicit_gids[kk] = before[kk];
     std::sort(explicit_gids[kk].begin(), explicit_gids[kk].end());
+    for (LO e = mesh.segment_table(k).shared_end; e < mesh.count(k); ++e) ghosts[kk].push_back(g(e));
+    std::sort(ghosts[kk].begin(), ghosts[kk].end());
   }
   collectively(comm, "build_distributed_adjacencies", [&] { build_adjacencies(mesh, request); });
   for (int k = 1; k < mesh.dim(); ++k) {
@@ -183,7 +211,7 @@ void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRe
     const std::int32_t todo = (!done[kk] && mesh.count(k) > 0) || (done[kk] && !same) ? 1 : 0;
     if (comm.allreduce(todo, Op::max) == 0) continue;
     if (done[kk]) uninstall(mesh, k);
-    distribute_dimension(comm, mesh, k, explicit_gids[kk]);
+    distribute_dimension(comm, mesh, k, explicit_gids[kk], ghosts[kk]);
   }
 }
 

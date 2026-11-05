@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -13,6 +14,7 @@
 #include "distributed_fixture.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
+#include "soma/topology/build.hpp"
 
 using namespace soma_test;
 using soma::LO;
@@ -115,6 +117,76 @@ TEST(Ghosts, BuildLocalPartPutsGhostsLast) {
       if (e >= m.segment_table(d).interior_end) EXPECT_EQ(sharing_of(m, d, e), sharing_of(ref, d, r)) << "gid " << g;
     }
   }
+}
+
+// Edges derived on a part with ghost cells: those of no own cell are
+// ghosts, owned by the lowest rank whose cells have them; the others are as
+// without the ghosts, with the same gids.
+TEST(Ghosts, DerivedEntitiesOfGhostsOnlyAreGhosts) {
+  const Comm c = Comm::world();
+  const int me = c.rank(), p = c.size();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  soma::HostMesh ref = soma::build_local_part(c, local_builder(rank_of, me));
+  soma::build_distributed_adjacencies(c, ref, soma::AdjacencyRequest{}.add(2, 1));
+
+  std::vector<GO> all, ghost_cells = next_rank_neighbours(rank_of, me, p);
+  std::set<GO> own_vertices;
+  for (const auto& [cell, r] : rank_of) {
+    if (r != me) continue;
+    all.push_back(cell);
+    for (const GO v : corners(static_cast<int>(cell - 1000))) own_vertices.insert(v);
+  }
+  all.insert(all.end(), ghost_cells.begin(), ghost_cells.end());
+  std::array<std::vector<GO>, 4> ghosts;
+  std::set<GO> gv;
+  for (const GO cell : ghost_cells) {
+    for (const GO v : corners(static_cast<int>(cell - 1000))) {
+      if (!own_vertices.contains(v)) gv.insert(v);
+    }
+  }
+  ghosts[0].assign(gv.begin(), gv.end());
+  ghosts[2] = ghost_cells;
+  soma::HostMesh m = soma::build_local_part(c, cells_builder(all), ghosts);
+  soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
+
+  // Edges by their corners: the lowest rank with a cell having each.
+  const auto ends = [](const soma::HostMesh& x, LO e) {
+    std::pair<GO, GO> v{x.gid(0)(x.conn(1)(x.conn_offsets(1)(e))), x.gid(0)(x.conn(1)(x.conn_offsets(1)(e) + 1))};
+    if (v.first > v.second) std::swap(v.first, v.second);
+    return v;
+  };
+  std::map<std::pair<GO, GO>, int> lowest;
+  for (const auto& [cell, r] : rank_of) {
+    const auto q = corners(static_cast<int>(cell - 1000));
+    for (int i = 0; i < 4; ++i) {
+      std::pair<GO, GO> v{q[static_cast<std::size_t>(i)], q[static_cast<std::size_t>((i + 1) % 4)]};
+      if (v.first > v.second) std::swap(v.first, v.second);
+      const auto it = lowest.find(v);
+      lowest[v] = it == lowest.end() ? r : std::min(it->second, r);
+    }
+  }
+  std::map<std::pair<GO, GO>, LO> in_ref;
+  for (LO e = 0; e < ref.count(1); ++e) in_ref[ends(ref, e)] = e;
+  LO ghost_edges = 0;
+  for (LO e = 0; e < m.count(1); ++e) {
+    const auto v = ends(m, e);
+    if (!in_ref.contains(v)) {
+      ++ghost_edges;
+      EXPECT_EQ(kind_of(m, 1, e), Ownership::ghost);
+      EXPECT_EQ(owner_of(m, 1, e, me), lowest.at(v));
+      continue;
+    }
+    const LO r = in_ref.at(v);
+    EXPECT_EQ(m.gid(1)(e), ref.gid(1)(r));
+    EXPECT_EQ(kind_of(m, 1, e), kind_of(ref, 1, r));
+    EXPECT_EQ(owner_of(m, 1, e, me), owner_of(ref, 1, r, me));
+    if (e >= m.segment_table(1).interior_end && e < m.segment_table(1).shared_end) {
+      EXPECT_EQ(sharing_of(m, 1, e), sharing_of(ref, 1, r));
+    }
+  }
+  EXPECT_EQ(m.count(1), ref.count(1) + ghost_edges);
+  EXPECT_EQ(m.segment_table(1).shared_end, ref.segment_table(1).shared_end);
+  if (p > 1) EXPECT_GT(c.allreduce(static_cast<std::int64_t>(ghost_edges), soma::Op::sum), 0);
 }
 
 TEST(Ghosts, BuildLocalPartRejectsGhostsItDoesNotHoldOnEveryRank) {
