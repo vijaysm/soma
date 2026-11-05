@@ -519,6 +519,17 @@ std::set<GO> member_gids(const soma::HostMesh& m, GO set, int slot) {
   return out;
 }
 
+// Whether f throws std::invalid_argument saying `what`.
+template <class F>
+bool throws_saying(F&& f, const std::string& what) {
+  try {
+    f();
+  } catch (const std::invalid_argument& e) {
+    return std::string(e.what()).find(what) != std::string::npos;
+  }
+  return false;
+}
+
 }  // namespace
 
 // Members follow their entities; the set list, flags and links stay; an
@@ -569,6 +580,23 @@ TEST(Migrate, SetsFollowTheirMembers) {
   EXPECT_EQ(got, want);
 }
 
+// A mesh mirrored without its edges holds no edge members; its sets keep
+// their other members.
+TEST(Migrate, SetsOfAMirrorWithoutEdgesKeepTheirOtherMembers) {
+  const Comm c = Comm::world();
+  if (c.size() != 1) GTEST_SKIP() << "a mirror holds no sharing";
+  soma::HostMesh m = grid_with_extras(c, cell_ranks(c));
+  add_sets(m);
+  soma::TransferOptions o;
+  o.dims = {true, false, true, true};
+  const soma::HostMesh lean = m.mirror<Kokkos::HostSpace>(o);
+  ASSERT_FALSE(lean.sets().has_members(1));
+  const soma::HostMesh part = soma::migrate(c, lean, std::vector<int>(static_cast<std::size_t>(lean.count(2)), 0));
+  EXPECT_EQ(member_gids(part, set_a, 2), member_gids(m, set_a, 2));
+  EXPECT_EQ(member_gids(part, set_a, 0), member_gids(m, set_a, 0));
+  EXPECT_EQ(member_gids(part, set_c, 0), member_gids(m, set_c, 0));
+}
+
 // Two sets, 100 and 101, that the last rank changes one way at a time.
 TEST(Migrate, SetsThatDifferBetweenRanksThrowOnEveryRank) {
   const Comm c = Comm::world();
@@ -589,7 +617,7 @@ TEST(Migrate, SetsThatDifferBetweenRanksThrowOnEveryRank) {
     sb.add(std::move(x));
     sb.add(std::move(y));
     std::move(sb).install(m);
-    EXPECT_THROW((void)soma::migrate(c, m, one_rank_up(m, rank_of, c.size())), std::invalid_argument);
+    EXPECT_TRUE(throws_saying([&] { (void)soma::migrate(c, m, one_rank_up(m, rank_of, c.size())); }, "sets differ"));
   }
 }
 
@@ -662,8 +690,10 @@ constexpr GO field_set = 500;
 // Fields of every kind, valued by gid: on all vertices (two components,
 // default, global value, tag format), on even cells, on all derived edges, on
 // cell nodes (order 2), variable length on every third vertex, handles on
-// cells, one field over vertices and every third cell, and one on sets.
-void add_fields(soma::HostMesh& m) {
+// cells, one field over vertices and every third cell, one on all of rank
+// 0's cells and the even cells of the others, and fixed and variable ones on
+// sets.
+void add_fields(soma::HostMesh& m, int me) {
   soma::SetSpec s;
   s.gid = field_set;
   soma::SetBuilder sb;
@@ -734,6 +764,11 @@ void add_fields(soma::HostMesh& m) {
     for (LO e : lids) f.view()(rows_of(f, 2, e).begin, 0) = static_cast<std::int32_t>(m.gid(2)(e) + 1);
   }
   {
+    const auto mine = list(2, [me](GO g) { return me == 0 || g % 2 == 0; });
+    auto f = reg.add<std::int32_t>("some", soma::Space<Kokkos::HostSpace>(soma::Domain<Kokkos::HostSpace>::from_list(m, 2, mine), soma::Layout::per_entity()), 1);
+    for (LO e : mine) f.view()(rows_of(f, 2, e).begin, 0) = 1;
+  }
+  {
     auto f = reg.add_tag<std::int32_t>("on_sets", soma::set_dim, 1);
     f.view()(0, 0) = 11;
     const std::vector<soma::Offset> off{0, 3};
@@ -753,7 +788,7 @@ TEST(Migrate, FieldsFollowTheirEntities) {
   const std::map<GO, int> rank_of = cell_ranks(c);
   soma::HostMesh m = soma::build_local_part(c, local_builder(rank_of, me));
   soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
-  add_fields(m);
+  add_fields(m, me);
   const soma::HostMesh part = soma::migrate(c, m, one_rank_up(m, rank_of, p));
   const auto& reg = part.fields();
   const auto members = [&](const auto& f, int d) {
@@ -828,6 +863,10 @@ TEST(Migrate, FieldsFollowTheirEntities) {
     if (part.gid(2)(e) % 3 == 0) EXPECT_EQ(multi.value_or_default(2, e), part.gid(2)(e) + 1);
   }
 
+  // Full on rank 0 only: a list everywhere after.
+  const auto some = reg.get<std::int32_t>("some");
+  EXPECT_EQ(members(some, 2), every(2, [&](GO g) { return g % 2 == 0 || rank_of.at(g) == 0; }));
+
   const auto on_sets = reg.get<std::int32_t>("on_sets");
   EXPECT_EQ(on_sets.value_or_default(soma::set_dim, *part.sets().index_of(field_set)), 11);
   const auto var_on_sets = reg.get_var<std::int32_t>("var_on_sets").value_or_default(soma::set_dim, *part.sets().index_of(field_set));
@@ -872,6 +911,7 @@ TEST(Migrate, FieldsThatDifferBetweenRanksThrowOnEveryRank) {
     v.type = soma::DataType::i32;
     v.default_value = soma::MeshValue::bytes_of<std::int32_t>(std::vector<std::int32_t>{last && change == 4 ? 1 : 0});
     m.values().set("answer", v);
-    EXPECT_THROW((void)soma::migrate(c, m, one_rank_up(m, rank_of, c.size())), std::invalid_argument);
+    EXPECT_TRUE(throws_saying([&] { (void)soma::migrate(c, m, one_rank_up(m, rank_of, c.size())); },
+                              "fields or mesh values differ"));
   }
 }
