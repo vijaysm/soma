@@ -56,11 +56,14 @@ struct Placement {
 // nodes, vertices their coordinates; the dimensions given to the builder on
 // any rank are given again, the others are derived again with the graphs held
 // on any rank (derived gids do not depend on the partition), and
-// build_local_part resolves the sharing. Mesh values are copied. Collective;
-// the mesh given is not changed. Throws on every rank: std::invalid_argument
-// for a dest without one rank of comm per element, or a mesh with fields or
-// sets, which are not carried yet; std::logic_error for an edited mesh
-// (compress it first).
+// build_local_part resolves the sharing. Sets keep their gids, flags and
+// links; members follow their entities, and an ordered set lists the entries
+// of each sending rank in its order, ranks in order, with its set entries as
+// rank 0 has them. Mesh values are copied. Collective; the mesh given is not
+// changed. Throws on every rank: std::invalid_argument for a dest without
+// one rank of comm per element, sets that differ between ranks (beyond their
+// entity members), or a mesh with fields, which are not carried yet;
+// std::logic_error for an edited mesh (compress it first).
 [[nodiscard]] HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> dest,
                                Ordering ordering = default_ordering);
 

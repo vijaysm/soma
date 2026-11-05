@@ -19,6 +19,8 @@
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/mesh_edit.hpp"
 #include "soma/core/mesh_values.hpp"
+#include "soma/core/set_builder.hpp"
+#include "soma/core/sets.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/migrate.hpp"
@@ -467,4 +469,113 @@ TEST(Migrate, DimensionsDerivedWithoutGraphsComeBack) {
   EXPECT_EQ(part.adjacencies().bits(), 0u);
   EXPECT_EQ(c.allreduce(owned(part, 1), soma::Op::sum), c.allreduce(owned(m, 1), soma::Op::sum));
   EXPECT_GT(c.allreduce(owned(part, 1), soma::Op::sum), 0);
+}
+
+namespace {
+
+constexpr GO set_a = 100, set_b = 101, set_c = 102;
+
+// Sets over the entities held here: A (unordered) the even cells and the
+// vertices on x = 0; B (ordered) the cells by decreasing gid, then A; C
+// (unordered) the explicit edges, the free vertex and A. A is B's child.
+void add_sets(soma::HostMesh& m) {
+  const auto lid_of = [&](int d) {
+    std::map<GO, LO> out;
+    for (LO e = 0; e < m.count(d); ++e) out[m.gid(d)(e)] = e;
+    return out;
+  };
+  const auto cells = lid_of(2), verts = lid_of(0), edges = lid_of(1);
+  soma::SetSpec a, b, cc;
+  a.gid = set_a;
+  b.gid = set_b;
+  b.flags = soma::set_ordered;
+  cc.gid = set_c;
+  for (const auto& [g, l] : cells) {
+    if (g % 2 == 0) a.contents.push_back({2, l});
+  }
+  for (const auto& [g, l] : verts) {
+    if (g != free_vertex && (g - 1) % (nx + 1) == 0) a.contents.push_back({0, l});
+  }
+  for (auto it = cells.rbegin(); it != cells.rend(); ++it) b.contents.push_back({2, it->second});
+  b.contents.push_back({soma::set_dim, set_a});
+  b.children = {set_a};
+  a.parents = {set_b};
+  for (const auto& [g, l] : edges) cc.contents.push_back({1, l});
+  if (verts.contains(free_vertex)) cc.contents.push_back({0, verts.at(free_vertex)});
+  cc.contents.push_back({soma::set_dim, set_a});
+  soma::SetBuilder sb;
+  sb.add(std::move(a));
+  sb.add(std::move(b));
+  sb.add(std::move(cc));
+  std::move(sb).install(m);
+}
+
+std::set<GO> member_gids(const soma::HostMesh& m, GO set, int slot) {
+  const LO s = *m.sets().index_of(set);
+  std::set<GO> out;
+  for (const LO l : m.sets().members_of(s, slot)) out.insert(slot == soma::set_dim ? m.sets().gid()(l) : m.gid(slot)(l));
+  return out;
+}
+
+}  // namespace
+
+// Members follow their entities; the set list, flags and links stay; an
+// ordered set lists each sending rank's entries in its order, ranks in order,
+// with the set entries as rank 0 had them.
+TEST(Migrate, SetsFollowTheirMembers) {
+  const Comm c = Comm::world();
+  const int me = c.rank(), p = c.size();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  soma::HostMesh m = grid_with_extras(c, rank_of);
+  add_sets(m);
+  const soma::HostMesh part = soma::migrate(c, m, one_rank_up(m, rank_of, p));
+  ASSERT_EQ(part.sets().count(), 3);
+  EXPECT_TRUE(part.sets().ordered(*part.sets().index_of(set_b)));
+  EXPECT_FALSE(part.sets().ordered(*part.sets().index_of(set_a)));
+
+  std::set<GO> even, x0, edges;
+  for (LO e = 0; e < part.count(2); ++e) {
+    if (part.gid(2)(e) % 2 == 0) even.insert(part.gid(2)(e));
+  }
+  for (LO e = 0; e < part.count(0); ++e) {
+    const GO g = part.gid(0)(e);
+    if (g != free_vertex && (g - 1) % (nx + 1) == 0) x0.insert(g);
+  }
+  for (LO e = 0; e < part.count(1); ++e) edges.insert(part.gid(1)(e));
+  EXPECT_EQ(member_gids(part, set_a, 2), even);
+  EXPECT_EQ(member_gids(part, set_a, 0), x0);
+  EXPECT_EQ(member_gids(part, set_c, 1), edges);
+  EXPECT_EQ(member_gids(part, set_c, 0), me == 0 ? std::set<GO>{free_vertex} : std::set<GO>{});
+  EXPECT_EQ(member_gids(part, set_c, soma::set_dim), std::set<GO>{set_a});
+  const LO a = *part.sets().index_of(set_a), b = *part.sets().index_of(set_b);
+  EXPECT_EQ(std::vector<LO>(part.sets().children(b).begin(), part.sets().children(b).end()), std::vector<LO>{a});
+  EXPECT_EQ(std::vector<LO>(part.sets().parents(a).begin(), part.sets().parents(a).end()), std::vector<LO>{b});
+
+  std::vector<std::pair<int, GO>> want;  // (slot, gid)
+  for (int s = 0; s < p; ++s) {
+    std::vector<GO> sent;
+    for (const auto& [cell, r] : rank_of) {
+      if (r == s && (r + 1) % p == me) sent.push_back(cell);
+    }
+    for (auto it = sent.rbegin(); it != sent.rend(); ++it) want.emplace_back(2, *it);
+    if (s == 0) want.emplace_back(soma::set_dim, set_a);
+  }
+  std::vector<std::pair<int, GO>> got;
+  for (const soma::SetEntry& x : part.sets().sequence(b)) {
+    got.emplace_back(x.slot, x.slot == soma::set_dim ? part.sets().gid()(x.lid) : part.gid(x.slot)(x.lid));
+  }
+  EXPECT_EQ(got, want);
+}
+
+TEST(Migrate, SetsThatDifferBetweenRanksThrowOnEveryRank) {
+  const Comm c = Comm::world();
+  if (c.size() == 1) GTEST_SKIP() << "needs two ranks";
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  soma::HostMesh m = grid_with_extras(c, rank_of);
+  soma::SetBuilder sb;
+  soma::SetSpec s;
+  s.gid = c.rank() == c.size() - 1 ? 200 : 100;
+  sb.add(std::move(s));
+  std::move(sb).install(m);
+  EXPECT_THROW((void)soma::migrate(c, m, one_rank_up(m, rank_of, c.size())), std::invalid_argument);
 }

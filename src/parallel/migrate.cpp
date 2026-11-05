@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "soma/core/mesh_builder.hpp"
+#include "soma/core/set_builder.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/route.hpp"
@@ -284,18 +285,135 @@ AdjacencyRequest graphs_to_rebuild(const Comm& comm, const HostMesh& mesh) {
   return r;
 }
 
+// A hash of what every rank's sets must agree on: gids, flags, children,
+// parents and the sets each contains.
+std::uint64_t set_list_hash(const EntitySets<Kokkos::HostSpace>& sets) {
+  std::uint64_t h = transport::mix(static_cast<std::uint64_t>(sets.count()));
+  const auto add = [&](std::uint64_t x) { h = transport::mix(h ^ transport::mix(x)); };
+  const auto gid = sets.gid();
+  for (LO i = 0; i < sets.count(); ++i) {
+    add(static_cast<std::uint64_t>(gid(i)));
+    add(sets.flags(i));
+    for (const LO l : sets.children(i)) add(static_cast<std::uint64_t>(gid(l)));
+    add(~std::uint64_t{0});
+    for (const LO l : sets.parents(i)) add(static_cast<std::uint64_t>(gid(l)));
+    add(~std::uint64_t{1});
+    for (const LO l : sets.members_of(i, set_dim)) add(static_cast<std::uint64_t>(gid(l)));
+    add(~std::uint64_t{2});
+  }
+  return h;
+}
+
+// gid -> lid of dimension d, sorted by gid.
+std::vector<std::pair<GO, LO>> lids_by_gid(const HostMesh& mesh, int d) {
+  std::vector<std::pair<GO, LO>> out(static_cast<std::size_t>(mesh.count(d)));
+  const auto g = mesh.gid(d);
+  for (LO e = 0; e < mesh.count(d); ++e) out[static_cast<std::size_t>(e)] = {g(e), e};
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+// The sets of `mesh` on `part`: each entity member travels from its owner
+// with the entity (set index, slot, gid, position in an ordered set); an
+// ordered set lists the entries of each sending rank in its order, ranks in
+// order, its set entries as rank 0 has them.
+void move_sets(const Comm& comm, const HostMesh& mesh, const detail::Placement& where, HostMesh& part) {
+  const auto& sets = mesh.sets();
+  if (sets.count() == 0) return;
+  const auto sgid = sets.gid();
+  struct Out {
+    std::int32_t set, slot;
+    GO gid;
+    std::int64_t pos;
+  };
+  std::vector<Out> out;
+  std::vector<int> to;
+  const auto send = [&](const Out& o, std::span<const int> ranks) {
+    for (const int r : ranks) {
+      out.push_back(o);
+      to.push_back(r);
+    }
+  };
+  std::vector<int> everyone(static_cast<std::size_t>(comm.size()));
+  for (int r = 0; r < comm.size(); ++r) everyone[static_cast<std::size_t>(r)] = r;
+  for (LO i = 0; i < sets.count(); ++i) {
+    const auto si = static_cast<std::int32_t>(i);
+    if (sets.ordered(i)) {
+      const auto seq = sets.sequence(i);
+      for (std::size_t k = 0; k < seq.size(); ++k) {
+        const SetEntry& x = seq[k];
+        const auto pos = static_cast<std::int64_t>(k);
+        if (x.slot == set_dim) {
+          if (comm.rank() == 0) send({si, set_dim, sgid(x.lid), pos}, everyone);
+        } else {
+          send({si, x.slot, mesh.gid(x.slot)(x.lid), pos}, where.of(x.slot, x.lid));
+        }
+      }
+      continue;
+    }
+    for (int d = 0; d <= mesh.dim(); ++d) {
+      if (!sets.has_members(d)) continue;
+      for (const LO l : sets.members_of(i, d)) send({si, d, mesh.gid(d)(l), -1}, where.of(d, l));
+    }
+  }
+  const Batch in = route(comm, to, sizeof(Out), [&](std::size_t k, std::byte* row) { std::memcpy(row, &out[k], sizeof(Out)); });
+
+  struct In {
+    int source;
+    Out o;
+  };
+  std::vector<In> got(in.size());
+  for (std::size_t k = 0; k < in.size(); ++k) {
+    got[k].source = in.source(k);
+    std::memcpy(&got[k].o, &in.payload(k, 0), sizeof(Out));
+  }
+  std::stable_sort(got.begin(), got.end(), [](const In& x, const In& y) {
+    return std::tuple(x.o.set, x.source, x.o.pos) < std::tuple(y.o.set, y.source, y.o.pos);
+  });
+  std::array<std::vector<std::pair<GO, LO>>, 4> lid;
+  for (int d = 0; d <= part.dim(); ++d) lid[static_cast<std::size_t>(d)] = lids_by_gid(part, d);
+  const auto lid_of = [&](int d, GO g) {
+    const auto& v = lid[static_cast<std::size_t>(d)];
+    const auto it = std::lower_bound(v.begin(), v.end(), std::pair<GO, LO>{g, std::numeric_limits<LO>::min()});
+    if (it == v.end() || it->first != g) throw std::logic_error("migrate: a set member did not arrive with its entity");
+    return it->second;
+  };
+  SetBuilder b;
+  std::size_t k = 0;
+  for (LO i = 0; i < sets.count(); ++i) {
+    SetSpec spec;
+    spec.gid = sgid(i);
+    spec.flags = sets.flags(i);
+    for (const LO l : sets.children(i)) spec.children.push_back(sgid(l));
+    for (const LO l : sets.parents(i)) spec.parents.push_back(sgid(l));
+    for (; k < got.size() && got[k].o.set == i; ++k) {
+      const Out& o = got[k].o;
+      spec.contents.push_back({o.slot, o.slot == set_dim ? o.gid : GO{lid_of(o.slot, o.gid)}});
+    }
+    if (!sets.ordered(i)) {
+      for (const LO l : sets.members_of(i, set_dim)) spec.contents.push_back({set_dim, sgid(l)});
+    }
+    b.add(std::move(spec));
+  }
+  std::move(b).install(part);
+}
+
 }  // namespace
 
 HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> dest, Ordering ordering) {
   const int p = comm.size(), top = mesh.dim();
   const auto n_top = static_cast<std::size_t>(mesh.count(top));
-  std::array<std::int32_t, 3> flags{
-      dest.size() != n_top || std::any_of(dest.begin(), dest.end(), [p](int r) { return r < 0 || r >= p; }) ? 1 : 0,
-      mesh.edited() ? 1 : 0, has_user_fields(mesh) || mesh.sets().count() > 0 ? 1 : 0};
-  comm.allreduce(std::span<std::int32_t>(flags), Op::max);
+  const std::uint64_t h = set_list_hash(mesh.sets());
+  std::array<std::uint64_t, 5> flags{
+      dest.size() != n_top || std::any_of(dest.begin(), dest.end(), [p](int r) { return r < 0 || r >= p; }) ? 1u : 0u,
+      mesh.edited() ? 1u : 0u, has_user_fields(mesh) ? 1u : 0u, h, ~h};
+  comm.allreduce(std::span<std::uint64_t>(flags), Op::max);
   if (flags[0] != 0) throw std::invalid_argument("migrate: a rank's dest does not give one rank of the communicator per element");
   if (flags[1] != 0) throw std::logic_error("migrate: a rank's mesh holds edits; compress() it first");
-  if (flags[2] != 0) throw std::invalid_argument("migrate: a rank's mesh has fields or sets, which migrate does not carry yet");
+  if (flags[2] != 0) throw std::invalid_argument("migrate: a rank's mesh has fields, which migrate does not carry yet");
+  if (flags[3] != ~flags[4]) {
+    throw std::invalid_argument("migrate: the ranks' sets differ (gids, flags, children, parents or sets they contain)");
+  }
 
   std::vector<std::size_t> offsets(n_top + 1);
   for (std::size_t i = 0; i <= n_top; ++i) offsets[i] = i;
@@ -406,6 +524,7 @@ HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> de
   const AdjacencyRequest graphs = graphs_to_rebuild(comm, mesh);
   HostMesh part = build_local_part(comm, std::move(b), ordering);
   if (!graphs.empty()) build_distributed_adjacencies(comm, part, graphs);
+  move_sets(comm, mesh, where, part);
   part.values() = mesh.values();
   return part;
 }
