@@ -463,7 +463,7 @@ TEST(H5mParallel, ElementsFollowTheCurvePartition) {
       for (LO q = 0; q < k; ++q) {
         for (int x = 0; x < 3; ++x) sum[static_cast<std::size_t>(x)] += sv.x(sv.vertex(D, e, q), x);
       }
-      for (int x = 0; x < 3; ++x) centroids.push_back(sum[static_cast<std::size_t>(x)] / k);
+      for (int x = 0; x < 3; ++x) centroids.push_back(sum[static_cast<std::size_t>(x)] / static_cast<Real>(k));
       gids.push_back(serial.gid(D)(e));
       mine.push_back(e);
     }
