@@ -19,9 +19,18 @@
 // bit for bit, whatever the op. Packing and unpacking are kernels over flat
 // index arrays in the mesh's memory space; messages are staged through host
 // memory (device-aware MPI is Phase 5) and use tags 32610 and 32611.
+//
+// Each operation also comes split: begin_update and begin_reduce pack the
+// rows sent, post the messages and return a Pending; its end() waits and
+// writes the rows received (reduce reads each holder's own rows then), test()
+// advances the messages and tells whether they are done. The caller must not
+// write the rows exchanged in between. Exchanges begun in the same order on
+// every rank may be in flight together and end in any order. A Pending
+// dropped unfinished completes its messages and writes nothing.
 
 #include <algorithm>
 #include <cstdint>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -171,16 +180,29 @@ class HaloExchange {
   [[nodiscard]] const std::vector<int>& neighbours() const noexcept { return nbrs_; }
 
   template <class T>
+  class Pending;
+
+  template <class T>
   void update(const Comm& comm, const View2<T, MemSpace>& values) const {
-    check(values);
-    exchange(comm, values, update_send_, update_send_off_, update_recv_, update_recv_off_, detail::update_tag, false,
-             Op::sum);
+    begin_update(comm, values).end();
   }
 
   template <class T>
   void reduce(const Comm& comm, const View2<T, MemSpace>& values, Op op) const {
+    begin_reduce(comm, values, op).end();
+  }
+
+  template <class T>
+  [[nodiscard]] Pending<T> begin_update(const Comm& comm, const View2<T, MemSpace>& values) const {
     check(values);
-    exchange(comm, values, reduce_lids_, reduce_off_, reduce_lids_, reduce_off_, detail::reduce_tag, true, op);
+    return begin<T>(comm, values, update_send_, update_send_off_, update_recv_, update_recv_off_, detail::update_tag,
+                    false, Op::sum);
+  }
+
+  template <class T>
+  [[nodiscard]] Pending<T> begin_reduce(const Comm& comm, const View2<T, MemSpace>& values, Op op) const {
+    check(values);
+    return begin<T>(comm, values, reduce_lids_, reduce_off_, reduce_lids_, reduce_off_, detail::reduce_tag, true, op);
   }
 
  private:
@@ -211,33 +233,38 @@ class HaloExchange {
   }
 
   template <class T>
-  void exchange(const Comm& comm, const View2<T, MemSpace>& values, const Lids& send, const std::vector<std::size_t>& send_off,
-                const Lids& recv, const std::vector<std::size_t>& recv_off, int tag, bool combine, Op op) const {
-    using Buf = Kokkos::View<T**, Kokkos::LayoutRight, MemSpace>;
+  Pending<T> begin(const Comm& comm, const View2<T, MemSpace>& values, const Lids& send,
+                   const std::vector<std::size_t>& send_off, const Lids& recv, const std::vector<std::size_t>& recv_off,
+                   int tag, bool combine, Op op) const {
+    using Buf = typename Pending<T>::Buf;
     const std::size_t ncomp = values.extent(1);
+    Pending<T> p;
+    p.values_ = values;
+    p.recv_ = recv;
+    p.combine_ = combine;
+    p.op_ = op;
+    p.first_ = first_;
+    p.me_ = me_;
+    p.offsets_ = combine_offsets_;
+    p.ranks_ = combine_ranks_;
+    p.at_ = combine_at_;
     Buf out(Kokkos::view_alloc("soma::HaloExchange::send", Kokkos::WithoutInitializing), send.extent(0), ncomp);
-    Buf in(Kokkos::view_alloc("soma::HaloExchange::recv", Kokkos::WithoutInitializing), recv.extent(0), ncomp);
+    p.in_ = Buf(Kokkos::view_alloc("soma::HaloExchange::recv", Kokkos::WithoutInitializing), recv.extent(0), ncomp);
     detail::pack_rows(values, send, out);
     Kokkos::fence("soma::HaloExchange::pack");
-    const auto hout = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, out);
-    auto hin = Kokkos::create_mirror_view(Kokkos::WithoutInitializing, in);
-    std::vector<Request> r;
+    p.hout_ = Kokkos::create_mirror_view(Kokkos::WithoutInitializing, out);
+    Kokkos::deep_copy(p.hout_, out);
+    p.hin_ = Kokkos::create_mirror_view(Kokkos::WithoutInitializing, p.in_);
     for (std::size_t s = 0; s < nbrs_.size(); ++s) {
       const std::size_t a = recv_off[s] * ncomp, b = recv_off[s + 1] * ncomp;
-      if (b > a) r.push_back(comm.irecv(std::span<T>(hin.data() + a, b - a), nbrs_[s], tag));
+      if (b > a) p.r_.push_back(comm.irecv(std::span<T>(p.hin_.data() + a, b - a), nbrs_[s], tag));
     }
     for (std::size_t s = 0; s < nbrs_.size(); ++s) {
       const std::size_t a = send_off[s] * ncomp, b = send_off[s + 1] * ncomp;
-      if (b > a) r.push_back(comm.isend(std::span<const T>(hout.data() + a, b - a), nbrs_[s], tag));
+      if (b > a) p.r_.push_back(comm.isend(std::span<const T>(p.hout_.data() + a, b - a), nbrs_[s], tag));
     }
-    Request::wait_all(r);
-    Kokkos::deep_copy(in, hin);
-    if (combine) {
-      detail::combine_rows(values, first_, combine_offsets_, combine_ranks_, combine_at_, in, me_, op);
-    } else {
-      detail::unpack_rows(values, recv, in);
-    }
-    Kokkos::fence("soma::HaloExchange::unpack");
+    p.active_ = true;
+    return p;
   }
 
   int dim_;
@@ -250,6 +277,79 @@ class HaloExchange {
   View1<const Offset, MemSpace> combine_offsets_;
   View1<const int, MemSpace> combine_ranks_;
   Lids combine_at_;
+};
+
+// An exchange begun and not yet ended. It holds the values' View, its
+// buffers and its messages, so it does not depend on the HaloExchange.
+template <class MemSpace>
+template <class T>
+class HaloExchange<MemSpace>::Pending {
+ public:
+  using Buf = Kokkos::View<T**, Kokkos::LayoutRight, MemSpace>;
+
+  Pending() = default;
+  Pending(Pending&& o) noexcept { *this = std::move(o); }
+  Pending& operator=(Pending&& o) noexcept {
+    if (this != &o) {
+      r_ = std::move(o.r_);  // an unfinished exchange held here completes first
+      values_ = std::move(o.values_);
+      recv_ = std::move(o.recv_);
+      in_ = std::move(o.in_);
+      hout_ = std::move(o.hout_);
+      hin_ = std::move(o.hin_);
+      offsets_ = std::move(o.offsets_);
+      ranks_ = std::move(o.ranks_);
+      at_ = std::move(o.at_);
+      combine_ = o.combine_;
+      op_ = o.op_;
+      first_ = o.first_;
+      me_ = o.me_;
+      active_ = std::exchange(o.active_, false);
+    }
+    return *this;
+  }
+  Pending(const Pending&) = delete;
+  Pending& operator=(const Pending&) = delete;
+  ~Pending() = default;  // the requests wait for their messages
+
+  // Advances the messages; true when all are done (or the exchange ended).
+  bool test() {
+    bool done = true;
+    for (Request& q : r_) done = q.test() && done;
+    return done;
+  }
+
+  // Waits, then writes the rows received. Throws std::logic_error if the
+  // exchange has ended or was moved from.
+  void end() {
+    if (!active_) throw std::logic_error("HaloExchange::Pending::end: the exchange has ended or was moved from");
+    active_ = false;
+    Request::wait_all(r_);
+    Kokkos::deep_copy(in_, hin_);
+    if (combine_) {
+      detail::combine_rows(values_, first_, offsets_, ranks_, at_, in_, me_, op_);
+    } else {
+      detail::unpack_rows(values_, recv_, in_);
+    }
+    Kokkos::fence("soma::HaloExchange::unpack");
+  }
+
+ private:
+  friend class HaloExchange<MemSpace>;
+  using Lids = Kokkos::View<const LO*, MemSpace>;
+  View2<T, MemSpace> values_;
+  Lids recv_;
+  Buf in_;
+  typename Buf::host_mirror_type hout_, hin_;
+  View1<const Offset, MemSpace> offsets_;
+  View1<const int, MemSpace> ranks_;
+  Lids at_;
+  bool combine_ = false;
+  Op op_ = Op::sum;
+  LO first_ = 0;
+  int me_ = 0;
+  bool active_ = false;
+  std::vector<Request> r_;  // last, so it is destroyed (and waits) before the buffers
 };
 
 }  // namespace soma

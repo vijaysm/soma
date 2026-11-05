@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <chrono>
 #include <cstdint>
 #include <map>
 #include <set>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -110,4 +112,99 @@ TEST(HaloExchange, RejectsWrongShapesAndMeshesWithoutSharing) {
   const soma::HaloExchange<Host> cells(c, m, 2);  // elements are all interior
   EXPECT_TRUE(cells.neighbours().empty());
   EXPECT_THROW(soma::HaloExchange<Host>(c, m, 4), std::invalid_argument);
+}
+
+namespace {
+
+// Owners' values on owned rows, a mark of this rank on copies.
+soma::View2<double, Host> owned_values(const Comm& c, const soma::HostMesh& m, int salt) {
+  const auto& t = m.segment_table(0);
+  const auto gid = m.gid(0);
+  soma::View2<double, Host> v("v", static_cast<std::size_t>(m.count(0)), 2);
+  for (LO e = 0; e < m.count(0); ++e) {
+    for (int k = 0; k < 2; ++k) v(e, k) = e >= t.owned_end ? -1.0 - c.rank() : contribution(gid(e), salt, k);
+  }
+  return v;
+}
+
+soma::View2<double, Host> copy_of(const soma::View2<double, Host>& v) {
+  soma::View2<double, Host> out("copy", v.extent(0), v.extent(1));
+  Kokkos::deep_copy(out, v);
+  return out;
+}
+
+bool same(const soma::View2<double, Host>& a, const soma::View2<double, Host>& b) {
+  for (std::size_t i = 0; i < a.extent(0); ++i) {
+    for (std::size_t k = 0; k < a.extent(1); ++k) {
+      if (a(i, k) != b(i, k)) return false;
+    }
+  }
+  return true;
+}
+
+}  // namespace
+
+// begin writes nothing; test() reports completion; end gives what update gives.
+TEST(HaloExchange, SplitUpdateWritesOnlyAtEnd) {
+  const Comm c = Comm::world();
+  const soma::HostMesh m = local_mesh(c, cell_ranks(c));
+  const soma::HaloExchange<Host> x(c, m, 0);
+  auto blocking = owned_values(c, m, 7);
+  x.update(c, blocking);
+  auto v = owned_values(c, m, 7);
+  const auto before = copy_of(v);
+  auto pending = x.begin_update(c, v);
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
+  while (!pending.test()) {
+    ASSERT_LT(std::chrono::steady_clock::now(), deadline) << "messages did not complete";
+  }
+  EXPECT_TRUE(same(v, before));
+  pending.end();
+  EXPECT_TRUE(same(v, blocking));
+}
+
+// Exchanges begun in the same order on every rank may end in any order.
+TEST(HaloExchange, ExchangesInFlightEndInAnyOrder) {
+  const Comm c = Comm::world();
+  const soma::HostMesh m = local_mesh(c, cell_ranks(c));
+  const soma::HaloExchange<Host> x(c, m, 0);
+  auto a_want = owned_values(c, m, 1), b_want = owned_values(c, m, 2), s_want = owned_values(c, m, 3);
+  x.update(c, a_want);
+  x.update(c, b_want);
+  x.reduce(c, s_want, soma::Op::sum);
+  auto a = owned_values(c, m, 1), b = owned_values(c, m, 2), s = owned_values(c, m, 3);
+  auto pa = x.begin_update(c, a);
+  auto pb = x.begin_update(c, b);
+  auto ps = x.begin_reduce(c, s, soma::Op::sum);
+  ps.end();
+  pb.end();
+  pa.end();
+  EXPECT_TRUE(same(a, a_want));
+  EXPECT_TRUE(same(b, b_want));
+  EXPECT_TRUE(same(s, s_want));
+}
+
+// A dropped exchange completes its messages, leaves the values and does not
+// disturb the next one; a finished or moved-from one cannot end again.
+TEST(HaloExchange, ADroppedExchangeLeavesTheValues) {
+  const Comm c = Comm::world();
+  const soma::HostMesh m = local_mesh(c, cell_ranks(c));
+  const soma::HaloExchange<Host> x(c, m, 0);
+  auto v = owned_values(c, m, 4);
+  const auto before = copy_of(v);
+  { auto dropped = x.begin_reduce(c, v, soma::Op::max); }
+  EXPECT_TRUE(same(v, before));
+  auto want = owned_values(c, m, 5);
+  x.update(c, want);
+  auto w = owned_values(c, m, 5);
+  auto p = x.begin_update(c, w);
+  auto moved = std::move(p);
+  EXPECT_THROW(p.end(), std::logic_error);  // NOLINT(bugprone-use-after-move)
+  moved.end();
+  EXPECT_TRUE(same(w, want));
+  EXPECT_THROW(moved.end(), std::logic_error);
+  EXPECT_TRUE(moved.test());
+  soma::View2<double, Host> wrong("wrong", static_cast<std::size_t>(m.count(0)) + 1, 1);
+  EXPECT_THROW((void)x.begin_update(c, wrong), std::invalid_argument);
+  EXPECT_THROW((void)x.begin_reduce(c, wrong, soma::Op::sum), std::invalid_argument);
 }
