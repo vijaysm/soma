@@ -71,48 +71,6 @@ std::vector<GO> next_rank_neighbours(const std::map<GO, int>& rank_of, int me, i
   return out;
 }
 
-// Partitions of the grid: 0 by the curve, 1 in one-cell columns dealt in
-// turn (so a second layer comes from a third rank), 2 with the last rank
-// empty, 3 with one cell alone on rank 0.
-std::map<GO, int> partition(const Comm& c, int kind) {
-  const int p = c.size();
-  std::map<GO, int> out = cell_ranks(c);
-  for (int cell = 0; cell < nx * ny; ++cell) {
-    const GO g = 1000 + cell;
-    if (kind == 1) out[g] = (cell % nx) % p;
-    if (kind == 2) out[g] = p == 1 ? 0 : out[g] % (p - 1);
-    if (kind == 3) out[g] = cell == 3 * nx + 5 || p == 1 ? 0 : 1 + out[g] % (p - 1);
-  }
-  return out;
-}
-
-// Cells within `layers` steps of rank r's cells but not its own, a step
-// joining cells with a common corner (bridge 0) or edge (bridge 1).
-std::set<GO> ring(const std::map<GO, int>& rank_of, int r, int layers, int bridge) {
-  const auto near = [&](GO a, GO b) {
-    const auto x = corners(static_cast<int>(a - 1000)), y = corners(static_cast<int>(b - 1000));
-    int common = 0;
-    for (const GO v : x) common += static_cast<int>(std::count(y.begin(), y.end(), v));
-    return common >= bridge + 1;
-  };
-  std::set<GO> held, frontier, out;
-  for (const auto& [cell, q] : rank_of) {
-    if (q == r) held.insert(cell);
-  }
-  frontier = held;
-  for (int i = 0; i < layers; ++i) {
-    std::set<GO> next;
-    for (const auto& [cell, q] : rank_of) {
-      if (held.contains(cell)) continue;
-      if (std::any_of(frontier.begin(), frontier.end(), [&](GO f) { return near(f, cell); })) next.insert(cell);
-    }
-    held.insert(next.begin(), next.end());
-    out.insert(next.begin(), next.end());
-    frontier = next;
-  }
-  return out;
-}
-
 }  // namespace
 
 // Each owner lists, for each of its cells, exactly the ranks whose k-ring has

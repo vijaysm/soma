@@ -130,6 +130,11 @@ if(SOMA_ENABLE_MOAB_REFERENCE)
   soma_add_test(test_adjacency_moab SOURCES reference/test_adjacency_moab.cpp
     LIBS ${SOMA_MOAB_TARGET})
   target_include_directories(test_adjacency_moab PRIVATE unit)
+  if(SOMA_ENABLE_MPI)
+    soma_add_test(test_ghosts_moab SOURCES reference/test_ghosts_moab.cpp
+      LIBS ${SOMA_MOAB_TARGET} RANKS 1 2 3 4 5 7 8)
+    target_include_directories(test_ghosts_moab PRIVATE unit)
+  endif()
   if(SOMA_ENABLE_HDF5)
     soma_add_test(test_h5m_moab SOURCES reference/test_h5m_moab.cpp
       LIBS ${SOMA_MOAB_TARGET} HDF5::HDF5)
