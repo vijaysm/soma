@@ -66,7 +66,13 @@ struct Renumbering {
   std::array<std::vector<LO>, 4> new_lid;
 };
 
+class Comm;
+struct GhostOptions;
+
 namespace detail {
+// Defined in src/parallel/ghosts.cpp.
+void add_ghosts(const Comm& comm, Mesh<Kokkos::HostSpace>& mesh, const GhostOptions& options);
+void remove_ghosts(const Comm& comm, Mesh<Kokkos::HostSpace>& mesh);
 // Defined in src/core/mesh_edit.cpp.
 Renumbering compress(Mesh<Kokkos::HostSpace>& mesh);
 // build_adjacencies on a host mesh holding removed entities.
@@ -185,6 +191,26 @@ class Mesh {
   Renumbering compress() {
     static_assert(std::is_same_v<MemSpace, Kokkos::HostSpace>, "compress: host meshes only");
     return detail::compress(*this);
+  }
+  // Ghost layers of a distributed part (design §21.4, soma/parallel/ghosts.hpp
+  // for the options). Collective. In place: every entity held other than as a
+  // ghost keeps its local id and gid; ghosts, with their gids, take the ids
+  // after the shared copies of each dimension, ordered by topology, owner,
+  // then the mesh's ordering, and replace any ghosts held before. Ghosts and
+  // shared copies hold their owners' field values; set members on ghosts only
+  // with options.sets. Field handles must be fetched again. Throws on every
+  // rank as migrate does (std::logic_error for an edited mesh) and for bad
+  // options. Host meshes only.
+  Mesh& add_ghosts(const Comm& comm, const GhostOptions& options) {
+    static_assert(std::is_same_v<MemSpace, Kokkos::HostSpace>, "add_ghosts: host meshes only");
+    detail::add_ghosts(comm, *this, options);
+    return *this;
+  }
+  // add_ghosts with no layers. Collective.
+  Mesh& remove_ghosts(const Comm& comm) {
+    static_assert(std::is_same_v<MemSpace, Kokkos::HostSpace>, "remove_ghosts: host meshes only");
+    detail::remove_ghosts(comm, *this);
+    return *this;
   }
   // True for the dimensions MeshBuilder was given entities of (vertices
   // always), also after derivation adopts them; false for derived-only ones.

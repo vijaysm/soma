@@ -8,12 +8,15 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <optional>
 #include <stdexcept>
 #include <tuple>
 #include <utility>
 
 #include "soma/parallel/distributed.hpp"
+#include "soma/parallel/migrate.hpp"
 
+#include "closure.hpp"
 #include "records.hpp"
 #include "side_keys.hpp"
 
@@ -174,5 +177,83 @@ GhostTargets ghost_targets(const Comm& comm, const HostMesh& mesh, const GhostOp
   }
   return out;
 }
+
+namespace {
+
+// The part's dimension d permuted so the entities `old` held (not as ghosts)
+// take their ids there; ghosts stay after them, as the part has them.
+void keep_ids(const HostMesh& old, HostMesh& part, int d) {
+  const SegmentTable& was = old.segment_table(d);
+  const SegmentTable& now = part.segment_table(d);
+  if (now.shared_end != was.shared_end || now.owned_end != was.owned_end || now.interior_end != was.interior_end) {
+    throw std::logic_error("add_ghosts: the part does not hold what the rank held before");
+  }
+  std::vector<std::pair<GO, LO>> lid(static_cast<std::size_t>(was.shared_end));
+  for (LO e = 0; e < was.shared_end; ++e) lid[static_cast<std::size_t>(e)] = {old.gid(d)(e), e};
+  std::sort(lid.begin(), lid.end());
+  std::vector<LO> new_of_old(static_cast<std::size_t>(part.count(d)));
+  bool same = true;
+  for (LO e = 0; e < part.count(d); ++e) {
+    LO to = e;
+    if (e < now.shared_end) {
+      const GO g = part.gid(d)(e);
+      const auto it = std::lower_bound(lid.begin(), lid.end(), std::pair<GO, LO>{g, std::numeric_limits<LO>::min()});
+      if (it == lid.end() || it->first != g) throw std::logic_error("add_ghosts: the part does not hold what the rank held before");
+      to = it->second;
+    }
+    new_of_old[static_cast<std::size_t>(e)] = to;
+    same = same && to == e;
+  }
+  if (same) return;
+  SegmentTable table;
+  table.count = now.count;
+  table.interior_end = was.interior_end;
+  table.owned_end = was.owned_end;
+  table.shared_end = was.shared_end;
+  for (const Segment& s : was.segments) {
+    if (s.begin < was.shared_end) table.segments.push_back(s);
+  }
+  for (const Segment& s : now.segments) {
+    if (s.begin >= now.shared_end) table.segments.push_back(s);
+  }
+  permute_entities(part, d, new_of_old, table);
+}
+
+}  // namespace
+
+void add_ghosts(const Comm& comm, HostMesh& mesh, const GhostOptions& options) {
+  check_movable(comm, mesh, "add_ghosts", false, "");
+  const GhostTargets targets = ghost_targets(comm, mesh, options);
+  const int top = mesh.dim(), me = comm.rank();
+  // Each owned element stays here, on the ranks sharing it and on those
+  // ghosting it.
+  const SegmentTable& t = mesh.segment_table(top);
+  std::optional<VarField<int, Kokkos::HostSpace>> sharing;
+  if (t.owned_end > t.interior_end) sharing = mesh.fields().get_var<int>(sharing_field, top);
+  std::vector<std::size_t> offsets{0};
+  std::vector<int> ranks;
+  for (LO e = 0; e < mesh.count(top); ++e) {
+    if (e < t.owned_end) {
+      std::vector<int> r{me};
+      if (e >= t.interior_end) {
+        const auto s = sharing->value_or_default(top, e);
+        r.insert(r.end(), s.begin(), s.end());
+      }
+      const auto g = targets.of(e);
+      r.insert(r.end(), g.begin(), g.end());
+      std::sort(r.begin(), r.end());
+      r.erase(std::unique(r.begin(), r.end()), r.end());
+      ranks.insert(ranks.end(), r.begin(), r.end());
+    }
+    offsets.push_back(ranks.size());
+  }
+  const Placement where = place_closure(comm, mesh, offsets, ranks);
+  const GhostMarks marks{options.sets};
+  HostMesh part = build_placed(comm, mesh, where, mesh.ordering(), &marks);
+  for (int d = 0; d <= top; ++d) keep_ids(mesh, part, d);
+  mesh = std::move(part);
+}
+
+void remove_ghosts(const Comm& comm, HostMesh& mesh) { add_ghosts(comm, mesh, GhostOptions{0, 0, false}); }
 
 }  // namespace soma::detail
