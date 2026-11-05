@@ -255,8 +255,9 @@ bool has_user_fields(const HostMesh& mesh) {
   return false;
 }
 
-// The graphs held on any rank, and a downward graph to each dimension that
-// some rank holds, none was given to the builder and no held graph builds.
+// The graphs held on any rank, and the connectivity (never held) of each
+// dimension that some rank holds, none gave the builder and no held graph
+// builds.
 AdjacencyRequest graphs_to_rebuild(const Comm& comm, const HostMesh& mesh) {
   std::array<std::int32_t, adjacency_slots + 8> f{};
   const std::uint32_t bits = mesh.adjacencies().bits();
@@ -278,7 +279,7 @@ AdjacencyRequest graphs_to_rebuild(const Comm& comm, const HostMesh& mesh) {
   AdjacencyRequest r = AdjacencyRequest::from_bits(held);
   for (int d = 1; d < mesh.dim(); ++d) {
     const auto k = static_cast<std::size_t>(d);
-    if (f[adjacency_slots + k] != 0 && f[adjacency_slots + 4 + k] == 0 && !built[k]) r.add(mesh.dim(), d);
+    if (f[adjacency_slots + k] != 0 && f[adjacency_slots + 4 + k] == 0 && !built[k]) r.add(d, 0);
   }
   return r;
 }

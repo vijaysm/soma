@@ -2,12 +2,14 @@
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <map>
 #include <set>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -16,6 +18,7 @@
 #include "distributed_fixture.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/mesh_edit.hpp"
+#include "soma/core/mesh_values.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/migrate.hpp"
@@ -406,4 +409,62 @@ TEST(Migrate, BadDestinationsAndEditedMeshesThrowOnEveryRank) {
     edit.apply();
   }
   EXPECT_THROW((void)soma::migrate(c, m, std::vector<int>(n, 0)), std::logic_error);
+}
+
+// quad9s and quads in one mesh (the last rank only quads, so ranks send
+// records of different widths), off the plane, with a mesh value: node counts
+// stay apart, every coordinate travels, mesh values are copied.
+TEST(Migrate, MixedNodeCountsCoordinatesAndMeshValues) {
+  const Comm c = Comm::world();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  const auto height = [](GO v) { return 0.125 * lattice(v).second + 0.5; };
+  std::set<GO> used;
+  std::array<std::vector<GO>, 2> cells, conn;  // quads, quad9s
+  for (const auto& [cell, r] : rank_of) {
+    if (r != c.rank()) continue;
+    const std::vector<GO> n = quad9(static_cast<int>(cell - 1000));
+    const std::size_t k = cell % 2 == 0 && (r != c.size() - 1 || c.size() == 1) ? 1 : 0;
+    cells[k].push_back(cell);
+    for (std::size_t q = 0; q < (k == 1 ? 9u : 4u); ++q) {
+      conn[k].push_back(n[q]);
+      used.insert(n[q]);
+    }
+  }
+  std::vector<GO> vg(used.begin(), used.end());
+  std::vector<soma::Real> xyz;
+  for (const GO v : vg) xyz.insert(xyz.end(), {0.5 * lattice(v).first, 0.5 * lattice(v).second, height(v)});
+  soma::MeshBuilder b(2);
+  b.add_vertices(vg, xyz);
+  b.add_elements(soma::Topology::quad, cells[0], conn[0]);
+  b.add_elements(soma::Topology::quad, cells[1], conn[1], 9);
+  soma::HostMesh m = soma::build_local_part(c, std::move(b));
+  soma::MeshValue answer;
+  answer.type = soma::DataType::i32;
+  answer.global_value = soma::MeshValue::bytes_of(std::span<const std::int32_t>(std::vector<std::int32_t>{42}));
+  m.values().set("answer", answer);
+
+  const soma::HostMesh part = soma::migrate(c, m, one_rank_up(m, rank_of, c.size()));
+  for (LO e = 0; e < part.count(2); ++e) {
+    const GO cell = part.gid(2)(e);
+    std::vector<GO> want = quad9(static_cast<int>(cell - 1000));
+    if (cell % 2 != 0 || (rank_of.at(cell) == c.size() - 1 && c.size() > 1)) want.resize(4);
+    EXPECT_EQ(nodes_of(part, 2, e), want) << "cell " << cell;
+  }
+  for (LO e = 0; e < part.count(0); ++e) EXPECT_EQ(part.coords()(e, 2), height(part.gid(0)(e)));
+  ASSERT_EQ(part.values().names(), std::vector<std::string>{"answer"});
+  EXPECT_EQ(part.values().at("answer").global_value, answer.global_value);
+  EXPECT_EQ(c.allreduce(owned(part, 2), soma::Op::sum), static_cast<std::int64_t>(nx * ny));
+}
+
+// Edges derived with no graph held (only their connectivity) come back too.
+TEST(Migrate, DimensionsDerivedWithoutGraphsComeBack) {
+  const Comm c = Comm::world();
+  const std::map<GO, int> rank_of = cell_ranks(c);
+  soma::HostMesh m = soma::build_local_part(c, local_builder(rank_of, c.rank()));
+  soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(1, 0));
+  ASSERT_EQ(m.adjacencies().bits(), 0u);
+  const soma::HostMesh part = soma::migrate(c, m, one_rank_up(m, rank_of, c.size()));
+  EXPECT_EQ(part.adjacencies().bits(), 0u);
+  EXPECT_EQ(c.allreduce(owned(part, 1), soma::Op::sum), c.allreduce(owned(m, 1), soma::Op::sum));
+  EXPECT_GT(c.allreduce(owned(part, 1), soma::Op::sum), 0);
 }
