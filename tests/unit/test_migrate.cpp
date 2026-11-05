@@ -733,7 +733,7 @@ void add_fields(soma::HostMesh& m, int me) {
     auto f = reg.add<double>("q", sp, 1);
     for (LO e = 0; e < m.count(2); ++e) {
       const auto r = rows_of(f, 2, e);
-      for (LO k = r.begin; k < r.end; ++k) f.view()(k, 0) = 100.0 * static_cast<double>(m.gid(2)(e)) + (k - r.begin);
+      for (LO k = r.begin; k < r.end; ++k) f.view()(k, 0) = 100.0 * static_cast<double>(m.gid(2)(e)) + static_cast<double>(k - r.begin);
     }
   }
   {
@@ -835,7 +835,7 @@ TEST(Migrate, FieldsFollowTheirEntities) {
   for (LO e = 0; e < part.count(2); ++e) {
     const auto r = rows_of(q, 2, e);
     ASSERT_EQ(r.end - r.begin, 9);
-    for (LO k = r.begin; k < r.end; ++k) EXPECT_EQ(q.view()(k, 0), 100.0 * static_cast<double>(part.gid(2)(e)) + (k - r.begin));
+    for (LO k = r.begin; k < r.end; ++k) EXPECT_EQ(q.view()(k, 0), 100.0 * static_cast<double>(part.gid(2)(e)) + static_cast<double>(k - r.begin));
   }
 
   const auto hist = reg.get_var<std::int64_t>("hist");
