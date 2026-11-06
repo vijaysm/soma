@@ -231,6 +231,7 @@ struct Meta {
 };
 
 Meta read_meta(const File& f) {
+  if (H5Aexists(f.root(), "amr") > 0) bad_file("it is an AMR checkpoint, not a mesh (read_soma_amr reads it)");
   const auto m = f.ints("", "meta");
   if (m.size() < 11) bad_file("/soma has no complete meta attribute");
   if (m[0] > soma_file::format_version || m[0] < 1) {
@@ -1116,7 +1117,12 @@ MeshFormat detect_format(const fs::path& path) {
   const hid_t id = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
   if (id < 0) return MeshFormat::unknown;
   const Id file(id);
-  if (H5Lexists(file.get(), soma_file::root, H5P_DEFAULT) > 0) return MeshFormat::soma;
+  if (H5Lexists(file.get(), soma_file::root, H5P_DEFAULT) > 0) {
+    const hid_t root = H5Gopen2(file.get(), soma_file::root, H5P_DEFAULT);
+    if (root < 0) return MeshFormat::unknown;
+    const Id group(root);
+    return H5Aexists(group.get(), "amr") > 0 ? MeshFormat::soma_amr : MeshFormat::soma;
+  }
   if (H5Lexists(file.get(), "tstt", H5P_DEFAULT) > 0) return MeshFormat::legacy_h5m;
   return MeshFormat::unknown;
 }
