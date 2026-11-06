@@ -192,9 +192,9 @@ class Mesh {
     static_assert(std::is_same_v<MemSpace, Kokkos::HostSpace>, "compress: host meshes only");
     return detail::compress(*this);
   }
-  // Ghost layers of a distributed part (design §21.4, soma/parallel/ghosts.hpp
-  // for the options). Collective. In place: every entity held other than as a
-  // ghost keeps its local id and gid; ghosts, with their gids, take the ids
+  // Ghost layers of a distributed part (options in soma/parallel/ghosts.hpp).
+  // Collective. In place: every entity held other than as a ghost keeps its
+  // local id and gid; ghosts, with their gids, take the ids
   // after the shared copies of each dimension, ordered by topology, owner,
   // then the mesh's ordering, and replace any ghosts held before. Ghosts and
   // shared copies hold their owners' field values; set members on ghosts only

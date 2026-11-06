@@ -23,7 +23,7 @@ commit `c4a45fd`), authored by the same team:
 deleted in the commit that finishes its port. Text from MOAB-derived (LGPL) files must not be
 copied into SOMA sources.
 
-The crystal router (design §7.2) is a clean-room implementation of the algorithm in gslib
+The crystal router is a clean-room implementation of the algorithm in gslib
 (Nek5000, BSD-3, UChicago Argonne), as described by Tufo & Fischer. No MOAB source (LGPL-3) is
 copied into SOMA.
 

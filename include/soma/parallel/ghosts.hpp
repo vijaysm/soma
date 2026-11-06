@@ -4,7 +4,7 @@
 #ifndef SOMA_PARALLEL_GHOSTS_HPP_
 #define SOMA_PARALLEL_GHOSTS_HPP_
 
-// Ghost layers of a distributed mesh (design §21.4). Two elements of the
+// Ghost layers of a distributed mesh. Two elements of the
 // mesh's dimension are joined when they have a common side of dimension
 // bridge_dim (by its corners, held or not); with layer 0 the elements a rank
 // holds other than as ghosts, layer i is every element held elsewhere joined

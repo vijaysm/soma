@@ -7,7 +7,7 @@
 // The local part of a distributed mesh. A rank builds the elements it holds
 // with every vertex they use; vertices held by several ranks are shared, the
 // lowest rank owning them. Each dimension is ordered interior, shared (owned
-// here), shared copies, ghosts, then by neighbour set (design §21.3, #66),
+// here), shared copies, ghosts, then by neighbour set,
 // and the sharing is kept in two internal fields over those ranges only:
 //
 //   soma:sharing  variable-length int on the shared entities of both kinds:

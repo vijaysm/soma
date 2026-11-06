@@ -4,7 +4,7 @@
 #ifndef SOMA_SRC_IO_SOMA_LAYOUT_HPP_
 #define SOMA_SRC_IO_SOMA_LAYOUT_HPP_
 
-// What the SOMA format's writer and reader share (design §22.2): names, the
+// What the SOMA format's writer and reader share: names, the
 // version, the HDF5 types of value types, and the file access and transfer
 // properties, MPI-IO and collective with a parallel HDF5 at more than one
 // rank.

@@ -4,8 +4,7 @@
 #ifndef SOMA_PARALLEL_MIGRATE_HPP_
 #define SOMA_PARALLEL_MIGRATE_HPP_
 
-// Moving the elements of a distributed mesh between ranks with their closure
-// (design §21.9).
+// Moving the elements of a distributed mesh between ranks with their closure.
 
 #include <array>
 #include <cstddef>
@@ -52,7 +51,7 @@ struct Placement {
 // Moves each element of the mesh's dimension to rank dest[e] (one per
 // element, by lid; a copy of a shared element follows its owner's) with its
 // closure, placed as detail::place_closure places it, and returns the new
-// part (design §21.9). Entities keep their gids, topology, corners and
+// part. Entities keep their gids, topology, corners and
 // nodes, vertices their coordinates; the dimensions given to the builder on
 // any rank are given again, the others are derived again with the graphs held
 // on any rank (derived gids do not depend on the partition), and

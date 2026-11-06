@@ -4,7 +4,7 @@
 #ifndef SOMA_SRC_PARALLEL_CLOSURE_HPP_
 #define SOMA_SRC_PARALLEL_CLOSURE_HPP_
 
-// The closure engine shared by migrate and ghosting (design §21.9, §21.4).
+// The closure engine shared by migrate and ghosting.
 
 #include "soma/core/mesh.hpp"
 #include "soma/core/ordering.hpp"

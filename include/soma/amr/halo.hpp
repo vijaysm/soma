@@ -12,8 +12,8 @@
 // box are disjoint (the first source along the curve wins where valid
 // regions share points), so a fill gives the same result at any thread
 // count. Ghost points that no box covers keep their values; the
-// coarse-fine fill takes those. The plan is local; in Phase 4 the copies
-// from other ranks' boxes become messages.
+// coarse-fine fill takes those. The plan is local: copies from other
+// ranks' boxes are not exchanged yet.
 
 #include <cstdint>
 #include <functional>

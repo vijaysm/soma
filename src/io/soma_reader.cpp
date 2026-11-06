@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
-// The SOMA format's reader (design §22.4): each rank reads a contiguous
+// The SOMA format's reader: each rank reads a contiguous
 // block of parts, owners send their shared entities to the ranks holding
 // copies, and each rank builds its part with the sharing the file gives.
 

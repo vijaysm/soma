@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
-// The SOMA format's writer (design §22.3): each rank lays out its owned rows
+// The SOMA format's writer: each rank lays out its owned rows
 // of every dataset, one exscan places them, and the ranks write them
 // collectively over MPI-IO, or through rank 0 with a serial HDF5.
 

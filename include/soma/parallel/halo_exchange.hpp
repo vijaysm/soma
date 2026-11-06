@@ -18,7 +18,7 @@
 // holder's own value in its place, so every holder computes the same result
 // bit for bit, whatever the op. Packing and unpacking are kernels over flat
 // index arrays in the mesh's memory space; messages are staged through host
-// memory (device-aware MPI is Phase 5) and use tags 32610 and 32611.
+// memory (device-aware MPI is not used yet) and use tags 32610 and 32611.
 //
 // Each operation also comes split: begin_update and begin_reduce pack the
 // rows sent, post the messages and return a Pending; its end() waits and

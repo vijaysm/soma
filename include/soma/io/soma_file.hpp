@@ -4,7 +4,7 @@
 #ifndef SOMA_IO_SOMA_FILE_HPP_
 #define SOMA_IO_SOMA_FILE_HPP_
 
-// The SOMA format (design §22): a mesh file written and read from many ranks
+// The SOMA format: a mesh file written and read from many ranks
 // with a fixed number of collectives. Needs a build with SOMA_ENABLE_HDF5;
 // without it these throw std::runtime_error.
 //

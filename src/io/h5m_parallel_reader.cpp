@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
-// The parallel .h5m read (design §21.3): every rank reads the metadata and
+// The parallel .h5m read: every rank reads the metadata and
 // a slice of each dataset, the elements are placed on their ranks, and each
 // rank builds its local part.
 
@@ -299,7 +299,7 @@ struct Member {
 static_assert(sizeof(Member) == 32);
 
 // The sets of /tstt/sets/list on every rank, each holding the members held
-// here (design §21.3): the list, children and parents are read whole, the
+// here: the list, children and parents are read whole, the
 // contents in slices whose members reach their holders through the
 // directory of file ids.
 void read_sets(const Comm& comm, HostMesh& mesh, hid_t tstt, const IdRange& sets, std::uint64_t max_id,
@@ -807,7 +807,7 @@ void import_var_tag(const Comm& comm, HostMesh& mesh, hid_t tstt, const std::str
   collectively(comm, [&] { install_var_tag<T>(mesh, name, runs, held, options, handle, format, full, totals); });
 }
 
-// Every tag, as the serial read takes them (design §21.3).
+// Every tag, as the serial read takes them.
 void import_tags(const Comm& comm, HostMesh& mesh, hid_t tstt, const FileLayout& file, const Locator& at,
                  const std::vector<std::pair<GO, int>>& holders, H5mReport& report) {
   std::map<std::string, std::vector<Dense>> dense;

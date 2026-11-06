@@ -101,9 +101,9 @@ HostMesh read_h5m(const std::filesystem::path& path, const H5mReadOptions& optio
                   H5mReport& report);
 
 // Collective over comm: the local part, on each rank, of the mesh the file
-// holds (design §21.3). Every rank reads the metadata and a slice of each
-// dataset. The elements of the mesh's dimension go by the file's parts when
-// it has at least as many PARALLEL_PARTITION sets as ranks (and
+// holds. Every rank reads the metadata and a slice of each dataset. The
+// elements of the mesh's dimension go by the file's parts when it has at
+// least as many PARALLEL_PARTITION sets as ranks (and
 // options.file_parts): part i of n, by tag value then set id, to rank
 // floor(iP/n), an element in several parts with the first. The others go by
 // the curve of their corners' centroids (partition_by_curve). Explicit

@@ -433,7 +433,6 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - With `SOMA_ENABLE_MOAB_REFERENCE=ON`, the tables are compared position by position with
   `moab::CN`, and the polygon behavior of MOAB is pinned.
 - A policy test fails if `SOMA_ENABLE_MPI` is tested outside the Comm seam.
-- Every test has an injected-fault record in `docs/negative_controls.md`.
 - `soma::testing::box_mesh` builds structured hex, quad and triangle boxes with closed-form
   counts, gids, coordinates and orientation, so tests do not depend on a file or a mesher.
   A length whose product with its cell count is not finite is rejected, naming the axis.
@@ -521,8 +520,7 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `bench/bench_adjacency` times derivation and adjacency queries for SOMA on host threads
   against MOAB, the only baseline, with a discarded warmup, median and MAD, environment
   disclosure, JSON lines, and a checksum comparison that fails the run on a mismatch.
-  `bench/run_adjacency.sh` repeats it at threads = 1, 2, 4, ..., N. Results are in
-  `docs/benchmarks.md`.
+  `bench/run_adjacency.sh` repeats it at threads = 1, 2, 4, ..., N.
 - `bench/bench_h5m_read` times `read_h5m` against MOAB `load_file` on the bundled meshes, the
   large ones when present, and a MOAB-written box of N^3 hexes (`--box N`, default 64); the
   `soma_sfc` workflow times the read in `Ordering::type_major_sfc`.
@@ -549,11 +547,3 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `SOMA_INSTALL` defaults to ON only when SOMA is the top-level project.
 - An out-of-tree packaging test installs to a clean prefix, builds a consumer, and runs it (at
   two ranks for MPI builds). It also works with multi-config generators through `ctest -C`.
-
-### Documentation
-
-- `docs/LESSONS_FROM_MOABX.md` lists the lessons carried over from moabX and those learned in
-  SOMA.
-- `docs/remote_builds.md` describes configuring and testing on NVIDIA, AMD and Intel GPUs.
-- `docs/negative_controls.md` records each injected fault and what it showed.
-- `docs/CONTINUITY.md` records the verified state and how to resume.
