@@ -6,7 +6,12 @@
 // each rank computes for itself, so nothing is gathered to compare.
 
 #include <cstdint>
+#include <limits>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <set>
 #include <stdexcept>
 #include <vector>
@@ -21,6 +26,7 @@
 #include "soma/amr/hierarchy.hpp"
 #include "soma/amr/interlevel.hpp"
 #include "soma/amr/level_field.hpp"
+#include "soma/amr/vtk_amr.hpp"
 #include "soma/parallel/comm.hpp"
 
 #include "amr_parts.hpp"
@@ -428,4 +434,87 @@ TEST(AmrDistributed, AFailedTaggerFailsEveryRank) {
   EXPECT_EQ(part.boxes(1).boxes(), level1);
   EXPECT_EQ(p[1].boxes().boxes(), level1);
   part.fill_halo(p, Interp::linear, Wall{});
+}
+
+namespace {
+
+std::string slurp(const std::filesystem::path& p) {
+  std::ifstream in(p, std::ios::binary);
+  std::ostringstream s;
+  s << in.rdbuf();
+  return s.str();
+}
+
+}  // namespace
+
+// The pieces each rank writes, and rank 0's index, are the files one process
+// writes for the whole hierarchy, byte for byte.
+TEST(AmrDistributed, VtkPiecesAreTheSerialFiles) {
+  const Comm c = Comm::world();
+  const Scratch dir(c, "soma_amr_vtk");
+  Hierarchy whole(geometry(), options());
+  whole.regrid(Ring{}, Interp::linear, Wall{});
+  whole.regrid(Ring{}, Interp::linear, Wall{});
+  std::vector<BoxList> fine;
+  for (int l = 1; l < whole.num_levels(); ++l) fine.push_back(whole.boxes(l).boxes());
+  const Hierarchy part(c, geometry(), options(), fine);
+  const auto w = whole.make_field<double>(IndexType::cell(), 2, 1);
+  const auto wn = whole.make_field<double>(IndexType::node(2), 1, 0);
+  const auto p = part.make_field<double>(IndexType::cell(), 2, 1);
+  const auto pn = part.make_field<double>(IndexType::node(2), 1, 0);
+  fill_levels(w, 0.0);
+  fill_levels(wn, 0.5);
+  fill_levels(p, 0.0);
+  fill_levels(pn, 0.5);
+  const auto before = soma::detail::comm_counts();
+  soma::amr::write_vtk_amr(c, dir.path("part.vthb"), part, {{"u", &p}, {"n", &pn}});
+  EXPECT_EQ(soma::detail::comm_counts().collectives - before.collectives, 4U);
+  if (c.rank() == 0) soma::amr::write_vtk_amr(dir.path("whole.vthb"), whole, {{"u", &w}, {"n", &wn}});
+  c.barrier();
+  if (c.rank() != 0) return;
+  std::string index = slurp(dir.path("whole.vthb"));
+  for (std::size_t at = 0; (at = index.find("whole", at)) != std::string::npos;) index.replace(at, 5, "part");
+  EXPECT_EQ(slurp(dir.path("part.vthb")), index);
+  std::size_t pieces = 0;
+  for (int l = 0; l < whole.num_levels(); ++l) {
+    for (std::size_t b = 0; b < whole.boxes(l).size(); ++b, ++pieces) {
+      const std::string n = "_" + std::to_string(l) + "_" + std::to_string(b) + ".vti";
+      const std::string mine = slurp(dir.path("part") / ("part" + n));
+      EXPECT_FALSE(mine.empty()) << n;
+      EXPECT_EQ(mine, slurp(dir.path("whole") / ("whole" + n))) << n;
+    }
+  }
+  EXPECT_EQ(static_cast<std::size_t>(std::distance(std::filesystem::directory_iterator(dir.path("part")), {})), pieces);
+}
+
+// Bad input on one rank, or ranks naming different fields, throws on every
+// rank before any file is written; a failed write throws on every rank.
+TEST(AmrDistributed, VtkFailuresThrowOnEveryRank) {
+  const Comm c = Comm::world();
+  const Scratch dir(c, "soma_amr_vtk_bad");
+  Hierarchy part(c, geometry(), options());
+  part.regrid(Ring{}, Interp::linear, Wall{});
+  const auto u = part.make_field<double>(IndexType::cell(), 1, 0);
+  fill_levels(u, 0.0);
+  const auto path = dir.path("bad.vthb");
+  // A value that is not finite in the last rank's boxes only.
+  const auto v = part.make_field<double>(IndexType::cell(), 1, 0);
+  fill_levels(v, 0.0);
+  if (c.rank() == c.size() - 1 && v[0].num_boxes() > 0) v[0].fill(std::numeric_limits<double>::quiet_NaN());
+  EXPECT_THROW(soma::amr::write_vtk_amr(c, path, part, {{"v", &v}}), std::invalid_argument);
+  if (c.size() > 1) {
+    std::vector<soma::amr::VtkAmrField> mine{{"u", &u}};
+    if (c.rank() == 0) mine.push_back({"w", &u});
+    EXPECT_THROW(soma::amr::write_vtk_amr(c, path, part, mine), std::invalid_argument);
+    // The overload without a communicator needs a hierarchy of one rank.
+    EXPECT_THROW(soma::amr::write_vtk_amr(path, part, {{"u", &u}}), std::invalid_argument);
+  }
+  c.barrier();
+  EXPECT_FALSE(std::filesystem::exists(path));
+  EXPECT_FALSE(std::filesystem::exists(dir.path("bad")));
+  // A file where the pieces' directory should be.
+  if (c.rank() == 0) std::ofstream(dir.path("blocked")) << "x";
+  c.barrier();
+  EXPECT_THROW(soma::amr::write_vtk_amr(c, dir.path("blocked.vthb"), part, {{"u", &u}}), std::runtime_error);
+  EXPECT_FALSE(std::filesystem::exists(dir.path("blocked.vthb")));
 }

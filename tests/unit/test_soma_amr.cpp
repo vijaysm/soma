@@ -9,7 +9,6 @@
 #include <filesystem>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -30,32 +29,6 @@ using namespace soma::test_amr;
 using soma::amr::Hierarchy;
 using soma::amr::Interp;
 using soma::amr::MultiLevelField;
-
-// A directory every rank sees, removed by rank 0 at the end.
-class Scratch {
- public:
-  explicit Scratch(const Comm& c) : c_(c) {
-    std::int64_t id = c.rank() == 0 ? static_cast<std::int64_t>(::getpid()) : 0;
-    c.bcast(std::span<std::int64_t>(&id, 1), 0);
-    dir_ = fs::temp_directory_path() / ("soma_amr_" + std::to_string(c.size()) + "_" + std::to_string(id));
-    if (c.rank() == 0) fs::create_directories(dir_);
-    c.barrier();
-  }
-  Scratch(const Scratch&) = delete;
-  Scratch& operator=(const Scratch&) = delete;
-  ~Scratch() {
-    c_.barrier();
-    if (c_.rank() == 0) {
-      std::error_code ec;
-      fs::remove_all(dir_, ec);
-    }
-  }
-  [[nodiscard]] fs::path path(const std::string& name) const { return dir_ / name; }
-
- private:
-  const Comm& c_;
-  fs::path dir_;
-};
 
 // Integer data: a value of each valid point's position.
 void fill_ints(const LevelField<std::int32_t>& f) {
@@ -107,7 +80,7 @@ void expect_restarted(const soma::AmrCheckpoint& c, const Hierarchy& whole, cons
 // P: the hierarchy's boxes, geometry and options, and every field come back.
 TEST(SomaAmr, RestartsAtAnyRankCount) {
   const Comm c = Comm::world();
-  const Scratch dir(c);
+  const Scratch dir(c, "soma_amr");
   const Hierarchy whole = ringed(Hierarchy(geometry(), options()));
   Fields w = fields_of(whole);
   whole.fill_halo(w.u, Interp::linear, Wall{});
@@ -150,7 +123,7 @@ TEST(SomaAmr, RestartsAtAnyRankCount) {
 // the rank count nor on the number of fields.
 TEST(SomaAmr, CollectivesDoNotGrow) {
   const Comm c = Comm::world();
-  const Scratch dir(c);
+  const Scratch dir(c, "soma_amr");
   const Hierarchy part = ringed(Hierarchy(c, geometry(), options()));
   const Fields p = fields_of(part);
   std::vector<soma::AmrFieldRef> many;
@@ -171,7 +144,7 @@ TEST(SomaAmr, CollectivesDoNotGrow) {
 // Failures throw on every rank and leave no file.
 TEST(SomaAmr, FailuresThrowOnEveryRank) {
   const Comm c = Comm::world();
-  const Scratch dir(c);
+  const Scratch dir(c, "soma_amr");
   const Hierarchy part = ringed(Hierarchy(c, geometry(), options()));
   const Fields p = fields_of(part);
   const fs::path out = dir.path("bad.soma");

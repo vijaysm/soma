@@ -6,11 +6,18 @@
 
 // Helpers of the distributed AMR tests: fields of known values, a ring
 // tagger, a wall boundary, a small hierarchy, and comparisons of each rank's
-// boxes with the same boxes held whole on one process.
+// boxes with the same boxes held whole on one process, and a scratch
+// directory.
 
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <span>
+#include <string>
+#include <system_error>
 #include <vector>
+
+#include <unistd.h>
 
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
@@ -130,6 +137,32 @@ void expect_same_levels(const soma::amr::Hierarchy& part, const soma::amr::Multi
   }
 }
 
+
+// A directory every rank sees, removed by rank 0 at the end.
+class Scratch {
+ public:
+  Scratch(const Comm& c, const std::string& prefix) : c_(c) {
+    std::int64_t id = c.rank() == 0 ? static_cast<std::int64_t>(::getpid()) : 0;
+    c.bcast(std::span<std::int64_t>(&id, 1), 0);
+    dir_ = std::filesystem::temp_directory_path() / (prefix + "_" + std::to_string(c.size()) + "_" + std::to_string(id));
+    if (c.rank() == 0) std::filesystem::create_directories(dir_);
+    c.barrier();
+  }
+  Scratch(const Scratch&) = delete;
+  Scratch& operator=(const Scratch&) = delete;
+  ~Scratch() {
+    c_.barrier();
+    if (c_.rank() == 0) {
+      std::error_code ec;
+      std::filesystem::remove_all(dir_, ec);
+    }
+  }
+  [[nodiscard]] std::filesystem::path path(const std::string& name) const { return dir_ / name; }
+
+ private:
+  const Comm& c_;
+  std::filesystem::path dir_;
+};
 
 }  // namespace soma::test_amr
 
