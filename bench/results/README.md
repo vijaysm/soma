@@ -21,5 +21,4 @@ change is inside the measurement spread are flagged `~` and are not results.
 Same machine, same compiler, same Kokkos and same build type on both sides, or
 the comparison measures the environment.
 
-Add a baseline by committing the file; the tables in `docs/benchmarks.md`
-quote the run they were made from.
+Add a baseline by committing the file.
