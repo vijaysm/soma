@@ -27,6 +27,7 @@
 #include "soma/fields/space.hpp"
 #include "soma/io/soma_file.hpp"
 #include "soma/parallel/distributed.hpp"
+#include "soma_image.hpp"
 #include "soma_layout.hpp"
 #include "temporary.hpp"
 
@@ -66,71 +67,9 @@ void append(std::vector<std::byte>& out, std::span<const T> v) {
   if (!v.empty()) std::memcpy(out.data() + at, v.data(), v.size_bytes());
 }
 
-// A dataset of rows of `width` values of `type`: `data` holds this rank's
-// rows (a column, written by every part) or every row (written once, the
-// same on every rank).
-struct Dataset {
-  std::string path;  // below /soma
-  DataType type = DataType::u8;
-  std::size_t width = 1;
-  std::vector<std::byte> data;
-
-  [[nodiscard]] std::size_t row_bytes() const { return width * soma_file::value_size(type); }
-  [[nodiscard]] std::uint64_t rows() const { return data.size() / row_bytes(); }
-};
-
-// An attribute the same on every rank: text, or an array of i64 or u8.
-struct Attribute {
-  std::string object;  // below /soma; "" for /soma
-  std::string name;
-  std::string text;
-  std::vector<std::int64_t> ints;
-  std::vector<std::uint8_t> bytes;
-  enum class Kind : std::uint8_t { text, ints, bytes } kind = Kind::ints;
-};
-
-// Everything the file holds, laid out before it is touched.
-struct Image {
-  std::vector<std::string> groups;  // below /soma, parents first
-  // Deques, so that the references column() and single() give stay valid.
-  std::deque<Dataset> columns;  // written by every part, in part order
-  std::deque<Dataset> once;     // the same on every rank, written by rank 0
-  std::vector<Attribute> attributes;
-
-  Dataset& column(std::string path, DataType type, std::size_t width = 1) {
-    columns.push_back({std::move(path), type, width, {}});
-    return columns.back();
-  }
-  Dataset& single(std::string path, DataType type, std::size_t width = 1) {
-    once.push_back({std::move(path), type, width, {}});
-    return once.back();
-  }
-  void ints(std::string object, std::string name, std::vector<std::int64_t> v) {
-    Attribute a;
-    a.object = std::move(object);
-    a.name = std::move(name);
-    a.ints = std::move(v);
-    attributes.push_back(std::move(a));
-  }
-  void text(std::string object, std::string name, std::string v) {
-    Attribute a;
-    a.object = std::move(object);
-    a.name = std::move(name);
-    a.text = std::move(v);
-    a.kind = Attribute::Kind::text;
-    attributes.push_back(std::move(a));
-  }
-  void bytes(std::string object, std::string name, std::span<const std::byte> v) {
-    if (v.empty()) return;  // HDF5 has no empty attribute; the meta array says it is there
-    Attribute a;
-    a.object = std::move(object);
-    a.name = std::move(name);
-    a.bytes.resize(v.size());
-    std::memcpy(a.bytes.data(), v.data(), v.size());
-    a.kind = Attribute::Kind::bytes;
-    attributes.push_back(std::move(a));
-  }
-};
+using soma_file::Attribute;
+using soma_file::Dataset;
+using soma_file::Image;
 
 bool streamed = false;  // detail::soma_streamed_sink
 
@@ -808,7 +747,7 @@ void write_streamed(const Comm& comm, const std::string& name, Image& img, const
 // Runs f; a failure on any rank throws on every rank (std::runtime_error
 // naming the path), the failing ones with their own cause.
 template <class F>
-void collectively(const Comm& comm, const fs::path& path, F&& f) {
+void collectively(const Comm& comm, const fs::path& path, const char* writer, F&& f) {
   std::string cause;
   try {
     f();
@@ -818,7 +757,7 @@ void collectively(const Comm& comm, const fs::path& path, F&& f) {
     cause = e.what();
   }
   if (comm.allreduce(static_cast<std::int32_t>(cause.empty() ? 0 : 1), Op::max) != 0) {
-    throw std::runtime_error(io::cannot_write(who, path, cause.empty() ? "failed on another rank" : cause));
+    throw std::runtime_error(io::cannot_write(writer, path, cause.empty() ? "failed on another rank" : cause));
   }
 }
 
@@ -842,6 +781,10 @@ void write_soma(const Comm& comm, const HostMesh& mesh, const fs::path& path, co
   const Agreed agreed = agree(comm, mesh, error);
   Image img = lay_out(comm, mesh, agreed);
 
+  soma_file::write_image(comm, path, img, options.compression, who);
+}
+
+void soma_file::write_image(const Comm& comm, const fs::path& path, Image& img, int compression, const char* writer) {
   // Where each part's rows go: one exscan and one sum over all columns.
   Placement at;
   for (const Dataset& d : img.columns) at.first.push_back(d.rows());
@@ -855,7 +798,7 @@ void write_soma(const Comm& comm, const HostMesh& mesh, const fs::path& path, co
   std::string cause;
   if (comm.rank() == 0) {
     try {
-      file.emplace(who, path, io::random_names(path), temporary_attempts);
+      file.emplace(writer, path, io::random_names(path), temporary_attempts);
       file->close();
       if (file->name().size() >= name.size()) throw std::runtime_error("the temporary file name is too long");
       std::memcpy(name.data(), file->name().data(), file->name().size());
@@ -867,16 +810,16 @@ void write_soma(const Comm& comm, const HostMesh& mesh, const fs::path& path, co
   comm.bcast(std::span<char>(name), 0);
   if (name[0] == '\0') {
     if (!cause.empty()) throw std::runtime_error(cause);
-    throw std::runtime_error(io::cannot_write(who, path, "rank 0 could not create the file"));
+    throw std::runtime_error(io::cannot_write(writer, path, "rank 0 could not create the file"));
   }
   const std::string temporary(name.data());
   const bool collective = soma_file::parallel_hdf5() && comm.size() > 1 && !streamed;
-  collectively(comm, path, [&] {
+  collectively(comm, path, writer, [&] {
     const h5::Session quiet;
     if (collective) {
-      write_collective(comm, temporary, img, at, options.compression);
+      write_collective(comm, temporary, img, at, compression);
     } else {
-      write_streamed(comm, temporary, img, at, options.compression);
+      write_streamed(comm, temporary, img, at, compression);
     }
   });
   // Rank 0 renames it over `path`; the others learn whether that worked.
@@ -892,7 +835,7 @@ void write_soma(const Comm& comm, const HostMesh& mesh, const fs::path& path, co
   comm.bcast(std::span<std::int32_t>(&ok, 1), 0);
   if (ok == 0) {
     if (!cause.empty()) throw std::runtime_error(cause);
-    throw std::runtime_error(io::cannot_write(who, path, "rank 0 could not rename the file"));
+    throw std::runtime_error(io::cannot_write(writer, path, "rank 0 could not rename the file"));
   }
 }
 
