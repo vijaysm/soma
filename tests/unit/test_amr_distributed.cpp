@@ -18,6 +18,7 @@
 #include "soma/amr/copy.hpp"
 #include "soma/amr/flux_register.hpp"
 #include "soma/amr/halo.hpp"
+#include "soma/amr/hierarchy.hpp"
 #include "soma/amr/interlevel.hpp"
 #include "soma/amr/level_field.hpp"
 #include "soma/parallel/comm.hpp"
@@ -331,4 +332,204 @@ TEST(AmrDistributed, RefluxEqualsTheSerialReflux) {
       if (c.size() > 1) EXPECT_THROW(part.reflux(sw), std::invalid_argument);
     }
   }
+}
+
+namespace {
+
+using soma::amr::Hierarchy;
+using soma::amr::Interp;
+
+// Tags the cells of a level within `width` of a circle of radius r (in the
+// unit square), so regrids make a ring of fine boxes.
+void tag_ring(const soma::amr::TagField& t, int level, double r, double width) {
+  const auto v = t.view();
+  const double n = 32.0 * (level == 0 ? 1 : (level == 1 ? 2 : 4));
+  soma::amr::for_each_point(t, soma::amr::Region::valid, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+    const double x = (i + 0.5) / n - 0.5, y = (j + 0.5) / n - 0.5;
+    const double d = Kokkos::sqrt(x * x + y * y) - r;
+    v.patch(b)(i, j, k) = (d < width && d > -width) ? 1 : 0;
+  });
+}
+
+struct Ring {
+  double r = 0.3;
+  void operator()(int level, const soma::amr::TagField& t) const { tag_ring(t, level, r, 0.04); }
+};
+
+// Ghosts outside the domain take a value of their position and level.
+template <class T>
+void set_region(const LevelField<T>& f, int level, int box, const Box& region) {
+  const auto v = f.view();
+  Kokkos::parallel_for(
+      "test.boundary", Kokkos::RangePolicy<Kokkos::DefaultExecutionSpace, Kokkos::IndexType<std::int64_t>>(0, region.num_pts()),
+      KOKKOS_LAMBDA(std::int64_t q) {
+        const IntVect x = soma::amr::detail::point_of(region, q);
+        for (int c = 0; c < v.ncomp; ++c) v.patch(box)(x[0], x[1], x[2], c) = static_cast<T>(-0.5 * x[0] + 3.0 * x[1] - level + c);
+      });
+  Kokkos::fence();
+}
+
+struct Wall {
+  template <class T>
+  void operator()(const LevelField<T>& f, int level, int box, const Box& region, int, int) const {
+    set_region(f, level, box, region);
+  }
+};
+
+soma::amr::Geometry geometry() { return soma::amr::Geometry{box(2, 32), {0, 0, 0}, {1, 1, 1}, Periodicity{}}; }
+
+soma::amr::HierarchyOptions options() {
+  soma::amr::HierarchyOptions o;
+  o.max_level = 2;
+  o.ratio = 2;
+  o.blocking_factor = 4;
+  o.max_box = 8;
+  return o;
+}
+
+void fill_levels(const soma::amr::MultiLevelField<double>& u, double offset) {
+  for (std::size_t l = 0; l < u.size(); ++l) fill_pattern(u[l], offset + 100.0 * static_cast<double>(l));
+}
+
+void expect_same_levels(const Hierarchy& part, const soma::amr::MultiLevelField<double>& p, const Hierarchy& whole,
+                        const soma::amr::MultiLevelField<double>& w) {
+  ASSERT_EQ(part.num_levels(), whole.num_levels());
+  for (int l = 0; l < part.num_levels(); ++l) {
+    ASSERT_EQ(part.boxes(l).boxes(), whole.boxes(l).boxes()) << l;
+    expect_same_boxes(p[static_cast<std::size_t>(l)], w[static_cast<std::size_t>(l)]);
+  }
+}
+
+}  // namespace
+
+// A hierarchy over many ranks fills, split or not, and restricts as one
+// process does.
+TEST(AmrDistributed, HierarchyFillsAndRestrictsAsOneProcess) {
+  const Comm c = Comm::world();
+  Hierarchy whole(geometry(), options());
+  whole.regrid(Ring{}, Interp::linear, Wall{});
+  whole.regrid(Ring{}, Interp::linear, Wall{});
+  ASSERT_EQ(whole.num_levels(), 3);
+  std::vector<BoxList> fine;
+  for (int l = 1; l < whole.num_levels(); ++l) fine.push_back(whole.boxes(l).boxes());
+  const Hierarchy part(c, geometry(), options(), fine);
+  for (int l = 0; l < part.num_levels(); ++l) {
+    EXPECT_EQ(part.distribution(l).owner, Distribution::along_curve(part.boxes(l), c.size()).owner);
+  }
+  for (const Interp interp : {Interp::piecewise_constant, Interp::linear, Interp::quadratic}) {
+    for (const IndexType type : {IndexType::cell(), IndexType::node(2), IndexType::face(1)}) {
+      auto w = whole.make_field<double>(type, 2, 2);
+      auto p = part.make_field<double>(type, 2, 2);
+      fill_levels(w, 0.0);
+      fill_levels(p, 0.0);
+      whole.fill_halo(w, interp, Wall{});
+      part.fill_halo(p, interp, Wall{});
+      expect_same_levels(part, p, whole, w);
+      fill_levels(p, 0.0);
+      const Wall wall;
+      auto pending = part.begin_fill_halo(p, interp, wall);
+      pending.end();
+      expect_same_levels(part, p, whole, w);
+      whole.average_down(w);
+      part.average_down(p);
+      expect_same_levels(part, p, whole, w);
+    }
+  }
+  // Fields of the other hierarchy are refused.
+  if (c.size() > 1) EXPECT_THROW(part.fill_halo(whole.make_field<double>(IndexType::cell(), 1, 1)), std::invalid_argument);
+}
+
+// Regrids over many ranks make the boxes and data one process makes, and
+// cut every level along the curve.
+TEST(AmrDistributed, RegridsMakeTheBoxesAndDataOfOneProcess) {
+  const Comm c = Comm::world();
+  Hierarchy whole(geometry(), options());
+  Hierarchy part(c, geometry(), options());
+  auto w = whole.make_field<double>(IndexType::cell(), 1, 2);
+  auto p = part.make_field<double>(IndexType::cell(), 1, 2);
+  auto wn = whole.make_field<double>(IndexType::node(2), 2, 1);
+  auto pn = part.make_field<double>(IndexType::node(2), 2, 1);
+  fill_levels(w, 0.0);
+  fill_levels(p, 0.0);
+  fill_levels(wn, 1.0);
+  fill_levels(pn, 1.0);
+  for (const double r : {0.3, 0.2}) {
+    whole.regrid(Ring{r}, Interp::linear, Wall{}, w, wn);
+    part.regrid(Ring{r}, Interp::linear, Wall{}, p, pn);
+    expect_same_levels(part, p, whole, w);
+    expect_same_levels(part, pn, whole, wn);
+    for (int l = 0; l < part.num_levels(); ++l) {
+      EXPECT_EQ(part.distribution(l).owner, Distribution::along_curve(part.boxes(l), c.size()).owner) << l;
+    }
+  }
+}
+
+// Costs from the options' callback, and measured costs that override it,
+// set every level's cut, the same on every rank.
+TEST(AmrDistributed, CostsSetTheCuts) {
+  const Comm c = Comm::world();
+  soma::amr::HierarchyOptions o = options();
+  o.cost = [](int level, const Box& b) { return (b.lo(0) < 16 << level ? 4.0 : 1.0) * static_cast<double>(b.num_pts()); };
+  Hierarchy part(c, geometry(), o);
+  part.regrid(Ring{}, Interp::linear, Wall{});
+  for (int l = 0; l < part.num_levels(); ++l) {
+    std::vector<double> w;
+    for (const Box& b : part.boxes(l).boxes()) w.push_back(o.cost(l, b));
+    EXPECT_EQ(part.distribution(l).owner, Distribution::along_curve(part.boxes(l), c.size(), w).owner) << l;
+  }
+  // Measured: each box of this rank costs one more than its global id; a
+  // new box takes the old costs in proportion to its overlap.
+  const Hierarchy before = part;
+  std::vector<std::vector<double>> measured;
+  for (int l = 0; l < before.num_levels(); ++l) {
+    std::vector<double> m;
+    for (const int g : before.distribution(l).owned(c.rank())) m.push_back(1.0 + g);
+    measured.push_back(m);
+  }
+  part.regrid(Ring{0.25}, measured, Interp::linear, Wall{});
+  for (int l = 0; l < part.num_levels(); ++l) {
+    std::vector<double> w;
+    for (const Box& b : part.boxes(l).boxes()) {
+      double sum = 0;
+      bool any = false;
+      if (l < before.num_levels()) {
+        for (std::size_t g = 0; g < before.boxes(l).size(); ++g) {
+          const Box overlap = b & before.boxes(l)[g];
+          if (overlap.empty()) continue;
+          any = true;
+          sum += (1.0 + static_cast<double>(g)) * static_cast<double>(overlap.num_pts()) /
+                 static_cast<double>(before.boxes(l)[g].num_pts());
+        }
+      }
+      w.push_back(any ? sum : o.cost(l, b));
+    }
+    EXPECT_EQ(part.distribution(l).owner, Distribution::along_curve(part.boxes(l), c.size(), w).owner) << l;
+    const auto all = c.allgatherv(std::span<const int>(part.distribution(l).owner));
+    for (int r = 0; r < c.size(); ++r) {
+      for (std::size_t i = 0; i < part.boxes(l).size(); ++i) {
+        ASSERT_EQ(all[static_cast<std::size_t>(r) * part.boxes(l).size() + i], part.distribution(l).owner[i]);
+      }
+    }
+  }
+  EXPECT_THROW(part.regrid(Ring{}, std::vector<std::vector<double>>{{-1.0}}, Interp::linear, Wall{}), std::invalid_argument);
+}
+
+// A tagger failing on one rank fails the regrid on every rank and leaves the
+// hierarchy and its fields as they were.
+TEST(AmrDistributed, AFailedTaggerFailsEveryRank) {
+  const Comm c = Comm::world();
+  Hierarchy part(c, geometry(), options());
+  part.regrid(Ring{}, Interp::linear, Wall{});
+  auto p = part.make_field<double>(IndexType::cell(), 1, 1);
+  fill_levels(p, 0.0);
+  const BoxList level1 = part.boxes(1).boxes();
+  const int last = c.size() - 1;
+  const auto failing = [&](int level, const soma::amr::TagField& t) {
+    if (c.rank() == last) throw std::runtime_error("tagger failed");
+    tag_ring(t, level, 0.2, 0.04);
+  };
+  EXPECT_THROW(part.regrid(failing, Interp::linear, Wall{}, p), std::runtime_error);
+  EXPECT_EQ(part.boxes(1).boxes(), level1);
+  EXPECT_EQ(p[1].boxes().boxes(), level1);
+  part.fill_halo(p, Interp::linear, Wall{});
 }

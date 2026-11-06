@@ -210,9 +210,14 @@ template <class T, class MemSpace = Kokkos::DefaultExecutionSpace::memory_space>
 class PendingCopy {
  public:
   PendingCopy() = default;
+  PendingCopy(const PendingCopy&) = delete;
+  PendingCopy& operator=(const PendingCopy&) = delete;
+  PendingCopy(PendingCopy&&) = default;
+  PendingCopy& operator=(PendingCopy&&) = default;
+  ~PendingCopy() = default;
   void end() {
-    if (done_) return;
-    done_ = true;
+    if (done_.value) return;
+    done_.value = true;
     messages_.wait();
     if (count_ == 0) return;
     Kokkos::deep_copy(recv_, recv_host_);
@@ -223,7 +228,17 @@ class PendingCopy {
   template <class U, class M>
   friend PendingCopy<U, M> begin_copy_views(const LevelView<U, M>& src, const LevelView<U, M>& dst, const CopyPlan& plan);
 
-  bool done_ = true;
+  // Finished, or moved from: a moved-from copy has nothing left to end.
+  struct Done {
+    bool value = true;
+    Done() = default;
+    Done(Done&& o) noexcept : value(std::exchange(o.value, true)) {}
+    Done& operator=(Done&& o) noexcept {
+      value = std::exchange(o.value, true);
+      return *this;
+    }
+  };
+  Done done_;
   int ncomp_ = 1;
   std::int64_t count_ = 0;
   LevelView<T, MemSpace> dst_;
@@ -239,7 +254,7 @@ template <class T, class MemSpace>
 PendingCopy<T, MemSpace> begin_copy_views(const LevelView<T, MemSpace>& src, const LevelView<T, MemSpace>& dst,
                                           const CopyPlan& plan) {
   PendingCopy<T, MemSpace> out;
-  out.done_ = false;
+  out.done_.value = false;
   out.ncomp_ = dst.ncomp < src.ncomp ? dst.ncomp : src.ncomp;
   out.count_ = plan.num_received();
   out.dst_ = dst;

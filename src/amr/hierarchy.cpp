@@ -4,7 +4,14 @@
 #include "soma/amr/hierarchy.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <exception>
+#include <span>
 #include <stdexcept>
+#include <string>
+#include <utility>
+#include <vector>
 
 #include "soma/amr/cluster.hpp"
 
@@ -56,6 +63,13 @@ BoxList detail::nest_region(const BoxList& fine, int ratio, int nesting, const B
   return wrap(grow(coarsen(fine, ratio), nesting), coarse_domain, periodic);
 }
 
+Hierarchy::Hierarchy(const Comm& comm, const Geometry& geometry, const HierarchyOptions& options,
+                     const std::vector<BoxList>& fine)
+    : Hierarchy(geometry, options, fine) {
+  comm_ = comm;
+  distribute(nullptr, nullptr);
+}
+
 Hierarchy::Hierarchy(const Geometry& geometry, const HierarchyOptions& options, const std::vector<BoxList>& fine)
     : geometry_(geometry), options_(options) {
   const HierarchyOptions& o = options_;
@@ -96,6 +110,86 @@ Hierarchy::Hierarchy(const Geometry& geometry, const HierarchyOptions& options, 
     }
     levels_.push_back(std::move(boxes));
   }
+  distribute(nullptr, nullptr);
+}
+
+void Hierarchy::distribute(const Hierarchy* old, const std::vector<std::vector<double>>* measured) {
+  const int nranks = comm_ ? comm_->size() : 1;
+  owners_.clear();
+  for (int l = 0; l < num_levels(); ++l) {
+    const BoxArray& level = boxes(l);
+    std::vector<double> w(level.size());
+    for (std::size_t b = 0; b < level.size(); ++b) {
+      w[b] = options_.cost ? options_.cost(l, level[b]) : static_cast<double>(level[b].num_pts());
+    }
+    const auto lu = static_cast<std::size_t>(l);
+    // Measured costs of the old level's boxes, gathered with their ids,
+    // spread over the new boxes by overlap. Every rank calls the gather for
+    // the levels both hierarchies have, so the collectives match.
+    if (old != nullptr && measured != nullptr && !measured->empty() && l < old->num_levels()) {
+      const BoxArray& before = old->boxes(l);
+      const std::vector<int> mine = old->distribution(l).owned(old->rank());
+      struct Cost {
+        std::int64_t id;
+        double cost;
+      };
+      std::vector<Cost> given;
+      if (lu < measured->size() && !(*measured)[lu].empty()) {
+        // A wrong count travels as an id of -1, so every rank throws.
+        if ((*measured)[lu].size() != mine.size()) {
+          given.push_back({-1, 0.0});
+        } else {
+          for (std::size_t i = 0; i < mine.size(); ++i) given.push_back({mine[i], (*measured)[lu][i]});
+        }
+      }
+      const auto all = comm_ ? comm_->allgatherv(std::span<const Cost>(given)) : given;
+      std::vector<double> old_cost(before.size(), -1.0);
+      for (const auto& [id, cost] : all) {
+        if (id < 0) {
+          throw std::invalid_argument("Hierarchy::regrid: level " + std::to_string(l) +
+                                      " needs one measured cost per box of the rank on some rank");
+        }
+        if (!std::isfinite(cost) || cost < 0) throw std::invalid_argument("Hierarchy::regrid: measured costs must be finite and not negative");
+        old_cost[static_cast<std::size_t>(id)] = cost;
+      }
+      for (std::size_t b = 0; b < level.size(); ++b) {
+        double sum = 0;
+        bool any = false;
+        for (std::size_t o = 0; o < before.size(); ++o) {
+          if (old_cost[o] < 0) continue;
+          const Box overlap = level[b] & before[o];
+          if (overlap.empty()) continue;
+          any = true;
+          sum += old_cost[o] * static_cast<double>(overlap.num_pts()) / static_cast<double>(before[o].num_pts());
+        }
+        if (any) w[b] = sum;
+      }
+    }
+    owners_.push_back(Distribution::along_curve(level, nranks, w));
+  }
+}
+
+FluxRegister Hierarchy::make_flux_register(int level, int ncomp) const {
+  if (level < 1) throw std::invalid_argument("Hierarchy::make_flux_register: level 0 has no level below");
+  const auto l = static_cast<std::size_t>(level);
+  return comm_ ? FluxRegister(*comm_, boxes(level), owners_[l], boxes(level - 1), owners_[l - 1], options_.ratio,
+                              geometry_.periodic, ncomp)
+               : FluxRegister(boxes(level), boxes(level - 1), options_.ratio, geometry_.periodic, ncomp);
+}
+
+const AverageDownPlan& Hierarchy::average_down_plan(int level, IndexType type) const {
+  if (level < 1) throw std::invalid_argument("Hierarchy::average_down_plan: level 0 has no level below");
+  const auto key = std::make_tuple(level, static_cast<int>(type.nodal));
+  auto it = average_down_plans_.find(key);
+  if (it == average_down_plans_.end()) {
+    const auto l = static_cast<std::size_t>(level);
+    it = average_down_plans_
+             .emplace(key, comm_ ? AverageDownPlan(*comm_, boxes(level), owners_[l], boxes(level - 1), owners_[l - 1], type,
+                                                   options_.ratio)
+                                 : AverageDownPlan(boxes(level), boxes(level - 1), type, options_.ratio))
+             .first;
+  }
+  return it->second;
 }
 
 Box Hierarchy::domain(int level) const {
@@ -111,7 +205,12 @@ double Hierarchy::dx(int level, int d) const {
 const HaloPlan& Hierarchy::halo_plan(int level, IndexType type, int ghosts) const {
   const auto key = std::make_tuple(level, static_cast<int>(type.nodal), ghosts);
   auto it = halo_plans_.find(key);
-  if (it == halo_plans_.end()) it = halo_plans_.emplace(key, HaloPlan(boxes(level), type, ghosts, geometry_.periodic)).first;
+  if (it == halo_plans_.end()) {
+    it = halo_plans_
+             .emplace(key, comm_ ? HaloPlan(*comm_, boxes(level), distribution(level), type, ghosts, geometry_.periodic)
+                                 : HaloPlan(boxes(level), type, ghosts, geometry_.periodic))
+             .first;
+  }
   return it->second;
 }
 
@@ -120,9 +219,12 @@ const CoarseFinePlan& Hierarchy::coarse_fine_plan(int level, IndexType type, int
   const auto key = std::make_tuple(level, static_cast<int>(type.nodal), ghosts, static_cast<int>(interp));
   auto it = coarse_fine_plans_.find(key);
   if (it == coarse_fine_plans_.end()) {
+    const auto l = static_cast<std::size_t>(level);
     it = coarse_fine_plans_
-             .emplace(key, CoarseFinePlan(boxes(level), boxes(level - 1), type, ghosts, options_.ratio, geometry_.periodic,
-                                          interp, 1))
+             .emplace(key, comm_ ? CoarseFinePlan(*comm_, boxes(level), owners_[l], boxes(level - 1), owners_[l - 1], type,
+                                                  ghosts, options_.ratio, geometry_.periodic, interp, 1)
+                                 : CoarseFinePlan(boxes(level), boxes(level - 1), type, ghosts, options_.ratio,
+                                                  geometry_.periodic, interp, 1))
              .first;
   }
   return it->second;
@@ -133,15 +235,40 @@ std::vector<BoxList> Hierarchy::make_grids(const Tagger& tagger) const {
   const int top = std::min(finest_level(), o.max_level - 1);
   std::vector<BoxList> out(static_cast<std::size_t>(top + 1));
   for (int l = top; l >= 0; --l) {
+    // This rank's tagged blocks (clustering sees no more than the blocks),
+    // gathered from every rank; a tagger failing on any rank fails them all
+    // before the gather.
+    const int block = o.blocking_factor / o.ratio;
     std::vector<IntVect> tags;
-    const TagField f(boxes(l), IndexType::cell(), 1, 0, "amr::Hierarchy.tags");
-    tagger(l, f);
-    const auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, f.view().data);
-    for (std::size_t b = 0; b < f.num_boxes(); ++b) {
-      const Box& v = f.valid(b);
-      for (std::int64_t q = 0; q < v.num_pts(); ++q) {
-        if (h(static_cast<std::size_t>(f.offset(b) + q)) != 0) tags.push_back(detail::point_of(v, q));
+    std::exception_ptr failed;
+    try {
+      const TagField f = make_level_field<std::uint8_t>(l, IndexType::cell(), 1, 0, "amr::Hierarchy.tags");
+      tagger(l, f);
+      const auto h = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, f.view().data);
+      for (std::size_t b = 0; b < f.num_boxes(); ++b) {
+        const Box& v = f.valid(b);
+        for (std::int64_t q = 0; q < v.num_pts(); ++q) {
+          if (h(static_cast<std::size_t>(f.offset(b) + q)) == 0) continue;
+          IntVect t = detail::point_of(v, q);
+          for (int d = 0; d < v.dim(); ++d) t[d] = floor_div(t[d], block) * block;
+          tags.push_back(t);
+        }
       }
+      std::sort(tags.begin(), tags.end(), [](const IntVect& a, const IntVect& b) {
+        return std::lexicographical_compare(a.v, a.v + 3, b.v, b.v + 3);
+      });
+      tags.erase(std::unique(tags.begin(), tags.end()), tags.end());
+    } catch (...) {
+      failed = std::current_exception();
+    }
+    if (comm_) {
+      if (comm_->allreduce(static_cast<std::int32_t>(failed ? 1 : 0), Op::max) != 0) {
+        if (failed) std::rethrow_exception(failed);
+        throw std::runtime_error("Hierarchy::regrid: the tagger failed on another rank");
+      }
+      tags = comm_->allgatherv(std::span<const IntVect>(tags));
+    } else if (failed) {
+      std::rethrow_exception(failed);
     }
     // The new level l + 2 must nest in the new level l + 1.
     if (l < top) {

@@ -116,6 +116,11 @@ class CommPlan {
 class CommPlan::Pending {
  public:
   Pending() = default;
+  Pending(const Pending&) = delete;
+  Pending& operator=(const Pending&) = delete;
+  Pending(Pending&&) noexcept = default;
+  Pending& operator=(Pending&&) noexcept = default;
+  ~Pending() = default;
   void wait() { Request::wait_all(requests_); }
 
  private:
