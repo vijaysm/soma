@@ -9,6 +9,7 @@
 // curve is cut into contiguous runs of about equal cell counts, one per rank.
 
 #include <cstdint>
+#include <span>
 #include <vector>
 
 #include "soma/amr/box.hpp"
@@ -56,6 +57,14 @@ struct Distribution {
   // Cut along the curve so that each of nranks ranks gets about the same
   // number of points (a box goes to the rank holding its middle point).
   static Distribution along_curve(const BoxArray& boxes, int nranks);
+  // The same cut by weight, one per box: a box goes to the rank holding the
+  // middle of its weight, so each rank's load is within the heaviest box of
+  // an equal share. Throws std::invalid_argument unless there is a finite,
+  // non-negative weight per box and they do not all vanish.
+  static Distribution along_curve(const BoxArray& boxes, int nranks, std::span<const double> weights);
+
+  // The boxes of `rank`, ascending (curve order).
+  std::vector<int> owned(int rank) const;
 };
 
 }  // namespace soma::amr

@@ -8,7 +8,8 @@
 // by `ghosts` in every direction, times ncomp components, stored as one
 // allocation with per-box offsets (each box column-major in i, j, k, then the
 // component). A kernel runs over all boxes of a level in one launch
-// (for_each_point) or over one box (LevelView::patch).
+// (for_each_point) or over one box (LevelView::patch). A field over many
+// ranks holds the boxes its rank owns, numbered from 0 in curve order.
 //
 //   amr::LevelField<double> u(boxes, amr::IndexType::cell(), 1, 2);
 //   auto v = u.view();
@@ -17,6 +18,7 @@
 //   });
 
 #include <cstdint>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -67,15 +69,29 @@ class LevelField {
   using execution_space = typename MemSpace::execution_space;
 
   LevelField() = default;
-  // The boxes are cell boxes; the field holds the points of `type` on them.
+  // The boxes are cell boxes; the field holds the points of `type` on them,
+  // every box on this process.
   LevelField(const BoxArray& boxes, IndexType type, int ncomp, int ghosts, const std::string& label = "amr::LevelField")
-      : boxes_(boxes), type_(type), ncomp_(ncomp), ghosts_(ghosts) {
-    const auto n = boxes.size();
+      : LevelField(boxes, Distribution{std::vector<int>(boxes.size(), 0)}, 0, type, ncomp, ghosts, label) {}
+  // Only the boxes `rank` owns under `distribution`, in curve order: box b
+  // of the field is box global(b) of the level. Throws
+  // std::invalid_argument unless the distribution has an owner per box and
+  // rank is not negative.
+  LevelField(const BoxArray& boxes, const Distribution& distribution, int rank, IndexType type, int ncomp, int ghosts,
+             const std::string& label = "amr::LevelField")
+      : boxes_(boxes), distribution_(distribution), rank_(rank), type_(type), ncomp_(ncomp), ghosts_(ghosts) {
+    if (distribution.owner.size() != boxes.size() || rank < 0) {
+      throw std::invalid_argument("amr::LevelField: the distribution does not give each box an owner, or the rank is negative");
+    }
+    global_ = distribution.owned(rank);
+    local_.assign(boxes.size(), -1);
+    const auto n = global_.size();
     valid_h_.resize(n);
     grown_h_.resize(n);
     offset_h_.resize(n + 1, 0);
     for (std::size_t b = 0; b < n; ++b) {
-      valid_h_[b] = boxes[b].convert(type);
+      local_[static_cast<std::size_t>(global_[b])] = static_cast<int>(b);
+      valid_h_[b] = boxes[static_cast<std::size_t>(global_[b])].convert(type);
       grown_h_[b] = valid_h_[b].grow(ghosts);
       offset_h_[b + 1] = offset_h_[b] + grown_h_[b].num_pts() * ncomp;
     }
@@ -86,7 +102,14 @@ class LevelField {
     view_.offset = to_device(offset_h_, label + ".offset");
   }
 
+  // Every box of the level, and who owns each.
   const BoxArray& boxes() const { return boxes_; }
+  const Distribution& distribution() const { return distribution_; }
+  int rank() const { return rank_; }
+  // The level's id of box b of the field, and the field's index of the
+  // level's box g (-1 when another rank owns it).
+  int global(std::size_t b) const { return global_[b]; }
+  int local(int g) const { return local_[static_cast<std::size_t>(g)]; }
   IndexType type() const { return type_; }
   int ncomp() const { return ncomp_; }
   int ghosts() const { return ghosts_; }
@@ -109,6 +132,9 @@ class LevelField {
   }
 
   BoxArray boxes_;
+  Distribution distribution_;
+  int rank_ = 0;
+  std::vector<int> global_, local_;
   IndexType type_{};
   int ncomp_ = 1;
   int ghosts_ = 0;

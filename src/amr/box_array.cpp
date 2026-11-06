@@ -4,6 +4,7 @@
 #include "soma/amr/box_array.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -92,15 +93,36 @@ BoxArray BoxArray::scratch(BoxList boxes, const Box& domain) {
 }
 
 Distribution Distribution::along_curve(const BoxArray& boxes, int nranks) {
+  std::vector<double> points(boxes.size());
+  for (std::size_t i = 0; i < boxes.size(); ++i) points[i] = static_cast<double>(boxes[i].num_pts());
+  return along_curve(boxes, nranks, points);
+}
+
+Distribution Distribution::along_curve(const BoxArray& boxes, int nranks, std::span<const double> weights) {
   if (nranks < 1) throw std::invalid_argument("Distribution: nranks must be at least 1");
+  if (weights.size() != boxes.size()) throw std::invalid_argument("Distribution: one weight per box is needed");
+  double total = 0;
+  for (const double w : weights) {
+    if (!std::isfinite(w) || w < 0) throw std::invalid_argument("Distribution: weights must be finite and not negative");
+    total += w;
+  }
   Distribution out;
   out.owner.resize(boxes.size());
-  const auto total = static_cast<double>(boxes.num_pts());
-  std::int64_t before = 0;
+  if (boxes.size() == 0) return out;
+  if (!(total > 0) || !std::isfinite(total)) throw std::invalid_argument("Distribution: the weights add up to nothing");
+  double before = 0;
   for (std::size_t i = 0; i < boxes.size(); ++i) {
-    const double middle = static_cast<double>(before) + 0.5 * static_cast<double>(boxes[i].num_pts());
+    const double middle = before + 0.5 * weights[i];
     out.owner[i] = std::min(nranks - 1, static_cast<int>(middle * nranks / total));
-    before += boxes[i].num_pts();
+    before += weights[i];
+  }
+  return out;
+}
+
+std::vector<int> Distribution::owned(int rank) const {
+  std::vector<int> out;
+  for (std::size_t i = 0; i < owner.size(); ++i) {
+    if (owner[i] == rank) out.push_back(static_cast<int>(i));
   }
   return out;
 }
