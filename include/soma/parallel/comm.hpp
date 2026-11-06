@@ -13,10 +13,13 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <optional>
 #include <span>
 #include <type_traits>
+#include <utility>
+#include <vector>
 
 #include "soma/config.hpp"
 
@@ -132,11 +135,26 @@ class Comm {
     alltoallv_bytes(std::as_bytes(send), send_counts, std::as_writable_bytes(recv), recv_counts, sizeof(T));
   }
 
-  // Untyped primitives behind alltoall and alltoallv; counts are in elements
-  // of `width` bytes.
+  // Every rank's `mine`, concatenated in rank order, on every rank; with
+  // `counts`, also how many elements each rank gave. One collective.
+  template <class T>
+  [[nodiscard]] std::vector<T> allgatherv(std::span<const T> mine, std::vector<std::size_t>* counts = nullptr) const {
+    static_assert(std::is_trivially_copyable_v<T>);
+    std::vector<std::size_t> n;
+    const std::vector<std::byte> all = allgatherv_bytes(std::as_bytes(mine), sizeof(T), n);
+    std::vector<T> out(all.size() / sizeof(T));
+    if (!all.empty()) std::memcpy(static_cast<void*>(out.data()), all.data(), all.size());
+    if (counts != nullptr) *counts = std::move(n);
+    return out;
+  }
+
+  // Untyped primitives behind alltoall, alltoallv and allgatherv; counts are
+  // in elements of `width` bytes.
   void alltoall_bytes(std::span<const std::byte> send, std::span<std::byte> recv, std::size_t width) const;
   void alltoallv_bytes(std::span<const std::byte> send, std::span<const std::size_t> send_counts,
                        std::span<std::byte> recv, std::span<const std::size_t> recv_counts, std::size_t width) const;
+  [[nodiscard]] std::vector<std::byte> allgatherv_bytes(std::span<const std::byte> mine, std::size_t width,
+                                                       std::vector<std::size_t>& counts) const;
 
   // Point-to-point messages of bytes; the buffer must stay valid, and a
   // receive buffer untouched, until the request completes. isend may
