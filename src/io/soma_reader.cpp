@@ -868,10 +868,14 @@ HostMesh build(const Comm& comm, const Parts& in, Ordering ordering) {
   std::optional<Prepared> p;
   collectively(comm, [&] { p.emplace(prepare(in)); });
   HostMesh mesh = build_local_part(comm, std::move(p->builder), p->sharing, ordering);
-  // Dimensions written for their data but derived in the mesh written.
+  // Dimensions written (for their data, or all of them) but derived in the
+  // mesh written: complete on every rank, since each holds its owned
+  // entities and copies of the rest its elements use, so building a graph
+  // keeps them, with their order and sharing, instead of deriving them again.
   for (int d = 1; d <= m.dim; ++d) {
     if (m.written[static_cast<std::size_t>(d)] && !m.input[static_cast<std::size_t>(d)]) {
       detail::TopologyAccess::block(mesh, d).input = false;
+      detail::TopologyAccess::block(mesh, d).derived = true;
     }
   }
   return mesh;

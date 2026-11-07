@@ -15,7 +15,8 @@
 // the part's entities; the sets with each part's members; the mesh values.
 // Ghosts and copies are not written. Written dimensions: the vertices, the
 // mesh's dimension, every dimension given to the builder on some rank and
-// every dimension a field has values on or a set has members of; the others
+// every dimension a field has values on or a set has members of (with
+// SomaWriteOptions::derived, every dimension held on some rank); the others
 // are derived again on read.
 //
 // write_soma writes `path` whole or not at all: everything is checked first,
@@ -56,6 +57,10 @@ namespace soma {
 
 struct SomaWriteOptions {
   int compression = 0;
+  // Also write every dimension held on some rank (derived edges and faces
+  // with their gids and sharing), so a read at the part count derives
+  // nothing and makes no gid directory pass. Read back as derived.
+  bool derived = false;
 };
 
 struct SomaReadOptions {

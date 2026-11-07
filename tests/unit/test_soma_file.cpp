@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <map>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -239,6 +240,23 @@ bool throws(F&& f, const std::string& what) {
   return false;
 }
 
+// Per gid of dimension d, the other ranks sharing it and its owner.
+std::map<GO, std::pair<std::vector<int>, int>> sharing_of_all(const HostMesh& m, int d) {
+  const soma::SegmentTable& t = m.segment_table(d);
+  const auto sharing = m.fields().get_var<int>(soma::sharing_field, d);
+  const auto owner = m.fields().get<int>(soma::owner_field, d);
+  std::map<GO, std::pair<std::vector<int>, int>> out;
+  for (LO e = t.interior_end; e < m.count(d); ++e) {
+    auto& [ranks, who] = out[m.gid(d)(e)];
+    if (e < t.shared_end) {
+      const auto r = static_cast<std::size_t>(e - t.interior_end);
+      for (auto i = sharing.offsets()(r); i < sharing.offsets()(r + 1); ++i) ranks.push_back(sharing.values()(i));
+    }
+    who = e < t.owned_end ? -1 : owner.view()(static_cast<std::size_t>(e - t.owned_end), 0);
+  }
+  return out;
+}
+
 // Collectives and routes f makes.
 template <class F>
 std::pair<std::uint64_t, std::uint64_t> counted(F&& f) {
@@ -343,6 +361,50 @@ TEST(SomaFile, ARestartGivesEachRankItsPart) {
       EXPECT_EQ(back.segment_table(d).owned_end, stay.segment_table(d).owned_end) << d;
       EXPECT_EQ(back.segment_table(d).shared_end, stay.segment_table(d).shared_end) << d;
     }
+  }
+}
+
+// Edges derived but written (for the fields on them, or with
+// SomaWriteOptions::derived) are read back complete: a restart that builds
+// the graphs the writer held derives nothing, routes only the copies owners
+// send (no gid directory), and gives each rank its part with the same edge
+// gids and sharing, marked derived. Read at one rank it is the mesh written.
+// Edges with no data on them and not written are derived again through the
+// directory.
+TEST(SomaFile, WrittenDerivedDimensionsRestartWithoutADirectory) {
+  const Comm c = Comm::world();
+  const Scratch dir(c);
+  for (int kind = 0; kind < 8; ++kind) {
+    SCOPED_TRACE(kind);
+    const bool bare = kind >= 4;  // no fields on the derived edges
+    HostMesh m = bare ? soma::build_local_part(c, local_builder(partition(c, kind % 4), c.rank())) : rich_part(c, kind);
+    if (bare) soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
+    ASSERT_FALSE(m.input(1));
+    const fs::path plain = dir.path("plain" + std::to_string(kind) + ".soma");
+    const fs::path full = dir.path("derived" + std::to_string(kind) + ".soma");
+    soma::write_soma(c, m, plain);
+    soma::write_soma(c, m, full, {.derived = true});
+    const HostMesh stay = all_to(c, m, c.rank());
+    std::optional<HostMesh> back;
+    const auto derives = counted([&] { (void)soma::read_soma(c, plain); });
+    const auto reads = counted([&] { back.emplace(soma::read_soma(c, full)); });
+    if (bare) {
+      EXPECT_GT(derives.second, 1u);
+    } else {
+      EXPECT_EQ(derives.second, 1u);
+    }
+    EXPECT_EQ(reads.second, 1u);
+    EXPECT_EQ(difference_of(*back, stay), "");
+    EXPECT_FALSE(back->input(1));
+    for (int d = 0; d <= m.dim(); ++d) {
+      EXPECT_EQ(back->segment_table(d).owned_end, stay.segment_table(d).owned_end) << d;
+      EXPECT_EQ(back->segment_table(d).shared_end, stay.segment_table(d).shared_end) << d;
+      if (d == 0 || d == m.dim()) continue;
+      EXPECT_EQ(sharing_of_all(*back, d), sharing_of_all(stay, d)) << d;
+    }
+    const HostMesh oracle = all_to(c, m, 0);
+    if (c.rank() == 0) EXPECT_EQ(difference_of(soma::read_soma(Comm::self(), full), oracle), "");
+    c.barrier();
   }
 }
 

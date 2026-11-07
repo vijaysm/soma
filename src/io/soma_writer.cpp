@@ -102,7 +102,7 @@ struct Agreed {
   std::uint32_t graphs = 0;
 };
 
-Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_error) {
+Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_error, bool derived) {
   const std::uint64_t hs = detail::sets_hash(mesh), hf = detail::fields_hash(mesh);
   // Maxima: flags, then each hash and its complement (equal on every rank
   // only when the maxima are complements), the dimension, then per
@@ -119,7 +119,11 @@ Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_er
   for (int d = 0; d <= mesh.dim(); ++d) {
     const auto k = static_cast<std::size_t>(d);
     f[7 + k] = mesh.count(d) > 0 && mesh.input(d) ? 1 : 0;
-    f[11 + k] = mesh.sets().has_members(d) ? 1 : 0;
+    // Members of some set (storage alone, as derivation leaves it, is not).
+    const auto& sets = mesh.sets();
+    for (LO s = 0; s < sets.count() && f[11 + k] == 0 && sets.has_members(d); ++s) {
+      f[11 + k] = sets.members_of(s, d).empty() ? 0 : 1;
+    }
     f[15 + k] = mesh.count(d) > 0 && d > 0 && mesh.has_nodes(d) ? 1 : 0;
     f[20 + k] = mesh.count(d) > 0 ? 1 : 0;
   }
@@ -143,6 +147,7 @@ Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_er
   for (std::size_t d = 0; d < 4; ++d) {
     a.input[d] = f[7 + d] != 0;
     a.written[d] = d == 0 || static_cast<int>(d) == a.dim || f[7 + d] != 0 || f[11 + d] != 0;
+    a.written[d] = a.written[d] || (derived && f[20 + d] != 0);
     a.nodes[d] = f[15 + d] != 0;
   }
   for (const FieldInfo& fi : mesh.fields().list()) {
@@ -165,7 +170,7 @@ Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_er
   AdjacencyRequest r = AdjacencyRequest::from_bits(held);
   for (int d = 1; d < a.dim; ++d) {
     const auto k = static_cast<std::size_t>(d);
-    if (f[20 + k] != 0 && !a.input[k] && !built[k]) r.add(d, 0);
+    if (f[20 + k] != 0 && !a.input[k] && !built[k] && !a.written[k]) r.add(d, 0);
   }
   a.graphs = r.bits();
   return a;
@@ -778,7 +783,7 @@ void write_soma(const Comm& comm, const HostMesh& mesh, const fs::path& path, co
   } else if (static_cast<std::size_t>(mesh.count(0)) != mesh.coords().extent(0)) {
     error = "the mesh holds " + std::to_string(mesh.count(0)) + " vertices but not their coordinates";
   }
-  const Agreed agreed = agree(comm, mesh, error);
+  const Agreed agreed = agree(comm, mesh, error, options.derived);
   Image img = lay_out(comm, mesh, agreed);
 
   soma_file::write_image(comm, path, img, options.compression, who);
