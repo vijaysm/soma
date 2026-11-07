@@ -70,6 +70,16 @@ class CoarseFinePlan {
   // prolongation of a regrid.
   CoarseFinePlan(const BoxArray& fine, const std::vector<BoxList>& targets, const BoxArray& coarse, IndexType type,
                  int fine_ghosts, int ratio, Periodicity periodic, Interp interp, int coarse_ghosts = 1);
+  // The same over many ranks, the part of comm.rank(): the scratch box of a
+  // fine box lives with its owner and is filled from the coarse owners.
+  static constexpr int default_tag = 32622;
+  CoarseFinePlan(const Comm& comm, const BoxArray& fine, const Distribution& fine_owner, const BoxArray& coarse,
+                 const Distribution& coarse_owner, IndexType type, int fine_ghosts, int ratio, Periodicity periodic,
+                 Interp interp, int coarse_ghosts = 1, int tag = default_tag);
+  CoarseFinePlan(const Comm& comm, const BoxArray& fine, const Distribution& fine_owner,
+                 const std::vector<BoxList>& targets, const BoxArray& coarse, const Distribution& coarse_owner,
+                 IndexType type, int fine_ghosts, int ratio, Periodicity periodic, Interp interp, int coarse_ghosts = 1,
+                 int tag = default_tag);
 
   IndexType type() const { return type_; }
   int ratio() const { return ratio_; }
@@ -77,23 +87,32 @@ class CoarseFinePlan {
   int coarse_ghosts() const { return copy_.src_ghosts(); }
   Interp interp() const { return interp_; }
   const BoxArray& scratch() const { return scratch_; }
+  // The owner of each scratch box: the owner of its fine box.
+  const Distribution& scratch_owner() const { return scratch_owner_; }
+  const std::vector<int>& fine_owner() const { return fine_owner_; }
   const CopyPlan& copy_plan() const { return copy_; }
+  // Every interpolation, on every rank, boxes by their ids.
   const std::vector<InterpOp>& ops() const { return ops_; }
+  // This rank's points to interpolate.
   std::int64_t num_points() const { return start_.back(); }
   Kokkos::View<const InterpOp*, DeviceSpace> device_ops() const { return d_ops_; }
   Kokkos::View<const std::int64_t*, DeviceSpace> device_start() const { return d_start_; }
 
  private:
-  void build(const BoxArray& fine, const std::vector<BoxList>& targets, const BoxArray& coarse, Periodicity periodic,
-             int coarse_ghosts);
+  void check_targets(const BoxArray& fine, const std::vector<BoxList>& targets) const;
+  void build(const std::optional<Comm>& comm, const BoxArray& fine, const std::vector<int>& fine_owner,
+             const std::vector<BoxList>& targets, const BoxArray& coarse, const Distribution& coarse_owner,
+             Periodicity periodic, int coarse_ghosts, int tag);
 
   IndexType type_{};
   int ratio_ = 2;
   int fine_ghosts_ = 0;
   Interp interp_ = Interp::linear;
   BoxArray scratch_;
+  Distribution scratch_owner_;
+  std::vector<int> fine_owner_;
   CopyPlan copy_;
-  std::vector<InterpOp> ops_;
+  std::vector<InterpOp> ops_, local_;
   std::vector<std::int64_t> start_{0};
   Kokkos::View<const InterpOp*, DeviceSpace> d_ops_;
   Kokkos::View<const std::int64_t*, DeviceSpace> d_start_;
@@ -214,8 +233,12 @@ void fill_coarse_fine(const LevelField<T>& fine, const LevelField<T>& coarse, co
       coarse.ghosts() < plan.coarse_ghosts() || fine.ncomp() != coarse.ncomp()) {
     throw std::invalid_argument("fill_coarse_fine: the fields do not match the plan");
   }
-  const LevelField<T> scratch(plan.scratch(), plan.type(), coarse.ncomp(), 0, "amr::fill_coarse_fine.scratch");
-  detail::run_copies(coarse.view(), scratch.view(), plan.copy_plan());
+  if (fine.distribution().owner != plan.fine_owner() || fine.rank() != coarse.rank()) {
+    throw std::invalid_argument("fill_coarse_fine: the fine field is not distributed as the plan's fine boxes");
+  }
+  const LevelField<T> scratch(plan.scratch(), plan.scratch_owner(), fine.rank(), plan.type(), coarse.ncomp(), 0,
+                              "amr::fill_coarse_fine.scratch");
+  begin_copy(coarse, scratch, plan.copy_plan()).end();
   const auto ops = plan.device_ops();
   const auto start = plan.device_start();
   const auto s = scratch.view();
@@ -248,67 +271,85 @@ void fill_coarse_fine(const LevelField<T>& fine, const LevelField<T>& coarse, co
   Kokkos::fence("amr::fill_coarse_fine");
 }
 
+// Restriction work: each fine box's coarse points are averaged where the
+// fine box lives, into a scratch box over those points, then copied to the
+// owners of the coarse boxes (with one rank, a local copy). Throws
+// std::invalid_argument for a fine box not aligned to the ratio.
+class AverageDownPlan {
+ public:
+  using DeviceSpace = Kokkos::DefaultExecutionSpace::memory_space;
+  static constexpr int default_tag = 32623;
+
+  AverageDownPlan() = default;
+  AverageDownPlan(const BoxArray& fine, const BoxArray& coarse, IndexType type, int ratio);
+  AverageDownPlan(const Comm& comm, const BoxArray& fine, const Distribution& fine_owner, const BoxArray& coarse,
+                  const Distribution& coarse_owner, IndexType type, int ratio, int tag = default_tag);
+
+  IndexType type() const { return type_; }
+  int ratio() const { return ratio_; }
+  const BoxArray& scratch() const { return scratch_; }
+  const Distribution& scratch_owner() const { return scratch_owner_; }
+  const std::vector<int>& fine_owner() const { return fine_owner_; }
+  const CopyPlan& copy_plan() const { return copy_; }
+  // This rank's averages: scratch box (coarse) from fine box, local indices.
+  std::int64_t num_points() const { return start_.back(); }
+  Kokkos::View<const InterpOp*, DeviceSpace> device_ops() const { return d_ops_; }
+  Kokkos::View<const std::int64_t*, DeviceSpace> device_start() const { return d_start_; }
+
+ private:
+  void build(const std::optional<Comm>& comm, const BoxArray& fine, const std::vector<int>& fine_owner,
+             const BoxArray& coarse, const Distribution& coarse_owner, int tag);
+
+  IndexType type_{};
+  int ratio_ = 2;
+  BoxArray scratch_;
+  Distribution scratch_owner_;
+  std::vector<int> fine_owner_;
+  CopyPlan copy_;
+  std::vector<InterpOp> ops_;
+  std::vector<std::int64_t> start_{0};
+  Kokkos::View<const InterpOp*, DeviceSpace> d_ops_;
+  Kokkos::View<const std::int64_t*, DeviceSpace> d_start_;
+};
+
 // Sets the coarse points under the fine level's valid points to the average
 // of the fine points they cover. Throws std::invalid_argument for fields of
-// different index types or component counts, or a fine box not aligned to
-// the ratio.
+// different index types or component counts, fields not distributed as the
+// plan's boxes, or (without a plan) a fine box not aligned to the ratio.
 template <class T>
-void average_down(const LevelField<T>& fine, const LevelField<T>& coarse, int ratio);
-
-namespace detail {
-
-// The restriction work: coarse points `region` of coarse box `coarse` from
-// fine box `fine`.
-std::vector<InterpOp> restriction_ops(const BoxArray& fine, const BoxArray& coarse, IndexType type, int ratio);
-
-}  // namespace detail
-
-template <class T>
-void average_down(const LevelField<T>& fine, const LevelField<T>& coarse, int ratio) {
+void average_down(const LevelField<T>& fine, const LevelField<T>& coarse, const AverageDownPlan& plan) {
   using Exec = Kokkos::DefaultExecutionSpace;
-  if (!(fine.type() == coarse.type()) || fine.ncomp() != coarse.ncomp()) {
+  if (!(fine.type() == coarse.type()) || !(fine.type() == plan.type()) || fine.ncomp() != coarse.ncomp()) {
     throw std::invalid_argument("average_down: the fields differ in index type or components");
   }
-  const std::vector<InterpOp> ops_h = detail::restriction_ops(fine.boxes(), coarse.boxes(), fine.type(), ratio);
-  std::vector<std::int64_t> start_h{0};
-  for (const InterpOp& op : ops_h) start_h.push_back(start_h.back() + op.region.num_pts());
-  Kokkos::View<InterpOp*, typename LevelField<T>::memory_space> ops("amr::average_down.ops", ops_h.size());
-  Kokkos::View<std::int64_t*, typename LevelField<T>::memory_space> start("amr::average_down.start", start_h.size());
-  auto oh = Kokkos::create_mirror_view(ops);
-  auto sh = Kokkos::create_mirror_view(start);
-  for (std::size_t i = 0; i < ops_h.size(); ++i) oh(i) = ops_h[i];
-  for (std::size_t i = 0; i < start_h.size(); ++i) sh(i) = start_h[i];
-  Kokkos::deep_copy(ops, oh);
-  Kokkos::deep_copy(start, sh);
+  if (fine.distribution().owner != plan.fine_owner() || fine.rank() != coarse.rank()) {
+    throw std::invalid_argument("average_down: the fine field is not distributed as the plan's fine boxes");
+  }
+  const LevelField<T> scratch(plan.scratch(), plan.scratch_owner(), fine.rank(), plan.type(), coarse.ncomp(), 0,
+                              "amr::average_down.scratch");
+  const auto ops = plan.device_ops();
+  const auto start = plan.device_start();
   const auto f = fine.view();
-  const auto cv = coarse.view();
-  const int n = static_cast<int>(ops_h.size());
-  const int ncomp = fine.ncomp(), dim = fine.boxes().domain().dim(), r = ratio;
+  const auto sv = scratch.view();
+  const int n = static_cast<int>(ops.extent(0));
+  const int ncomp = fine.ncomp(), dim = fine.boxes().domain().dim(), r = plan.ratio();
   const IndexType type = fine.type();
   Kokkos::parallel_for(
-      "amr::average_down", Kokkos::RangePolicy<Exec, Kokkos::IndexType<std::int64_t>>(0, start_h.back()),
+      "amr::average_down", Kokkos::RangePolicy<Exec, Kokkos::IndexType<std::int64_t>>(0, plan.num_points()),
       KOKKOS_LAMBDA(std::int64_t p) {
-        int lo = 0, hi = n - 1;
-        while (lo < hi) {
-          const int mid = (lo + hi + 1) / 2;
-          if (start(mid) <= p) {
-            lo = mid;
-          } else {
-            hi = mid - 1;
-          }
-        }
-        const InterpOp& op = ops(lo);
-        const IntVect q = detail::point_of(op.region, p - start(lo));
+        const int i = detail::op_of(start, n, p);
+        const InterpOp& op = ops(i);
+        const IntVect q = detail::point_of(op.region, p - start(i));
         const auto from = f.patch(op.fine);
-        const auto to = cv.patch(op.coarse);
+        const auto to = sv.patch(op.coarse);
         int len[3] = {1, 1, 1};
         for (int d = 0; d < dim; ++d) len[d] = type.is_nodal(d) ? 1 : r;
         for (int c = 0; c < ncomp; ++c) {
           double sum = 0;
           for (int k = 0; k < len[2]; ++k) {
             for (int j = 0; j < len[1]; ++j) {
-              for (int i = 0; i < len[0]; ++i) {
-                sum += static_cast<double>(from(q[0] * r + i, q[1] * r + j, dim > 2 ? q[2] * r + k : 0, c));
+              for (int i2 = 0; i2 < len[0]; ++i2) {
+                sum += static_cast<double>(from(q[0] * r + i2, q[1] * r + j, dim > 2 ? q[2] * r + k : 0, c));
               }
             }
           }
@@ -316,6 +357,12 @@ void average_down(const LevelField<T>& fine, const LevelField<T>& coarse, int ra
         }
       });
   Kokkos::fence("amr::average_down");
+  begin_copy(scratch, coarse, plan.copy_plan()).end();
+}
+
+template <class T>
+void average_down(const LevelField<T>& fine, const LevelField<T>& coarse, int ratio) {
+  average_down(fine, coarse, AverageDownPlan(fine.boxes(), coarse.boxes(), fine.type(), ratio));
 }
 
 }  // namespace soma::amr

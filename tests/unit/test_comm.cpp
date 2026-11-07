@@ -85,8 +85,9 @@ TEST(Comm, CountsEveryCollectiveCall) {
   c.alltoallv(std::span<const int>(send), std::span<const std::size_t>(counts), std::span<int>(recv),
               std::span<const std::size_t>(counts));
   c.ibarrier().wait();
+  (void)c.allgatherv(std::span<const int>(send));
   const auto after = soma::detail::comm_counts();
-  EXPECT_EQ(after.collectives - before.collectives, 9u);
+  EXPECT_EQ(after.collectives - before.collectives, 10u);
   EXPECT_EQ(after.routes, before.routes);
 }
 
@@ -195,6 +196,28 @@ TEST(Comm, AlltoallvKeepsRankOrderAndCounts) {
   c.alltoallv(std::span<const std::int64_t>(send), std::span<const std::size_t>(sc), std::span<std::int64_t>(recv),
               std::span<const std::size_t>(rc));
   EXPECT_EQ(recv, expected);
+}
+
+// Rank r gives r % 3 elements (none on some ranks); every rank gets them
+// all, in rank order, with each rank's count.
+TEST(Comm, AllgathervConcatenatesInRankOrder) {
+  const Comm c = Comm::world();
+  const auto n = [](int r) { return static_cast<std::size_t>(r % 3); };
+  std::vector<std::int64_t> mine, expected;
+  std::vector<std::size_t> expected_counts;
+  for (std::size_t k = 0; k < n(c.rank()); ++k) mine.push_back(100 * c.rank() + static_cast<std::int64_t>(k));
+  for (int r = 0; r < c.size(); ++r) {
+    expected_counts.push_back(n(r));
+    for (std::size_t k = 0; k < n(r); ++k) expected.push_back(100 * r + static_cast<std::int64_t>(k));
+  }
+  std::vector<std::size_t> counts;
+  EXPECT_EQ(c.allgatherv(std::span<const std::int64_t>(mine), &counts), expected);
+  EXPECT_EQ(counts, expected_counts);
+  const std::vector<std::array<std::int32_t, 3>> one{{c.rank(), 1, 2}};
+  const auto all = c.allgatherv(std::span<const std::array<std::int32_t, 3>>(one));
+  ASSERT_EQ(all.size(), static_cast<std::size_t>(c.size()));
+  for (int r = 0; r < c.size(); ++r) EXPECT_EQ(all[static_cast<std::size_t>(r)][0], r);
+  EXPECT_EQ(Comm::self().allgatherv(std::span<const std::int64_t>(mine)), mine);
 }
 
 TEST(Comm, AlltoallRejectsMismatchedBuffers) {

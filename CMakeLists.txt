@@ -95,7 +95,8 @@ else()
 endif()
 if(SOMA_ENABLE_HDF5)
   list(APPEND SOMA_SOURCES src/io/h5m_reader.cpp src/io/h5m_parallel_reader.cpp src/io/h5m_writer.cpp
-                           src/io/soma_writer.cpp src/io/soma_reader.cpp src/io/soma_convert.cpp)
+                           src/io/soma_writer.cpp src/io/soma_reader.cpp src/io/soma_convert.cpp
+                           src/io/soma_amr.cpp)
 else()
   list(APPEND SOMA_SOURCES src/io/h5m_unavailable.cpp src/io/soma_unavailable.cpp)
 endif()

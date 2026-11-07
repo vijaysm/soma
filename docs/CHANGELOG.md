@@ -49,6 +49,8 @@ All notable changes to SOMA are recorded here. The format follows
 - `Comm::exscan` on a span scans each entry on its own (one call for a vector of counts).
 - `detail::comm_counts()` counts the collectives and routed exchanges this process has
   entered, for tests that bound them.
+- `Comm::allgatherv` gathers each rank's span of trivially copyable values on every rank, in
+  rank order, with the counts if asked; one collective.
 
 ### Topology
 
@@ -297,6 +299,10 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   round of point-to-point messages: `forward` (values per sent record to where route() put
   them) and `reverse` (answers back to the sender's order). Learnt from both halves of the
   exchange, so no handshake is needed.
+- `CommPlan::from_counts` builds a plan from the counts each rank sends to and receives from
+  each other rank, with no exchange, and `begin_forward` / `begin_forward_bytes` start a forward
+  under a caller's tag and return a move-only `Pending` to wait on, so other work can run while
+  the messages travel.
 - `rendezvous(keys, payload, answer_width, answer)` sends each record to
   `owner(key, P) = mix(key) % P` (the splitmix64 finalizer, so owners depend only on the key
   and P), lets the owner answer every arrival, and returns the answers in key order; failures
@@ -412,6 +418,26 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   old ones were, prolonged elsewhere, then restricted), all fields or none.
 - `write_vtk_amr` writes a hierarchy as VTK overlapping AMR (`.vthb` and one `.vti` per box),
   which ParaView reads with the cells under finer levels hidden.
+- Distributed AMR: every rank holds every level's boxes and their `Distribution` (cut along the
+  curve, by point count or by weights), and a `LevelField` holds only the boxes its rank owns.
+  `CopyPlan`, `HaloPlan`, `CoarseFinePlan`, `AverageDownPlan` and `FluxRegister` take a
+  communicator: copies within a rank stay local, the rest go as one message per neighbour
+  rank, packed and unpacked by device kernels and staged through host memory. Halo fills
+  split into `begin_fill_halo` and `end()` around interior work. Results equal those of one
+  process bit for bit at any rank count.
+- `Hierarchy(comm, geometry, options, fine)` distributes every level; `HierarchyOptions::cost`
+  weights boxes for the cut, or measured costs passed to `regrid` override it. A distributed
+  `regrid` gathers the tagged blocks in one collective, so every rank clusters the same boxes
+  as one process would; a tagger failing on one rank throws on every rank.
+- `write_soma(comm, hierarchy, fields, path)` checkpoints a hierarchy and its fields (any of the
+  eight value types) in the SOMA format: each level's boxes and each field's valid points, box
+  after box in curve order, in 6 collectives whatever the rank count or number of fields.
+  `read_soma_amr(comm, path)` restarts it at any rank count, cut by the reader's costs, each
+  rank reading its own run of rows; ghosts are filled by the caller. `detect_format` reports
+  `MeshFormat::soma_amr`, and the mesh and AMR readers each refuse the other's files.
+- `write_vtk_amr(comm, path, hierarchy, fields)` writes each rank's boxes as `.vti` pieces and
+  the `.vthb` index on rank 0 once every piece is in place; the files equal those one process
+  writes.
 
 ### Testing
 

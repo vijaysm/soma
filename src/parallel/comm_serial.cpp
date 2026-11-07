@@ -141,6 +141,16 @@ void Comm::alltoallv_bytes(std::span<const std::byte> send, std::span<const std:
   if (!send.empty()) std::memmove(recv.data(), send.data(), send.size());
 }
 
+std::vector<std::byte> Comm::allgatherv_bytes(std::span<const std::byte> mine, std::size_t width,
+                                              std::vector<std::size_t>& counts) const {
+  detail::count_collective();
+  if (width == 0 || mine.size() % width != 0) {
+    throw std::invalid_argument("soma::Comm::allgatherv: the buffer is not a whole number of elements");
+  }
+  counts.assign(1, mine.size() / width);
+  return std::vector<std::byte>(mine.begin(), mine.end());
+}
+
 Request Comm::isend_bytes(std::span<const std::byte> buffer, int dest, int tag) const {
   detail::check_peer("isend", dest, tag, size_, false);
   send(buffer, tag, false);

@@ -274,6 +274,103 @@ TEST(Transport, PlansRejectInconsistentHalves) {
   EXPECT_EQ(CommPlan().num_arrived(), 0U);
 }
 
+namespace {
+
+// Records rank r sends to rank q: (r + 2q) % 4 of them, so some pairs send
+// nothing, a rank sends to itself, and counts differ by direction.
+std::size_t count_between(int r, int q) { return static_cast<std::size_t>((r + 2 * q) % 4); }
+
+std::int64_t value_of(int r, int q, std::size_t k) {
+  return 1000000 * static_cast<std::int64_t>(r) + 1000 * q + static_cast<std::int64_t>(k);
+}
+
+CommPlan counted_plan(const Comm& c) {
+  std::vector<CommPlan::Run> to, from;
+  for (int q = 0; q < c.size(); ++q) {
+    if (count_between(c.rank(), q) > 0) to.push_back({q, count_between(c.rank(), q)});
+    if (count_between(q, c.rank()) > 0) from.push_back({q, count_between(q, c.rank())});
+  }
+  return CommPlan::from_counts(c, to, from);
+}
+
+std::vector<std::int64_t> counted_values(const Comm& c, bool sent) {
+  std::vector<std::int64_t> v;
+  for (int q = 0; q < c.size(); ++q) {
+    const std::size_t n = sent ? count_between(c.rank(), q) : count_between(q, c.rank());
+    for (std::size_t k = 0; k < n; ++k) v.push_back(sent ? value_of(c.rank(), q, k) : value_of(q, c.rank(), k));
+  }
+  return v;
+}
+
+}  // namespace
+
+// A plan from counts alone moves records already grouped by destination, each
+// neighbour's run as one message, in source order where they arrive.
+TEST(Transport, PlansFromCountsDeliverEachRun) {
+  const Comm c = Comm::world();
+  const CommPlan plan = counted_plan(c);
+  const auto sent = counted_values(c, true);
+  const auto expected = counted_values(c, false);
+  ASSERT_EQ(plan.num_sent(), sent.size());
+  ASSERT_EQ(plan.num_arrived(), expected.size());
+  std::vector<std::int64_t> got(expected.size(), -1);
+  plan.forward(c, std::span<const std::int64_t>(sent), std::span<std::int64_t>(got));
+  EXPECT_EQ(got, expected);
+  std::vector<std::int64_t> back(sent.size(), -1);
+  plan.reverse(c, std::span<const std::int64_t>(got), std::span<std::int64_t>(back));
+  EXPECT_EQ(back, sent);
+}
+
+// Split-phase: two exchanges in flight at once on different tags, finished in
+// the other order, and one finished by its Pending's destructor.
+TEST(Transport, PlansExchangeInFlightOnTheirOwnTags) {
+  const Comm c = Comm::world();
+  const CommPlan plan = counted_plan(c);
+  const auto sent = counted_values(c, true);
+  const auto expected = counted_values(c, false);
+  std::vector<std::int64_t> twice(sent.size());
+  for (std::size_t i = 0; i < sent.size(); ++i) twice[i] = 2 * sent[i];
+  std::vector<std::int64_t> a(expected.size(), -1), b(expected.size(), -1), d(expected.size(), -1);
+  {
+    auto pa = plan.begin_forward(c, std::span<const std::int64_t>(sent), std::span<std::int64_t>(a), 7101);
+    auto pb = plan.begin_forward(c, std::span<const std::int64_t>(twice), std::span<std::int64_t>(b), 7102);
+    pb.wait();
+    pb.wait();  // a second wait does nothing
+    pa.wait();
+    auto pd = plan.begin_forward(c, std::span<const std::int64_t>(sent), std::span<std::int64_t>(d), 7103);
+  }
+  EXPECT_EQ(a, expected);
+  for (std::size_t i = 0; i < expected.size(); ++i) EXPECT_EQ(b[i], 2 * expected[i]);
+  EXPECT_EQ(d, expected);
+  CommPlan::Pending moved = plan.begin_forward(c, std::span<const std::int64_t>(sent), std::span<std::int64_t>(a), 7104);
+  CommPlan::Pending target = std::move(moved);
+  target.wait();
+  EXPECT_EQ(a, expected);
+}
+
+TEST(Transport, PlansFromCountsRejectBadRuns) {
+  const Comm c = Comm::world();
+  const int me = c.rank();
+  using Run = CommPlan::Run;
+  EXPECT_THROW((void)CommPlan::from_counts(c, std::vector<Run>{{c.size(), 1}}, {}), std::invalid_argument);
+  EXPECT_THROW((void)CommPlan::from_counts(c, {}, std::vector<Run>{{-1, 1}}), std::invalid_argument);
+  if (c.size() > 1) {
+    EXPECT_THROW((void)CommPlan::from_counts(c, std::vector<Run>{{1, 1}, {0, 1}}, {}), std::invalid_argument);
+    EXPECT_THROW((void)CommPlan::from_counts(c, {}, std::vector<Run>{{0, 1}, {0, 1}}), std::invalid_argument);
+  }
+  EXPECT_THROW((void)CommPlan::from_counts(c, std::vector<Run>{{me, 2}}, std::vector<Run>{{me, 1}}), std::invalid_argument);
+  // Runs of no records are allowed and send nothing.
+  std::vector<Run> to{{me, 2}};
+  if (me + 1 < c.size()) to.push_back({me + 1, 0});
+  const CommPlan plan = CommPlan::from_counts(c, to, std::vector<Run>{{me, 2}});
+  EXPECT_TRUE(plan.send_ranks().empty());
+  std::vector<std::int32_t> two{1, 2}, three(3), out(2);
+  EXPECT_THROW((void)plan.begin_forward(c, std::span<const std::int32_t>(two), std::span<std::int32_t>(three), 7105),
+               std::invalid_argument);
+  plan.begin_forward(c, std::span<const std::int32_t>(two), std::span<std::int32_t>(out), 7105).wait();
+  EXPECT_EQ(out, two);
+}
+
 TEST(Transport, OwnersDependOnlyOnTheKeyAndRankCount) {
   using soma::transport::mix;
   using soma::transport::owner;

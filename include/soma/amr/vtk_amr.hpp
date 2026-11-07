@@ -25,12 +25,22 @@
 // not finite. Each file is written to a temporary and renamed into place,
 // the .vthb last, so a failure never leaves a .vthb naming files that are
 // missing; failures throw std::runtime_error.
+//
+// The overload taking a communicator is collective over the hierarchy's
+// ranks: each rank writes the pieces of the boxes it owns, and rank 0 writes
+// the .vthb once every piece is in place. A piece is named by its level and
+// global box id, so the files are those the serial overload writes for the
+// whole hierarchy. Bad input on any rank, or ranks giving different fields,
+// throws std::invalid_argument on every rank before any file is written; a
+// failed write throws std::runtime_error on every rank. The overload without
+// one is the same over Comm::self() and needs a hierarchy of one rank.
 
 #include <filesystem>
 #include <string>
 #include <vector>
 
 #include "soma/amr/hierarchy.hpp"
+#include "soma/parallel/comm.hpp"
 
 namespace soma::amr {
 
@@ -38,6 +48,9 @@ struct VtkAmrField {
   std::string name;
   const MultiLevelField<double>* field = nullptr;
 };
+
+void write_vtk_amr(const Comm& comm, const std::filesystem::path& path, const Hierarchy& hierarchy,
+                   const std::vector<VtkAmrField>& fields);
 
 void write_vtk_amr(const std::filesystem::path& path, const Hierarchy& hierarchy, const std::vector<VtkAmrField>& fields);
 

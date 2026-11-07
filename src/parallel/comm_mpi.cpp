@@ -194,6 +194,33 @@ void Comm::alltoallv_bytes(std::span<const std::byte> send, std::span<const std:
         "MPI_Alltoallv");
 }
 
+std::vector<std::byte> Comm::allgatherv_bytes(std::span<const std::byte> mine, std::size_t width,
+                                              std::vector<std::size_t>& counts) const {
+  detail::count_collective();
+  if (width == 0 || mine.size() % width != 0) {
+    throw std::invalid_argument("soma::Comm::allgatherv: the buffer is not a whole number of elements");
+  }
+  const auto p = static_cast<std::size_t>(size_);
+  std::vector<std::uint64_t> n(p);
+  const std::uint64_t own = mine.size() / width;
+  check(MPI_Allgather(&own, 1, MPI_UINT64_T, n.data(), 1, MPI_UINT64_T, comm_), "MPI_Allgather");
+  std::vector<int> rc(p), rd(p);
+  std::size_t total = 0;
+  counts.assign(p, 0);
+  for (std::size_t r = 0; r < p; ++r) {
+    counts[r] = static_cast<std::size_t>(n[r]);
+    rc[r] = checked_count(counts[r] * width);
+    rd[r] = checked_count(total);
+    total += counts[r] * width;
+  }
+  (void)checked_count(total);
+  std::vector<std::byte> out(total);
+  check(MPI_Allgatherv(mine.data(), checked_count(mine.size()), MPI_BYTE, out.data(), rc.data(), rd.data(), MPI_BYTE,
+                       comm_),
+        "MPI_Allgatherv");
+  return out;
+}
+
 Request Comm::isend_bytes(std::span<const std::byte> buffer, int dest, int tag) const {
   detail::check_peer("isend", dest, tag, size_, false);
   Request r;

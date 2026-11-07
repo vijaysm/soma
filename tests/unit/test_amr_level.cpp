@@ -5,6 +5,7 @@
 // fields: every stored value belongs to exactly one point of one box.
 
 #include <algorithm>
+#include <cmath>
 #include <functional>
 #include <cstdint>
 #include <random>
@@ -143,6 +144,57 @@ TEST(AmrDistribution, ContiguousRunsOfEqualWork) {
   EXPECT_THROW(soma::amr::Distribution::along_curve(ba, 0), std::invalid_argument);
 }
 
+// Weights replace point counts: equal weights on unequal boxes cut by box
+// count, and point counts as weights give the unweighted cut.
+TEST(AmrDistribution, WeightedCutsFollowTheWeights) {
+  using soma::amr::Distribution;
+  const BoxArray uneven({box2(0, 0, 11, 3), box2(12, 0, 13, 3), box2(14, 0, 15, 3), box2(16, 0, 17, 3)},
+                        box2(0, 0, 17, 3));
+  const std::vector<double> equal(4, 1.0);
+  EXPECT_EQ(Distribution::along_curve(uneven, 2, equal).owner, (std::vector<int>{0, 0, 1, 1}));
+  std::vector<double> points;
+  for (const Box& b : uneven.boxes()) points.push_back(static_cast<double>(b.num_pts()));
+  for (const int p : {1, 2, 3, 4, 7}) {
+    EXPECT_EQ(Distribution::along_curve(uneven, p, points).owner, Distribution::along_curve(uneven, p).owner) << p;
+  }
+  // A heavy last box takes a rank alone; a box of no weight goes with its
+  // neighbours.
+  EXPECT_EQ(Distribution::along_curve(uneven, 2, std::vector<double>{1, 1, 1, 9}).owner, (std::vector<int>{0, 0, 0, 1}));
+  EXPECT_EQ(Distribution::along_curve(uneven, 2, std::vector<double>{1, 0, 1, 1}).owner, (std::vector<int>{0, 0, 1, 1}));
+  // Every rank's share is within one box of an equal cut.
+  BoxList many;
+  for (int i = 0; i < 40; ++i) many.push_back(box2(4 * i, 0, 4 * i + 3, 3));
+  const BoxArray line(many, box2(0, 0, 159, 3));
+  std::vector<double> w;
+  std::mt19937 gen(5);
+  std::uniform_real_distribution<double> u(0.5, 2.0);
+  double total = 0, heaviest = 0;
+  for (int i = 0; i < 40; ++i) {
+    w.push_back(u(gen));
+    total += w.back();
+    heaviest = std::max(heaviest, w.back());
+  }
+  for (const int p : {2, 3, 5, 8}) {
+    const auto d = Distribution::along_curve(line, p, w);
+    std::vector<double> load(static_cast<std::size_t>(p), 0.0);
+    for (std::size_t i = 0; i < 40; ++i) load[static_cast<std::size_t>(d.owner[i])] += w[i];
+    EXPECT_TRUE(std::is_sorted(d.owner.begin(), d.owner.end()));
+    for (const double l : load) EXPECT_LE(std::abs(l - total / p), heaviest) << p;
+  }
+  EXPECT_THROW(Distribution::along_curve(uneven, 2, std::vector<double>{1, 1, 1}), std::invalid_argument);
+  EXPECT_THROW(Distribution::along_curve(uneven, 2, std::vector<double>{1, -1, 1, 1}), std::invalid_argument);
+  EXPECT_THROW(Distribution::along_curve(uneven, 2, std::vector<double>{0, 0, 0, 0}), std::invalid_argument);
+  EXPECT_THROW(Distribution::along_curve(uneven, 2, std::vector<double>{1, NAN, 1, 1}), std::invalid_argument);
+}
+
+TEST(AmrDistribution, OwnedListsEachRanksBoxesInCurveOrder) {
+  soma::amr::Distribution d{{0, 0, 1, 3, 3}};
+  EXPECT_EQ(d.owned(0), (std::vector<int>{0, 1}));
+  EXPECT_EQ(d.owned(1), (std::vector<int>{2}));
+  EXPECT_TRUE(d.owned(2).empty());
+  EXPECT_EQ(d.owned(3), (std::vector<int>{3, 4}));
+}
+
 namespace {
 
 // Kernels live in named functions: CUDA refuses device lambdas in a test
@@ -209,6 +261,51 @@ TEST(AmrLevelField, EveryValueBelongsToOnePoint) {
       }
     }
   }
+}
+
+// A distributed field allocates only its rank's boxes, in curve order, and
+// maps them to and from their global ids; its kernels run over those boxes.
+TEST(AmrLevelField, HoldsOnlyTheBoxesItsRankOwns) {
+  const Box domain = box2(0, 0, 31, 31);
+  const BoxArray ba(soma::amr::chop({domain}, 8), domain);
+  ASSERT_EQ(ba.size(), 16U);
+  const auto dist = soma::amr::Distribution::along_curve(ba, 3);
+  std::size_t seen = 0;
+  for (int r = 0; r < 3; ++r) {
+    soma::amr::LevelField<int> f(ba, dist, r, IndexType::cell(), 2, 1);
+    const auto mine = dist.owned(r);
+    ASSERT_EQ(f.num_boxes(), mine.size());
+    std::int64_t total = 0;
+    for (std::size_t b = 0; b < f.num_boxes(); ++b) {
+      const int g = mine[b];
+      EXPECT_EQ(f.global(b), g);
+      EXPECT_EQ(f.local(g), static_cast<int>(b));
+      EXPECT_EQ(f.valid(b), ba[static_cast<std::size_t>(g)]);
+      EXPECT_EQ(f.offset(b), total);
+      total += f.grown(b).num_pts() * 2;
+    }
+    for (std::size_t g = 0; g < ba.size(); ++g) {
+      if (dist.owner[g] != r) EXPECT_EQ(f.local(static_cast<int>(g)), -1);
+    }
+    EXPECT_EQ(static_cast<std::int64_t>(f.view().data.extent(0)), total);
+    f.fill(0);
+    std::int64_t valid = 0;
+    for (std::size_t b = 0; b < f.num_boxes(); ++b) valid += f.valid(b).num_pts();
+    EXPECT_EQ(count_valid(f), valid);
+    EXPECT_EQ(&f.distribution(), &f.distribution());
+    EXPECT_EQ(f.distribution().owner, dist.owner);
+    EXPECT_EQ(f.rank(), r);
+    seen += f.num_boxes();
+  }
+  EXPECT_EQ(seen, ba.size());
+  // The serial constructor owns every box.
+  const soma::amr::LevelField<int> all(ba, IndexType::cell(), 1, 0);
+  EXPECT_EQ(all.num_boxes(), ba.size());
+  EXPECT_EQ(all.global(5), 5);
+  EXPECT_EQ(all.distribution().owner, std::vector<int>(ba.size(), 0));
+  EXPECT_THROW(soma::amr::LevelField<int>(ba, soma::amr::Distribution{{0, 1}}, 0, IndexType::cell(), 1, 0),
+               std::invalid_argument);
+  EXPECT_THROW(soma::amr::LevelField<int>(ba, dist, -1, IndexType::cell(), 1, 0), std::invalid_argument);
 }
 
 TEST(AmrLevelField, PatchIndexesTheGrownBox) {
