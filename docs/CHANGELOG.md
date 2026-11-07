@@ -392,7 +392,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   one routed exchange. With N < P, `rebalance` migrates elements by the curve so every rank
   gets some. The result equals the mesh written by gid: entities, coordinates, connectivity,
   nodes, sets in order, fields with domains, defaults, global values and formats, mesh values;
-  derived dimensions are derived again.
+  derived dimensions not written are derived again.
+- `SomaWriteOptions::derived` also writes every dimension held on some rank (derived edges and
+  faces with their gids and sharing). Dimensions written but derived in the mesh written read
+  back complete and marked derived, so building the writer's graphs derives nothing and a
+  restart makes no gid directory pass. A dimension is written for sets only when some set has
+  members of it.
 - Meshes that cannot be written and files that cannot be read throw on every rank.
 - `detect_format(path)` tells a MOAB `.h5m` file from a SOMA file by content;
   `convert_mesh_file(comm, in, out, compression)` and the `soma-convert` tool convert either
@@ -473,6 +478,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   every bundled mesh and on two files MOAB writes at test time: every set's flags, members,
   sequence, children and parents, and every tag value on entities, sets and the mesh,
   variable-length and handle values included.
+- With `SOMA_ENABLE_MOAB_REFERENCE=ON`, MPI and HDF5, `test_parallel_parity_moab` reads the
+  bundled partitioned meshes with MOAB's `READ_PART` (shared entities resolved, one ghost
+  layer) and builds SOMA's parts from the same elements on each rank: for vertices and
+  elements, matched by coordinates, the local, owned, shared and ghost sets, owners, sharing
+  ranks, global owned counts, and an update of doubles and integers equal MOAB's at 1 to 8
+  ranks.
 
 ### MOAB files
 
@@ -561,6 +572,13 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `bench/bench_transport` (MPI builds) times `route` with each strategy against MOAB's crystal
   router (`gs_transfer`) on dense and sparse destination patterns, checked by count and
   checksum on every rank.
+- `bench/bench_parallel` (MPI and HDF5 builds) times, at P ranks on a box of n^3 hexes in
+  partition sets that MOAB writes, the parallel read (independent and collective) against
+  `READ_PART` with resolution, `build_local_part` against `resolve_shared_ents`, `add_ghosts`
+  against `exchange_ghost_cells`, a vertex update of 1 and 3 doubles (fused and split)
+  against `exchange_tags`, and `write_soma` / `read_soma` against `WRITE_PART` and a
+  `READ_PART` load, checking owned counts and updated values. `bench/run_parallel.sh` runs it
+  over rank counts and sizes into JSON files; its header lists what a run at scale needs.
 
 ### Packaging
 
