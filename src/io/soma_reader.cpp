@@ -20,6 +20,7 @@
 #include <string>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "../parallel/records.hpp"
@@ -51,6 +52,11 @@ using soma_file::value_group;
 constexpr const char* who = "read_soma";
 
 [[noreturn]] void bad_file(const std::string& why) { throw std::runtime_error(std::string(who) + ": " + why); }
+
+// A file whose datasets do not hold the rows its part table gives this rank.
+struct PartTableError : std::runtime_error {
+  using std::runtime_error::runtime_error;
+};
 
 // Reads values from a byte stream, checking that they are there.
 struct Cursor {
@@ -189,10 +195,10 @@ class File {
     return {chars.begin(), chars.end()};
   }
 
-  // Every read in one transfer: the extents are checked on every rank of
-  // `comm` first, so that a bad file throws on every rank before any data
-  // moves.
-  void read(const Comm& comm, std::vector<Read>& reads) const {
+  // Every read in one transfer. Rows a dataset does not hold make this rank
+  // read nothing, still joining the transfer, and are returned as the cause,
+  // for the caller to report with its next check.
+  [[nodiscard]] std::string read(std::vector<Read>& reads) const {
     std::vector<bool> empty;  // no rows on any rank: not read
     std::string error;
     for (const Read& r : reads) {
@@ -201,8 +207,8 @@ class File {
       const bool fits = dims.size() == 2 && dims[1] == r.width && r.first <= dims[0] && r.rows <= dims[0] - r.first;
       if (!fits && error.empty()) error = "/soma/" + r.path + " does not hold the rows its part table gives";
     }
-    if (comm.allreduce(static_cast<std::int32_t>(error.empty() ? 0 : 1), Op::max) != 0) {
-      bad_file(error.empty() ? "another rank's datasets do not match the part table" : error);
+    if (!error.empty()) {
+      for (Read& r : reads) r.rows = 0;
     }
     for (Read& r : reads) r.out->resize(r.rows * r.width * soma_file::value_size(r.type));
     if (replica_) {
@@ -218,7 +224,7 @@ class File {
         std::copy(it->second.data.begin() + at, it->second.data.begin() + at + static_cast<std::ptrdiff_t>(n),
                   r.out->begin());
       }
-      return;
+      return error;
     }
     std::vector<Id> ds, spaces, memories;
     std::vector<hid_t> ids, types, mem, file;
@@ -263,6 +269,7 @@ class File {
         record_->rows[r.path] = {r.first, r.width * soma_file::value_size(r.type), *r.out, r.whole};
       }
     }
+    return error;
   }
 
  private:
@@ -501,11 +508,14 @@ Parts read_file(const Comm& comm, const File& f, Ranks ranks, bool parse = true)
   const std::vector<std::string> columns = lines(f.text("parts/offsets", "columns"));
   const std::size_t k_count = columns.size();
   std::vector<std::byte> table_bytes;
+  std::string bad;  // rows the datasets do not hold, reported after the transfers
   {
     std::vector<Read> one{{"parts/offsets", DataType::u64, k_count, b.first, b.last - b.first + 1, &table_bytes}};
-    f.read(comm, one);
+    bad = f.read(one);
   }
-  const auto table = as<std::uint64_t>(table_bytes);
+  // Without its table rows, the rank reads nothing more.
+  const auto table = bad.empty() ? as<std::uint64_t>(table_bytes)
+                                 : std::vector<std::uint64_t>((b.last - b.first + 1) * k_count, 0);
   std::map<std::string, std::size_t> column_of;
   for (std::size_t k = 0; k < k_count; ++k) column_of[columns[k]] = k;
   const auto start = [&](std::uint64_t q, const std::string& c) {
@@ -569,7 +579,8 @@ Parts read_file(const Comm& comm, const File& f, Ranks ranks, bool parse = true)
   whole("sets/flags", DataType::u8, 1);
   whole("sets/entries", DataType::i64, 3);
   column("sets/members", DataType::i64, 4);
-  f.read(comm, reads);
+  if (std::string more = f.read(reads); bad.empty()) bad = std::move(more);
+  if (!bad.empty()) throw PartTableError(std::string(who) + ": " + bad);
   if (!parse) return in;
 
   // Entities, by dimension.
@@ -877,18 +888,25 @@ void send_copies(const Comm& comm, Parts& in) {
 }
 
 // Runs f; a failure on any rank throws on every rank, the failing ones
-// rethrowing their own.
+// rethrowing their own, the others naming a part table that does not match
+// its datasets when that is a cause.
 template <class F>
 void collectively(const Comm& comm, F&& f) {
   std::exception_ptr failure;
+  std::int32_t code = 0;
   try {
     f();
+  } catch (const PartTableError&) {
+    failure = std::current_exception();
+    code = 2;
   } catch (...) {
     failure = std::current_exception();
+    code = 1;
   }
-  if (comm.allreduce(static_cast<std::int32_t>(failure != nullptr), Op::max) != 0) {
+  code = comm.allreduce(code, Op::max);
+  if (code != 0) {
     if (failure) std::rethrow_exception(failure);
-    bad_file("failed on another rank");
+    bad_file(code == 2 ? "another rank's datasets do not match the part table" : "failed on another rank");
   }
 }
 
@@ -970,11 +988,23 @@ Prepared prepare(const Parts& in) {
   return p;
 }
 
-HostMesh build(const Comm& comm, const Parts& in, Ordering ordering) {
+// The part, with `before` (this rank's failure so far) reported with the
+// build's checks; a failure of the build itself is left in `failure`.
+HostMesh build(const Comm& comm, const Parts& in, Ordering ordering, std::exception_ptr before,
+               std::exception_ptr& failure) {
   const Meta& m = in.meta;
   std::optional<Prepared> p;
-  collectively(comm, [&] { p.emplace(prepare(in)); });
-  HostMesh mesh = build_local_part(comm, std::move(p->builder), p->sharing, ordering);
+  if (!before) {
+    try {
+      p.emplace(prepare(in));
+    } catch (...) {
+      before = std::current_exception();
+    }
+  }
+  HostMesh mesh = detail::build_local_part_deferred(comm, p ? std::move(p->builder) : MeshBuilder(m.dim),
+                                                    p ? p->sharing : std::array<std::optional<Sharing>, 4>{},
+                                                    ordering, before, failure, who);
+  if (failure) return mesh;
   // Dimensions written (for their data, or all of them) but derived in the
   // mesh written: complete on every rank, since each holds its owned
   // entities and copies of the rest its elements use, so building a graph
@@ -1382,12 +1412,22 @@ HostMesh read_soma(const Comm& comm, const fs::path& path, const SomaReadOptions
       }
     });
   }
-  collectively(comm, [&] { send_copies(comm, in); });
-  HostMesh mesh = build(comm, in, options.ordering);
+  // A failure sending copies or building is reported with the next check.
+  std::exception_ptr before, built;
+  try {
+    send_copies(comm, in);
+  } catch (...) {
+    before = std::current_exception();
+  }
+  HostMesh mesh = build(comm, in, options.ordering, before, built);
   if (options.adjacencies && in.meta.graphs != 0) {
+    collectively(comm, [&] {
+      if (built) std::rethrow_exception(std::exchange(built, nullptr));
+    });
     build_distributed_adjacencies(comm, mesh, AdjacencyRequest::from_bits(in.meta.graphs));
   }
   collectively(comm, [&] {
+    if (built) std::rethrow_exception(built);
     const h5::Session quiet;
     std::array<std::vector<std::pair<GO, LO>>, 4> lids;
     for (int d = 0; d <= mesh.dim(); ++d) lids[static_cast<std::size_t>(d)] = by_gid(mesh, d);

@@ -335,7 +335,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `resolve_sharing(comm, gids)` finds every rank holding each gid (the lowest owns it).
 - `build_local_part(comm, builder, ordering)` builds a rank's part with the ownership and
   sharing of every dimension it holds, kept in the internal fields `soma:sharing` (the other
-  ranks holding each shared entity) and `soma:owner` (the owner of each shared copy).
+  ranks holding each shared entity) and `soma:owner` (the owner of each shared copy). Its
+  checks and the box of every rank's vertices take one reduction, and the build one more.
 - `build_distributed_adjacencies(comm, mesh, request)` builds graphs on a part and gives
   derived edges and faces gids that do not depend on P (the largest explicit gid plus the rank
   of their sorted corner gids), sharing and ownership order; a distributed dimension that the
@@ -397,7 +398,7 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `read_soma(comm, path, SomaReadOptions{ordering, rebalance, adjacencies})` reads a file of
   N parts at P ranks, part q on rank floor(qP/N). Owners send their shared entities, with
   field values and set memberships, to the ranks holding copies, and the sharing comes from
-  the file: a restart read (N = P) gives each rank the part it wrote with 14 collectives and
+  the file: a restart read (N = P) gives each rank the part it wrote with 6 collectives and
   one routed exchange. With N < P, `rebalance` migrates elements by the curve so every rank
   gets some. The result equals the mesh written by gid: entities, coordinates, connectivity,
   nodes, sets in order, fields with domains, defaults, global values and formats, mesh values;

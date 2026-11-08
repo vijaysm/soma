@@ -351,75 +351,89 @@ HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, Ordering orde
 
 namespace {
 
-// build_local_part with the sharing of some dimensions given.
+// build_local_part with the sharing of some dimensions given: its checks and
+// the box of every rank's vertices in one reduction, with `before`, this
+// rank's failure so far (every rank throws if any rank failed). A failure of
+// the build itself is reported in one more reduction, or left in `deferred`
+// when given, for the caller to report with its next check.
 HostMesh build_part(const Comm& comm, MeshBuilder&& builder, const std::array<std::vector<GO>, 4>& ghosts,
-                    const std::array<std::optional<Sharing>, 4>& given, Ordering ordering) {
-  // Every dimension the builder holds on some rank, the vertices always.
+                    const std::array<std::optional<Sharing>, 4>& given, Ordering ordering,
+                    std::exception_ptr before = nullptr, std::exception_ptr* deferred = nullptr,
+                    const char* who = "build_local_part") {
+  // Every dimension the builder holds (the vertices always), and the box.
   std::array<std::vector<GO>, 4> gids;
   gids[0].assign(builder.vertex_gids().begin(), builder.vertex_gids().end());
-  std::array<std::int32_t, 4> held{1, 0, 0, 0};
+  // Maxima of: held per dimension, a stray ghost, a given sharing that does
+  // not cover its gids, an earlier failure, then the negated lows and highs.
+  std::array<Real, 13> f;
+  f.fill(0);
+  f[0] = 1;
   for (int d = 1; d <= 3; ++d) {
     gids[static_cast<std::size_t>(d)] = builder.element_gids(d);
-    held[static_cast<std::size_t>(d)] = gids[static_cast<std::size_t>(d)].empty() ? 0 : 1;
+    f[static_cast<std::size_t>(d)] = gids[static_cast<std::size_t>(d)].empty() ? 0 : 1;
   }
-  comm.allreduce(std::span<std::int32_t>(held), Op::max);
   // Ghost flags per gid given; a ghost the builder does not hold fails.
   std::array<std::vector<std::uint8_t>, 4> flags;
-  bool stray = false;
   for (std::size_t d = 0; d < 4; ++d) {
     if (ghosts[d].empty()) continue;
     std::vector<GO> g = ghosts[d];
     std::sort(g.begin(), g.end());
     std::vector<GO> h = gids[d];
     std::sort(h.begin(), h.end());
-    stray = stray || !std::includes(h.begin(), h.end(), g.begin(), g.end());
+    if (!std::includes(h.begin(), h.end(), g.begin(), g.end())) f[4] = 1;
     flags[d].resize(gids[d].size());
     for (std::size_t i = 0; i < gids[d].size(); ++i) flags[d][i] = std::binary_search(g.begin(), g.end(), gids[d][i]) ? 1 : 0;
   }
-  if (comm.allreduce(static_cast<std::int32_t>(stray), Op::max)) {
-    throw std::invalid_argument("build_local_part: a rank names a ghost it does not hold");
-  }
-  std::array<std::optional<Sharing>, 4> sharing;
-  bool bad = false;
   for (std::size_t d = 0; d < 4; ++d) {
-    if (!held[d] || !given[d]) continue;
-    bad = bad || given[d]->offsets.size() != gids[d].size() + 1 || given[d]->offsets.back() != given[d]->ranks.size();
+    const auto& g = given[d];
+    if (g && (g->offsets.size() != gids[d].size() + 1 || g->offsets.back() != g->ranks.size())) f[5] = 1;
   }
-  if (comm.allreduce(static_cast<std::int32_t>(bad), Op::max)) {
-    throw std::invalid_argument("build_local_part: a rank's given sharing does not cover its gids");
-  }
-  for (std::size_t d = 0; d < 4; ++d) {
-    if (held[d]) sharing[d] = given[d] ? *given[d] : resolve_sharing(comm, gids[d], flags[d]);
-  }
-
-  // The box of every rank's vertices: maxima of the highs and of the negated lows.
+  f[6] = before ? 1 : 0;
   const auto xyz = builder.vertex_coordinates();
-  std::array<Real, 6> box;
-  box.fill(-std::numeric_limits<Real>::infinity());
+  for (std::size_t k = 7; k < 13; ++k) f[k] = -std::numeric_limits<Real>::infinity();
   for (std::size_t i = 0; i + 2 < xyz.size(); i += 3) {
     for (std::size_t d = 0; d < 3; ++d) {
-      box[d] = std::max(box[d], -xyz[i + d]);
-      box[3 + d] = std::max(box[3 + d], xyz[i + d]);
+      f[7 + d] = std::max(f[7 + d], -xyz[i + d]);
+      f[10 + d] = std::max(f[10 + d], xyz[i + d]);
     }
   }
-  comm.allreduce(std::span<Real>(box), Op::max);
+  comm.allreduce(std::span<Real>(f), Op::max);
+  if (f[6] != 0) {
+    if (before) std::rethrow_exception(before);
+    throw std::runtime_error(std::string(who) + ": failed on another rank");
+  }
+  if (f[4] != 0) throw std::invalid_argument("build_local_part: a rank names a ghost it does not hold");
+  if (f[5] != 0) throw std::invalid_argument("build_local_part: a rank's given sharing does not cover its gids");
+  std::array<std::optional<Sharing>, 4> sharing;
+  for (std::size_t d = 0; d < 4; ++d) {
+    if (f[d] != 0) sharing[d] = given[d] ? *given[d] : resolve_sharing(comm, gids[d], flags[d]);
+  }
 
-  // A failure on one rank is reported on every rank before anything else
-  // collective runs.
   HostMesh mesh;
-  collectively(comm, "build_local_part", [&] {
+  const auto build = [&] {
     for (std::size_t d = 0; d < 4; ++d) {
       if (!sharing[d]) continue;
       std::vector<Ownership> kinds(gids[d].size());
       for (std::size_t i = 0; i < kinds.size(); ++i) kinds[i] = sharing[d]->kind(i, comm.rank());
       builder.set_ownership(static_cast<int>(d), gids[d], kinds, sharing[d]->groups());
     }
-    if (std::isfinite(box[3])) builder.set_key_box({-box[0], -box[1], -box[2]}, {box[3], box[4], box[5]});
+    if (std::isfinite(f[10])) builder.set_key_box({-f[7], -f[8], -f[9]}, {f[10], f[11], f[12]});
     mesh = std::move(builder).build(ordering);
     for (std::size_t d = 0; d < 4; ++d) {
       if (sharing[d] && static_cast<int>(d) <= mesh.dim()) install(mesh, comm, static_cast<int>(d), gids[d], *sharing[d]);
     }
-  });
+  };
+  if (deferred == nullptr) {
+    // A failure on one rank is reported on every rank before anything else
+    // collective runs.
+    collectively(comm, "build_local_part", build);
+  } else {
+    try {
+      build();
+    } catch (...) {
+      *deferred = std::current_exception();
+    }
+  }
   return mesh;
 }
 
@@ -433,6 +447,12 @@ HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, const std::ar
 HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, const std::array<std::optional<Sharing>, 4>& sharing,
                           Ordering ordering) {
   return build_part(comm, std::move(builder), {}, sharing, ordering);
+}
+
+HostMesh detail::build_local_part_deferred(const Comm& comm, MeshBuilder&& builder,
+                                           const std::array<std::optional<Sharing>, 4>& sharing, Ordering ordering,
+                                           std::exception_ptr before, std::exception_ptr& failure, const char* who) {
+  return build_part(comm, std::move(builder), {}, sharing, ordering, std::move(before), &failure, who);
 }
 
 }  // namespace soma

@@ -687,7 +687,9 @@ TEST(SomaFile, CollectivesDoNotGrowWithFieldsOrRanks) {
   const auto r2 = counted([&] { (void)soma::read_soma(c, dir.path("rich.soma"), restart); });
   EXPECT_EQ(r1, r2);
   EXPECT_EQ(r1.second, 1u);
-  EXPECT_LE(r1.first, 16u);
+  // Agreeing the options, checking the reads, the owners' exchange (two),
+  // checking the build, and checking the install.
+  EXPECT_EQ(r1.first, 6u);
   // Aggregators add a split and an agreement, and the first ranks' reads.
   const soma::SomaReadOptions through{.adjacencies = false, .aggregators = 1};
   const auto g1 = counted([&] { (void)soma::read_soma(c, dir.path("plain.soma"), through); });

@@ -19,6 +19,7 @@
 // exchanges are built from them once.
 
 #include <array>
+#include <exception>
 #include <optional>
 #include <vector>
 
@@ -64,6 +65,18 @@ inline constexpr const char* owner_field = "soma:owner";
 [[nodiscard]] HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder,
                                         const std::array<std::optional<Sharing>, 4>& sharing,
                                         Ordering ordering = default_ordering);
+
+namespace detail {
+// The overload above for a caller that reports failures in its own
+// reductions: `before`, this rank's failure so far, joins the build's checks
+// (every rank throws if any rank failed: the failing ones their own, the
+// others std::runtime_error naming `who`), and a failure of the build itself
+// is left in `failure`, for the caller to report with its next check.
+[[nodiscard]] HostMesh build_local_part_deferred(const Comm& comm, MeshBuilder&& builder,
+                                                 const std::array<std::optional<Sharing>, 4>& sharing,
+                                                 Ordering ordering, std::exception_ptr before,
+                                                 std::exception_ptr& failure, const char* who);
+}  // namespace detail
 
 // Collective: builds the requested graphs on a local part, then gives each
 // newly derived dimension (edges, faces) its distributed form. Entities
