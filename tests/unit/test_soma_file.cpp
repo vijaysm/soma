@@ -257,6 +257,17 @@ std::map<GO, std::pair<std::vector<int>, int>> sharing_of_all(const HostMesh& m,
   return out;
 }
 
+// Aggregators a write or read may take at `ranks`: about half of them with a
+// parallel HDF5, else one.
+int some_aggregators(int ranks) {
+#ifdef H5_HAVE_PARALLEL
+  return (ranks + 1) / 2;
+#else
+  (void)ranks;
+  return 1;
+#endif
+}
+
 // Collectives and routes f makes.
 template <class F>
 std::pair<std::uint64_t, std::uint64_t> counted(F&& f) {
@@ -424,6 +435,10 @@ TEST(SomaFile, FewerPartsThanRanksAreRebalanced) {
   if (c.rank() == 0) EXPECT_EQ(difference_of(gathered, oracle), "");
   const HostMesh kept = soma::read_soma(c, out, {.rebalance = false});
   EXPECT_EQ(kept.count(2) > 0, c.rank() == 0);
+  // Through aggregators, the same.
+  const int a = some_aggregators(c.size());
+  EXPECT_EQ(difference_of(soma::read_soma(c, out, {.aggregators = a}), spread), "");
+  EXPECT_EQ(difference_of(soma::read_soma(c, out, {.rebalance = false, .aggregators = a}), kept), "");
 }
 
 // Read at every rank count up to the parts', gathered it is the mesh
@@ -445,6 +460,9 @@ TEST(SomaFile, PartsReadAtEveryRankCountAreTheMeshWritten) {
         const Comm s = sub.comm();
         const HostMesh gathered = all_to(s, soma::read_soma(s, out), 0);
         if (s.rank() == 0) EXPECT_EQ(difference_of(gathered, oracle), "") << "kind " << kind << " at " << k;
+        const HostMesh through =
+            all_to(s, soma::read_soma(s, out, {.aggregators = some_aggregators(s.size())}), 0);
+        if (s.rank() == 0) EXPECT_EQ(difference_of(through, oracle), "") << "kind " << kind << " at " << k;
       }
       c.barrier();
     }
@@ -473,6 +491,43 @@ TEST(SomaFile, BothSinksAndGhostedPartsWriteTheSameFile) {
     }
     c.barrier();
   }
+}
+
+// Any number of aggregators, with MPI-IO hints and aligned datasets, writes
+// the file every rank writes, which restarts each rank with its part, read
+// through as many aggregators or through none. More than one aggregator needs
+// a parallel HDF5.
+TEST(SomaFile, AggregatorsAndHintsWriteTheSameFile) {
+  const Comm c = Comm::world();
+  const Scratch dir(c);
+  const HostMesh m = rich_part(c, 4);
+  soma::write_soma(c, m, dir.path("plain.soma"));
+  const HostMesh stay = all_to(c, m, c.rank());
+  soma::MpiIoHints hints;
+  hints.cb_nodes = 1;
+  hints.cb_buffer_size = std::size_t{1} << 20;
+  hints.collective_buffering = true;
+  hints.alignment = 4096;
+  for (int a = 1; a <= c.size(); ++a) {
+    SCOPED_TRACE(a);
+    const fs::path out = dir.path("m" + std::to_string(a) + ".soma");
+#ifndef H5_HAVE_PARALLEL
+    if (a > 1) {
+      EXPECT_TRUE(throws<std::invalid_argument>([&] { soma::write_soma(c, m, out, {.aggregators = a}); },
+                                                "parallel HDF5"));
+      continue;
+    }
+#endif
+    const soma::MpiIoHints h = a == c.size() ? hints : soma::MpiIoHints{};
+    soma::write_soma(c, m, out, {.hints = h, .aggregators = a});
+    if (c.rank() == 0) EXPECT_EQ(content_difference(dir.path("plain.soma"), out), "");
+    EXPECT_EQ(difference_of(soma::read_soma(c, out), stay), "");
+    EXPECT_EQ(difference_of(soma::read_soma(c, dir.path("plain.soma"), {.hints = h, .aggregators = a}), stay), "");
+    c.barrier();
+  }
+  soma::write_soma(c, m, dir.path("hints.soma"), {.hints = hints});
+  if (c.rank() == 0) EXPECT_EQ(content_difference(dir.path("plain.soma"), dir.path("hints.soma")), "");
+  c.barrier();
 }
 
 // quad9s keep their nodes; deflated files read back the same and are
@@ -532,6 +587,23 @@ TEST(SomaFile, MeshesItCannotWriteThrowOnEveryRank) {
     EXPECT_TRUE(throws<std::invalid_argument>([&] { soma::write_soma(c, m, out, {.compression = 10}); },
                                               "compression"));
     EXPECT_TRUE(throws<std::runtime_error>([&] { soma::write_soma(c, m, dir.path("no/such/dir.soma")); }, "cannot"));
+    for (const int a : {-1, c.size() + 1}) {
+      EXPECT_TRUE(throws<std::invalid_argument>([&] { soma::write_soma(c, m, out, {.aggregators = a}); },
+                                                "aggregators must be in"));
+    }
+    soma::MpiIoHints odd;
+    odd.alignment = 3;
+    EXPECT_TRUE(throws<std::invalid_argument>([&] { soma::write_soma(c, m, out, {.hints = odd}); },
+                                              "not a power of two"));
+    soma::MpiIoHints negative;
+    negative.cb_nodes = -1;
+    EXPECT_TRUE(throws<std::invalid_argument>([&] { soma::write_soma(c, m, out, {.hints = negative}); },
+                                              "negative count"));
+    soma::MpiIoHints mine;
+    mine.cb_nodes = last ? 2 : 1;
+    EXPECT_TRUE(throws<std::invalid_argument>([&] { soma::write_soma(c, m, out, {.hints = mine}); },
+                                              "aggregators or MPI-IO hints differ") ||
+                c.size() == 1);
   }
   {
     HostMesh m = rich_part(c, 4);
@@ -571,6 +643,18 @@ TEST(SomaFile, FilesItCannotReadThrowOnEveryRank) {
   c.barrier();
   EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::read_soma(c, newer); }, "format_version 99"));
   EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::read_soma(c, table); }, "part table"));
+  // The same through aggregators, which send the cause to their groups.
+  const soma::SomaReadOptions through{.aggregators = some_aggregators(c.size())};
+  EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::read_soma(c, newer, through); }, "format_version 99"));
+  EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::read_soma(c, table, through); }, "part table"));
+  EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::read_soma(c, dir.path("missing.soma"), through); },
+                                         "read_soma"));
+  // Options that cannot be used, or that differ between ranks.
+  EXPECT_TRUE(throws<std::invalid_argument>(
+      [&] { (void)soma::read_soma(c, newer, {.aggregators = c.size() + 1}); }, "aggregators must be in"));
+  EXPECT_TRUE(throws<std::invalid_argument>(
+                  [&] { (void)soma::read_soma(c, newer, {.aggregators = c.rank() == 0 ? 1 : 0}); }, "differ") ||
+              c.size() == 1);
 }
 
 // A write and a read at the part count make as many collectives with one
@@ -592,12 +676,25 @@ TEST(SomaFile, CollectivesDoNotGrowWithFieldsOrRanks) {
   EXPECT_EQ(w1, w2);
   EXPECT_EQ(w1.second, 0u);
   EXPECT_LE(w1.first, 8u);
+  // Aggregators add one split, however many there are.
+  const auto a1 = counted([&] { soma::write_soma(c, plain, dir.path("a1.soma"), {.aggregators = 1}); });
+  const auto a2 = counted([&] { soma::write_soma(c, rich, dir.path("a2.soma"), {.aggregators = 1}); });
+  EXPECT_EQ(a1, a2);
+  EXPECT_EQ(a1.second, 0u);
+  EXPECT_LE(a1.first, w1.first + 1);
   const soma::SomaReadOptions restart{.adjacencies = false};
   const auto r1 = counted([&] { (void)soma::read_soma(c, dir.path("plain.soma"), restart); });
   const auto r2 = counted([&] { (void)soma::read_soma(c, dir.path("rich.soma"), restart); });
   EXPECT_EQ(r1, r2);
   EXPECT_EQ(r1.second, 1u);
   EXPECT_LE(r1.first, 16u);
+  // Aggregators add a split and an agreement, and the first ranks' reads.
+  const soma::SomaReadOptions through{.adjacencies = false, .aggregators = 1};
+  const auto g1 = counted([&] { (void)soma::read_soma(c, dir.path("plain.soma"), through); });
+  const auto g2 = counted([&] { (void)soma::read_soma(c, dir.path("rich.soma"), through); });
+  EXPECT_EQ(g1, g2);
+  EXPECT_EQ(g1.second, 1u);
+  EXPECT_LE(g1.first, r1.first + 4);
   // The same on every rank.
   std::array<std::int64_t, 4> v{static_cast<std::int64_t>(w1.first), -static_cast<std::int64_t>(w1.first),
                                 static_cast<std::int64_t>(r1.first), -static_cast<std::int64_t>(r1.first)};

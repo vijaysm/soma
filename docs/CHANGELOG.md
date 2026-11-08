@@ -51,6 +51,8 @@ All notable changes to SOMA are recorded here. The format follows
   entered, for tests that bound them.
 - `Comm::allgatherv` gathers each rank's span of trivially copyable values on every rank, in
   rank order, with the counts if asked; one collective.
+- `Comm::split(color, key)` returns an owned `SplitComm` (freed with it) grouping the ranks of
+  a color in key order; a negative color joins no group. One collective.
 
 ### Topology
 
@@ -357,6 +359,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   owners, set membership with `sets`. `resolve_sharing` and `build_local_part` take ghosts;
   derived sides of ghost elements only are ghosts. `HaloExchange::update` writes ghosts,
   `reduce` leaves them. Parity with MOAB's `exchange_ghost_cells` for the first layer.
+  `add_ghosts` returns after one reduction when no rank has anything to ghost and none holds
+  ghosts.
 - `build_distributed_adjacencies` keeps the sharing of the dimensions it does not extend when
   deriving beside explicit entities renews the epoch.
 - `permute_entities(mesh, dim, new_of_old, table, gids)` reorders one dimension with
@@ -388,7 +392,7 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `read_soma(comm, path, SomaReadOptions{ordering, rebalance, adjacencies})` reads a file of
   N parts at P ranks, part q on rank floor(qP/N). Owners send their shared entities, with
   field values and set memberships, to the ranks holding copies, and the sharing comes from
-  the file: a restart read (N = P) gives each rank the part it wrote with 13 collectives and
+  the file: a restart read (N = P) gives each rank the part it wrote with 14 collectives and
   one routed exchange. With N < P, `rebalance` migrates elements by the curve so every rank
   gets some. The result equals the mesh written by gid: entities, coordinates, connectivity,
   nodes, sets in order, fields with domains, defaults, global values and formats, mesh values;
@@ -398,6 +402,13 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   back complete and marked derived, so building the writer's graphs derives nothing and a
   restart makes no gid directory pass. A dimension is written for sets only when some set has
   members of it.
+- `MpiIoHints` in `SomaWriteOptions` and `SomaReadOptions` pass `cb_nodes`, `cb_buffer_size`,
+  `romio_cb_write`/`romio_cb_read`, `striping_factor` and `striping_unit` to MPI-IO, and align
+  datasets with `H5Pset_alignment`. With `aggregators` = M in [1, P], a write sends each rank's
+  rows to the first rank of its group floor(rM/P), and only those M ranks open the file and
+  write their group's rows; a read has those ranks read their group's metadata and rows and
+  send each rank its own. The file stays one file and is the same as without aggregators.
+  M > 1 needs a parallel HDF5; invalid or differing options throw on every rank.
 - Meshes that cannot be written and files that cannot be read throw on every rank.
 - `detect_format(path)` tells a MOAB `.h5m` file from a SOMA file by content;
   `convert_mesh_file(comm, in, out, compression)` and the `soma-convert` tool convert either

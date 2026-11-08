@@ -16,6 +16,7 @@
 
 #include "hdf5.hpp"
 #include "soma/fields/data_type.hpp"
+#include "soma/io/soma_file.hpp"
 #include "soma/parallel/comm.hpp"
 
 namespace soma::soma_file {
@@ -76,14 +77,71 @@ constexpr bool parallel_hdf5() {
 #endif
 }
 
+// Why the hints and aggregator count cannot be used at `ranks` ranks, or
+// nothing.
+inline std::string access_error(const MpiIoHints& h, int aggregators, int ranks) {
+  if (aggregators < 0 || aggregators > ranks) {
+    return "aggregators must be in [0, " + std::to_string(ranks) + "], not " + std::to_string(aggregators);
+  }
+  if (aggregators > 1 && !parallel_hdf5()) return "more than one aggregator needs a parallel HDF5";
+  if (h.cb_nodes < 0 || h.striping_factor < 0) return "a negative count in the MPI-IO hints";
+  if ((h.alignment & (h.alignment - 1)) != 0) {
+    return "alignment " + std::to_string(h.alignment) + " is not a power of two";
+  }
+  return "";
+}
+
+// The first rank of the group of rank r, of `m` aggregators over `p` ranks:
+// group floor(rm/p), whose first rank is ceil(gp/m). A group's ranks are
+// consecutive, so its parts' rows are contiguous in every dataset.
+inline int leader_of(int r, int m, int p) {
+  const auto g = static_cast<std::int64_t>(r) * m / p;
+  return static_cast<int>((g * p + m - 1) / m);
+}
+
+// A hash of the options every rank must give alike.
+inline std::uint64_t access_hash(const MpiIoHints& h, int aggregators) {
+  std::uint64_t x = 1469598103934665603ULL;
+  for (const std::uint64_t v : {static_cast<std::uint64_t>(aggregators), static_cast<std::uint64_t>(h.cb_nodes),
+                                static_cast<std::uint64_t>(h.cb_buffer_size),
+                                static_cast<std::uint64_t>(h.collective_buffering ? 1 + *h.collective_buffering : 0),
+                                static_cast<std::uint64_t>(h.striping_factor),
+                                static_cast<std::uint64_t>(h.striping_unit),
+                                static_cast<std::uint64_t>(h.alignment)}) {
+    x = (x ^ v) * 1099511628211ULL;
+  }
+  return x;
+}
+
 // A collective (MPI-IO) file over `comm` when `collective`, else the default
 // driver; metadata is read and written collectively too unless
-// `independent_metadata` (when ranks open different datasets).
-inline h5::Id file_access(const Comm& comm, bool collective, bool independent_metadata = false) {
+// `independent_metadata` (when ranks open different datasets). The hints go
+// to MPI-IO; the alignment applies with either driver.
+inline h5::Id file_access(const Comm& comm, bool collective, bool independent_metadata = false,
+                          const MpiIoHints& hints = {}) {
   h5::Id fapl = h5::check(H5Pcreate(H5P_FILE_ACCESS), "make a file access property list");
+  if (hints.alignment > 1) {
+    h5::check(H5Pset_alignment(fapl.get(), hints.alignment, hints.alignment), "align datasets");
+  }
 #ifdef H5_HAVE_PARALLEL
   if (collective) {
-    h5::check(H5Pset_fapl_mpio(fapl.get(), comm.native(), MPI_INFO_NULL), "use MPI-IO");
+    MPI_Info info = MPI_INFO_NULL;
+    const auto set = [&](const char* key, const std::string& value) {
+      if (info == MPI_INFO_NULL) MPI_Info_create(&info);
+      MPI_Info_set(info, key, value.c_str());
+    };
+    if (hints.cb_nodes > 0) set("cb_nodes", std::to_string(hints.cb_nodes));
+    if (hints.cb_buffer_size > 0) set("cb_buffer_size", std::to_string(hints.cb_buffer_size));
+    if (hints.collective_buffering) {
+      const char* v = *hints.collective_buffering ? "enable" : "disable";
+      set("romio_cb_write", v);
+      set("romio_cb_read", v);
+    }
+    if (hints.striping_factor > 0) set("striping_factor", std::to_string(hints.striping_factor));
+    if (hints.striping_unit > 0) set("striping_unit", std::to_string(hints.striping_unit));
+    const herr_t mpio = H5Pset_fapl_mpio(fapl.get(), comm.native(), info);  // copies the info
+    if (info != MPI_INFO_NULL) MPI_Info_free(&info);
+    h5::check(mpio, "use MPI-IO");
     if (!independent_metadata) {
       h5::check(H5Pset_all_coll_metadata_ops(fapl.get(), true), "read metadata collectively");
       h5::check(H5Pset_coll_metadata_write(fapl.get(), true), "write metadata collectively");

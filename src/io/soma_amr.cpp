@@ -100,6 +100,7 @@ std::string check(const Comm& comm, const amr::Hierarchy& h, const std::vector<A
     return "compression is a deflate level in [0, 9], not " + std::to_string(options.compression);
   }
   if (options.compression > 0 && H5Zfilter_avail(H5Z_FILTER_DEFLATE) <= 0) return "this HDF5 has no deflate filter";
+  if (std::string e = soma_file::access_error(options.hints, options.aggregators, comm.size()); !e.empty()) return e;
   if (h.rank() != comm.rank() || (h.comm() ? h.comm()->size() : 1) != comm.size()) {
     return "the hierarchy is not over the ranks of the communicator";
   }
@@ -344,16 +345,21 @@ void write_soma(const Comm& comm, const amr::Hierarchy& hierarchy, const std::ve
   } catch (const std::exception& e) {
     error = e.what();
   }
-  // Failures, and the fields' names and kinds, agreed in one reduction.
+  // Failures, the fields' names and kinds, and the access options, agreed in
+  // one reduction.
   const auto h63 = static_cast<std::int64_t>(hash >> 1);
-  std::array<std::int64_t, 3> agree{error.empty() ? 0 : 1, h63, -h63};
+  const auto a63 = static_cast<std::int64_t>(soma_file::access_hash(options.hints, options.aggregators) >> 1);
+  std::array<std::int64_t, 5> agree{error.empty() ? 0 : 1, h63, -h63, a63, -a63};
   comm.allreduce(std::span<std::int64_t>(agree), Op::max);
   if (agree[0] != 0) {
     throw std::invalid_argument(std::string(writer) + ": " + (error.empty() ? "another rank cannot write its part" : error));
   }
   if (agree[1] != -agree[2]) throw std::invalid_argument(std::string(writer) + ": the ranks give different fields");
+  if (agree[3] != -agree[4]) {
+    throw std::invalid_argument(std::string(writer) + ": the ranks' aggregators or MPI-IO hints differ");
+  }
   soma_file::Image img = lay_out(comm, hierarchy, fields);
-  soma_file::write_image(comm, path, img, options.compression, writer);
+  soma_file::write_image(comm, path, img, options, writer);
 }
 
 AmrCheckpoint read_soma_amr(const Comm& comm, const fs::path& path, const SomaAmrReadOptions& options) {

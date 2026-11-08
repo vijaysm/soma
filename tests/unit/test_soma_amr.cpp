@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <hdf5.h>
 #include <Kokkos_Core.hpp>
 
 #include "soma/amr/hierarchy.hpp"
@@ -106,6 +107,14 @@ TEST(SomaAmr, RestartsAtAnyRankCount) {
   }
   c.barrier();
   expect_restarted(soma::read_soma_amr(c, dir.path("one.soma")), whole, w);
+  // Written through aggregators, the same checkpoint.
+#ifdef H5_HAVE_PARALLEL
+  const int aggregators = (c.size() + 1) / 2;
+#else
+  const int aggregators = 1;
+#endif
+  soma::write_soma(c, part, {{"u", p.u}, {"n", p.n}}, dir.path("gathered.soma"), {.aggregators = aggregators});
+  expect_restarted(soma::read_soma_amr(c, dir.path("gathered.soma")), whole, w);
   // Costs given to the reader cut the levels by them.
   soma::SomaAmrReadOptions o;
   o.cost = [](int, const Box& b) { return b.lo(0) < 32 ? 1.0 : 5.0; };
@@ -150,6 +159,11 @@ TEST(SomaAmr, FailuresThrowOnEveryRank) {
   const fs::path out = dir.path("bad.soma");
   EXPECT_THROW(soma::write_soma(c, part, {{"u", p.u}}, out, {.compression = 10}), std::invalid_argument);
   EXPECT_THROW(soma::write_soma(c, part, {{"u", p.u}, {"u", p.u}}, out), std::invalid_argument);
+  EXPECT_THROW(soma::write_soma(c, part, {{"u", p.u}}, out, {.aggregators = c.size() + 1}), std::invalid_argument);
+  if (c.size() > 1) {
+    const int mine = c.rank() == 0 ? 1 : 0;
+    EXPECT_THROW(soma::write_soma(c, part, {{"u", p.u}}, out, {.aggregators = mine}), std::invalid_argument);
+  }
   // A field of another hierarchy.
   const Hierarchy other(c, geometry(), options());
   const auto q = other.make_field<double>(IndexType::cell(), 1, 0);

@@ -46,8 +46,10 @@
 // format_version, or datasets that disagree with the part table throw
 // std::runtime_error on every rank.
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 
 #include "soma/core/mesh.hpp"
 #include "soma/core/ordering.hpp"
@@ -55,18 +57,47 @@
 
 namespace soma {
 
+// MPI-IO hints for collective file access, by their ROMIO names (an MPI
+// library may ignore any), and the alignment of datasets in the file. Unset
+// fields leave the library's defaults, and the file is as without hints.
+struct MpiIoHints {
+  int cb_nodes = 0;                          // ranks MPI-IO aggregates through
+  std::size_t cb_buffer_size = 0;            // bytes each aggregates at a time
+  std::optional<bool> collective_buffering;  // romio_cb_write / romio_cb_read
+  int striping_factor = 0;                   // stripes (Lustre's stripe count)
+  std::size_t striping_unit = 0;             // stripe size in bytes
+  // Datasets of at least this many bytes start on a multiple of it, so they
+  // begin on stripe boundaries; a power of two, or 0 for none.
+  std::size_t alignment = 0;
+};
+
 struct SomaWriteOptions {
   int compression = 0;
   // Also write every dimension held on some rank (derived edges and faces
   // with their gids and sharing), so a read at the part count derives
   // nothing and makes no gid directory pass. Read back as derived.
   bool derived = false;
+  // How the file is opened for collective writes.
+  MpiIoHints hints;
+  // 0: every rank writes its rows (collectively over MPI-IO, or through rank
+  // 0 with a serial HDF5). M in [1, P]: rank r sends its rows to the first
+  // rank of its group floor(rM/P), and only those M ranks open the file and
+  // write, each its group's rows (contiguous in every dataset) at once;
+  // M > 1 needs a parallel HDF5. The file is the same either way.
+  int aggregators = 0;
 };
 
 struct SomaReadOptions {
   Ordering ordering = default_ordering;
   bool rebalance = true;
   bool adjacencies = true;
+  // How the file is opened for collective reads.
+  MpiIoHints hints;
+  // 0: every rank opens the file and reads its rows. M in [1, P]: only the
+  // first rank of each group floor(rM/P) opens it, reads the metadata and its
+  // group's rows (contiguous in every dataset), and sends each rank its own;
+  // M > 1 needs a parallel HDF5. The mesh read is the same either way.
+  int aggregators = 0;
 };
 
 enum class MeshFormat : std::uint8_t { legacy_h5m, soma, soma_amr, unknown };

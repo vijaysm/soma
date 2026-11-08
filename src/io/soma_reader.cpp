@@ -2,8 +2,10 @@
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
 // The SOMA format's reader: each rank reads a contiguous
-// block of parts, owners send their shared entities to the ranks holding
-// copies, and each rank builds its part with the sharing the file gives.
+// block of parts (or, with aggregators, the first rank of its group reads the
+// group's and sends it its own), owners send their shared entities to the
+// ranks holding copies, and each rank builds its part with the sharing the
+// file gives.
 
 #include <algorithm>
 #include <array>
@@ -94,31 +96,203 @@ int rank_of(std::uint64_t q, int p, std::uint64_t n) {
   return static_cast<int>(q * static_cast<std::uint64_t>(p) / n);
 }
 
+template <class T>
+std::vector<T> as(const std::vector<std::byte>& b) {
+  std::vector<T> out(b.size() / sizeof(T));
+  if (!out.empty()) std::memcpy(out.data(), b.data(), out.size() * sizeof(T));
+  return out;
+}
+
+template <class T>
+std::vector<std::byte> bytes_of(const std::vector<T>& v) {
+  std::vector<std::byte> out(v.size() * sizeof(T));
+  if (!out.empty()) std::memcpy(out.data(), v.data(), out.size());
+  return out;
+}
+
+// The lines of a text.
+std::vector<std::string> lines(const std::string& text) {
+  std::vector<std::string> out;
+  for (std::size_t at = 0; at < text.size();) {
+    const std::size_t nl = text.find('\n', at);
+    out.push_back(text.substr(at, nl - at));
+    at = nl == std::string::npos ? text.size() : nl + 1;
+  }
+  return out;
+}
+
+// Rows [first, first + rows) of a dataset of `width` columns into `out`;
+// all of them, the same on every rank, when `whole`.
+struct Read {
+  std::string path;
+  DataType type = DataType::u8;
+  std::size_t width = 1;
+  std::uint64_t first = 0, rows = 0;
+  std::vector<std::byte>* out = nullptr;
+  bool whole = false;
+};
+
+// Rows of a dataset read, from row `first`, of `row_bytes` each.
+struct RowsRead {
+  std::uint64_t first = 0, row_bytes = 0;
+  std::vector<std::byte> data;
+  bool whole = false;
+};
+
+// What a file answered: the attributes and dataset extents asked of it, by
+// query, and the rows read of each dataset. With aggregators, the first rank
+// of a group records one for its group's parts, and each rank of the group
+// reads its part from its slice of it as from the file.
+struct Replica {
+  std::map<std::string, std::vector<std::byte>> answers;
+  std::map<std::string, RowsRead> rows;
+};
+
 // The file and its metadata, read alike on every rank (collectively with
-// MPI-IO).
+// MPI-IO), or a replica of what a file answered.
 class File {
  public:
-  File(const Comm& comm, const fs::path& path, bool collective) {
-    const Id fapl = soma_file::file_access(comm, collective);
+  // Opens the file; what it answers is added to `record` when given.
+  File(const Comm& comm, const fs::path& path, bool collective, const MpiIoHints& hints = {},
+       Replica* record = nullptr)
+      : record_(record) {
+    const Id fapl = soma_file::file_access(comm, collective, false, hints);
     file_ = h5::check(H5Fopen(path.c_str(), H5F_ACC_RDONLY, fapl.get()), "open " + path.string());
     if (H5Lexists(file_.get(), soma_file::root, H5P_DEFAULT) <= 0) bad_file(path.string() + " is not a SOMA file");
     root_ = h5::open_group(file_.get(), soma_file::root);
     dxpl_ = soma_file::transfer(collective);
   }
 
-  [[nodiscard]] hid_t root() const { return root_.get(); }
-  [[nodiscard]] hid_t dxpl() const { return dxpl_.get(); }
-  [[nodiscard]] bool has(const std::string& path) const { return h5::exists(root_.get(), path); }
+  // Answers as `replica` recorded them, without a file.
+  explicit File(Replica replica) : replica_(std::move(replica)) {}
+
+  [[nodiscard]] bool has_amr() const {
+    return !must("amr", answer("amr", [&] { return std::vector<std::byte>(H5Aexists(root_.get(), "amr") > 0); }))
+                .empty();
+  }
+
+  [[nodiscard]] std::vector<std::uint64_t> extent(const std::string& path) const {
+    return as<std::uint64_t>(must(path, answer("x|" + path, [&] { return file_extent(path); })));
+  }
 
   [[nodiscard]] std::vector<std::int64_t> ints(const std::string& object, const char* name) const {
+    return as<std::int64_t>(must(name, answer("i|" + object + "|" + name, [&] { return file_ints(object, name); })));
+  }
+
+  [[nodiscard]] std::optional<std::vector<std::byte>> bytes(const std::string& object, const char* name) const {
+    return answer("b|" + object + "|" + name, [&] { return file_bytes(object, name); });
+  }
+
+  [[nodiscard]] std::string text(const std::string& object, const char* name) const {
+    const auto b = must(name, answer("t|" + object + "|" + name, [&] { return file_text(object, name); }));
+    const auto chars = as<char>(b);
+    return {chars.begin(), chars.end()};
+  }
+
+  // Every read in one transfer: the extents are checked on every rank of
+  // `comm` first, so that a bad file throws on every rank before any data
+  // moves.
+  void read(const Comm& comm, std::vector<Read>& reads) const {
+    std::vector<bool> empty;  // no rows on any rank: not read
+    std::string error;
+    for (const Read& r : reads) {
+      const auto dims = extent(r.path);
+      empty.push_back(dims.size() == 2 && dims[0] == 0);
+      const bool fits = dims.size() == 2 && dims[1] == r.width && r.first <= dims[0] && r.rows <= dims[0] - r.first;
+      if (!fits && error.empty()) error = "/soma/" + r.path + " does not hold the rows its part table gives";
+    }
+    if (comm.allreduce(static_cast<std::int32_t>(error.empty() ? 0 : 1), Op::max) != 0) {
+      bad_file(error.empty() ? "another rank's datasets do not match the part table" : error);
+    }
+    for (Read& r : reads) r.out->resize(r.rows * r.width * soma_file::value_size(r.type));
+    if (replica_) {
+      for (Read& r : reads) {
+        if (r.rows == 0) continue;
+        const auto it = replica_->rows.find(r.path);
+        const std::size_t n = r.out->size();
+        if (it == replica_->rows.end() || r.first < it->second.first ||
+            (r.first - it->second.first) * it->second.row_bytes + n > it->second.data.size()) {
+          bad_file("the rows of /soma/" + r.path + " read for this rank's group do not hold its part's");
+        }
+        const auto at = static_cast<std::ptrdiff_t>((r.first - it->second.first) * it->second.row_bytes);
+        std::copy(it->second.data.begin() + at, it->second.data.begin() + at + static_cast<std::ptrdiff_t>(n),
+                  r.out->begin());
+      }
+      return;
+    }
+    std::vector<Id> ds, spaces, memories;
+    std::vector<hid_t> ids, types, mem, file;
+    std::vector<void*> buffers;
+    for (std::size_t k = 0; k < reads.size(); ++k) {
+      Read& r = reads[k];
+      if (empty[k]) continue;
+      ds.push_back(h5::open_dataset(root_.get(), r.path));
+      Id space = h5::check(H5Dget_space(ds.back().get()), "get a dataspace");
+      Id memory;
+      if (r.rows == 0) {
+        h5::check(H5Sselect_none(space.get()), "select nothing");
+        memory = h5::check(H5Scopy(space.get()), "copy a dataspace");
+        h5::check(H5Sselect_none(memory.get()), "select nothing");
+      } else {
+        const std::array<hsize_t, 2> start{r.first, 0}, count{r.rows, r.width};
+        h5::check(H5Sselect_hyperslab(space.get(), H5S_SELECT_SET, start.data(), nullptr, count.data(), nullptr),
+                  "select rows");
+        memory = h5::check(H5Screate_simple(2, count.data(), nullptr), "create a memory dataspace");
+      }
+      ids.push_back(ds.back().get());
+      types.push_back(soma_file::memory_type(r.type));
+      mem.push_back(memory.get());
+      file.push_back(space.get());
+      buffers.push_back(r.out->empty() ? static_cast<void*>(&r) : r.out->data());
+      spaces.push_back(std::move(space));
+      memories.push_back(std::move(memory));
+    }
+    if (!ids.empty()) {
+#if H5_VERSION_GE(1, 14, 0)
+      h5::check(H5Dread_multi(ids.size(), ids.data(), types.data(), mem.data(), file.data(), dxpl_.get(),
+                              buffers.data()),
+                "read the datasets");
+#else
+      for (std::size_t k = 0; k < ids.size(); ++k) {
+        h5::check(H5Dread(ids[k], types[k], mem[k], file[k], dxpl_.get(), buffers[k]), "read a dataset");
+      }
+#endif
+    }
+    if (record_ != nullptr) {
+      for (const Read& r : reads) {
+        record_->rows[r.path] = {r.first, r.width * soma_file::value_size(r.type), *r.out, r.whole};
+      }
+    }
+  }
+
+ private:
+  // The answer to a query: the file's (recorded when recording), or the
+  // replica's; none for an attribute the file does not have.
+  template <class F>
+  std::optional<std::vector<std::byte>> answer(const std::string& key, F&& ask) const {
+    if (replica_) {
+      const auto it = replica_->answers.find(key);
+      if (it == replica_->answers.end()) return std::nullopt;
+      return it->second;
+    }
+    std::optional<std::vector<std::byte>> a = ask();
+    if (record_ != nullptr && a) record_->answers[key] = *a;
+    return a;
+  }
+  [[nodiscard]] std::vector<std::byte> file_extent(const std::string& path) const {
+    const Id ds = h5::open_dataset(root_.get(), path);
+    std::vector<std::uint64_t> dims;
+    for (const hsize_t n : h5::extent(ds.get(), path)) dims.push_back(n);
+    return bytes_of(dims);
+  }
+  [[nodiscard]] std::vector<std::byte> file_ints(const std::string& object, const char* name) const {
     const Id a = attribute(object, name);
     const Id space = h5::check(H5Aget_space(a.get()), "get the dataspace of an attribute");
     std::vector<std::int64_t> out(static_cast<std::size_t>(H5Sget_simple_extent_npoints(space.get())));
     if (!out.empty()) h5::check(H5Aread(a.get(), H5T_NATIVE_INT64, out.data()), std::string("read ") + name);
-    return out;
+    return bytes_of(out);
   }
-
-  [[nodiscard]] std::optional<std::vector<std::byte>> bytes(const std::string& object, const char* name) const {
+  [[nodiscard]] std::optional<std::vector<std::byte>> file_bytes(const std::string& object, const char* name) const {
     const Id obj = open(object);
     if (H5Aexists(obj.get(), name) <= 0) return std::nullopt;
     const Id a = h5::check(H5Aopen(obj.get(), name, H5P_DEFAULT), std::string("open the attribute ") + name);
@@ -127,17 +301,18 @@ class File {
     if (!out.empty()) h5::check(H5Aread(a.get(), H5T_NATIVE_UINT8, out.data()), std::string("read ") + name);
     return out;
   }
-
-  [[nodiscard]] std::string text(const std::string& object, const char* name) const {
+  [[nodiscard]] std::vector<std::byte> file_text(const std::string& object, const char* name) const {
     const Id a = attribute(object, name);
     const Id type = h5::check(H5Aget_type(a.get()), "get the type of an attribute");
     std::string out(H5Tget_size(type.get()), '\0');
     h5::check(H5Aread(a.get(), type.get(), out.data()), std::string("read ") + name);
     out.resize(std::strlen(out.c_str()));
-    return out;
+    return bytes_of(std::vector<char>(out.begin(), out.end()));
   }
-
- private:
+  [[nodiscard]] static std::vector<std::byte> must(const std::string& what, std::optional<std::vector<std::byte>> a) {
+    if (!a) bad_file("the group's first rank read no " + what + " for this rank");
+    return std::move(*a);
+  }
   [[nodiscard]] Id open(const std::string& object) const {
     return h5::check(H5Oopen(root_.get(), object.empty() ? "." : object.c_str(), H5P_DEFAULT), "open /soma/" + object);
   }
@@ -148,78 +323,9 @@ class File {
   }
 
   Id file_, root_, dxpl_;
+  Replica* record_ = nullptr;
+  std::optional<Replica> replica_;
 };
-
-// Rows [first, first + rows) of a dataset of `width` columns into `out`.
-struct Read {
-  std::string path;
-  DataType type = DataType::u8;
-  std::size_t width = 1;
-  std::uint64_t first = 0, rows = 0;
-  std::vector<std::byte>* out = nullptr;
-};
-
-// Every read in one transfer: the datasets are opened and their extents
-// checked on every rank first, so that a bad file throws on every rank
-// before any data moves.
-void read_all(const Comm& comm, const File& f, std::vector<Read>& reads) {
-  std::vector<Id> ds;
-  std::vector<bool> empty;  // no rows on any rank: not read
-  std::string error;
-  for (Read& r : reads) {
-    ds.push_back(h5::open_dataset(f.root(), r.path));
-    const auto dims = h5::extent(ds.back().get(), r.path);
-    empty.push_back(dims.size() == 2 && dims[0] == 0);
-    const bool fits = dims.size() == 2 && dims[1] == r.width && r.first <= dims[0] && r.rows <= dims[0] - r.first;
-    if (!fits && error.empty()) error = "/soma/" + r.path + " does not hold the rows its part table gives";
-  }
-  if (comm.allreduce(static_cast<std::int32_t>(error.empty() ? 0 : 1), Op::max) != 0) {
-    bad_file(error.empty() ? "another rank's datasets do not match the part table" : error);
-  }
-  std::vector<Id> spaces, memories;
-  std::vector<hid_t> ids, types, mem, file;
-  std::vector<void*> buffers;
-  for (std::size_t k = 0; k < reads.size(); ++k) {
-    Read& r = reads[k];
-    r.out->resize(r.rows * r.width * soma_file::value_size(r.type));
-    if (empty[k]) continue;
-    Id space = h5::check(H5Dget_space(ds[k].get()), "get a dataspace");
-    Id memory;
-    if (r.rows == 0) {
-      h5::check(H5Sselect_none(space.get()), "select nothing");
-      memory = h5::check(H5Scopy(space.get()), "copy a dataspace");
-      h5::check(H5Sselect_none(memory.get()), "select nothing");
-    } else {
-      const std::array<hsize_t, 2> start{r.first, 0}, count{r.rows, r.width};
-      h5::check(H5Sselect_hyperslab(space.get(), H5S_SELECT_SET, start.data(), nullptr, count.data(), nullptr),
-                "select rows");
-      memory = h5::check(H5Screate_simple(2, count.data(), nullptr), "create a memory dataspace");
-    }
-    ids.push_back(ds[k].get());
-    types.push_back(soma_file::memory_type(r.type));
-    mem.push_back(memory.get());
-    file.push_back(space.get());
-    buffers.push_back(r.out->empty() ? static_cast<void*>(&r) : r.out->data());
-    spaces.push_back(std::move(space));
-    memories.push_back(std::move(memory));
-  }
-  if (ids.empty()) return;
-#if H5_VERSION_GE(1, 14, 0)
-  h5::check(H5Dread_multi(ids.size(), ids.data(), types.data(), mem.data(), file.data(), f.dxpl(), buffers.data()),
-            "read the datasets");
-#else
-  for (std::size_t k = 0; k < ids.size(); ++k) {
-    h5::check(H5Dread(ids[k], types[k], mem[k], file[k], f.dxpl(), buffers[k]), "read a dataset");
-  }
-#endif
-}
-
-template <class T>
-std::vector<T> as(const std::vector<std::byte>& b) {
-  std::vector<T> out(b.size() / sizeof(T));
-  if (!out.empty()) std::memcpy(out.data(), b.data(), out.size() * sizeof(T));
-  return out;
-}
 
 // What the root says.
 struct Meta {
@@ -231,7 +337,7 @@ struct Meta {
 };
 
 Meta read_meta(const File& f) {
-  if (H5Aexists(f.root(), "amr") > 0) bad_file("it is an AMR checkpoint, not a mesh (read_soma_amr reads it)");
+  if (f.has_amr()) bad_file("it is an AMR checkpoint, not a mesh (read_soma_amr reads it)");
   const auto m = f.ints("", "meta");
   if (m.size() < 11) bad_file("/soma has no complete meta attribute");
   if (m[0] > soma_file::format_version || m[0] < 1) {
@@ -377,26 +483,27 @@ std::vector<std::vector<GO>> csr(const std::vector<std::int64_t>& counts, const 
   return out;
 }
 
-Parts read_file(const Comm& comm, const File& f) {
+// The ranks [first, last) of `size` whose parts are read together.
+struct Ranks {
+  int first = 0, last = 0, size = 0;
+};
+
+// Reads the parts of `ranks` (collectively over comm) and, when `parse`,
+// lays them out as Parts; without, only the metadata and block are set.
+Parts read_file(const Comm& comm, const File& f, Ranks ranks, bool parse = true) {
   Parts in;
   in.meta = read_meta(f);
   const Meta& m = in.meta;
-  in.block = block_of(comm.rank(), comm.size(), m.parts);
+  in.block = {block_of(ranks.first, ranks.size, m.parts).first, block_of(ranks.last - 1, ranks.size, m.parts).last};
   const Block& b = in.block;
 
   // The part table rows of this block's parts and the one after.
-  const auto columns_text = f.text("parts/offsets", "columns");
-  std::vector<std::string> columns;
-  for (std::size_t at = 0; at < columns_text.size();) {
-    const std::size_t nl = columns_text.find('\n', at);
-    columns.push_back(columns_text.substr(at, nl - at));
-    at = nl == std::string::npos ? columns_text.size() : nl + 1;
-  }
+  const std::vector<std::string> columns = lines(f.text("parts/offsets", "columns"));
   const std::size_t k_count = columns.size();
   std::vector<std::byte> table_bytes;
   {
     std::vector<Read> one{{"parts/offsets", DataType::u64, k_count, b.first, b.last - b.first + 1, &table_bytes}};
-    read_all(comm, f, one);
+    f.read(comm, one);
   }
   const auto table = as<std::uint64_t>(table_bytes);
   std::map<std::string, std::size_t> column_of;
@@ -416,9 +523,8 @@ Parts read_file(const Comm& comm, const File& f) {
     reads.push_back({path, t, width, start(b.first, path), start(b.last, path) - start(b.first, path), &data[path]});
   };
   const auto whole = [&](const std::string& path, DataType t, std::size_t width) {
-    const Id ds = h5::open_dataset(f.root(), path);
-    const auto dims = h5::extent(ds.get(), path);
-    reads.push_back({path, t, width, 0, dims.empty() ? 0 : dims[0], &data[path]});
+    const auto dims = f.extent(path);
+    reads.push_back({path, t, width, 0, dims.empty() ? 0 : dims[0], &data[path], true});
   };
   for (int d = 0; d <= m.dim; ++d) {
     if (!m.written[static_cast<std::size_t>(d)]) continue;
@@ -463,7 +569,8 @@ Parts read_file(const Comm& comm, const File& f) {
   whole("sets/flags", DataType::u8, 1);
   whole("sets/entries", DataType::i64, 3);
   column("sets/members", DataType::i64, 4);
-  read_all(comm, f, reads);
+  f.read(comm, reads);
+  if (!parse) return in;
 
   // Entities, by dimension.
   for (int d = 0; d <= m.dim; ++d) {
@@ -1041,7 +1148,9 @@ void install_sets(HostMesh& mesh, const Parts& in, const std::array<std::vector<
   std::move(b).install(mesh);
 }
 
-void install_values(HostMesh& mesh, const File& f, const Meta& m) {
+// The mesh values the file holds, by name.
+std::vector<std::pair<std::string, MeshValue>> values_of(const File& f, const Meta& m) {
+  std::vector<std::pair<std::string, MeshValue>> out;
   for (std::int64_t i = 0; i < m.values; ++i) {
     const std::string g = value_group(static_cast<std::size_t>(i));
     const auto meta = f.ints(g, "meta");
@@ -1055,26 +1164,224 @@ void install_values(HostMesh& mesh, const File& f, const Meta& m) {
     v.format.nbits = static_cast<int>(meta[5]);
     if (meta[6] != 0) v.default_value = f.bytes(g, "default").value_or(std::vector<std::byte>{});
     if (meta[7] != 0) v.global_value = f.bytes(g, "global").value_or(std::vector<std::byte>{});
-    mesh.values().set(f.text(g, "name"), std::move(v));
+    out.emplace_back(f.text(g, "name"), std::move(v));
   }
+  return out;
 }
 
+void install_values(HostMesh& mesh, const File& f, const Meta& m) {
+  for (auto& [name, v] : values_of(f, m)) mesh.values().set(name, std::move(v));
+}
+
+
+// The part of a group's replica that a rank of it reads, for its block of
+// parts: the datasets read whole, and those parts' rows of the part table
+// and of each other column.
+Replica slice(const Replica& group, Block b) {
+  Replica out;
+  out.answers = group.answers;
+  const auto names = group.answers.find("t|parts/offsets|columns");
+  const auto offsets = group.rows.find("parts/offsets");
+  if (names == group.answers.end() || offsets == group.rows.end()) bad_file("the part table was not read");
+  const auto chars = as<char>(names->second);
+  const std::vector<std::string> columns = lines(std::string(chars.begin(), chars.end()));
+  std::map<std::string, std::size_t> column_of;
+  for (std::size_t k = 0; k < columns.size(); ++k) column_of[columns[k]] = k;
+  const RowsRead& t = offsets->second;
+  const auto table = as<std::uint64_t>(t.data);
+  const auto start = [&](std::uint64_t q, std::size_t k) {
+    const std::size_t at = (q - t.first) * columns.size() + k;
+    if (q < t.first || at >= table.size()) bad_file("the part table rows read do not cover a rank's parts");
+    return table[at];
+  };
+  for (const auto& [path, rows] : group.rows) {
+    std::uint64_t lo = 0, hi = 0;
+    if (rows.whole) {
+      out.rows[path] = rows;
+      continue;
+    }
+    if (path == "parts/offsets") {
+      lo = b.first;
+      hi = b.last + 1;
+    } else if (const auto k = column_of.find(path); k != column_of.end()) {
+      lo = start(b.first, k->second);
+      hi = start(b.last, k->second);
+    } else {
+      bad_file("/soma/" + path + " is read by part but is no column of the part table");
+    }
+    // Rows the group did not read (a bad part table) are left out: the rank's
+    // own read finds the table wrong, as without aggregators.
+    if (lo < rows.first || hi < lo || (hi - rows.first) * rows.row_bytes > rows.data.size()) continue;
+    const auto begin = rows.data.begin() + static_cast<std::ptrdiff_t>((lo - rows.first) * rows.row_bytes);
+    out.rows[path] = {lo, rows.row_bytes,
+                      std::vector<std::byte>(begin, begin + static_cast<std::ptrdiff_t>((hi - lo) * rows.row_bytes)),
+                      false};
+  }
+  return out;
+}
+
+void append_text(std::vector<std::byte>& out, const std::string& s) {
+  append(out, static_cast<std::uint64_t>(s.size()));
+  append(out, std::as_bytes(std::span<const char>(s)));
+}
+
+std::string take_text(Cursor& c) {
+  const auto n = static_cast<std::size_t>(c.take<std::uint64_t>());
+  const auto b = c.bytes(n);
+  return {reinterpret_cast<const char*>(b.data()), n};
+}
+
+std::vector<std::byte> pack(const Replica& r) {
+  std::vector<std::byte> out;
+  append(out, static_cast<std::uint64_t>(r.answers.size()));
+  for (const auto& [key, value] : r.answers) {
+    append_text(out, key);
+    append(out, static_cast<std::uint64_t>(value.size()));
+    append(out, std::span<const std::byte>(value));
+  }
+  append(out, static_cast<std::uint64_t>(r.rows.size()));
+  for (const auto& [path, rows] : r.rows) {
+    append_text(out, path);
+    append(out, rows.first);
+    append(out, rows.row_bytes);
+    append(out, static_cast<std::uint8_t>(rows.whole ? 1 : 0));
+    append(out, static_cast<std::uint64_t>(rows.data.size()));
+    append(out, std::span<const std::byte>(rows.data));
+  }
+  return out;
+}
+
+Replica unpack(std::span<const std::byte> in) {
+  Cursor c{in};
+  Replica r;
+  for (auto n = c.take<std::uint64_t>(); n > 0; --n) {
+    std::string key = take_text(c);
+    const auto b = c.bytes(static_cast<std::size_t>(c.take<std::uint64_t>()));
+    r.answers[std::move(key)] = {b.begin(), b.end()};
+  }
+  for (auto n = c.take<std::uint64_t>(); n > 0; --n) {
+    std::string path = take_text(c);
+    RowsRead rows;
+    rows.first = c.take<std::uint64_t>();
+    rows.row_bytes = c.take<std::uint64_t>();
+    rows.whole = c.take<std::uint8_t>() != 0;
+    const auto b = c.bytes(static_cast<std::size_t>(c.take<std::uint64_t>()));
+    rows.data.assign(b.begin(), b.end());
+    r.rows[std::move(path)] = std::move(rows);
+  }
+  return r;
+}
+
+constexpr int tag_replica_size = 31010;
+constexpr int tag_replica = 31011;
+
+// With aggregators: the first rank of each group alone opens the file
+// (collectively with the other first ranks), reads its group's parts, and
+// sends each rank of the group its slice, a failure's cause instead when it
+// fails; it keeps its own.
+Replica gather_reads(const Comm& comm, const fs::path& path, const SomaReadOptions& options) {
+  const int p = comm.size(), me = comm.rank(), m = options.aggregators;
+  const int leader = soma_file::leader_of(me, m, p);
+  const SplitComm leaders = comm.split(leader == me ? 0 : -1, me);
+  if (leader != me) {
+    std::uint64_t n = 0;
+    Request size = comm.irecv(std::span<std::uint64_t>(&n, 1), leader, tag_replica_size);
+    size.wait();
+    std::vector<std::byte> message(n);
+    Request data = comm.irecv(std::span<std::byte>(message), leader, tag_replica);
+    data.wait();
+    if (message.empty()) bad_file("the group's first rank sent nothing");
+    const auto rest = std::span<const std::byte>(message).subspan(1);
+    if (message[0] == std::byte{0}) {
+      throw std::runtime_error(std::string(reinterpret_cast<const char*>(rest.data()), rest.size()));
+    }
+    return unpack(rest);
+  }
+  int end = me + 1;
+  while (end < p && soma_file::leader_of(end, m, p) == me) ++end;
+  std::string error;
+  Replica group;
+  std::uint64_t parts = 0;
+  try {
+    const h5::Session quiet;
+    try {
+      const File f(leaders.comm(), path, soma_file::parallel_hdf5(), options.hints, &group);
+      const Parts in = read_file(leaders.comm(), f, Ranks{me, end, p}, false);
+      (void)values_of(f, in.meta);  // asked now for the group's ranks
+      parts = in.meta.parts;
+    } catch (const h5::Error& e) {
+      bad_file("cannot read " + path.string() + ": " + e.what());
+    }
+  } catch (const std::exception& e) {
+    error = e.what();
+  }
+  const auto message = [&](int r) {
+    std::vector<std::byte> out{std::byte{1}};
+    if (error.empty()) {
+      try {
+        append(out, std::span<const std::byte>(pack(slice(group, block_of(r, p, parts)))));
+        return out;
+      } catch (const std::exception& e) {
+        error = e.what();
+      }
+    }
+    out.assign(1, std::byte{0});
+    append(out, std::as_bytes(std::span<const char>(error)));
+    return out;
+  };
+  for (int r = me + 1; r < end; ++r) {
+    const std::vector<std::byte> out = message(r);
+    const std::uint64_t n = out.size();
+    Request size = comm.issend(std::span<const std::uint64_t>(&n, 1), r, tag_replica_size);
+    size.wait();
+    Request data = comm.issend(std::span<const std::byte>(out), r, tag_replica);
+    data.wait();
+  }
+  Replica mine;
+  if (error.empty()) mine = slice(group, block_of(me, p, parts));
+  if (!error.empty()) throw std::runtime_error(error);
+  return mine;
+}
 
 }  // namespace
 
 HostMesh read_soma(const Comm& comm, const fs::path& path, const SomaReadOptions& options) {
+  {
+    // The access options, checked and agreed in one reduction.
+    const std::string error = soma_file::access_error(options.hints, options.aggregators, comm.size());
+    const auto h63 = static_cast<std::int64_t>(soma_file::access_hash(options.hints, options.aggregators) >> 1);
+    std::array<std::int64_t, 3> agree{error.empty() ? 0 : 1, h63, -h63};
+    comm.allreduce(std::span<std::int64_t>(agree), Op::max);
+    if (agree[0] != 0) {
+      throw std::invalid_argument(std::string(who) + ": " +
+                                  (error.empty() ? "another rank's options are invalid" : error));
+    }
+    if (agree[1] != -agree[2]) {
+      throw std::invalid_argument(std::string(who) + ": the ranks' aggregators or MPI-IO hints differ");
+    }
+  }
   const bool collective = soma_file::parallel_hdf5() && comm.size() > 1;
+  const Ranks mine{comm.rank(), comm.rank() + 1, comm.size()};
   std::optional<File> f;
   Parts in;
-  collectively(comm, [&] {
-    const h5::Session quiet;
-    try {
-      f.emplace(comm, path, collective);
-      in = read_file(comm, *f);
-    } catch (const h5::Error& e) {
-      bad_file("cannot read " + path.string() + ": " + e.what());
-    }
-  });
+  if (options.aggregators > 0) {
+    Replica replica;
+    collectively(comm, [&] { replica = gather_reads(comm, path, options); });
+    collectively(comm, [&] {
+      f.emplace(std::move(replica));
+      in = read_file(comm, *f, mine);
+    });
+  } else {
+    collectively(comm, [&] {
+      const h5::Session quiet;
+      try {
+        f.emplace(comm, path, collective, options.hints);
+        in = read_file(comm, *f, mine);
+      } catch (const h5::Error& e) {
+        bad_file("cannot read " + path.string() + ": " + e.what());
+      }
+    });
+  }
   collectively(comm, [&] { send_copies(comm, in); });
   HostMesh mesh = build(comm, in, options.ordering);
   if (options.adjacencies && in.meta.graphs != 0) {

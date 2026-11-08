@@ -93,7 +93,8 @@ struct Image {
 // Writes `img` to `path` whole or not at all, collectively over comm; I/O
 // failures throw std::runtime_error naming `writer` and the path on every
 // rank. `compression` is a checked deflate level.
-void write_image(const Comm& comm, const std::filesystem::path& path, Image& img, int compression, const char* writer);
+void write_image(const Comm& comm, const std::filesystem::path& path, Image& img, const SomaWriteOptions& options,
+                 const char* writer);
 
 }  // namespace soma::soma_file
 
