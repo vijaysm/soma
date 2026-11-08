@@ -10,7 +10,7 @@
 //     resolved;
 //   * sharing: build_local_part from each rank's hexes against
 //     resolve_shared_ents (vertices) on the parts as read;
-//   * ghosts: one layer of ghost hexes (add_ghosts against
+//   * ghosts: one layer of ghost hexes, or --layers (add_ghosts against
 //     exchange_ghost_cells);
 //   * halo: an update of a vertex field of 1 and 3 doubles over shared and
 //     ghost vertices (HaloExchange, fused and split into begin and end,
@@ -119,7 +119,7 @@ int main(int argc, char** argv) {
   const soma::ScopeGuard guard(argc, argv);
   const Comm comm = Comm::world();
   bool json = false;
-  int repeats = 5, n = 32, parts = 64;
+  int repeats = 5, n = 32, parts = 64, layers = 1;
   fs::path dir = fs::temp_directory_path();
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
@@ -129,6 +129,8 @@ int main(int argc, char** argv) {
       repeats = std::atoi(argv[++i]);
     } else if (a == "--n" && i + 1 < argc) {
       n = std::atoi(argv[++i]);
+    } else if (a == "--layers" && i + 1 < argc) {
+      layers = std::atoi(argv[++i]);
     } else if (a == "--parts" && i + 1 < argc) {
       parts = std::atoi(argv[++i]);
     } else if (a == "--dir" && i + 1 < argc) {
@@ -207,16 +209,17 @@ int main(int argc, char** argv) {
 
   // ---- ghosts ----
   std::unique_ptr<Moab> mg;
+  const std::string ghosts = layers == 1 ? "ghosts" : "ghosts_" + std::to_string(layers) + "_layers";
   const auto g1 = runner.run(
-      "ghosts", "moab_exchange_ghost_cells", cells,
+      ghosts, "moab_exchange_ghost_cells", cells,
       [&] {
         fresh(mg);
         mg->load(box, true);
       },
-      [&] { check(mg->pc->exchange_ghost_cells(3, 0, 1, 0, true), "exchange_ghost_cells"); });
+      [&] { check(mg->pc->exchange_ghost_cells(3, 0, layers, 0, true), "exchange_ghost_cells"); });
   std::optional<HostMesh> ghosted;
-  const auto g2 = runner.run("ghosts", "soma_add_ghosts", cells, [&] { ghosted.emplace(base->clone()); },
-                             [&] { ghosted->add_ghosts(comm, soma::GhostOptions{1, 0, false}); });
+  const auto g2 = runner.run(ghosts, "soma_add_ghosts", cells, [&] { ghosted.emplace(base->clone()); },
+                             [&] { ghosted->add_ghosts(comm, soma::GhostOptions{layers, 0, false}); });
   runner.compare(g1, g2);
 
   // ---- halo ----
