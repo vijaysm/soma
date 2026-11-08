@@ -529,3 +529,31 @@ TEST(Ghosts, HaloExchangeRefusesAGhostItsOwnerDoesNotOwn) {
   }
   EXPECT_THROW((soma::HaloExchange<Kokkos::HostSpace>(c, m, 2)), std::invalid_argument);
 }
+
+// With every cell on one rank no rank shares, ghosts or gains anything, so
+// add_ghosts leaves the mesh as it is: it routes no more than finding the
+// (empty) ghost targets does, ids and gids stay, and field storage is kept.
+TEST(Ghosts, NothingToGhostLeavesTheMeshAsItIs) {
+  const Comm c = Comm::world();
+  std::map<GO, int> rank_of = cell_ranks(c);
+  for (auto& [cell, r] : rank_of) r = 0;
+  soma::HostMesh m = soma::build_local_part(c, local_builder(rank_of, c.rank()));
+  auto f = m.fields().add_tag<double>("t", 0, 1);
+  const double* before_data = f.view().data();
+  std::array<std::vector<GO>, 3> gids;
+  for (int d = 0; d <= 2; ++d) gids[static_cast<std::size_t>(d)].assign(m.gid(d).data(), m.gid(d).data() + m.count(d));
+  const soma::GhostOptions o{1, 0, false};
+  const auto c0 = soma::detail::comm_counts();
+  (void)soma::detail::ghost_targets(c, m, o);
+  const auto c1 = soma::detail::comm_counts();
+  m.add_ghosts(c, o);
+  const auto c2 = soma::detail::comm_counts();
+  EXPECT_EQ(c2.routes - c1.routes, c1.routes - c0.routes);
+  for (int d = 0; d <= 2; ++d) {
+    EXPECT_EQ(std::vector<GO>(m.gid(d).data(), m.gid(d).data() + m.count(d)), gids[static_cast<std::size_t>(d)]) << d;
+    EXPECT_EQ(m.segment_table(d).shared_end, m.count(d)) << d;
+  }
+  EXPECT_EQ(m.fields().get<double>("t", 0).view().data(), before_data);
+  m.remove_ghosts(c);
+  EXPECT_EQ(m.fields().get<double>("t", 0).view().data(), before_data);
+}

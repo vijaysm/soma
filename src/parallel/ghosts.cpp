@@ -34,7 +34,11 @@ struct Element {
 GhostTargets ghost_targets(const Comm& comm, const HostMesh& mesh, const GhostOptions& options) {
   const int top = mesh.dim(), me = comm.rank(), b = options.bridge_dim;
   const bool sharing = comm.size() == 1 || mesh.fields().contains(sharing_field);
-  std::array<std::int64_t, 5> f{options.layers, -options.layers, b, -b, sharing ? 0 : 1};
+  // With no vertex shared on any rank no element is joined to another
+  // rank's, so there are no targets.
+  const SegmentTable& st = mesh.segment_table(0);
+  std::array<std::int64_t, 6> f{options.layers, -options.layers, b, -b, sharing ? 0 : 1,
+                                st.shared_end > st.interior_end ? 1 : 0};
   comm.allreduce(std::span<std::int64_t>(f), Op::max);
   if (f[0] != -f[1] || f[2] != -f[3]) throw std::invalid_argument("ghost_targets: the ranks' options differ");
   if (options.layers < 0) throw std::invalid_argument("ghost_targets: a negative layer count");
@@ -43,7 +47,7 @@ GhostTargets ghost_targets(const Comm& comm, const HostMesh& mesh, const GhostOp
 
   GhostTargets out;
   out.offsets.assign(static_cast<std::size_t>(mesh.count(top)) + 1, 0);
-  if (options.layers == 0) return out;
+  if (options.layers == 0 || f[5] == 0) return out;
 
   // The other holders of each shared vertex, then of vertices learnt with ghosts.
   const auto vgid = mesh.gid(0);
@@ -225,6 +229,11 @@ void add_ghosts(const Comm& comm, HostMesh& mesh, const GhostOptions& options) {
   check_movable(comm, mesh, "add_ghosts", false, "");
   const GhostTargets targets = ghost_targets(comm, mesh, options);
   const int top = mesh.dim(), me = comm.rank();
+  // Nothing to place when no rank holds copies or ghosts and none gains a
+  // ghost (one rank, say): the rebuild would give the same mesh.
+  std::int32_t change = targets.ranks.empty() ? 0 : 1;
+  for (int d = 0; d <= top; ++d) change = mesh.segment_table(d).owned_end < mesh.count(d) ? 1 : change;
+  if (comm.allreduce(change, Op::max) == 0) return;
   // Each owned element stays here, on the ranks sharing it and on those
   // ghosting it.
   const SegmentTable& t = mesh.segment_table(top);
