@@ -21,6 +21,7 @@
 #include "soma/parallel/transport/sort.hpp"
 #include "soma/topology/build.hpp"
 
+#include "closure.hpp"
 #include "side_keys.hpp"
 
 namespace soma {
@@ -29,6 +30,7 @@ namespace {
 
 void add_sharing_fields(HostMesh& mesh, int dim, const std::vector<Offset>& offsets, const std::vector<int>& ranks,
                         const std::vector<int>& owners);
+void order_and_install(const Comm& comm, HostMesh& mesh, int k, const std::vector<GO>& gids, const Sharing& sharing);
 
 // Installs soma:sharing and soma:owner on dimension `dim` from the sharing of
 // `gids` (the gids given to resolve_sharing, in its order).
@@ -191,7 +193,67 @@ void distribute_dimension(const Comm& comm, HostMesh& mesh, int k, const std::ve
                   : std::binary_search(explicit_ghosts.begin(), explicit_ghosts.end(), gid(e));
     }
   }
-  const Sharing sharing = resolve_sharing(comm, gids, ghost);
+  order_and_install(comm, mesh, k, gids, resolve_sharing(comm, gids, ghost));
+}
+
+// What add_ghosts knows of a dimension it derives again (all of them on
+// every rank): its gids and sharing taken from what the rank held and from
+// what the owners of its ghosts sent, instead of a sort and a directory. An
+// entity is a ghost by the same rule as in distribute_dimension.
+void distribute_known(const Comm& comm, HostMesh& mesh, int k, const std::vector<GO>& explicit_gids,
+                      const std::vector<GO>& explicit_ghosts, const detail::KnownEntities& known) {
+  const LO n = mesh.count(k);
+  const auto gid = mesh.gid(k);
+  const int top = mesh.dim();
+  std::vector<detail::SideKey> sides;
+  for (LO e = 0; e < mesh.segment_table(top).shared_end; ++e) {
+    detail::for_each_side(mesh, top, e, k, [&](const detail::SideKey& key) { sides.push_back(key); });
+  }
+  std::sort(sides.begin(), sides.end());
+  std::vector<GO> gids(static_cast<std::size_t>(n));
+  Sharing sharing;
+  sharing.offsets.push_back(0);
+  sharing.ghost_owner.assign(static_cast<std::size_t>(n), -1);
+  std::string missing;
+  for (LO e = 0; e < n; ++e) {
+    const auto i = static_cast<std::size_t>(e);
+    const bool given = std::binary_search(explicit_gids.begin(), explicit_gids.end(), gid(e));
+    const detail::SideKey key = detail::key_of(mesh, k, e);
+    if (given) {
+      gids[i] = gid(e);
+    } else if (const auto g = known.gid(key)) {
+      gids[i] = *g;
+    } else {
+      missing = "no gid is known for an entity of dimension " + std::to_string(k);
+      sharing.offsets.push_back(static_cast<std::uint32_t>(sharing.ranks.size()));
+      continue;
+    }
+    const bool ghost = given ? std::binary_search(explicit_ghosts.begin(), explicit_ghosts.end(), gids[i])
+                             : !std::binary_search(sides.begin(), sides.end(), key);
+    if (ghost) {
+      const auto owner = known.owner(gids[i]);
+      if (!owner) {
+        missing = "no owner is known for ghost " + std::to_string(gids[i]) + " of dimension " + std::to_string(k);
+      }
+      sharing.ghost_owner[i] = owner.value_or(comm.rank());
+    } else if (const auto row = known.holders(gids[i])) {
+      sharing.ranks.insert(sharing.ranks.end(), row->begin(), row->end());
+    } else {
+      missing = "no holders are known for " + std::to_string(gids[i]) + " of dimension " + std::to_string(k);
+    }
+    sharing.offsets.push_back(static_cast<std::uint32_t>(sharing.ranks.size()));
+  }
+  collectively(comm, "add_ghosts", [&] {
+    if (!missing.empty()) throw std::logic_error("add_ghosts: " + missing);
+  });
+  order_and_install(comm, mesh, k, gids, sharing);
+}
+
+// Orders dimension k by (kind, topology, arity, group), keeping the order
+// within, gives it `gids` and installs its sharing.
+void order_and_install(const Comm& comm, HostMesh& mesh, int k, const std::vector<GO>& gids, const Sharing& sharing) {
+  const LO n = mesh.count(k);
+  const auto off = mesh.conn_offsets(k);
   const std::vector<std::uint32_t> groups = sharing.groups();
   collectively(comm, "build_distributed_adjacencies", [&] {
     // By (kind, topology, arity, group), the derived order within.
@@ -217,9 +279,10 @@ void distribute_dimension(const Comm& comm, HostMesh& mesh, int k, const std::ve
   });
 }
 
-}  // namespace
-
-void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRequest request) {
+// build_distributed_adjacencies, each dimension distributed by
+// distribute(k, explicit gids, explicit ghosts).
+template <class Distribute>
+void build_and_distribute(const Comm& comm, HostMesh& mesh, AdjacencyRequest request, Distribute&& distribute) {
   // Explicit entities of each dimension (in lid order, then sorted), and
   // dimensions already distributed.
   std::array<std::vector<GO>, 4> explicit_gids, before, ghosts;
@@ -250,7 +313,7 @@ void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRe
     const std::int32_t todo = (!done[kk] && mesh.count(k) > 0) || (done[kk] && !same) ? 1 : 0;
     if (comm.allreduce(todo, Op::max) == 0) continue;
     if (done[kk]) uninstall(mesh, k);
-    distribute_dimension(comm, mesh, k, explicit_gids[kk], ghosts[kk]);
+    distribute(k, explicit_gids[kk], ghosts[kk]);
     kept[kk].reset();
   }
   // Dimensions left alone keep their sharing at the new epoch.
@@ -265,6 +328,21 @@ void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRe
     uninstall(mesh, d);
     add_sharing_fields(mesh, d, k->offsets, k->ranks, k->owners);
   }
+}
+
+}  // namespace
+
+void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRequest request) {
+  build_and_distribute(comm, mesh, request, [&](int k, const std::vector<GO>& given, const std::vector<GO>& ghosts) {
+    distribute_dimension(comm, mesh, k, given, ghosts);
+  });
+}
+
+void detail::build_known_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRequest request,
+                                     const std::array<KnownEntities, 4>& known) {
+  build_and_distribute(comm, mesh, request, [&](int k, const std::vector<GO>& given, const std::vector<GO>& ghosts) {
+    distribute_known(comm, mesh, k, given, ghosts, known[static_cast<std::size_t>(k)]);
+  });
 }
 
 HostMesh build_local_part(const Comm& comm, MeshBuilder&& builder, Ordering ordering) {

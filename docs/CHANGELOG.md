@@ -360,7 +360,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   derived sides of ghost elements only are ghosts. `HaloExchange::update` writes ghosts,
   `reduce` leaves them. Parity with MOAB's `exchange_ghost_cells` for the first layer.
   `add_ghosts` returns after one reduction when no rank has anything to ghost and none holds
-  ghosts.
+  ghosts. It sends each ghosting rank its ghosts' closures (after owners give the copies of
+  their shared entities what they hold) and builds the part from them and what the rank holds,
+  with the sharing known and field values and set memberships asked of their owners: no gid
+  directory, about 1.7 times faster at 2 to 8 ranks, and the same part entity for entity as
+  rebuilding it through directories (`detail::add_ghosts_by_rebuild`). An entity held only for
+  an explicit edge (such an edge's far corner) is no longer lost when another rank ghosts it.
 - `build_distributed_adjacencies` keeps the sharing of the dimensions it does not extend when
   deriving beside explicit entities renews the epoch.
 - `permute_entities(mesh, dim, new_of_old, table, gids)` reorders one dimension with

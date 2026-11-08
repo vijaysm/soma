@@ -14,6 +14,8 @@
 #include <gtest/gtest.h>
 
 #include "distributed_fixture.hpp"
+#include "distributed_parts.hpp"
+#include "mesh_text.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/mesh_edit.hpp"
 #include "soma/core/set_builder.hpp"
@@ -557,3 +559,130 @@ TEST(Ghosts, NothingToGhostLeavesTheMeshAsItIs) {
   m.remove_ghosts(c);
   EXPECT_EQ(m.fields().get<double>("t", 0).view().data(), before_data);
 }
+
+namespace {
+
+// Where two parts differ entity for entity, or "": per dimension the gids by
+// lid, the segments, the sharing and owners, then the held graphs by lid and
+// everything else by gid.
+std::string exact_difference(const soma::HostMesh& a, const soma::HostMesh& b, int me) {
+  if (a.dim() != b.dim()) return "dimension";
+  for (int d = 0; d <= a.dim(); ++d) {
+    const std::string at = " of dimension " + std::to_string(d);
+    if (a.count(d) != b.count(d)) return "count" + at;
+    const soma::SegmentTable &x = a.segment_table(d), &y = b.segment_table(d);
+    if (x.segments != y.segments || x.interior_end != y.interior_end || x.owned_end != y.owned_end ||
+        x.shared_end != y.shared_end) {
+      return "segments" + at;
+    }
+    for (LO e = 0; e < a.count(d); ++e) {
+      if (a.gid(d)(e) != b.gid(d)(e)) return "gid of " + std::to_string(e) + at;
+      if (owner_of(a, d, e, me) != owner_of(b, d, e, me)) return "owner of " + std::to_string(e) + at;
+      if (e >= x.interior_end && e < x.shared_end && sharing_of(a, d, e) != sharing_of(b, d, e)) {
+        return "sharing of " + std::to_string(e) + at;
+      }
+    }
+  }
+  if (a.adjacencies().bits() != b.adjacencies().bits()) return "graphs held";
+  for (int from = 0; from <= a.dim(); ++from) {
+    for (int to = 0; to <= a.dim(); ++to) {
+      if (from == to || to == 0 || !a.has_adjacency(from, to)) continue;
+      const auto g = a.adjacency(from, to), h = b.adjacency(from, to);
+      const std::string graph = "graph " + std::to_string(from) + " -> " + std::to_string(to);
+      const auto differ = [](const auto& u, const auto& v) -> std::string {
+        if (u.extent(0) != v.extent(0)) return " in length";
+        for (std::size_t i = 0; i < u.extent(0); ++i) {
+          if (u(i) != v(i)) return " at " + std::to_string(i);
+        }
+        return "";
+      };
+      if (const std::string w = differ(g.offsets, h.offsets); !w.empty()) return graph + " offsets" + w;
+      if (const std::string w = differ(g.targets, h.targets); !w.empty()) return graph + " targets" + w;
+      if (const std::string w = differ(g.codes, h.codes); !w.empty()) return graph + " codes" + w;
+    }
+  }
+  return mesh_difference(a, b);
+}
+
+}  // namespace
+
+// add_ghosts sends each ghosting rank its ghosts' closures and builds the
+// part from them: the part, entity for entity, that rebuilding it through
+// the directories gives, on every partition and kind of part, adding ghosts
+// to a part that has some and removing them. (The grid with extras only on
+// the curve partition: on the others the rebuild moves the diagonal edge to
+// a rank ghosting both its corners; see the next test.)
+TEST(Ghosts, AddGhostsBuildsWhatTheRebuildBuilds) {
+  const Comm c = Comm::world();
+  const int me = c.rank();
+  for (int kind = 0; kind < 4; ++kind) {
+    const std::map<GO, int> rank_of = partition(c, kind);
+    std::vector<GO> cells;
+    for (const auto& [cell, r] : rank_of) {
+      if (r == me) cells.push_back(cell);
+    }
+    for (int part = 0; part < 6; ++part) {
+      if (part == 2 && kind != 0) continue;
+      soma::HostMesh m;
+      if (part == 0 || part == 5) {
+        m = soma::build_local_part(c, local_builder(rank_of, me));
+        soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
+        decorate(m);
+      } else if (part == 1) {
+        m = soma::build_local_part(c, local_builder(rank_of, me));
+        soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1).add(0, 2));
+        add_fields(m, me);
+      } else if (part == 2) {
+        m = grid_with_extras(c, rank_of);
+        add_sets(m);
+      } else if (part == 3) {
+        m = soma::build_local_part(c, cells_with_edges_builder(cells));
+        soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(2, 1));
+      } else {
+        m = soma::build_local_part(c, quad9_builder(rank_of, me));
+      }
+      if (part == 5) {  // each segment reversed
+        for (int d = 0; d <= 2; ++d) {
+          const soma::SegmentTable t = m.segment_table(d);
+          std::vector<LO> p(static_cast<std::size_t>(m.count(d)));
+          for (const soma::Segment& g : t.segments) {
+            for (LO e = g.begin; e < g.end; ++e) p[static_cast<std::size_t>(e)] = g.begin + (g.end - 1 - e);
+          }
+          soma::permute_entities(m, d, p, t);
+        }
+      }
+      for (const soma::GhostOptions o : {soma::GhostOptions{1, 0, false}, soma::GhostOptions{2, 1, true},
+                                         soma::GhostOptions{1, 1, true}, soma::GhostOptions{2, 0, false},
+                                         soma::GhostOptions{0, 0, false}}) {
+        SCOPED_TRACE(testing::Message() << "partition " << kind << ", part " << part << ", layers " << o.layers
+                                        << ", bridge " << o.bridge_dim << ", sets " << o.sets);
+        soma::HostMesh want = m.clone();
+        soma::detail::add_ghosts_by_rebuild(c, want, o);
+        m.add_ghosts(c, o);  // on top of the ghosts the last options gave
+        EXPECT_EQ(exact_difference(m, want, me), "");
+      }
+    }
+  }
+}
+
+// Entities held other than as ghosts stay held, with their ids, whatever
+// else holds their vertices as ghosts: the diagonal edge (whose far corner a
+// rank holds only for it) and the free vertex too.
+TEST(Ghosts, AddGhostsKeepsWhatARankHoldsOnlyForAnEdge) {
+  const Comm c = Comm::world();
+  for (int kind = 0; kind < 4; ++kind) {
+    const std::map<GO, int> rank_of = partition(c, kind);
+    for (int layers = 1; layers <= 2; ++layers) {
+      SCOPED_TRACE(testing::Message() << "partition " << kind << ", layers " << layers);
+      soma::HostMesh m = grid_with_extras(c, rank_of);
+      add_sets(m);
+      const Held before = held(m);
+      m.add_ghosts(c, soma::GhostOptions{layers, 0, true});
+      expect_held(m, before);
+      m.remove_ghosts(c);
+      expect_held(m, before);
+      for (int d = 0; d <= 2; ++d) EXPECT_EQ(m.count(d), before.table[static_cast<std::size_t>(d)].shared_end);
+    }
+  }
+}
+
