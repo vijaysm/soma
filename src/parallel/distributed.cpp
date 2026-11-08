@@ -28,8 +28,7 @@ namespace soma {
 
 namespace {
 
-void add_sharing_fields(HostMesh& mesh, int dim, const std::vector<Offset>& offsets, const std::vector<int>& ranks,
-                        const std::vector<int>& owners);
+using detail::add_sharing_fields;
 void order_and_install(const Comm& comm, HostMesh& mesh, int k, const std::vector<GO>& gids, const Sharing& sharing);
 
 // Installs soma:sharing and soma:owner on dimension `dim` from the sharing of
@@ -54,23 +53,6 @@ void install(HostMesh& mesh, const Comm& comm, int dim, std::span<const GO> gids
   for (LO e = t.owned_end; e < t.shared_end; ++e) owners.push_back(sharing.owner(find(gid(e)), comm.rank()));
   for (LO e = t.shared_end; e < mesh.count(dim); ++e) owners.push_back(sharing.owner(find(gid(e)), comm.rank()));
   add_sharing_fields(mesh, dim, offsets, ranks, owners);
-}
-
-// soma:sharing (rows over the shared entities) and soma:owner (over the
-// copies and ghosts) of dimension `dim`.
-void add_sharing_fields(HostMesh& mesh, int dim, const std::vector<Offset>& offsets, const std::vector<int>& ranks,
-                        const std::vector<int>& owners) {
-  const SegmentTable& t = mesh.segment_table(dim);
-  SegmentFilter shared;
-  shared.ownership = SegmentFilter::Own::shared;
-  std::vector<LO> others(static_cast<std::size_t>(mesh.count(dim) - t.owned_end));
-  std::iota(others.begin(), others.end(), t.owned_end);
-  auto& reg = mesh.fields();
-  reg.add_var<int>(sharing_field, make_space(mesh, Domain<Kokkos::HostSpace>::segments(mesh, dim, shared), Layout::per_entity()),
-                   offsets, ranks);
-  auto owner = reg.add<int>(owner_field,
-                            make_space(mesh, Domain<Kokkos::HostSpace>::from_list(mesh, dim, others), Layout::per_entity()), 1);
-  for (std::size_t r = 0; r < owners.size(); ++r) owner.view()(r, 0) = owners[r];
 }
 
 bool has_sharing(const HostMesh& mesh, int dim) {
@@ -331,6 +313,22 @@ void build_and_distribute(const Comm& comm, HostMesh& mesh, AdjacencyRequest req
 }
 
 }  // namespace
+
+void detail::add_sharing_fields(HostMesh& mesh, int dim, const std::vector<Offset>& offsets,
+                                const std::vector<int>& ranks, const std::vector<int>& owners) {
+  const SegmentTable& t = mesh.segment_table(dim);
+  SegmentFilter shared;
+  shared.ownership = SegmentFilter::Own::shared;
+  std::vector<LO> others(static_cast<std::size_t>(mesh.count(dim) - t.owned_end));
+  std::iota(others.begin(), others.end(), t.owned_end);
+  auto& reg = mesh.fields();
+  reg.add_var<int>(sharing_field,
+                   make_space(mesh, Domain<Kokkos::HostSpace>::segments(mesh, dim, shared), Layout::per_entity()),
+                   offsets, ranks);
+  auto owner = reg.add<int>(
+      owner_field, make_space(mesh, Domain<Kokkos::HostSpace>::from_list(mesh, dim, others), Layout::per_entity()), 1);
+  for (std::size_t r = 0; r < owners.size(); ++r) owner.view()(r, 0) = owners[r];
+}
 
 void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRequest request) {
   build_and_distribute(comm, mesh, request, [&](int k, const std::vector<GO>& given, const std::vector<GO>& ghosts) {

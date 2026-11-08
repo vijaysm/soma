@@ -575,6 +575,12 @@ std::string exact_difference(const soma::HostMesh& a, const soma::HostMesh& b, i
         x.shared_end != y.shared_end) {
       return "segments" + at;
     }
+    if (d == 0) {
+      for (const soma::Ownership k : {soma::Ownership::interior, soma::Ownership::shared, soma::Ownership::shared_copy,
+                                      soma::Ownership::ghost}) {
+        if (a.corner_end(k) != b.corner_end(k)) return "corner end of kind " + std::to_string(static_cast<int>(k));
+      }
+    }
     for (LO e = 0; e < a.count(d); ++e) {
       if (a.gid(d)(e) != b.gid(d)(e)) return "gid of " + std::to_string(e) + at;
       if (owner_of(a, d, e, me) != owner_of(b, d, e, me)) return "owner of " + std::to_string(e) + at;
@@ -686,3 +692,38 @@ TEST(Ghosts, AddGhostsKeepsWhatARankHoldsOnlyForAnEdge) {
   }
 }
 
+
+// Cells held on two ranks (each rank also holds the first cell of the next):
+// no rank holding a cell ghosts it, and the part is the rebuild's.
+TEST(Ghosts, CellsHeldOnTwoRanksAreNotGhostedThere) {
+  const Comm c = Comm::world();
+  const int me = c.rank(), p = c.size();
+  for (int kind = 0; kind < 4; ++kind) {
+    const std::map<GO, int> rank_of = partition(c, kind);
+    std::vector<GO> cells;
+    std::map<int, GO> first;
+    for (const auto& [cell, r] : rank_of) {
+      if (r == me) cells.push_back(cell);
+      first.emplace(r, cell);
+    }
+    const auto next = first.find((me + 1) % p);
+    if (next != first.end() && rank_of.at(next->second) != me) cells.push_back(next->second);
+    for (int layers = 1; layers <= 2; ++layers) {
+      SCOPED_TRACE(testing::Message() << "partition " << kind << ", layers " << layers);
+      soma::HostMesh m = soma::build_local_part(c, cells_builder(cells));
+      const soma::detail::GhostTargets t = soma::detail::ghost_targets(c, m, soma::GhostOptions{layers, 0});
+      const soma::SegmentTable& s = m.segment_table(2);
+      for (LO e = 0; e < s.owned_end; ++e) {
+        const std::vector<int> holders = e < s.interior_end ? std::vector<int>{} : sharing_of(m, 2, e);
+        for (const int r : t.of(e)) {
+          EXPECT_NE(r, me) << "cell " << m.gid(2)(e);
+          EXPECT_EQ(std::count(holders.begin(), holders.end(), r), 0) << "cell " << m.gid(2)(e) << ", rank " << r;
+        }
+      }
+      soma::HostMesh want = m.clone();
+      soma::detail::add_ghosts_by_rebuild(c, want, soma::GhostOptions{layers, 0, false});
+      m.add_ghosts(c, soma::GhostOptions{layers, 0, false});
+      EXPECT_EQ(exact_difference(m, want, me), "");
+    }
+  }
+}

@@ -385,9 +385,9 @@ std::uint64_t key_of(int d, GO g) { return static_cast<std::uint64_t>(g) << 2 | 
 // owned the entity, handed to every rank of the new part holding it. A
 // delivered row is (dimension, lid on the part, depositing rank) as int32,
 // then the record; rows come in no particular order. With `direct`, each
-// rank asks the owner the part names (soma:owner) for each entity, and the
-// owner answers with its records; else records meet the asks at a
-// directory.
+// rank asks the owner the part names (soma:owner) for each copy and ghost,
+// and the owner answers with its records; the rank answers for what it
+// owns itself. Else records meet the asks at a directory.
 constexpr std::size_t delivered_header = 3 * sizeof(std::int32_t);
 
 // The owner of each entity of dimension d of a part, by lid.
@@ -410,6 +410,8 @@ Batch deliver(const Comm& comm, const HostMesh& part, const std::vector<std::uin
   const auto directory_of = [p](std::uint64_t k) { return transport::owner(k, p); };
   const std::size_t answer_width = sizeof(std::uint64_t) + sizeof(std::int32_t) + width;
   Batch got;
+  std::vector<std::tuple<std::int32_t, LO, std::size_t>> local;  // (dimension, lid, record)
+  std::array<std::vector<std::pair<GO, LO>>, 4> lid;
   if (direct) {
     std::vector<std::pair<std::uint64_t, std::size_t>> mine(keys.size());  // (key, record)
     for (std::size_t i = 0; i < keys.size(); ++i) mine[i] = {keys[i], i};
@@ -417,12 +419,23 @@ Batch deliver(const Comm& comm, const HostMesh& part, const std::vector<std::uin
     std::vector<std::uint64_t> asked;
     std::vector<int> to;
     for (int d = 0; d <= part.dim(); ++d) {
-      if (dims[static_cast<std::size_t>(d)] == 0) continue;
+      const auto dd = static_cast<std::size_t>(d);
+      if (dims[dd] == 0) continue;
       const std::vector<int> owner = owners_of(comm, part, d);
-      for (LO e = 0; e < part.count(d); ++e) {
+      const LO owned = part.segment_table(d).owned_end;
+      for (LO e = 0; e < owned; ++e) {
+        const std::uint64_t k = key_of(d, part.gid(d)(e));
+        for (auto it = std::lower_bound(mine.begin(), mine.end(), std::pair<std::uint64_t, std::size_t>{k, 0});
+             it != mine.end() && it->first == k; ++it) {
+          local.emplace_back(d, e, it->second);
+        }
+      }
+      for (LO e = owned; e < part.count(d); ++e) {
         asked.push_back(key_of(d, part.gid(d)(e)));
         to.push_back(owner[static_cast<std::size_t>(e)]);
+        lid[dd].emplace_back(part.gid(d)(e), e);
       }
+      std::sort(lid[dd].begin(), lid[dd].end());
     }
     const Batch asks =
         route(comm, to, sizeof(std::uint64_t), [&](std::size_t i, std::byte* row) { put(row, 0, asked[i]); });
@@ -488,11 +501,12 @@ Batch deliver(const Comm& comm, const HostMesh& part, const std::vector<std::uin
     });
   }
 
-  std::array<std::vector<std::pair<GO, LO>>, 4> lid;
-  for (int d = 0; d <= part.dim(); ++d) {
-    if (dims[static_cast<std::size_t>(d)] != 0) lid[static_cast<std::size_t>(d)] = lids_by_gid(part, d);
+  if (!direct) {
+    for (int d = 0; d <= part.dim(); ++d) {
+      if (dims[static_cast<std::size_t>(d)] != 0) lid[static_cast<std::size_t>(d)] = lids_by_gid(part, d);
+    }
   }
-  Batch out(got.size(), delivered_header + width, "soma::migrate");
+  Batch out(got.size() + local.size(), delivered_header + width, "soma::migrate");
   for (std::size_t i = 0; i < got.size(); ++i) {
     const std::byte* row = &got.payload(i, 0);
     const auto k = take<std::uint64_t>(row, 0);
@@ -504,6 +518,14 @@ Batch deliver(const Comm& comm, const HostMesh& part, const std::vector<std::uin
     put(o, 0, static_cast<std::int32_t>(d));
     put(o, sizeof(std::int32_t), static_cast<std::int32_t>(it->second));
     std::memcpy(o + 2 * sizeof(std::int32_t), row + sizeof(std::uint64_t), sizeof(std::int32_t) + width);
+  }
+  for (std::size_t i = 0; i < local.size(); ++i) {
+    const auto [d, e, k] = local[i];
+    std::byte* o = &out.payload(got.size() + i, 0);
+    put(o, 0, d);
+    put(o, sizeof(std::int32_t), static_cast<std::int32_t>(e));
+    put(o, 2 * sizeof(std::int32_t), static_cast<std::int32_t>(comm.rank()));
+    if (width > 0) fill(k, o + delivered_header);
   }
   return out;
 }

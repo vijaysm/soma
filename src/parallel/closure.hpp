@@ -85,6 +85,11 @@ void build_known_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRequest 
 // builds: what a part built again must build. Collective.
 [[nodiscard]] AdjacencyRequest graphs_to_rebuild(const Comm& comm, const HostMesh& mesh);
 
+// soma:sharing (rows over the shared entities: the other ranks holding each)
+// and soma:owner (over the copies and ghosts) of dimension `dim`.
+void add_sharing_fields(HostMesh& mesh, int dim, const std::vector<Offset>& offsets, const std::vector<int>& ranks,
+                        const std::vector<int>& owners);
+
 // Collective: the sets, fields and mesh values of `mesh` on `part`, a part
 // built of its entities. Each entity's set memberships and field values are
 // those its owner held, asked of the owner `part` names when `direct`, else

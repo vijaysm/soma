@@ -362,11 +362,17 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `reduce` leaves them. Parity with MOAB's `exchange_ghost_cells` for the first layer.
   `add_ghosts` returns after one reduction when no rank has anything to ghost and none holds
   ghosts. It sends each ghosting rank its ghosts' closures (after owners give the copies of
-  their shared entities what they hold) and builds the part from them and what the rank holds,
-  with the sharing known and field values and set memberships asked of their owners: no gid
-  directory, about 1.7 times faster at 2 to 8 ranks, and the same part entity for entity as
-  rebuilding it through directories (`detail::add_ghosts_by_rebuild`). An entity held only for
-  an explicit edge (such an edge's far corner) is no longer lost when another rank ghosts it.
+  their shared entities what they hold) and appends them to what the rank holds, which stays in
+  place: only the ghosts are ordered (as the part built whole orders them) and only the ghosts'
+  own sides are derived. The rounds start from the elements with a shared vertex, index the
+  sides of those within `layers - 1` of them, and skip telling vertex holders in the last
+  round; field values and set memberships are asked of owners for copies and ghosts only. So
+  the cost follows the ghost layer, not the part, with no gid directory: on a 64^3 box one
+  layer takes 34 to 41 ms at 2 to 8 ranks (281 to 115 ms before), as MOAB's
+  `exchange_ghost_cells` at 8 ranks, two layers 56 to 87 ms, below MOAB's at 4 and 8. The part
+  is the one rebuilding it through directories gives (`detail::add_ghosts_by_rebuild`), entity
+  for entity. An entity held only for an explicit edge (such an edge's far corner) is no
+  longer lost when another rank ghosts it.
 - `build_distributed_adjacencies` keeps the sharing of the dimensions it does not extend when
   deriving beside explicit entities renews the epoch.
 - `permute_entities(mesh, dim, new_of_old, table, gids)` reorders one dimension with

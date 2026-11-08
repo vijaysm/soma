@@ -42,8 +42,9 @@ struct GhostTargets {
 // Collective: one round per layer. A rank sends each side of dimension
 // bridge_dim of its frontier elements to every other holder of the side's
 // lowest vertex (from soma:sharing, or as told with a ghost); each holder
-// answers with the elements it owns that have the side and the holders of
-// their vertices; the asker keeps those it does not hold. Every owner of an
+// answers with the elements it owns that have the side and, but in the last
+// round, the holders of their vertices; the asker keeps those it does not
+// hold. Every owner of an
 // answer holds that vertex, so answers come from any rank, however thin the
 // parts between. Throws std::invalid_argument on every rank for options that
 // differ between ranks, a negative layer count, a bridge_dim outside
