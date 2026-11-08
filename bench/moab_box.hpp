@@ -75,7 +75,9 @@ inline std::filesystem::path write_partitioned_box(const std::filesystem::path& 
   std::vector<int> ids(verts.size());
   for (std::size_t i = 0; i < ids.size(); ++i) ids[i] = static_cast<int>(i) + 1;
   check(mb.tag_set_data(gid, verts, ids.data()), "tag_set_data GLOBAL_ID");
-  const auto v = [&](std::size_t i, std::size_t j, std::size_t k) { return verts[i + m * (j + m * k)]; };
+  const auto v = [&](std::size_t i, std::size_t j, std::size_t k) {
+    return verts[static_cast<moab::EntityID>(i + m * (j + m * k))];
+  };
   moab::Tag part = nullptr;
   const int none = -1;
   check(mb.tag_get_handle("PARALLEL_PARTITION", 1, moab::MB_TYPE_INTEGER, part, moab::MB_TAG_SPARSE | moab::MB_TAG_CREAT,
