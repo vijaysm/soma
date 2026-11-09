@@ -223,6 +223,7 @@ void set_offset(const fs::path& p, hsize_t row, hsize_t column, std::uint64_t va
   H5Fclose(f);
 }
 
+#if SOMA_ENABLE_MPI
 // Rewrites a dataset of doubles of a file as big-endian doubles, the same
 // values.
 void make_big_endian(const fs::path& p, const char* path) {
@@ -239,6 +240,7 @@ void make_big_endian(const fs::path& p, const char* path) {
   H5Sclose(space);
   H5Fclose(f);
 }
+#endif
 
 std::size_t files_in(const fs::path& dir) {
   return static_cast<std::size_t>(std::distance(fs::directory_iterator(dir), fs::directory_iterator()));
