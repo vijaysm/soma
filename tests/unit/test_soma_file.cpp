@@ -223,6 +223,23 @@ void set_offset(const fs::path& p, hsize_t row, hsize_t column, std::uint64_t va
   H5Fclose(f);
 }
 
+// Rewrites a dataset of doubles of a file as big-endian doubles, the same
+// values.
+void make_big_endian(const fs::path& p, const char* path) {
+  const hid_t f = H5Fopen(p.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  hid_t ds = H5Dopen2(f, path, H5P_DEFAULT);
+  const hid_t space = H5Dget_space(ds);
+  std::vector<double> v(static_cast<std::size_t>(H5Sget_simple_extent_npoints(space)));
+  H5Dread(ds, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, v.data());
+  H5Dclose(ds);
+  H5Ldelete(f, path, H5P_DEFAULT);
+  ds = H5Dcreate2(f, path, H5T_IEEE_F64BE, space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  H5Dwrite(ds, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, v.data());
+  H5Dclose(ds);
+  H5Sclose(space);
+  H5Fclose(f);
+}
+
 std::size_t files_in(const fs::path& dir) {
   return static_cast<std::size_t>(std::distance(fs::directory_iterator(dir), fs::directory_iterator()));
 }
@@ -502,6 +519,53 @@ TEST(SomaFile, PartsReadAtEveryRankCountAreTheMeshWritten) {
 #endif
 }
 
+// Answers to the file's questions longer than one broadcast carries (a mesh
+// value of 200 KB) reach every rank whole, with and without aggregators.
+TEST(SomaFile, LongMetadataReachesEveryRank) {
+#if !SOMA_ENABLE_MPI
+  GTEST_SKIP() << "needs MPI";
+#else
+  const Comm c = Comm::world();
+  const Scratch dir(c);
+  HostMesh m = rich_part(c, 0);
+  std::vector<std::uint8_t> bytes(200000);
+  for (std::size_t i = 0; i < bytes.size(); ++i) bytes[i] = static_cast<std::uint8_t>((i * 7 + i / 251) & 0xff);
+  soma::MeshValue v;
+  v.type = soma::DataType::u8;
+  v.ncomp = static_cast<int>(bytes.size());
+  v.global_value = soma::MeshValue::bytes_of(std::span<const std::uint8_t>(bytes));
+  m.values().set("long", v);
+  const fs::path out = dir.path("long.soma");
+  soma::write_soma(c, m, out);
+  const HostMesh oracle = all_to(c, m, 0);
+  const HostMesh read = all_to(c, soma::read_soma(c, out), 0);
+  if (c.rank() == 0) EXPECT_EQ(difference_of(read, oracle), "");
+  const HostMesh through = soma::read_soma(c, out, {.aggregators = some_aggregators(c.size())});
+  EXPECT_EQ(through.values().at("long").global_value, v.global_value);
+  const HostMesh gathered = all_to(c, through, 0);
+  if (c.rank() == 0) EXPECT_EQ(difference_of(gathered, oracle), "");
+#endif
+}
+
+// A dataset stored in another byte order than the one read (vertex
+// coordinates as big-endian doubles) is read through HDF5, converted.
+TEST(SomaFile, DatasetsInAnotherByteOrderAreConverted) {
+#if !SOMA_ENABLE_MPI
+  GTEST_SKIP() << "needs MPI";
+#else
+  const Comm c = Comm::world();
+  const Scratch dir(c);
+  const HostMesh m = rich_part(c, 0);
+  const fs::path out = dir.path("big.soma");
+  soma::write_soma(c, m, out);
+  if (c.rank() == 0) make_big_endian(out, "soma/dim0/coords");
+  c.barrier();
+  const HostMesh oracle = all_to(c, m, 0);
+  const HostMesh read = all_to(c, soma::read_soma(c, out), 0);
+  if (c.rank() == 0) EXPECT_EQ(difference_of(read, oracle), "");
+#endif
+}
+
 // With MPI-IO and through rank 0 the ranks write the same datasets and
 // attributes; ghosts are not written.
 TEST(SomaFile, BothSinksAndGhostedPartsWriteTheSameFile) {
@@ -720,8 +784,14 @@ TEST(SomaFile, CollectivesDoNotGrowWithFieldsOrRanks) {
   EXPECT_EQ(r1, r2);
   EXPECT_EQ(r1.second, 1u);
   // Agreeing the options, checking the reads, the owners' exchange (two),
-  // checking the build, and checking the install.
-  EXPECT_EQ(r1.first, 6u);
+  // checking the build, and checking the install; with MPI-IO on more than
+  // one rank, the first rank's answers to the file's questions besides.
+#ifdef H5_HAVE_PARALLEL
+  const std::uint64_t answers = c.size() > 1 ? 1 : 0;
+#else
+  const std::uint64_t answers = 0;
+#endif
+  EXPECT_EQ(r1.first, 6u + answers);
   // Aggregators add a split and an agreement, and the first ranks' reads.
   const soma::SomaReadOptions through{.adjacencies = false, .aggregators = 1};
   const auto g1 = counted([&] { (void)soma::read_soma(c, dir.path("plain.soma"), through); });

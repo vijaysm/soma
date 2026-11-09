@@ -410,7 +410,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   N parts at P ranks, part q on rank floor(qP/N). Owners send their shared entities, with
   field values and set memberships, to the ranks holding copies, and the sharing comes from
   the file: a restart read (N = P) gives each rank the part it wrote with 6 collectives and
-  one routed exchange. With N < P, `rebalance` migrates elements by the curve so every rank
+  one routed exchange, 7 with MPI-IO at P > 1. There the file is opened once, collectively,
+  and rank 0 alone reads its metadata and where each dataset's rows are, sent to every rank
+  in one broadcast; every rank then reads its rows in one collective MPI-IO read on the file
+  HDF5 opened. HDF5 itself makes 4 broadcasts (opening the file) instead of 63, and the other
+  ranks no metadata reads. Compressed datasets, or those stored in another type or byte order,
+  are read through HDF5. With N < P, `rebalance` migrates elements by the curve so every rank
   gets some. The result equals the mesh written by gid: entities, coordinates, connectivity,
   nodes, sets in order, fields with domains, defaults, global values and formats, mesh values;
   derived dimensions not written are derived again.

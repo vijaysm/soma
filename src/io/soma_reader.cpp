@@ -154,23 +154,46 @@ struct Replica {
   std::map<std::string, RowsRead> rows;
 };
 
-// The file and its metadata, read alike on every rank (collectively with
-// MPI-IO), or a replica of what a file answered.
+// The file and its metadata, read alike on every rank, or a replica of what a
+// file answered. Over more than one rank with MPI-IO the metadata is shared:
+// the file is opened once, collectively, and the first rank alone asks it
+// every question (see share_answers); the others take its answers, and every
+// rank reads the rows straight from the file in one collective MPI-IO read
+// where a dataset is stored as the rows it holds.
 class File {
  public:
   // Opens the file; what it answers is added to `record` when given.
   File(const Comm& comm, const fs::path& path, bool collective, const MpiIoHints& hints = {},
        Replica* record = nullptr)
-      : record_(record) {
-    const Id fapl = soma_file::file_access(comm, collective, false, hints);
+      : path_(path), record_(record), shared_(collective && comm.size() > 1) {
+    const Id fapl = soma_file::file_access(comm, collective, shared_, hints);
     file_ = h5::check(H5Fopen(path.c_str(), H5F_ACC_RDONLY, fapl.get()), "open " + path.string());
-    if (H5Lexists(file_.get(), soma_file::root, H5P_DEFAULT) <= 0) bad_file(path.string() + " is not a SOMA file");
-    root_ = h5::open_group(file_.get(), soma_file::root);
+    if (!shared_) open_root();
     dxpl_ = soma_file::transfer(collective);
   }
 
   // Answers as `replica` recorded them, without a file.
   explicit File(Replica replica) : replica_(std::move(replica)) {}
+
+  // Whether the metadata is shared, to be asked of the first rank alone.
+  [[nodiscard]] bool shared() const { return shared_; }
+
+  // On the first rank of a shared file: from now on the file is asked and its
+  // answers kept, and reads only note where the rows are, filling zeros.
+  void survey() {
+    open_root();
+    answers_.emplace();
+    surveying_ = true;
+  }
+
+  // The answers kept since survey().
+  std::map<std::string, std::vector<std::byte>> surveyed() {
+    surveying_ = false;
+    return std::exchange(answers_, std::nullopt).value_or(std::map<std::string, std::vector<std::byte>>{});
+  }
+
+  // Answers the first rank surveyed, given instead of the file's.
+  void answer_from(std::map<std::string, std::vector<std::byte>> answers) { answers_ = std::move(answers); }
 
   [[nodiscard]] bool has_amr() const {
     return !must("amr", answer("amr", [&] { return std::vector<std::byte>(H5Aexists(root_.get(), "amr") > 0); }))
@@ -199,6 +222,14 @@ class File {
   // read nothing, still joining the transfer, and are returned as the cause,
   // for the caller to report with its next check.
   [[nodiscard]] std::string read(std::vector<Read>& reads) const {
+    if (surveying_) {
+      for (Read& r : reads) {
+        (void)extent(r.path);
+        (void)answer("o|" + r.path, [&] { return file_location(r.path, r.type); });
+        r.out->assign(r.rows * r.width * soma_file::value_size(r.type), std::byte{0});
+      }
+      return {};
+    }
     std::vector<bool> empty;  // no rows on any rank: not read
     std::string error;
     for (const Read& r : reads) {
@@ -226,12 +257,31 @@ class File {
       }
       return error;
     }
+    // Rows of datasets stored as they are read, in one MPI-IO read; the
+    // others through HDF5. Where each is, and whether it is, is the same on
+    // every rank.
+    std::vector<bool> raw(reads.size(), false);
+    if (answers_) {
+      std::vector<Piece> pieces;
+      bool any = false;
+      for (std::size_t k = 0; k < reads.size(); ++k) {
+        const Read& r = reads[k];
+        if (empty[k]) continue;
+        const auto at = as<std::uint64_t>(must(r.path, answer("o|" + r.path, [] { return std::nullopt; })));
+        if (at.size() != 2 || at[0] == 0) continue;
+        raw[k] = any = true;
+        const std::uint64_t row = r.width * soma_file::value_size(r.type);
+        if (r.rows > 0) pieces.push_back({at[1] + r.first * row, r.rows * row, r.out->data()});
+      }
+      if (any) read_raw(std::move(pieces));
+    }
     std::vector<Id> ds, spaces, memories;
     std::vector<hid_t> ids, types, mem, file;
     std::vector<void*> buffers;
     for (std::size_t k = 0; k < reads.size(); ++k) {
       Read& r = reads[k];
-      if (empty[k]) continue;
+      if (empty[k] || raw[k]) continue;
+      open_root();
       ds.push_back(h5::open_dataset(root_.get(), r.path));
       Id space = h5::check(H5Dget_space(ds.back().get()), "get a dataspace");
       Id memory;
@@ -277,14 +327,89 @@ class File {
   // replica's; none for an attribute the file does not have.
   template <class F>
   std::optional<std::vector<std::byte>> answer(const std::string& key, F&& ask) const {
-    if (replica_) {
-      const auto it = replica_->answers.find(key);
-      if (it == replica_->answers.end()) return std::nullopt;
+    const auto given = replica_ ? &replica_->answers : surveying_ ? nullptr : answers_ ? &*answers_ : nullptr;
+    if (given != nullptr) {
+      const auto it = given->find(key);
+      if (it == given->end()) return std::nullopt;
+      if (record_ != nullptr) record_->answers[key] = it->second;
       return it->second;
     }
     std::optional<std::vector<std::byte>> a = ask();
-    if (record_ != nullptr && a) record_->answers[key] = *a;
+    if (surveying_ && a) (*answers_)[key] = *a;
+    if (record_ != nullptr && !surveying_ && a) record_->answers[key] = *a;
     return a;
+  }
+  // Opened on the first rank's survey, and on the others when a dataset is
+  // read through HDF5.
+  void open_root() const {
+    if (root_.get() >= 0) return;
+    if (H5Lexists(file_.get(), soma_file::root, H5P_DEFAULT) <= 0) bad_file(path_.string() + " is not a SOMA file");
+    root_ = h5::open_group(file_.get(), soma_file::root);
+  }
+  // Where a dataset's rows start in the file, after a flag set when they are
+  // stored there as they are read (contiguous, of the type read).
+  [[nodiscard]] std::vector<std::byte> file_location(const std::string& path, DataType t) const {
+    const Id ds = h5::open_dataset(root_.get(), path);
+    const Id dcpl = h5::check(H5Dget_create_plist(ds.get()), "get the creation properties of /soma/" + path);
+    const Id type = h5::check(H5Dget_type(ds.get()), "get the type of /soma/" + path);
+    const haddr_t at = H5Dget_offset(ds.get());
+    const bool raw = H5Pget_layout(dcpl.get()) == H5D_CONTIGUOUS && H5Pget_external_count(dcpl.get()) == 0 &&
+                     H5Tequal(type.get(), soma_file::memory_type(t)) > 0 && at != HADDR_UNDEF;
+    return bytes_of(std::vector<std::uint64_t>{raw ? 1U : 0U, raw ? at : 0});
+  }
+  // Bytes of the file, each piece's at its offset into its buffer, in one
+  // collective MPI-IO read on the file HDF5 opened; every rank calls it, with
+  // pieces or none.
+  struct Piece {
+    std::uint64_t at = 0, bytes = 0;
+    std::byte* to = nullptr;
+  };
+  void read_raw(std::vector<Piece> pieces) const {
+#ifdef H5_HAVE_PARALLEL
+    void* handle = nullptr;
+    h5::check(H5Fget_vfd_handle(file_.get(), H5P_DEFAULT, &handle), "get the MPI-IO file");
+    MPI_File fh = *static_cast<MPI_File*>(handle);
+    std::sort(pieces.begin(), pieces.end(), [](const Piece& x, const Piece& y) { return x.at < y.at; });
+    constexpr std::uint64_t most = std::uint64_t{1} << 30;  // bytes a block's int count holds
+    std::vector<int> lengths;
+    std::vector<MPI_Aint> at, to;
+    std::uint64_t total = 0;
+    for (const Piece& p : pieces) {
+      for (std::uint64_t k = 0; k < p.bytes; k += most) {
+        lengths.push_back(static_cast<int>(std::min(most, p.bytes - k)));
+        at.push_back(static_cast<MPI_Aint>(p.at + k));
+        MPI_Aint a = 0;
+        MPI_Get_address(p.to + k, &a);
+        to.push_back(a);
+      }
+      total += p.bytes;
+    }
+    const int n = static_cast<int>(lengths.size());
+    MPI_Datatype file_type = MPI_BYTE, memory = MPI_BYTE;
+    if (n > 0) {
+      MPI_Type_create_hindexed(n, lengths.data(), at.data(), MPI_BYTE, &file_type);
+      MPI_Type_commit(&file_type);
+      MPI_Type_create_hindexed(n, lengths.data(), to.data(), MPI_BYTE, &memory);
+      MPI_Type_commit(&memory);
+    }
+    // A failed view still joins the read, reading nothing; the view HDF5
+    // expects is restored after.
+    const bool viewed = MPI_File_set_view(fh, 0, MPI_BYTE, file_type, "native", MPI_INFO_NULL) == MPI_SUCCESS;
+    MPI_Status status;
+    const bool read = MPI_File_read_at_all(fh, 0, n > 0 ? MPI_BOTTOM : nullptr, viewed && n > 0 ? 1 : 0, memory,
+                                           &status) == MPI_SUCCESS;
+    const bool reset = MPI_File_set_view(fh, 0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL) == MPI_SUCCESS;
+    MPI_Count got = 0;
+    if (read) MPI_Get_elements_x(&status, MPI_BYTE, &got);
+    if (n > 0) {
+      MPI_Type_free(&file_type);
+      MPI_Type_free(&memory);
+    }
+    if (!viewed || !read || !reset) throw h5::Error("read the datasets' rows with MPI-IO");
+    if (static_cast<std::uint64_t>(got) != total) bad_file(path_.string() + " is shorter than its datasets");
+#else
+    (void)pieces;
+#endif
   }
   [[nodiscard]] std::vector<std::byte> file_extent(const std::string& path) const {
     const Id ds = h5::open_dataset(root_.get(), path);
@@ -329,9 +454,13 @@ class File {
                      std::string("open the attribute ") + name + " of /soma/" + object);
   }
 
-  Id file_, root_, dxpl_;
+  fs::path path_;
+  Id file_, dxpl_;
+  mutable Id root_;
   Replica* record_ = nullptr;
   std::optional<Replica> replica_;
+  bool shared_ = false, surveying_ = false;
+  mutable std::optional<std::map<std::string, std::vector<std::byte>>> answers_;  // shared: the first rank's
 };
 
 // What the root says.
@@ -1302,6 +1431,60 @@ Replica unpack(std::span<const std::byte> in) {
   return r;
 }
 
+// Rank 0's message, given to every rank: in one broadcast of first_bcast
+// bytes, and a second for what does not fit.
+constexpr std::size_t first_bcast = std::size_t{64} << 10;
+
+std::vector<std::byte> broadcast(const Comm& comm, std::vector<std::byte> message) {
+  constexpr std::size_t room = first_bcast - sizeof(std::uint64_t);
+  std::vector<std::byte> head(first_bcast);
+  std::uint64_t n = message.size();
+  if (comm.rank() == 0) {
+    std::memcpy(head.data(), &n, sizeof n);
+    std::copy_n(message.begin(), std::min<std::size_t>(n, room), head.begin() + sizeof n);
+  }
+  comm.bcast(std::span<std::byte>(head), 0);
+  std::memcpy(&n, head.data(), sizeof n);
+  if (comm.rank() != 0) {
+    const auto begin = head.begin() + sizeof n;
+    message.assign(begin, begin + static_cast<std::ptrdiff_t>(std::min<std::size_t>(n, room)));
+    message.resize(n);
+  }
+  if (n > room) comm.bcast(std::span<std::byte>(message).subspan(room), 0);
+  return message;
+}
+
+// For a shared file: the first rank of comm asks the file every question
+// `ask` asks (and where each dataset read is), alone, and its answers, or its
+// failure, go to every rank in one broadcast; the file then answers from
+// them. Otherwise nothing.
+template <class F>
+void share_answers(const Comm& comm, File& f, F&& ask) {
+  if (!f.shared()) return;
+  std::vector<std::byte> message;
+  if (comm.rank() == 0) {
+    message.push_back(std::byte{0});
+    try {
+      f.survey();
+      ask();
+      Replica r;
+      r.answers = f.surveyed();
+      append(message, std::span<const std::byte>(pack(r)));
+    } catch (const std::exception& e) {
+      (void)f.surveyed();
+      message.assign(1, dynamic_cast<const h5::Error*>(&e) != nullptr ? std::byte{2} : std::byte{1});
+      append(message, std::as_bytes(std::span<const char>(e.what(), std::strlen(e.what()))));
+    }
+  }
+  message = broadcast(comm, std::move(message));
+  if (message.empty()) bad_file("the first rank sent no answers");
+  const auto rest = std::span<const std::byte>(message).subspan(1);
+  const std::string text(reinterpret_cast<const char*>(rest.data()), message[0] == std::byte{0} ? 0 : rest.size());
+  if (message[0] == std::byte{2}) throw h5::Error(text);
+  if (message[0] != std::byte{0}) throw std::runtime_error(text);
+  f.answer_from(unpack(rest).answers);
+}
+
 constexpr int tag_replica_size = 31010;
 constexpr int tag_replica = 31011;
 
@@ -1335,7 +1518,11 @@ Replica gather_reads(const Comm& comm, const fs::path& path, const SomaReadOptio
   try {
     const h5::Session quiet;
     try {
-      const File f(leaders.comm(), path, soma_file::parallel_hdf5(), options.hints, &group);
+      File f(leaders.comm(), path, soma_file::parallel_hdf5(), options.hints, &group);
+      share_answers(leaders.comm(), f, [&] {
+        const Parts in = read_file(leaders.comm(), f, Ranks{me, end, p}, false);
+        (void)values_of(f, in.meta);
+      });
       const Parts in = read_file(leaders.comm(), f, Ranks{me, end, p}, false);
       (void)values_of(f, in.meta);  // asked now for the group's ranks
       parts = in.meta.parts;
@@ -1406,6 +1593,7 @@ HostMesh read_soma(const Comm& comm, const fs::path& path, const SomaReadOptions
       const h5::Session quiet;
       try {
         f.emplace(comm, path, collective, options.hints);
+        share_answers(comm, *f, [&] { (void)values_of(*f, read_file(comm, *f, mine, false).meta); });
         in = read_file(comm, *f, mine);
       } catch (const h5::Error& e) {
         bad_file("cannot read " + path.string() + ": " + e.what());
