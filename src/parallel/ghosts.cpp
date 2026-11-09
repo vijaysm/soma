@@ -44,9 +44,26 @@ GhostTargets ghost_targets(const Comm& comm, const HostMesh& mesh, const GhostOp
   // With no vertex shared on any rank no element is joined to another
   // rank's, so there are no targets.
   const SegmentTable& st = mesh.segment_table(0);
-  std::array<std::int64_t, 6> f{options.layers, -options.layers, b, -b, sharing ? 0 : 1,
-                                st.shared_end > st.interior_end ? 1 : 0};
+  // With the corner count of the widest owned element, for the answers.
+  std::int64_t widest = 0;
+  {
+    const SegmentTable& et = mesh.segment_table(top);
+    const auto off = mesh.conn_offsets(top);
+    for (const Segment& g : et.segments) {
+      if (g.begin >= et.owned_end) continue;
+      if (g.topology != Topology::polygon) {
+        widest = std::max<std::int64_t>(widest, g.arity);
+        continue;
+      }
+      for (LO e = g.begin; e < std::min(g.end, et.owned_end); ++e) {
+        widest = std::max<std::int64_t>(widest, static_cast<std::int64_t>(off(e + 1) - off(e)));
+      }
+    }
+  }
+  std::array<std::int64_t, 7> f{options.layers, -options.layers, b, -b, sharing ? 0 : 1,
+                                st.shared_end > st.interior_end ? 1 : 0, widest};
   comm.allreduce(std::span<std::int64_t>(f), Op::max);
+  widest = f[6];
   if (f[0] != -f[1] || f[2] != -f[3]) throw std::invalid_argument("ghost_targets: the ranks' options differ");
   if (options.layers < 0) throw std::invalid_argument("ghost_targets: a negative layer count");
   if (b < 0 || b >= top) throw std::invalid_argument("ghost_targets: bridge_dim is not below the mesh's dimension");
@@ -136,16 +153,18 @@ GhostTargets ghost_targets(const Comm& comm, const HostMesh& mesh, const GhostOp
   for (const LO e : boundary) {
     frontier.push_back({static_cast<Topology>(mesh.topology(top)(e)), corner_gids(mesh, top, e)});
   }
-  std::int64_t widest = 0;
-  for (LO e = 0; e < owned; ++e) {
-    widest = std::max<std::int64_t>(widest, static_cast<std::int64_t>(off(e + 1) - off(e)));
-  }
-  widest = comm.allreduce(widest, Op::max);
-  // An answer: gid, topology, corner count, lid on its owner, corners.
-  constexpr std::size_t head = sizeof(GO) + 2 * sizeof(std::int32_t) + sizeof(LO);
+  // An answer: gid, topology, corner count, corners.
+  constexpr std::size_t head = sizeof(GO) + 2 * sizeof(std::int32_t);
   const std::size_t width = head + static_cast<std::size_t>(widest) * sizeof(GO);
 
-  std::vector<std::pair<int, LO>> taken;  // (owner of a ghost element, its lid there)
+  // The ranks ghosting each owned element: those it answers that do not
+  // hold it already (as a copy, or taken in an earlier round), as (lid,
+  // rank).
+  std::vector<std::pair<LO, int>> rows;
+  std::optional<VarField<int, Kokkos::HostSpace>> copies;
+  if (mesh.segment_table(top).owned_end > mesh.segment_table(top).interior_end) {
+    copies = mesh.fields().get_var<int>(sharing_field, top);
+  }
   for (int layer = 0; layer < options.layers; ++layer) {
     // Each side of the frontier to the other holders of its lowest vertex.
     std::vector<std::pair<int, SideKey>> asks;
@@ -175,6 +194,13 @@ GhostTargets ghost_targets(const Comm& comm, const HostMesh& mesh, const GhostOp
     }
     std::sort(answers.begin(), answers.end());
     answers.erase(std::unique(answers.begin(), answers.end()), answers.end());
+    for (const auto& [asker, e] : answers) {
+      if (e >= mesh.segment_table(top).interior_end) {
+        const auto r = copies->value_or_default(top, e);
+        if (std::find(r.begin(), r.end(), asker) != r.end()) continue;
+      }
+      rows.emplace_back(e, asker);
+    }
     to.resize(answers.size());
     for (std::size_t i = 0; i < answers.size(); ++i) to[i] = answers[i].first;
     const Batch got = route(comm, to, width, [&](std::size_t i, std::byte* row) {
@@ -183,7 +209,6 @@ GhostTargets ghost_targets(const Comm& comm, const HostMesh& mesh, const GhostOp
       put(row, 0, egid(e));
       put(row, sizeof(GO), static_cast<std::int32_t>(mesh.topology(top)(e)));
       put(row, sizeof(GO) + sizeof(std::int32_t), static_cast<std::int32_t>(c.size()));
-      put(row, sizeof(GO) + 2 * sizeof(std::int32_t), e);
       for (std::size_t q = 0; q < c.size(); ++q) put(row, head + q * sizeof(GO), c[q]);
     });
     // The holders of the answers' vertices, for the next round: this rank
@@ -224,7 +249,6 @@ GhostTargets ghost_targets(const Comm& comm, const HostMesh& mesh, const GhostOp
       const auto n = static_cast<std::size_t>(take<std::int32_t>(row, sizeof(GO) + sizeof(std::int32_t)));
       for (std::size_t q = 0; q < n; ++q) x.corners.push_back(take<GO>(row, head + q * sizeof(GO)));
       fresh.push_back(g);
-      taken.emplace_back(got.source(i), take<LO>(row, sizeof(GO) + 2 * sizeof(std::int32_t)));
       frontier.push_back(std::move(x));
     }
     std::sort(fresh.begin(), fresh.end());
@@ -232,13 +256,8 @@ GhostTargets ghost_targets(const Comm& comm, const HostMesh& mesh, const GhostOp
     std::inplace_merge(known.begin(), middle, known.end());
   }
 
-  // Each owner learns who ghosts its elements.
-  std::vector<int> to(taken.size());
-  for (std::size_t i = 0; i < taken.size(); ++i) to[i] = taken[i].first;
-  const Batch asked = route(comm, to, sizeof(LO), [&](std::size_t i, std::byte* row) { put(row, 0, taken[i].second); });
-  std::vector<std::pair<LO, int>> rows;
-  for (std::size_t i = 0; i < asked.size(); ++i) rows.emplace_back(take<LO>(&asked.payload(i, 0), 0), asked.source(i));
   std::sort(rows.begin(), rows.end());
+  rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
   out.ranks.reserve(rows.size());
   std::size_t k = 0;
   for (LO e = 0; e < mesh.count(top); ++e) {
@@ -309,20 +328,20 @@ struct Arrived {
   std::array<Real, 3> xyz{};
 };
 
-// The owner of each held entity (other than as a ghost) of dimension d.
-std::vector<int> held_owners(const HostMesh& mesh, int d, int me) {
+// The owner of each copy of dimension d, from owned_end on.
+std::vector<int> copy_owners(const HostMesh& mesh, int d) {
   const SegmentTable& t = mesh.segment_table(d);
-  std::vector<int> out(static_cast<std::size_t>(t.shared_end), me);
+  std::vector<int> out;
   if (t.owned_end == t.shared_end) return out;
   const auto o = mesh.fields().get<int>(owner_field, d);
-  for (LO e = t.owned_end; e < t.shared_end; ++e) out[static_cast<std::size_t>(e)] = o.value_or_default(d, e);
+  for (LO e = t.owned_end; e < t.shared_end; ++e) out.push_back(o.value_or_default(d, e));
   return out;
 }
 
-// The held entities of dimension d (gid, lid), sorted.
-std::vector<std::pair<GO, LO>> held_by_gid(const HostMesh& mesh, int d) {
+// The held entities of dimension d in [first, shared_end), (gid, lid) sorted.
+std::vector<std::pair<GO, LO>> held_by_gid(const HostMesh& mesh, int d, LO first = 0) {
   std::vector<std::pair<GO, LO>> out;
-  for (LO e = 0; e < mesh.segment_table(d).shared_end; ++e) out.emplace_back(mesh.gid(d)(e), e);
+  for (LO e = first; e < mesh.segment_table(d).shared_end; ++e) out.emplace_back(mesh.gid(d)(e), e);
   std::sort(out.begin(), out.end());
   return out;
 }
@@ -650,7 +669,7 @@ HostMesh append_ghosts(const Comm& comm, const HostMesh& mesh, const GhostTarget
   // finds them; the box of the owned vertices of every rank (the negated
   // lows, the highs): the box of the part built whole; dimensions held on
   // some rank.
-  std::array<Real, 14> f{};
+  std::array<Real, 15> f{};
   for (int d = 1; d < top; ++d) f[static_cast<std::size_t>(d)] = mesh.input(d) && mesh.count(d) > 0 ? 1 : 0;
   for (std::size_t q = 4; q < 10; ++q) f[q] = -std::numeric_limits<Real>::infinity();
   for (int d = 0; d <= top; ++d) f[10 + static_cast<std::size_t>(d)] = mesh.count(d) > 0 ? 1 : 0;
@@ -660,14 +679,33 @@ HostMesh append_ghosts(const Comm& comm, const HostMesh& mesh, const GhostTarget
       f[7 + q] = std::max(f[7 + q], mesh.coords()(v, q));
     }
   }
+  // Then the most nodes an entity held has (dimensions above the vertices),
+  // which bounds what an entity's row carries.
+  for (int d = 1; d <= top; ++d) {
+    const SegmentTable& t = mesh.segment_table(d);
+    const auto nodes = [&](LO e) {
+      Offset n = mesh.conn_offsets(d)(e + 1) - mesh.conn_offsets(d)(e);
+      if (mesh.has_nodes(d)) n += mesh.node_offsets(d)(e + 1) - mesh.node_offsets(d)(e);
+      return static_cast<Real>(n);
+    };
+    for (const Segment& g : t.segments) {
+      if (g.begin >= t.shared_end) continue;
+      // A segment's entities have one topology and arity; polygons differ.
+      const bool each = g.topology == Topology::polygon || mesh.has_nodes(d);
+      const LO last = each ? std::min(g.end, t.shared_end) : g.begin + 1;
+      for (LO e = g.begin; e < last; ++e) f[14] = std::max(f[14], nodes(e));
+    }
+  }
   comm.allreduce(std::span<Real>(f), Op::max);
   const auto given = [&](int d) { return d == 0 || d == top || f[static_cast<std::size_t>(d)] != 0; };
   const auto derived = [&](int d) { return !given(d) && f[10 + static_cast<std::size_t>(d)] != 0; };
-  std::array<std::vector<int>, 4> owner;
-  for (int d = 0; d <= top; ++d) owner[static_cast<std::size_t>(d)] = held_owners(mesh, d, me);
-  const auto local = [&](int d, LO e) {
-    return arrived_of(mesh, d, e, owner[static_cast<std::size_t>(d)][static_cast<std::size_t>(e)]);
+  std::array<std::vector<int>, 4> copy_owner;
+  for (int d = 0; d <= top; ++d) copy_owner[static_cast<std::size_t>(d)] = copy_owners(mesh, d);
+  const auto owner_of = [&](int d, LO e) {
+    const LO owned = mesh.segment_table(d).owned_end;
+    return e < owned ? me : copy_owner[static_cast<std::size_t>(d)][static_cast<std::size_t>(e - owned)];
   };
+  const auto local = [&](int d, LO e) { return arrived_of(mesh, d, e, owner_of(d, e)); };
 
   // What owners send: their shared entities to the copies; and the closures
   // of the elements other ranks ghost: the element, its sides held here (of
@@ -717,45 +755,87 @@ HostMesh append_ghosts(const Comm& comm, const HostMesh& mesh, const GhostTarget
     }
   }
   for (auto* v : {&shared, &ents, &sides, &verts}) sort_unique(*v);
-  std::int64_t widest = 0;
-  for (const auto* v : {&shared, &ents}) {
-    for (const auto& [r, d, e] : *v) {
-      if (d == 0) continue;
-      Offset n = mesh.conn_offsets(d)(e + 1) - mesh.conn_offsets(d)(e);
-      if (mesh.has_nodes(d)) n += mesh.node_offsets(d)(e + 1) - mesh.node_offsets(d)(e);
-      widest = std::max<std::int64_t>(widest, static_cast<std::int64_t>(n));
+  // Who holds what this rank owns, for its field values and set
+  // memberships: the ranks sharing it, those sent it here, and those sent it
+  // by another rank, which tells the owner (rank, dimension, lid, holder).
+  Holders push;
+  std::vector<std::tuple<int, int, LO, int>> notices;
+  for (int d = 0; d <= top; ++d) {
+    const SegmentTable& t = mesh.segment_table(d);
+    if (t.owned_end == t.interior_end) continue;
+    const auto rows = mesh.fields().get_var<int>(sharing_field, d);
+    for (LO e = t.interior_end; e < t.owned_end; ++e) {
+      for (const int r : rows.value_or_default(d, e)) push[static_cast<std::size_t>(d)].emplace_back(e, r);
     }
   }
-  widest = comm.allreduce(widest, Op::max);
-  const std::size_t width = entity_header + static_cast<std::size_t>(widest) * sizeof(GO);
-
-  // Rows of entities (d > 0) and of vertices to their ranks.
-  const auto send = [&](const std::vector<std::tuple<int, int, LO>>& rows, bool vertices, auto&& version) {
-    std::vector<std::size_t> which;
-    std::vector<int> to;
-    for (std::size_t i = 0; i < rows.size(); ++i) {
-      if ((std::get<1>(rows[i]) == 0) != vertices) continue;
-      which.push_back(i);
-      to.push_back(std::get<0>(rows[i]));
+  for (const auto* v : {&verts, &ents, &sides}) {
+    for (const auto& [r, d, e] : *v) {
+      const int o = owner_of(d, e);
+      if (o == me) {
+        push[static_cast<std::size_t>(d)].emplace_back(e, r);
+      } else if (o != r) {
+        notices.emplace_back(o, d, e, r);
+      }
     }
-    return route(comm, to, vertices ? vertex_width : width, [&](std::size_t i, std::byte* row) {
-      const auto [r, d, e] = rows[which[i]];
-      const Arrived a = version(d, e);
-      if (vertices) {
-        put_vertex(row, a);
+  }
+  std::sort(notices.begin(), notices.end());
+  notices.erase(std::unique(notices.begin(), notices.end()), notices.end());
+
+  // Rows of one route, each tagged: a vertex, an entity (d > 0) or a side's
+  // gid, owner and key, padded to the widest.
+  enum Tag : std::int32_t { vertex_row, entity_row, side_row, notice_row };
+  constexpr std::size_t tag = sizeof(std::int64_t);
+  const std::size_t width =
+      tag + std::max({vertex_width, side_width, entity_header + static_cast<std::size_t>(f[14]) * sizeof(GO)});
+  const auto send = [&](std::initializer_list<const std::vector<std::tuple<int, int, LO>>*> lists, bool tell,
+                        auto&& version) {
+    std::vector<std::pair<const std::vector<std::tuple<int, int, LO>>*, std::size_t>> which;
+    std::vector<int> to;
+    for (const auto* rows : lists) {
+      for (std::size_t i = 0; i < rows->size(); ++i) {
+        which.emplace_back(rows, i);
+        to.push_back(std::get<0>((*rows)[i]));
+      }
+    }
+    const std::size_t told = to.size();
+    for (std::size_t i = 0; tell && i < notices.size(); ++i) to.push_back(std::get<0>(notices[i]));
+    return route(comm, to, width, [&](std::size_t i, std::byte* row) {
+      if (i >= told) {
+        const auto [o, d, e, r] = notices[i - told];
+        put(row, 0, std::int32_t{notice_row});
+        put(row, tag, static_cast<std::int32_t>(d));
+        put(row, tag + sizeof(std::int32_t), static_cast<std::int32_t>(r));
+        put(row, tag + 2 * sizeof(std::int32_t), mesh.gid(d)(e));
+        return;
+      }
+      const auto [r, d, e] = (*which[i].first)[which[i].second];
+      if (which[i].first == &sides) {
+        put(row, 0, std::int32_t{side_row});
+        put(row, tag, static_cast<std::int32_t>(d));
+        put(row, tag + sizeof(std::int32_t), static_cast<std::int32_t>(owner_of(d, e)));
+        put(row, tag + 2 * sizeof(std::int32_t), mesh.gid(d)(e));
+        put(row, tag + 2 * sizeof(std::int32_t) + sizeof(GO), key_of(mesh, d, e));
+      } else if (d == 0) {
+        put(row, 0, std::int32_t{vertex_row});
+        put_vertex(row + tag, version(d, e));
       } else {
-        put_entity(row, a);
+        put(row, 0, std::int32_t{entity_row});
+        put_entity(row + tag, version(d, e));
       }
     });
   };
   // The copies here take their owners' entities.
   std::array<std::vector<Arrived>, 4> theirs;
   {
-    const Batch vin = send(shared, true, local), ein = send(shared, false, local);
-    for (std::size_t i = 0; i < vin.size(); ++i) theirs[0].push_back(take_vertex(&vin.payload(i, 0)));
-    for (std::size_t i = 0; i < ein.size(); ++i) {
-      Arrived a = take_entity(&ein.payload(i, 0));
-      theirs[static_cast<std::size_t>(dimension(a.topology))].push_back(std::move(a));
+    const Batch in = send({&shared}, false, local);
+    for (std::size_t i = 0; i < in.size(); ++i) {
+      const std::byte* row = &in.payload(i, 0);
+      if (take<std::int32_t>(row, 0) == vertex_row) {
+        theirs[0].push_back(take_vertex(row + tag));
+      } else {
+        Arrived a = take_entity(row + tag);
+        theirs[static_cast<std::size_t>(dimension(a.topology))].push_back(std::move(a));
+      }
     }
     for (auto& v : theirs) by_gid(v);
   }
@@ -764,31 +844,34 @@ HostMesh append_ghosts(const Comm& comm, const HostMesh& mesh, const GhostTarget
     const Arrived* a = e >= mesh.segment_table(d).owned_end ? find(theirs[dd], mesh.gid(d)(e)) : nullptr;
     return a != nullptr ? *a : local(d, e);
   };
-  const Batch vin = send(verts, true, version), ein = send(ents, false, version);
-  std::vector<int> to(sides.size());
-  for (std::size_t i = 0; i < sides.size(); ++i) to[i] = std::get<0>(sides[i]);
-  const Batch sin = route(comm, to, side_width, [&](std::size_t i, std::byte* row) {
-    const auto [r, d, e] = sides[i];
-    put(row, 0, static_cast<std::int32_t>(d));
-    put(row, sizeof(std::int32_t),
-        static_cast<std::int32_t>(owner[static_cast<std::size_t>(d)][static_cast<std::size_t>(e)]));
-    put(row, 2 * sizeof(std::int32_t), mesh.gid(d)(e));
-    put(row, 2 * sizeof(std::int32_t) + sizeof(GO), key_of(mesh, d, e));
-  });
+  const Batch in = send({&verts, &ents, &sides}, true, version);
 
-  // What arrived and is not held here: the ghosts, once each by gid.
+  // What arrived and is not held here: the ghosts, once each by gid. What a
+  // rank holds and is sent is held by the sender too, so it is shared: only
+  // the shared entities are looked up.
   std::array<std::vector<std::pair<GO, LO>>, 4> held;
-  for (int d = 0; d <= top; ++d) held[static_cast<std::size_t>(d)] = held_by_gid(mesh, d);
+  for (int d = 0; d <= top; ++d) {
+    held[static_cast<std::size_t>(d)] = held_by_gid(mesh, d, mesh.segment_table(d).interior_end);
+  }
   const auto fresh = [&](int d, GO g) { return find(held[static_cast<std::size_t>(d)], g) < 0; };
   std::array<std::vector<Arrived>, 4> ghosts;
-  for (std::size_t i = 0; i < ein.size(); ++i) {
-    Arrived a = take_entity(&ein.payload(i, 0));
-    const int d = dimension(a.topology);
+  std::vector<const std::byte*> side_rows;
+  for (std::size_t i = 0; i < in.size(); ++i) {
+    const std::byte* row = &in.payload(i, 0);
+    const auto t = take<std::int32_t>(row, 0);
+    if (t == side_row) {
+      side_rows.push_back(row + tag);
+      continue;
+    }
+    if (t == notice_row) {
+      const int d = take<std::int32_t>(row, tag);
+      const LO e = find(held[static_cast<std::size_t>(d)], take<GO>(row, tag + 2 * sizeof(std::int32_t)));
+      push[static_cast<std::size_t>(d)].emplace_back(e, take<std::int32_t>(row, tag + sizeof(std::int32_t)));
+      continue;
+    }
+    Arrived a = t == vertex_row ? take_vertex(row + tag) : take_entity(row + tag);
+    const int d = t == vertex_row ? 0 : dimension(a.topology);
     if (fresh(d, a.gid)) ghosts[static_cast<std::size_t>(d)].push_back(std::move(a));
-  }
-  for (std::size_t i = 0; i < vin.size(); ++i) {
-    Arrived a = take_vertex(&vin.payload(i, 0));
-    if (fresh(0, a.gid)) ghosts[0].push_back(std::move(a));
   }
   std::array<std::vector<std::pair<GO, int>>, 4> ghost_owner;
   for (std::size_t d = 0; d <= static_cast<std::size_t>(top); ++d) {
@@ -799,8 +882,7 @@ HostMesh append_ghosts(const Comm& comm, const HostMesh& mesh, const GhostTarget
   // The sides of the ghost elements as their owners hold them, by key.
   std::array<std::vector<KnownSide>, 4> known_sides;
   std::array<std::vector<std::pair<GO, int>>, 4> side_owner;
-  for (std::size_t i = 0; i < sin.size(); ++i) {
-    const std::byte* row = &sin.payload(i, 0);
+  for (const std::byte* row : side_rows) {
     const auto k = static_cast<std::size_t>(take<std::int32_t>(row, 0));
     const KnownSide x{take<SideKey>(row, 2 * sizeof(std::int32_t) + sizeof(GO)),
                       take<GO>(row, 2 * sizeof(std::int32_t)), take<std::int32_t>(row, sizeof(std::int32_t))};
@@ -912,7 +994,7 @@ HostMesh append_ghosts(const Comm& comm, const HostMesh& mesh, const GhostTarget
           offsets.push_back(static_cast<Offset>(ranks.size()));
         }
       }
-      std::vector<int> owners(owner[dd].begin() + t.owned_end, owner[dd].end());
+      std::vector<int> owners = copy_owner[dd];
       for (LO e = t.shared_end; e < part.count(d); ++e) owners.push_back(owner_of_ghost(dd, part.gid(d)(e)));
       add_sharing_fields(part, d, offsets, ranks, owners);
     }
@@ -936,7 +1018,7 @@ HostMesh append_ghosts(const Comm& comm, const HostMesh& mesh, const GhostTarget
       const SegmentTable& t = mesh.segment_table(k);
       std::optional<VarField<int, Kokkos::HostSpace>> rows;
       if (t.shared_end > t.interior_end) rows = mesh.fields().get_var<int>(sharing_field, k);
-      for (const auto& [g, e] : held[static_cast<std::size_t>(k)]) {
+      for (const auto& [g, e] : held_by_gid(mesh, k)) {
         x.by_key.emplace_back(key_of(mesh, k, e), g);
         x.held.push_back(g);
         if (e >= t.interior_end) {
@@ -946,8 +1028,7 @@ HostMesh append_ghosts(const Comm& comm, const HostMesh& mesh, const GhostTarget
         x.offsets.push_back(x.ranks.size());
       }
     }
-    for (std::size_t i = 0; i < sin.size(); ++i) {
-      const std::byte* row = &sin.payload(i, 0);
+    for (const std::byte* row : side_rows) {
       const int k = take<std::int32_t>(row, 0);
       const GO g = take<GO>(row, 2 * sizeof(std::int32_t));
       if (!given(k) || !fresh(k, g)) continue;
@@ -963,7 +1044,11 @@ HostMesh append_ghosts(const Comm& comm, const HostMesh& mesh, const GhostTarget
     }
     build_known_adjacencies(comm, part, graphs, known);
   }
-  move_entity_data(comm, mesh, part, options.sets, true);
+  for (auto& v : push) {
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+  }
+  move_entity_data(comm, mesh, part, options.sets, &push);
   return part;
 }
 

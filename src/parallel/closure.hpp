@@ -90,12 +90,18 @@ void build_known_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRequest 
 void add_sharing_fields(HostMesh& mesh, int dim, const std::vector<Offset>& offsets, const std::vector<int>& ranks,
                         const std::vector<int>& owners);
 
+// Per dimension, (lid, rank) for each entity owned here and each other rank
+// holding it, sorted and unique.
+using Holders = std::array<std::vector<std::pair<LO, int>>, 4>;
+
 // Collective: the sets, fields and mesh values of `mesh` on `part`, a part
 // built of its entities. Each entity's set memberships and field values are
-// those its owner held, asked of the owner `part` names when `direct`, else
-// through a directory; set members on ghosts are kept only with
+// those its owner held: with `push`, for a part that keeps the held entities
+// of `mesh` in place, sent by the owner to the ranks `push` names; else
+// through a directory. Set members on ghosts are kept only with
 // `ghost_members`.
-void move_entity_data(const Comm& comm, const HostMesh& mesh, HostMesh& part, bool ghost_members, bool direct);
+void move_entity_data(const Comm& comm, const HostMesh& mesh, HostMesh& part, bool ghost_members,
+                      const Holders* push);
 
 // Collective: the part each rank gets when the mesh's entities go where
 // `where` places them: built by build_local_part (with ghosts marked when

@@ -368,10 +368,13 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   place: only the ghosts are ordered (as the part built whole orders them) and only the ghosts'
   own sides are derived. The rounds start from the elements with a shared vertex, index the
   sides of those within `layers - 1` of them, and skip telling vertex holders in the last
-  round; field values and set memberships are asked of owners for copies and ghosts only. So
-  the cost follows the ghost layer, not the part, with no gid directory: on a 64^3 box one
-  layer takes 34 to 41 ms at 2 to 8 ranks (281 to 115 ms before), as MOAB's
-  `exchange_ghost_cells` at 8 ranks, two layers 56 to 87 ms, below MOAB's at 4 and 8. The part
+  round; owners keep the ranks they answer, so no round tells them. Copies' versions go in
+  one exchange and closures in another, with notices telling owners who holds their closure
+  entities; owners then push field values and set memberships to the ranks holding copies
+  and ghosts, which look up only their shared and ghost entities. So the cost follows the
+  ghost layer, not the part, with no gid directory: on a 64^3 box one layer takes 28 to 37
+  ms at 2 to 8 ranks (281 to 115 ms before), as MOAB's `exchange_ghost_cells` at 8 ranks,
+  two layers 47 to 83 ms, below MOAB's at 4 and 8. The part
   is the one rebuilding it through directories gives (`detail::add_ghosts_by_rebuild`), entity
   for entity. An entity held only for an explicit edge (such an edge's far corner) is no
   longer lost when another rank ghosts it.
