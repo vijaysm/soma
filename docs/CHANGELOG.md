@@ -25,6 +25,8 @@ All notable changes to SOMA are recorded here. The format follows
 - The configure summary line reports the Kokkos source, host and GPU backends, MPI, tests,
   GPU-aware MPI and build type.
 - `-Wall -Wextra` are applied to SOMA targets for compilers that accept them.
+- `SOMA_ENABLE_HDF5=ON` needs HDF5 1.14 or newer. SOMA files are written in the HDF5 1.14 file
+  format (`H5F_LIBVER_V114`), whatever newer library writes them.
 - CPM is at 0.43.2.
 
 ### Runtime and Comm

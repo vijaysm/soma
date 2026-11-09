@@ -116,10 +116,12 @@ inline std::uint64_t access_hash(const MpiIoHints& h, int aggregators) {
 // A collective (MPI-IO) file over `comm` when `collective`, else the default
 // driver; metadata is read and written collectively too unless
 // `independent_metadata` (when ranks open different datasets). The hints go
-// to MPI-IO; the alignment applies with either driver.
+// to MPI-IO; the alignment applies with either driver. Objects are created
+// in the HDF5 1.14 file format, whatever newer library writes them.
 inline h5::Id file_access(const Comm& comm, bool collective, bool independent_metadata = false,
                           const MpiIoHints& hints = {}) {
   h5::Id fapl = h5::check(H5Pcreate(H5P_FILE_ACCESS), "make a file access property list");
+  h5::check(H5Pset_libver_bounds(fapl.get(), H5F_LIBVER_V114, H5F_LIBVER_LATEST), "use the HDF5 1.14 format");
   if (hints.alignment > 1) {
     h5::check(H5Pset_alignment(fapl.get(), hints.alignment, hints.alignment), "align datasets");
   }

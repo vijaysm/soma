@@ -335,6 +335,38 @@ TEST(SomaFile, EqualMeshesGiveEqualBytes) {
   }
 }
 
+// Files are written in the HDF5 1.14 format, from one rank and from every
+// rank (the collective sink with a parallel HDF5): a version 3 superblock and
+// version 2 object headers, which the format of HDF5 1.8 and later gives.
+TEST(SomaFile, FilesAreInTheHdf5_1_14Format) {
+  const Comm c = Comm::world();
+  const Scratch dir(c);
+  const HostMesh m = rich_part(c, 0);
+  soma::write_soma(c, m, dir.path("every.soma"));
+  if (c.rank() == 0) soma::write_soma(soma::read_h5m(data("hexes_mixed.h5m")), dir.path("one.soma"));
+  c.barrier();
+  if (c.rank() != 0) return;
+  for (const char* name : {"every.soma", "one.soma"}) {
+    SCOPED_TRACE(name);
+    const hid_t f = H5Fopen(dir.path(name).c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
+    ASSERT_GE(f, 0);
+    H5F_info2_t info;
+    ASSERT_GE(H5Fget_info2(f, &info), 0);
+    EXPECT_EQ(info.super.version, 3u);
+    std::vector<unsigned> headers;
+    const auto object = [](hid_t loc, const char* path, const H5O_info2_t*, void* data) -> herr_t {
+      H5O_native_info_t native;
+      if (H5Oget_native_info_by_name(loc, path, &native, H5O_NATIVE_INFO_HDR, H5P_DEFAULT) < 0) return -1;
+      static_cast<std::vector<unsigned>*>(data)->push_back(native.hdr.version);
+      return 0;
+    };
+    ASSERT_GE(H5Ovisit3(f, H5_INDEX_NAME, H5_ITER_INC, object, &headers, H5O_INFO_BASIC), 0);
+    EXPECT_FALSE(headers.empty());
+    for (const unsigned v : headers) EXPECT_EQ(v, 2u);
+    H5Fclose(f);
+  }
+}
+
 // Parts written from every rank and read at one rank equal the mesh
 // migrated to that rank: every partition, explicit and derived edges, sets
 // in order, fields of every kind with their domains.
