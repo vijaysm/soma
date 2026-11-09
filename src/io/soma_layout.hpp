@@ -9,8 +9,14 @@
 // properties, MPI-IO and collective with a parallel HDF5 at more than one
 // rank.
 
+#include <algorithm>
+#include <cstddef>
 #include <cstdint>
+#include <cstring>
+#include <span>
+#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <hdf5.h>
 
@@ -166,6 +172,110 @@ inline h5::Id transfer(bool collective) {
   (void)collective;
 #endif
   return dxpl;
+}
+
+// Reads of a file opened once over more than one rank with MPI-IO: the
+// first rank alone reads its metadata (the file is opened with metadata read
+// independently, since HDF5 cannot read it independently on one rank of a
+// file opened for collective metadata reads), and every rank its rows,
+// straight from the file in one collective MPI-IO read where a dataset is
+// stored as the rows read.
+
+// Where a dataset's rows are: `raw` when they are stored at `at` as read in
+// memory type `memory` (contiguous, allocated, of that type).
+struct Location {
+  bool raw = false;
+  std::uint64_t at = 0;
+};
+
+inline Location location(hid_t dataset, hid_t memory, const std::string& where) {
+  const h5::Id dcpl = h5::check(H5Dget_create_plist(dataset), "get the creation properties of " + where);
+  const h5::Id type = h5::check(H5Dget_type(dataset), "get the type of " + where);
+  const haddr_t at = H5Dget_offset(dataset);
+  const bool raw = H5Pget_layout(dcpl.get()) == H5D_CONTIGUOUS && H5Pget_external_count(dcpl.get()) == 0 &&
+                   H5Tequal(type.get(), memory) > 0 && at != HADDR_UNDEF;
+  return {raw, raw ? static_cast<std::uint64_t>(at) : 0};
+}
+
+// Bytes of a file to read: `bytes` at offset `at` into `to`.
+struct Piece {
+  std::uint64_t at = 0, bytes = 0;
+  std::byte* to = nullptr;
+};
+
+// The pieces, in one collective MPI-IO read on the file HDF5 opened with
+// MPI-IO; every rank calls it, with pieces or none. Throws h5::Error when
+// MPI-IO fails, std::runtime_error when the file is shorter than the pieces.
+inline void read_raw(hid_t file, std::vector<Piece> pieces) {
+#ifdef H5_HAVE_PARALLEL
+  void* handle = nullptr;
+  h5::check(H5Fget_vfd_handle(file, H5P_DEFAULT, &handle), "get the MPI-IO file");
+  MPI_File fh = *static_cast<MPI_File*>(handle);
+  std::sort(pieces.begin(), pieces.end(), [](const Piece& x, const Piece& y) { return x.at < y.at; });
+  constexpr std::uint64_t most = std::uint64_t{1} << 30;  // bytes a block's int length holds
+  std::vector<int> lengths;
+  std::vector<MPI_Aint> at, to;
+  std::uint64_t total = 0;
+  for (const Piece& p : pieces) {
+    for (std::uint64_t k = 0; k < p.bytes; k += most) {
+      lengths.push_back(static_cast<int>(std::min(most, p.bytes - k)));
+      at.push_back(static_cast<MPI_Aint>(p.at + k));
+      MPI_Aint a = 0;
+      MPI_Get_address(p.to + k, &a);
+      to.push_back(a);
+    }
+    total += p.bytes;
+  }
+  const int n = static_cast<int>(lengths.size());
+  MPI_Datatype file_view = MPI_BYTE, memory = MPI_BYTE;
+  if (n > 0) {
+    MPI_Type_create_hindexed(n, lengths.data(), at.data(), MPI_BYTE, &file_view);
+    MPI_Type_commit(&file_view);
+    MPI_Type_create_hindexed(n, lengths.data(), to.data(), MPI_BYTE, &memory);
+    MPI_Type_commit(&memory);
+  }
+  // A failed view still joins the read, reading nothing; the view HDF5
+  // expects is restored after.
+  const bool viewed = MPI_File_set_view(fh, 0, MPI_BYTE, file_view, "native", MPI_INFO_NULL) == MPI_SUCCESS;
+  MPI_Status status;
+  const bool read = MPI_File_read_at_all(fh, 0, n > 0 ? MPI_BOTTOM : nullptr, viewed && n > 0 ? 1 : 0, memory,
+                                         &status) == MPI_SUCCESS;
+  const bool reset = MPI_File_set_view(fh, 0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL) == MPI_SUCCESS;
+  MPI_Count got = 0;
+  if (read) MPI_Get_elements_x(&status, MPI_BYTE, &got);
+  if (n > 0) {
+    MPI_Type_free(&file_view);
+    MPI_Type_free(&memory);
+  }
+  if (!viewed || !read || !reset) throw h5::Error("HDF5 could not read the datasets' rows with MPI-IO");
+  if (static_cast<std::uint64_t>(got) != total) throw std::runtime_error("the file is shorter than its datasets");
+#else
+  (void)file;
+  (void)pieces;
+#endif
+}
+
+// Rank 0's message, given to every rank: in one broadcast of first_bcast
+// bytes, and a second for what does not fit.
+inline constexpr std::size_t first_bcast = std::size_t{64} << 10;
+
+inline std::vector<std::byte> broadcast(const Comm& comm, std::vector<std::byte> message) {
+  constexpr std::size_t room = first_bcast - sizeof(std::uint64_t);
+  std::vector<std::byte> head(first_bcast);
+  std::uint64_t n = message.size();
+  if (comm.rank() == 0) {
+    std::memcpy(head.data(), &n, sizeof n);
+    std::copy_n(message.begin(), std::min<std::size_t>(n, room), head.begin() + sizeof n);
+  }
+  comm.bcast(std::span<std::byte>(head), 0);
+  std::memcpy(&n, head.data(), sizeof n);
+  if (comm.rank() != 0) {
+    const auto begin = head.begin() + sizeof n;
+    message.assign(begin, begin + static_cast<std::ptrdiff_t>(std::min<std::size_t>(n, room)));
+    message.resize(n);
+  }
+  if (n > room) comm.bcast(std::span<std::byte>(message).subspan(room), 0);
+  return message;
 }
 
 }  // namespace soma::soma_file

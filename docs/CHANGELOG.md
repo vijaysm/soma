@@ -471,7 +471,10 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   eight value types) in the SOMA format: each level's boxes and each field's valid points, box
   after box in curve order, in 6 collectives whatever the rank count or number of fields.
   `read_soma_amr(comm, path)` restarts it at any rank count, cut by the reader's costs, each
-  rank reading its own run of rows; ghosts are filled by the caller. `detect_format` reports
+  rank reading its own run of rows; ghosts are filled by the caller. With MPI-IO at P > 1 the
+  file is opened once: rank 0 alone reads the header and where each column is, sent to every
+  rank in one broadcast, and every rank reads its rows of all fields in one collective MPI-IO
+  read (compressed or converted columns through HDF5). `detect_format` reports
   `MeshFormat::soma_amr`, and the mesh and AMR readers each refuse the other's files.
 - `write_vtk_amr(comm, path, hierarchy, fields)` writes each rank's boxes as `.vti` pieces and
   the `.vthb` index on rank 0 once every piece is in place; the files equal those one process

@@ -13,10 +13,12 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <optional>
 #include <set>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <string>
 #include <vector>
 
@@ -235,6 +237,14 @@ std::vector<T> rows(hid_t root, const std::string& path, std::uint64_t first, st
   return out;
 }
 
+// A field's column of a level: whether the file has it, its extent and
+// where its rows are.
+struct Column {
+  bool exists = false;
+  std::vector<std::uint64_t> extent;
+  soma_file::Location at;
+};
+
 struct Header {
   std::vector<std::int64_t> words, domain;
   std::vector<double> geometry;
@@ -246,7 +256,92 @@ struct Header {
     int ncomp = 1, ghosts = 0;
   };
   std::vector<Field> fields;
+  std::vector<std::vector<Column>> columns;  // by field, then level
 };
+
+template <class T>
+void put(std::vector<std::byte>& out, const std::vector<T>& v) {
+  const std::uint64_t n = v.size();
+  const std::size_t at = out.size();
+  out.resize(at + sizeof n + n * sizeof(T));
+  std::memcpy(out.data() + at, &n, sizeof n);
+  if (n > 0) std::memcpy(out.data() + at + sizeof n, v.data(), n * sizeof(T));
+}
+
+template <class T>
+std::vector<T> take(std::span<const std::byte> in, std::size_t& at) {
+  std::uint64_t n = 0;
+  if (at + sizeof n > in.size()) throw std::logic_error("a header was cut short");
+  std::memcpy(&n, in.data() + at, sizeof n);
+  at += sizeof n;
+  if (n > (in.size() - at) / sizeof(T)) throw std::logic_error("a header was cut short");
+  std::vector<T> v(static_cast<std::size_t>(n));
+  if (n > 0) std::memcpy(v.data(), in.data() + at, v.size() * sizeof(T));
+  at += v.size() * sizeof(T);
+  return v;
+}
+
+std::vector<std::byte> pack(const Header& x) {
+  std::vector<std::byte> out;
+  put(out, x.words);
+  put(out, x.domain);
+  put(out, x.geometry);
+  put(out, std::vector<std::uint64_t>{x.boxes.size()});
+  for (const amr::BoxList& list : x.boxes) {
+    std::vector<std::int32_t> w;
+    for (const amr::Box& b : list) {
+      for (const int v : {b.lo(0), b.lo(1), b.lo(2), b.hi(0), b.hi(1), b.hi(2)}) w.push_back(v);
+    }
+    put(out, w);
+  }
+  put(out, std::vector<std::uint64_t>{x.fields.size()});
+  for (std::size_t j = 0; j < x.fields.size(); ++j) {
+    const Header::Field& f = x.fields[j];
+    put(out, std::vector<char>(f.name.begin(), f.name.end()));
+    put(out, std::vector<std::int64_t>{static_cast<std::int64_t>(f.type), f.index.nodal, f.ncomp, f.ghosts});
+    for (const Column& c : x.columns[j]) {
+      put(out, std::vector<std::uint64_t>{c.exists ? 1U : 0U, c.at.raw ? 1U : 0U, c.at.at});
+      put(out, c.extent);
+    }
+  }
+  return out;
+}
+
+Header unpack(std::span<const std::byte> in) {
+  Header x;
+  std::size_t at = 0;
+  x.words = take<std::int64_t>(in, at);
+  x.domain = take<std::int64_t>(in, at);
+  x.geometry = take<double>(in, at);
+  if (x.words.size() != w_num_words) throw std::logic_error("a header was cut short");
+  const int dim = static_cast<int>(x.words[w_dimension]);
+  const auto levels = take<std::uint64_t>(in, at).at(0);
+  for (std::uint64_t l = 0; l < levels; ++l) {
+    const auto w = take<std::int32_t>(in, at);
+    amr::BoxList list;
+    for (std::size_t b = 0; b + 5 < w.size(); b += 6) {
+      list.push_back(
+          amr::Box(amr::IntVect{{w[b], w[b + 1], w[b + 2]}}, amr::IntVect{{w[b + 3], w[b + 4], w[b + 5]}}, dim));
+    }
+    x.boxes.push_back(std::move(list));
+  }
+  const auto nfields = take<std::uint64_t>(in, at).at(0);
+  for (std::uint64_t j = 0; j < nfields; ++j) {
+    const auto name = take<char>(in, at);
+    const auto m = take<std::int64_t>(in, at);
+    if (m.size() != 4) throw std::logic_error("a header was cut short");
+    x.fields.push_back({std::string(name.begin(), name.end()), static_cast<DataType>(m[0]),
+                        amr::IndexType{static_cast<std::uint8_t>(m[1])}, static_cast<int>(m[2]),
+                        static_cast<int>(m[3])});
+    std::vector<Column>& columns = x.columns.emplace_back();
+    for (std::uint64_t l = 0; l < levels; ++l) {
+      const auto c = take<std::uint64_t>(in, at);
+      if (c.size() != 3) throw std::logic_error("a header was cut short");
+      columns.push_back({c[0] != 0, take<std::uint64_t>(in, at), {c[1] != 0, c[2]}});
+    }
+  }
+  return x;
+}
 
 Header read_header(hid_t root, const std::string& where) {
   Header x;
@@ -296,6 +391,18 @@ Header read_header(hid_t root, const std::string& where) {
     f.ncomp = static_cast<int>(m[2]);
     f.ghosts = static_cast<int>(m[3]);
     x.fields.push_back(f);
+    std::vector<Column>& columns = x.columns.emplace_back();
+    for (int l = 0; l < nlevels; ++l) {
+      const std::string column = path + "/l" + std::to_string(l);
+      Column c;
+      c.exists = h5::exists(root, column);
+      if (c.exists) {
+        const Id ds = h5::open_dataset(root, column);
+        for (const hsize_t n : h5::extent(ds.get(), column)) c.extent.push_back(n);
+        c.at = soma_file::location(ds.get(), soma_file::memory_type(f.type), "/soma/" + column);
+      }
+      columns.push_back(std::move(c));
+    }
   }
   return x;
 }
@@ -308,16 +415,63 @@ std::vector<std::uint64_t> box_rows(const amr::BoxArray& boxes, amr::IndexType t
   return start;
 }
 
+// The rows of a level's column this rank reads, [first, last), and the
+// column's row count: those of the boxes it holds, a run of the curve.
+struct Run {
+  std::uint64_t first = 0, last = 0, rows = 0;
+};
+
+Run run_of(const amr::Hierarchy& h, int l, const Header::Field& f) {
+  const auto start = box_rows(h.boxes(l), f.index, f.ncomp);
+  const std::vector<int>& owner = h.distribution(l).owner;
+  const auto lo = static_cast<std::size_t>(std::lower_bound(owner.begin(), owner.end(), h.rank()) - owner.begin());
+  const auto hi = static_cast<std::size_t>(std::upper_bound(owner.begin(), owner.end(), h.rank()) - owner.begin());
+  return {start[lo], start[hi], start.back()};
+}
+
+// The rows of every field's columns this rank reads, by field and level, as
+// bytes: through HDF5 (opening /soma with `root` when needed), and with
+// `raw` the columns stored as read in one collective MPI-IO read.
+std::vector<std::vector<std::vector<std::byte>>> field_rows(hid_t file, const std::function<hid_t()>& root,
+                                                           const amr::Hierarchy& h, const Header& x, bool raw) {
+  std::vector<std::vector<std::vector<std::byte>>> out(x.fields.size());
+  std::vector<soma_file::Piece> pieces;
+  bool any = false;
+  for (std::size_t j = 0; j < x.fields.size(); ++j) {
+    const Header::Field& f = x.fields[j];
+    const std::size_t size = soma_file::value_size(f.type);
+    for (int l = 0; l < h.num_levels(); ++l) {
+      const std::string path = field_path(j) + "/l" + std::to_string(l);
+      const Column& c = x.columns.at(j).at(static_cast<std::size_t>(l));
+      const Run r = run_of(h, l, f);
+      if (!c.exists) throw std::runtime_error("the dataset /soma/" + path + " is missing");
+      if (c.extent.empty() || c.extent[0] != r.rows || (c.extent.size() > 1 ? c.extent[1] : 1) != 1) {
+        throw std::runtime_error("the dataset /soma/" + path + " does not have the rows its boxes need");
+      }
+      std::vector<std::byte>& bytes = out[j].emplace_back((r.last - r.first) * size);
+      if (raw && c.at.raw) {
+        any = true;
+        if (!bytes.empty()) pieces.push_back({c.at.at + r.first * size, bytes.size(), bytes.data()});
+        continue;
+      }
+      const Id ds = h5::open_dataset(root(), path);
+      h5::read_rows(ds.get(), soma_file::memory_type(f.type), r.first, r.last - r.first,
+                    bytes.empty() ? nullptr : bytes.data(), "/soma/" + path);
+    }
+  }
+  if (any) soma_file::read_raw(file, std::move(pieces));
+  return out;
+}
+
 template <class T>
-amr::MultiLevelField<T> read_field(hid_t root, const amr::Hierarchy& h, const Header::Field& f, std::size_t j) {
+amr::MultiLevelField<T> read_field(const amr::Hierarchy& h, const Header::Field& f,
+                                   const std::vector<std::vector<std::byte>>& rows) {
   amr::MultiLevelField<T> u = h.make_field<T>(f.index, f.ncomp, f.ghosts, f.name);
   for (int l = 0; l < h.num_levels(); ++l) {
     amr::LevelField<T>& lf = u[static_cast<std::size_t>(l)];
-    const auto start = box_rows(h.boxes(l), f.index, f.ncomp);
-    const std::uint64_t first = lf.num_boxes() > 0 ? start[static_cast<std::size_t>(lf.global(0))] : 0;
-    const std::uint64_t last =
-        lf.num_boxes() > 0 ? start[static_cast<std::size_t>(lf.global(lf.num_boxes() - 1)) + 1] : first;
-    const std::vector<T> v = rows<T>(root, field_path(j) + "/l" + std::to_string(l), first, last - first, start.back(), 1);
+    const std::vector<std::byte>& bytes = rows[static_cast<std::size_t>(l)];
+    std::vector<T> v(bytes.size() / sizeof(T));
+    if (!v.empty()) std::memcpy(v.data(), bytes.data(), v.size() * sizeof(T));
     auto host = Kokkos::create_mirror_view(lf.view().data);
     Kokkos::deep_copy(host, T{});
     std::size_t at = 0;
@@ -325,7 +479,8 @@ amr::MultiLevelField<T> read_field(hid_t root, const amr::Hierarchy& h, const He
       const amr::Box& valid = lf.valid(b);
       for (int c = 0; c < lf.ncomp(); ++c) {
         for (std::int64_t q = 0; q < valid.num_pts(); ++q) {
-          host(static_cast<std::size_t>(lf.offset(b) + place(lf.grown(b), amr::detail::point_of(valid, q), c))) = v[at++];
+          host(static_cast<std::size_t>(lf.offset(b) + place(lf.grown(b), amr::detail::point_of(valid, q), c))) =
+              v.at(at++);
         }
       }
     }
@@ -364,20 +519,52 @@ void write_soma(const Comm& comm, const amr::Hierarchy& hierarchy, const std::ve
 
 AmrCheckpoint read_soma_amr(const Comm& comm, const fs::path& path, const SomaAmrReadOptions& options) {
   const h5::Session quiet;
+  // Over more than one rank with MPI-IO the file is opened once, collectively,
+  // and rank 0 alone reads the header and where the columns are, given to
+  // every rank in one broadcast; the rows are read in one MPI-IO read.
   const bool collective = soma_file::parallel_hdf5() && comm.size() > 1;
   std::optional<Id> file, root;
   std::optional<Id> dxpl;
   Header header;
-  agreed(comm, path, [&] {
-    if (H5Fis_accessible(path.c_str(), H5P_DEFAULT) <= 0) throw std::runtime_error("cannot be opened as an HDF5 file");
-    const Id fapl = soma_file::file_access(comm, collective);
-    file = h5::check(H5Fopen(path.c_str(), H5F_ACC_RDONLY, fapl.get()), "open the file");
+  const auto open_root = [&] {
     if (H5Lexists(file->get(), soma_file::root, H5P_DEFAULT) <= 0) throw std::runtime_error("it is not a SOMA file");
     root = h5::open_group(file->get(), soma_file::root);
+  };
+  agreed(comm, path, [&] {
+    if (!collective && H5Fis_accessible(path.c_str(), H5P_DEFAULT) <= 0) {
+      throw std::runtime_error("cannot be opened as an HDF5 file");
+    }
+    const Id fapl = soma_file::file_access(comm, collective, collective);
+    const hid_t id = H5Fopen(path.c_str(), H5F_ACC_RDONLY, fapl.get());
+    if (id < 0) throw std::runtime_error("cannot be opened as an HDF5 file");
+    file.emplace(id);
     dxpl = soma_file::transfer(collective);
-    const h5::CollectiveReads reads(dxpl->get());
-    header = read_header(root->get(), path.string());
+    if (!collective) {
+      open_root();
+      header = read_header(root->get(), path.string());
+    }
   });
+  if (collective) {
+    std::vector<std::byte> message{std::byte{0}};
+    if (comm.rank() == 0) {
+      try {
+        open_root();
+        const std::vector<std::byte> packed = pack(read_header(root->get(), path.string()));
+        message.insert(message.end(), packed.begin(), packed.end());
+      } catch (const std::exception& e) {
+        const std::string why = e.what();
+        message.assign(1, std::byte{1});
+        for (const char ch : why) message.push_back(static_cast<std::byte>(ch));
+      }
+    }
+    message = soma_file::broadcast(comm, std::move(message));
+    const auto rest = std::span<const std::byte>(message).subspan(1);
+    if (message[0] != std::byte{0}) {
+      throw std::runtime_error(std::string(reader) + ": " + path.string() + ": " +
+                               std::string(reinterpret_cast<const char*>(rest.data()), rest.size()));
+    }
+    header = unpack(rest);
+  }
   // The hierarchy over this communicator; a file whose boxes are not a valid
   // hierarchy is a bad file on every rank alike.
   amr::Geometry geometry;
@@ -413,11 +600,16 @@ AmrCheckpoint read_soma_amr(const Comm& comm, const fs::path& path, const SomaAm
   std::vector<AmrField> out;
   agreed(comm, path, [&] {
     const h5::CollectiveReads reads(dxpl->get());
+    const auto root_id = [&] {
+      if (!root) open_root();
+      return root->get();
+    };
+    const auto data = field_rows(file->get(), root_id, *h, header, collective);
     for (std::size_t j = 0; j < header.fields.size(); ++j) {
       const Header::Field& f = header.fields[j];
       AmrField field;
       field.name = f.name;
-      dispatch_data_type(f.type, [&]<class T>() { field.levels = read_field<T>(root->get(), *h, f, j); });
+      dispatch_data_type(f.type, [&]<class T>() { field.levels = read_field<T>(*h, f, data[j]); });
       out.push_back(std::move(field));
     }
   });

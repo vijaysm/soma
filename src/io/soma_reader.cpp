@@ -262,7 +262,7 @@ class File {
     // every rank.
     std::vector<bool> raw(reads.size(), false);
     if (answers_) {
-      std::vector<Piece> pieces;
+      std::vector<soma_file::Piece> pieces;
       bool any = false;
       for (std::size_t k = 0; k < reads.size(); ++k) {
         const Read& r = reads[k];
@@ -273,7 +273,15 @@ class File {
         const std::uint64_t row = r.width * soma_file::value_size(r.type);
         if (r.rows > 0) pieces.push_back({at[1] + r.first * row, r.rows * row, r.out->data()});
       }
-      if (any) read_raw(std::move(pieces));
+      if (any) {
+        try {
+          soma_file::read_raw(file_.get(), std::move(pieces));
+        } catch (const h5::Error&) {
+          throw;
+        } catch (const std::exception& e) {
+          bad_file(path_.string() + ": " + e.what());
+        }
+      }
     }
     std::vector<Id> ds, spaces, memories;
     std::vector<hid_t> ids, types, mem, file;
@@ -347,69 +355,11 @@ class File {
     root_ = h5::open_group(file_.get(), soma_file::root);
   }
   // Where a dataset's rows start in the file, after a flag set when they are
-  // stored there as they are read (contiguous, of the type read).
+  // stored there as they are read.
   [[nodiscard]] std::vector<std::byte> file_location(const std::string& path, DataType t) const {
     const Id ds = h5::open_dataset(root_.get(), path);
-    const Id dcpl = h5::check(H5Dget_create_plist(ds.get()), "get the creation properties of /soma/" + path);
-    const Id type = h5::check(H5Dget_type(ds.get()), "get the type of /soma/" + path);
-    const haddr_t at = H5Dget_offset(ds.get());
-    const bool raw = H5Pget_layout(dcpl.get()) == H5D_CONTIGUOUS && H5Pget_external_count(dcpl.get()) == 0 &&
-                     H5Tequal(type.get(), soma_file::memory_type(t)) > 0 && at != HADDR_UNDEF;
-    return bytes_of(std::vector<std::uint64_t>{raw ? 1U : 0U, raw ? at : 0});
-  }
-  // Bytes of the file, each piece's at its offset into its buffer, in one
-  // collective MPI-IO read on the file HDF5 opened; every rank calls it, with
-  // pieces or none.
-  struct Piece {
-    std::uint64_t at = 0, bytes = 0;
-    std::byte* to = nullptr;
-  };
-  void read_raw(std::vector<Piece> pieces) const {
-#ifdef H5_HAVE_PARALLEL
-    void* handle = nullptr;
-    h5::check(H5Fget_vfd_handle(file_.get(), H5P_DEFAULT, &handle), "get the MPI-IO file");
-    MPI_File fh = *static_cast<MPI_File*>(handle);
-    std::sort(pieces.begin(), pieces.end(), [](const Piece& x, const Piece& y) { return x.at < y.at; });
-    constexpr std::uint64_t most = std::uint64_t{1} << 30;  // bytes a block's int count holds
-    std::vector<int> lengths;
-    std::vector<MPI_Aint> at, to;
-    std::uint64_t total = 0;
-    for (const Piece& p : pieces) {
-      for (std::uint64_t k = 0; k < p.bytes; k += most) {
-        lengths.push_back(static_cast<int>(std::min(most, p.bytes - k)));
-        at.push_back(static_cast<MPI_Aint>(p.at + k));
-        MPI_Aint a = 0;
-        MPI_Get_address(p.to + k, &a);
-        to.push_back(a);
-      }
-      total += p.bytes;
-    }
-    const int n = static_cast<int>(lengths.size());
-    MPI_Datatype file_type = MPI_BYTE, memory = MPI_BYTE;
-    if (n > 0) {
-      MPI_Type_create_hindexed(n, lengths.data(), at.data(), MPI_BYTE, &file_type);
-      MPI_Type_commit(&file_type);
-      MPI_Type_create_hindexed(n, lengths.data(), to.data(), MPI_BYTE, &memory);
-      MPI_Type_commit(&memory);
-    }
-    // A failed view still joins the read, reading nothing; the view HDF5
-    // expects is restored after.
-    const bool viewed = MPI_File_set_view(fh, 0, MPI_BYTE, file_type, "native", MPI_INFO_NULL) == MPI_SUCCESS;
-    MPI_Status status;
-    const bool read = MPI_File_read_at_all(fh, 0, n > 0 ? MPI_BOTTOM : nullptr, viewed && n > 0 ? 1 : 0, memory,
-                                           &status) == MPI_SUCCESS;
-    const bool reset = MPI_File_set_view(fh, 0, MPI_BYTE, MPI_BYTE, "native", MPI_INFO_NULL) == MPI_SUCCESS;
-    MPI_Count got = 0;
-    if (read) MPI_Get_elements_x(&status, MPI_BYTE, &got);
-    if (n > 0) {
-      MPI_Type_free(&file_type);
-      MPI_Type_free(&memory);
-    }
-    if (!viewed || !read || !reset) throw h5::Error("read the datasets' rows with MPI-IO");
-    if (static_cast<std::uint64_t>(got) != total) bad_file(path_.string() + " is shorter than its datasets");
-#else
-    (void)pieces;
-#endif
+    const soma_file::Location at = soma_file::location(ds.get(), soma_file::memory_type(t), "/soma/" + path);
+    return bytes_of(std::vector<std::uint64_t>{at.raw ? 1U : 0U, at.at});
   }
   [[nodiscard]] std::vector<std::byte> file_extent(const std::string& path) const {
     const Id ds = h5::open_dataset(root_.get(), path);
@@ -1431,29 +1381,6 @@ Replica unpack(std::span<const std::byte> in) {
   return r;
 }
 
-// Rank 0's message, given to every rank: in one broadcast of first_bcast
-// bytes, and a second for what does not fit.
-constexpr std::size_t first_bcast = std::size_t{64} << 10;
-
-std::vector<std::byte> broadcast(const Comm& comm, std::vector<std::byte> message) {
-  constexpr std::size_t room = first_bcast - sizeof(std::uint64_t);
-  std::vector<std::byte> head(first_bcast);
-  std::uint64_t n = message.size();
-  if (comm.rank() == 0) {
-    std::memcpy(head.data(), &n, sizeof n);
-    std::copy_n(message.begin(), std::min<std::size_t>(n, room), head.begin() + sizeof n);
-  }
-  comm.bcast(std::span<std::byte>(head), 0);
-  std::memcpy(&n, head.data(), sizeof n);
-  if (comm.rank() != 0) {
-    const auto begin = head.begin() + sizeof n;
-    message.assign(begin, begin + static_cast<std::ptrdiff_t>(std::min<std::size_t>(n, room)));
-    message.resize(n);
-  }
-  if (n > room) comm.bcast(std::span<std::byte>(message).subspan(room), 0);
-  return message;
-}
-
 // For a shared file: the first rank of comm asks the file every question
 // `ask` asks (and where each dataset read is), alone, and its answers, or its
 // failure, go to every rank in one broadcast; the file then answers from
@@ -1476,7 +1403,7 @@ void share_answers(const Comm& comm, File& f, F&& ask) {
       append(message, std::as_bytes(std::span<const char>(e.what(), std::strlen(e.what()))));
     }
   }
-  message = broadcast(comm, std::move(message));
+  message = soma_file::broadcast(comm, std::move(message));
   if (message.empty()) bad_file("the first rank sent no answers");
   const auto rest = std::span<const std::byte>(message).subspan(1);
   const std::string text(reinterpret_cast<const char*>(rest.data()), message[0] == std::byte{0} ? 0 : rest.size());
