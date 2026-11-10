@@ -242,6 +242,24 @@ void make_big_endian(const fs::path& p, const char* path) {
 }
 #endif
 
+// Gives the second vertex of a file the first one's gid.
+void repeat_vertex_gid(const fs::path& p) {
+  const hid_t f = H5Fopen(p.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  const hid_t ds = H5Dopen2(f, "soma/dim0/gid", H5P_DEFAULT);
+  const hid_t space = H5Dget_space(ds);
+  const std::array<hsize_t, 2> start{0, 0}, count{2, 1};
+  H5Sselect_hyperslab(space, H5S_SELECT_SET, start.data(), nullptr, count.data(), nullptr);
+  const hid_t mem = H5Screate_simple(2, count.data(), nullptr);
+  std::array<std::int64_t, 2> g{};
+  H5Dread(ds, H5T_NATIVE_INT64, mem, space, H5P_DEFAULT, g.data());
+  g[1] = g[0];
+  H5Dwrite(ds, H5T_NATIVE_INT64, mem, space, H5P_DEFAULT, g.data());
+  H5Sclose(mem);
+  H5Sclose(space);
+  H5Dclose(ds);
+  H5Fclose(f);
+}
+
 std::size_t files_in(const fs::path& dir) {
   return static_cast<std::size_t>(std::distance(fs::directory_iterator(dir), fs::directory_iterator()));
 }
@@ -731,16 +749,29 @@ TEST(SomaFile, FilesItCannotReadThrowOnEveryRank) {
   EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::read_soma(c, data("hex_2048.h5m")); }, "not a SOMA file"));
   EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::read_soma(c, dir.path("missing.soma")); }, "read_soma"));
   const HostMesh m = rich_part(c, 4);
-  const fs::path newer = dir.path("newer.soma"), table = dir.path("table.soma");
+  const fs::path newer = dir.path("newer.soma"), table = dir.path("table.soma"), twice = dir.path("twice.soma");
   soma::write_soma(c, m, newer);
   soma::write_soma(c, m, table);
+  soma::write_soma(c, m, twice);
+  // Gids from a file are dense, and are looked up by a table; the others by
+  // a search.
+  const fs::path dense = dir.path("dense.soma");
+  soma::write_soma(c, soma::read_h5m(c, data("hex_2048.h5m")), dense);
   if (c.rank() == 0) {
+    repeat_vertex_gid(dense);
     set_meta(newer, 0, 99);
     set_offset(table, 1, 0, std::uint64_t{1} << 40);
+    repeat_vertex_gid(twice);
   }
   c.barrier();
   EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::read_soma(c, newer); }, "format_version 99"));
   EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::read_soma(c, table); }, "part table"));
+  // A part naming a vertex twice: the rank reading it says so.
+  for (const fs::path& p : {twice, dense}) {
+    EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::read_soma(c, p); },
+                                           c.rank() == 0 ? "dimension 0 holds gid" : "read_soma"))
+        << p;
+  }
   // The same through aggregators, which send the cause to their groups.
   const soma::SomaReadOptions through{.aggregators = some_aggregators(c.size())};
   EXPECT_TRUE(throws<std::runtime_error>([&] { (void)soma::read_soma(c, newer, through); }, "format_version 99"));

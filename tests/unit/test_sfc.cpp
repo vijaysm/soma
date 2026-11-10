@@ -155,6 +155,39 @@ TEST(Hilbert, MatchesTheTransposeReference) {
   }
 }
 
+// At the full width of two and three axes, where the host follows the curve
+// by state tables: cells near the corners, edges and centre of the grid, and
+// many random ones, against the transpose.
+TEST(Hilbert, FullWidthTablesFollowTheTranspose) {
+  std::uint64_t s = 0x243F6A8885A308D3ULL;
+  const auto next = [&] {
+    s ^= s << 13;
+    s ^= s >> 7;
+    s ^= s << 17;
+    return s;
+  };
+  for (const int n : {2, 3}) {
+    const int bits = soma::sfc::bits_per_axis(n);
+    const std::uint32_t m = soma::sfc::max_cell(n);
+    const std::vector<std::uint32_t> edges{0U, 1U, 2U, m / 2 - 1, m / 2, m / 2 + 1, m - 2, m - 1, m};
+    for (const std::uint32_t x : edges) {
+      for (const std::uint32_t y : edges) {
+        for (const std::uint32_t z : edges) {
+          const std::uint32_t c[3] = {x, y, z};
+          ASSERT_EQ(soma::sfc::hilbert_index(c, n, bits), transpose_reference(c, n, bits))
+              << "n " << n << " (" << x << "," << y << "," << z << ")";
+        }
+      }
+    }
+    for (int r = 0; r < 200000; ++r) {
+      std::uint32_t c[3];
+      for (std::uint32_t& v : c) v = static_cast<std::uint32_t>(next()) & m;
+      ASSERT_EQ(soma::sfc::hilbert_index(c, n, bits), transpose_reference(c, n, bits))
+          << "n " << n << " (" << c[0] << "," << c[1] << "," << c[2] << ")";
+    }
+  }
+}
+
 TEST(Hilbert, KnownValuesOnAnEightByEightGrid) {
   EXPECT_EQ(index_2d(0, 0, 3), 0u);
   EXPECT_EQ(index_2d(7, 0, 3), 63u);

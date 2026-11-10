@@ -558,6 +558,16 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   on the key, which gives the same order.
 - `sfc::hilbert_index` works without branches, with the axis count as a template parameter: the
   same keys, 3.7x faster each.
+- At the full width of two or three axes the host follows the Hilbert curve by state tables, two
+  levels a step in 3D and four in 2D, read off the transpose and checked against it: the same
+  keys, 7x (3D) and 17x (2D) faster. `MeshBuilder::build` orders (key, position) pairs and
+  moves records once: by one pass on the key's highest 16 varying bits and sorts of the small
+  buckets, ties by gid, the same order; ownership and repeated element gids are looked up in
+  tables over dense gid ranges. `Sharing::groups` sorts only shared rows. `read_soma` finds
+  local ids and rows by tables over dense gids and indexes set memberships only for copies it
+  sends. A one-rank read of a 64^3 box from a SOMA file takes 55 ms instead of 194 (MOAB 46),
+  and 132 instead of 155 at 8 ranks (MOAB 266); `build_local_part` 42 instead of 118 ms at one
+  rank and 18 instead of 32 at 8 (MOAB's `resolve_shared_ents` 235 and 68).
 - `read_h5m` places tag values by lid in one pass instead of sorting them, and builds each full
   domain once for every tag that covers it.
 - `write_h5m` writes a mesh in MOAB's legacy `.h5m` format, read back by MOAB `load_file` and

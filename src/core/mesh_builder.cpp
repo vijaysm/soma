@@ -4,6 +4,7 @@
 #include "soma/core/mesh_builder.hpp"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <functional>
@@ -168,32 +169,110 @@ void sort_unless_sorted(It first, It last, Less less) {
   if (!std::is_sorted(first, last, less)) std::sort(first, last, less);
 }
 
-// Stable LSD radix sort by a 64-bit key, 11 bits a pass; a digit every key
-// shares takes no pass, so equal keys (Ordering::file) cost one scan.
-template <class R, class KeyOf>
-void stable_sort_by_key(std::vector<R>& v, KeyOf key_of) {
+// Records are ordered through their positions: (key, position) pairs are
+// sorted, and the records moved once at the end (permute).
+struct Keyed {
+  std::uint64_t key;
+  std::size_t at;
+};
+
+// Stable LSD radix sort of the pairs by key, 11 bits a pass; a digit every
+// key shares takes no pass, so equal keys cost one scan.
+void radix_sort(std::vector<Keyed>& v) {
   if (v.size() < 2) return;
   std::uint64_t all_or = 0;
   std::uint64_t all_and = ~std::uint64_t{0};
-  for (const R& r : v) {
-    all_or |= key_of(r);
-    all_and &= key_of(r);
+  for (const Keyed& r : v) {
+    all_or |= r.key;
+    all_and &= r.key;
   }
   const std::uint64_t varying = all_or ^ all_and;
   constexpr int bits = 11;
   constexpr std::size_t buckets = std::size_t{1} << bits;
-  std::vector<R> tmp;
+  std::vector<Keyed> tmp;
   std::vector<std::size_t> start(buckets);
   for (int shift = 0; shift < 64; shift += bits) {
     if (((varying >> shift) & (buckets - 1)) == 0) continue;
     if (tmp.empty()) tmp.resize(v.size());
     std::fill(start.begin(), start.end(), std::size_t{0});
-    for (const R& r : v) ++start[(key_of(r) >> shift) & (buckets - 1)];
+    for (const Keyed& r : v) ++start[(r.key >> shift) & (buckets - 1)];
     std::size_t sum = 0;
     for (std::size_t& c : start) sum += std::exchange(c, sum);
-    for (const R& r : v) tmp[start[(key_of(r) >> shift) & (buckets - 1)]++] = r;
+    for (const Keyed& r : v) tmp[start[(r.key >> shift) & (buckets - 1)]++] = r;
     v.swap(tmp);
   }
+}
+
+// The positions of n records by (key, tie): by key, then each run of equal
+// keys (all of them with Ordering::file, few on a curve) by `tie`, a strict
+// order of positions. Input already in order costs a scan.
+template <class KeyOf, class Tie>
+std::vector<std::size_t> order_by_key(std::size_t n, KeyOf key_of, Tie tie) {
+  std::vector<std::size_t> order(n);
+  std::iota(order.begin(), order.end(), std::size_t{0});
+  const auto before = [&](std::size_t a, std::size_t b) {
+    const std::uint64_t ka = key_of(a), kb = key_of(b);
+    return ka != kb ? ka < kb : tie(a, b);
+  };
+  if (std::is_sorted(order.begin(), order.end(), before)) return order;
+  std::vector<Keyed> v(n);
+  std::uint64_t all_or = 0;
+  std::uint64_t all_and = ~std::uint64_t{0};
+  for (std::size_t i = 0; i < n; ++i) {
+    v[i] = {key_of(i), i};
+    all_or |= v[i].key;
+    all_and &= v[i].key;
+  }
+  // One pass on the 16 highest bits that vary, then each bucket (a few keys
+  // on a curve) sorted alone; stability is not needed, ties being by `tie`.
+  const std::uint64_t varying = all_or ^ all_and;
+  if (varying != 0) {
+    const int top = 64 - std::countl_zero(varying);
+    const int shift = std::max(0, top - 16);
+    const auto bucket = [&](const Keyed& r) { return static_cast<std::size_t>((r.key >> shift) & 0xFFFF); };
+    std::vector<std::size_t> start(std::size_t{1} << 16, 0);
+    for (const Keyed& r : v) ++start[bucket(r)];
+    std::size_t sum = 0;
+    for (std::size_t& c : start) sum += std::exchange(c, sum);
+    std::vector<Keyed> sorted(n);
+    for (const Keyed& r : v) sorted[start[bucket(r)]++] = r;
+    v.swap(sorted);
+    const auto by_key = [](const Keyed& a, const Keyed& b) { return a.key < b.key; };
+    for (std::size_t lo = 0, b = 0; b < start.size(); ++b) {
+      if (start[b] - lo > 1) {
+        std::sort(v.begin() + static_cast<std::ptrdiff_t>(lo), v.begin() + static_cast<std::ptrdiff_t>(start[b]),
+                  by_key);
+      }
+      lo = start[b];
+    }
+  }
+  for (std::size_t i = 0; i < n; ++i) order[i] = v[i].at;
+  for (std::size_t lo = 0; lo < n;) {
+    std::size_t hi = lo + 1;
+    while (hi < n && v[hi].key == v[lo].key) ++hi;
+    if (hi - lo > 1) {
+      std::sort(order.begin() + static_cast<std::ptrdiff_t>(lo), order.begin() + static_cast<std::ptrdiff_t>(hi), tie);
+    }
+    lo = hi;
+  }
+  return order;
+}
+
+// Reorders the positions stably by key_of(position).
+template <class KeyOf>
+void stable_by(std::vector<std::size_t>& order, KeyOf key_of) {
+  std::vector<Keyed> v(order.size());
+  for (std::size_t i = 0; i < order.size(); ++i) v[i] = {key_of(order[i]), order[i]};
+  radix_sort(v);
+  for (std::size_t i = 0; i < order.size(); ++i) order[i] = v[i].at;
+}
+
+// The records in the order of their positions.
+template <class R>
+void permute(std::vector<R>& recs, const std::vector<std::size_t>& order) {
+  std::vector<R> out(recs.size());
+  for (std::size_t i = 0; i < order.size(); ++i) out[i] = recs[order[i]];
+  recs.swap(out);
 }
 
 // The segments of n entities sorted by (ownership, topology, arity) already:
@@ -255,23 +334,59 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
   const Keys keys = make_keys(ordering, xyz_, key_box_);
   // Per dimension, the ownership named by gid, sorted by gid; (kind, group)
   // packed in one word, kind high, so a word sorts by kind then group.
-  std::array<std::vector<Owned>, 4> owned = owned_;
+  // An array over the gids' range when it is at most twice their count (as
+  // file gids usually are; positions + 1, 0 for none), else sorted by gid.
+  std::array<std::vector<Owned>, 4> owned = std::move(owned_);
+  std::array<GO, 4> owned_lo{};
+  std::array<std::vector<std::size_t>, 4> owned_at;
   for (std::size_t d = 0; d < 4; ++d) {
     auto& o = owned[d];
+    const auto twice = [&](GO g) {
+      throw std::invalid_argument("set_ownership: gid " + std::to_string(g) + " of dimension " + std::to_string(d) +
+                                  " is named twice");
+    };
+    if (o.empty()) continue;
+    GO lo = o[0].gid, hi = o[0].gid;
+    for (const Owned& x : o) {
+      lo = std::min(lo, x.gid);
+      hi = std::max(hi, x.gid);
+    }
+    // Unsigned, since hi - lo overflows GO for gids spanning its range.
+    const std::uint64_t span = static_cast<std::uint64_t>(hi) - static_cast<std::uint64_t>(lo);
+    if (span < 2 * static_cast<std::uint64_t>(o.size())) {
+      owned_lo[d] = lo;
+      auto& at = owned_at[d];
+      at.assign(static_cast<std::size_t>(span) + 1, 0);
+      bool again = false;
+      for (std::size_t i = 0; i < o.size(); ++i) {
+        std::size_t& a = at[static_cast<std::size_t>(o[i].gid - lo)];
+        again = again || a != 0;
+        a = i + 1;
+      }
+      if (!again) continue;
+      owned_at[d].clear();  // the least gid named twice is reported below
+    }
     std::sort(o.begin(), o.end(), [](const Owned& a, const Owned& b) { return a.gid < b.gid; });
     const auto dup = std::adjacent_find(o.begin(), o.end(), [](const Owned& a, const Owned& b) { return a.gid == b.gid; });
-    if (dup != o.end()) {
-      throw std::invalid_argument("set_ownership: gid " + std::to_string(dup->gid) + " of dimension " +
-                                  std::to_string(d) + " is named twice");
-    }
+    if (dup != o.end()) twice(dup->gid);
   }
   std::array<std::size_t, 4> named{};  // entities found among those named
   const auto own_of = [&](std::size_t d, GO g) -> std::uint64_t {
     const auto& o = owned[d];
-    const auto it = std::lower_bound(o.begin(), o.end(), g, [](const Owned& a, GO x) { return a.gid < x; });
-    if (it == o.end() || it->gid != g) return 0;
+    const Owned* x = nullptr;
+    if (!owned_at[d].empty()) {
+      const auto& at = owned_at[d];
+      if (g >= owned_lo[d] && static_cast<std::uint64_t>(g) - static_cast<std::uint64_t>(owned_lo[d]) < at.size()) {
+        const std::size_t a = at[static_cast<std::size_t>(g - owned_lo[d])];
+        if (a != 0) x = &o[a - 1];
+      }
+    } else {
+      const auto it = std::lower_bound(o.begin(), o.end(), g, [](const Owned& a, GO v) { return a.gid < v; });
+      if (it != o.end() && it->gid == g) x = &*it;
+    }
+    if (x == nullptr) return 0;
     ++named[d];
-    return std::uint64_t{static_cast<std::uint8_t>(it->kind)} << 32 | it->group;
+    return std::uint64_t{static_cast<std::uint8_t>(x->kind)} << 32 | x->group;
   };
   const auto check_named = [&](std::size_t d) {
     if (named[d] != owned[d].size()) {
@@ -296,16 +411,19 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
                          const Real* x = &xyz_[3 * i];
                          vrecs[i] = {keys(x[0], x[1], x[2]), vertex_gids_[i], i, 0};
                        });
-  // By gid, then stably by key: by (key, gid).
-  sort_unless_sorted(vrecs.begin(), vrecs.end(),
-                     [](const VertexRec& a, const VertexRec& b) { return a.gid < b.gid; });
-  stable_sort_by_key(vrecs, [](const VertexRec& r) { return r.key; });
-  // Then stably by group and by kind: by (kind, group, key, gid).
-  if (!owned[0].empty()) {
-    for (VertexRec& r : vrecs) r.own = own_of(0, r.gid);
-    check_named(0);
-    stable_sort_by_key(vrecs, [](const VertexRec& r) { return r.own & 0xFFFFFFFFULL; });
-    stable_sort_by_key(vrecs, [](const VertexRec& r) { return r.own >> 32; });
+  {
+    // By (key, gid); with Ordering::file every key is 0, so by gid.
+    std::vector<std::size_t> order = order_by_key(
+        nv, [&](std::size_t i) { return vrecs[i].key; },
+        [&](std::size_t a, std::size_t b) { return vrecs[a].gid < vrecs[b].gid; });
+    // Then stably by group and by kind: by (kind, group, key, gid).
+    if (!owned[0].empty()) {
+      for (VertexRec& r : vrecs) r.own = own_of(0, r.gid);
+      check_named(0);
+      stable_by(order, [&](std::size_t i) { return vrecs[i].own & 0xFFFFFFFFULL; });
+      stable_by(order, [&](std::size_t i) { return vrecs[i].own >> 32; });
+    }
+    permute(vrecs, order);
   }
   mesh.coords_ = CoordView<Kokkos::HostSpace>(
       Kokkos::view_alloc(std::string("soma::mesh::coords"), Kokkos::WithoutInitializing), nv);
@@ -495,27 +613,56 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
             rec.key = keys(c[0], c[1], c[2]);
           });
     }
-    // By (gid, topology, arity), which also finds repeated gids; then stably by
-    // key and by (topology, arity, nodes): by (topology, arity, nodes, key, gid).
-    sort_unless_sorted(recs.begin(), recs.end(), [](const Rec& x, const Rec& y) {
-      return std::tuple(x.gid, x.t, x.arity) < std::tuple(y.gid, y.t, y.arity);
-    });
-    for (std::size_t i = 1; i < recs.size(); ++i) {
-      const Rec& p = recs[i - 1];
-      const Rec& q = recs[i];
-      if (p.gid != q.gid) continue;
-      if (p.t != q.t) {
-        throw std::invalid_argument("element gid " + std::to_string(q.gid) +
-                                    " is used by both " + name(p.t) + " and " + name(q.t) +
-                                    " elements of dimension " + std::to_string(d));
+    // A gid given twice is reported at the least such gid, by the first two
+    // of its elements in (topology, arity) order.
+    const auto repeated = [&](GO g) {
+      std::vector<std::pair<Topology, std::uint16_t>> same;
+      for (const Rec& r : recs) {
+        if (r.gid == g) same.emplace_back(r.t, r.arity);
       }
-      throw std::invalid_argument("duplicate element gid " + std::to_string(q.gid));
+      std::sort(same.begin(), same.end());
+      if (same[0].first != same[1].first) {
+        throw std::invalid_argument("element gid " + std::to_string(g) + " is used by both " + name(same[0].first) +
+                                    " and " + name(same[1].first) + " elements of dimension " + std::to_string(d));
+      }
+      throw std::invalid_argument("duplicate element gid " + std::to_string(g));
+    };
+    if (!recs.empty()) {
+      GO lo = recs[0].gid, hi = recs[0].gid;
+      for (const Rec& r : recs) {
+        lo = std::min(lo, r.gid);
+        hi = std::max(hi, r.gid);
+      }
+      // Unsigned, since hi - lo overflows GO for gids spanning its range.
+      const std::uint64_t span = static_cast<std::uint64_t>(hi) - static_cast<std::uint64_t>(lo);
+      if (span < 2 * static_cast<std::uint64_t>(recs.size())) {
+        std::vector<std::uint8_t> seen(static_cast<std::size_t>(span) + 1, 0);  // 2: twice or more
+        bool twice = false;
+        for (const Rec& r : recs) {
+          std::uint8_t& c = seen[static_cast<std::size_t>(r.gid - lo)];
+          c = c == 0 ? 1 : 2;
+          twice = twice || c == 2;
+        }
+        for (std::size_t k = 0; twice && k < seen.size(); ++k) {
+          if (seen[k] == 2) repeated(lo + static_cast<GO>(k));
+        }
+      } else {
+        std::vector<GO> gids(recs.size());
+        for (std::size_t i = 0; i < recs.size(); ++i) gids[i] = recs[i].gid;
+        sort_unless_sorted(gids.begin(), gids.end(), std::less<>());
+        const auto dup = std::adjacent_find(gids.begin(), gids.end());
+        if (dup != gids.end()) repeated(*dup);
+      }
     }
-    stable_sort_by_key(recs, [](const Rec& r) { return r.key; });
+    // By (key, gid), then stably by group, by (topology, arity, nodes) and by
+    // kind: by (kind, topology, arity, nodes, group, key, gid).
+    std::vector<std::size_t> order = order_by_key(
+        recs.size(), [&](std::size_t i) { return recs[i].key; },
+        [&](std::size_t a, std::size_t b) { return recs[a].gid < recs[b].gid; });
     if (!owned[d].empty()) {
       for (Rec& r : recs) r.own = own_of(d, r.gid);
       check_named(d);
-      stable_sort_by_key(recs, [](const Rec& r) { return r.own & 0xFFFFFFFFULL; });
+      stable_by(order, [&](std::size_t i) { return recs[i].own & 0xFFFFFFFFULL; });
     }
     {
       std::vector<std::tuple<Topology, std::uint16_t, std::uint16_t>> groups;
@@ -526,15 +673,17 @@ HostMesh MeshBuilder::build(Ordering ordering) && {
       std::sort(groups.begin(), groups.end());
       groups.erase(std::unique(groups.begin(), groups.end()), groups.end());
       if (groups.size() > 1) {
-        const auto group_of = [&](const Rec& r) {
+        const auto group_of = [&](std::size_t i) {
+          const Rec& r = recs[i];
           const auto it =
               std::lower_bound(groups.begin(), groups.end(), std::tuple(r.t, r.arity, r.nodes));
           return static_cast<std::uint64_t>(it - groups.begin());
         };
-        stable_sort_by_key(recs, group_of);
+        stable_by(order, group_of);
       }
     }
-    if (!owned[d].empty()) stable_sort_by_key(recs, [](const Rec& r) { return r.own >> 32; });
+    if (!owned[d].empty()) stable_by(order, [&](std::size_t i) { return recs[i].own >> 32; });
+    permute(recs, order);
     auto& e = mesh.ents_[d];
     e.count = detail::to_lo(recs.size(), "number of elements");
     e.input = !recs.empty();

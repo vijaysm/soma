@@ -39,16 +39,25 @@ std::vector<std::uint32_t> Sharing::groups() const {
     if (is_ghost(*this, i)) return std::span<const int>(&ghost_owner[i], 1);
     return std::span<const int>(ranks.data() + offsets[i], offsets[i + 1] - offsets[i]);
   };
-  std::vector<std::size_t> order(n);
-  std::iota(order.begin(), order.end(), std::size_t{0});
+  // Empty rows (interior entities, most of them) come first, as group 0;
+  // only the others are sorted.
+  std::vector<std::size_t> order;
+  bool any_empty = false;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (row(i).empty()) {
+      any_empty = true;
+    } else {
+      order.push_back(i);
+    }
+  }
   const auto less = [&](std::size_t a, std::size_t b) {
     const auto x = row(a), y = row(b);
     return std::lexicographical_compare(x.begin(), x.end(), y.begin(), y.end());
   };
-  std::stable_sort(order.begin(), order.end(), less);
-  std::vector<std::uint32_t> out(n);
-  std::uint32_t group = 0;
-  for (std::size_t k = 0; k < n; ++k) {
+  std::sort(order.begin(), order.end(), less);
+  std::vector<std::uint32_t> out(n, 0);
+  std::uint32_t group = any_empty ? 1 : 0;
+  for (std::size_t k = 0; k < order.size(); ++k) {
     if (k > 0 && less(order[k - 1], order[k])) ++group;
     out[order[k]] = group;
   }

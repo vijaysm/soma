@@ -805,14 +805,21 @@ Parts read_file(const Comm& comm, const File& f, Ranks ranks, bool parse = true)
   std::size_t at = 0;
   for (std::uint64_t q = b.first; q < b.last; ++q) {
     const auto n = start(q + 1, "sets/members") - start(q, "sets/members");
+    // The part's first row of each dimension written.
+    std::array<std::uint64_t, 4> base{};
+    for (int d = 0; d <= m.dim; ++d) {
+      const std::string g = dim_group(d);
+      if (m.written[static_cast<std::size_t>(d)]) {
+        base[static_cast<std::size_t>(d)] = start(q, g + "/gid") - start(b.first, g + "/gid");
+      }
+    }
     for (std::uint64_t k = 0; k < n; ++k, at += 4) {
       const std::int64_t set = members[at], d = members[at + 1], index = members[at + 2], pos = members[at + 3];
       if (set < 0 || static_cast<std::size_t>(set) >= nsets || d < 0 || d > m.dim ||
           !m.written[static_cast<std::size_t>(d)]) {
         bad_file("/soma/sets/members is inconsistent");
       }
-      const std::string g = dim_group(static_cast<int>(d));
-      const auto row = start(q, g + "/gid") - start(b.first, g + "/gid") + static_cast<std::uint64_t>(index);
+      const auto row = base[static_cast<std::size_t>(d)] + static_cast<std::uint64_t>(index);
       Rows& r = in.rows[static_cast<std::size_t>(d)];
       if (index < 0 || row >= r.size()) bad_file("/soma/sets/members names no entity of its part");
       r.members.push_back({set, row, q, pos});
@@ -831,9 +838,15 @@ void send_copies(const Comm& comm, Parts& in) {
   std::map<int, std::vector<std::byte>> streams;
   for (int d = 0; d <= in.meta.dim; ++d) {
     Rows& r = in.rows[static_cast<std::size_t>(d)];
+    if (std::all_of(r.others.begin(), r.others.begin() + static_cast<std::ptrdiff_t>(r.owned),
+                    [](const std::vector<int>& o) { return o.empty(); })) {
+      continue;
+    }
     // Memberships by row.
     std::unordered_map<std::size_t, std::vector<const Membership*>> member_of;
-    for (const Membership& x : r.members) member_of[x.row].push_back(&x);
+    for (const Membership& x : r.members) {
+      if (!r.others[x.row].empty()) member_of[x.row].push_back(&x);
+    }
     for (std::size_t i = 0; i < r.owned; ++i) {
       if (r.others[i].empty()) continue;
       std::vector<std::byte> rec;
@@ -989,6 +1002,81 @@ void collectively(const Comm& comm, F&& f) {
   }
 }
 
+// Positions by gid, of n gids gid_of(0..n): an array over the gids' range when
+// it is at most twice their count (as a file's or a mesh's gids usually are),
+// else (gid, position) pairs sorted by gid. `repeated` is the first gid, in
+// position order, given again, if any.
+class GidIndex {
+ public:
+  GidIndex() = default;
+  template <class GidOf>
+  GidIndex(std::size_t n, GidOf gid_of) {
+    if (n == 0) return;
+    GO lo = gid_of(0), hi = lo;
+    for (std::size_t i = 1; i < n; ++i) {
+      lo = std::min(lo, gid_of(i));
+      hi = std::max(hi, gid_of(i));
+    }
+    // Unsigned, since hi - lo overflows GO for gids spanning its range.
+    const std::uint64_t span = static_cast<std::uint64_t>(hi) - static_cast<std::uint64_t>(lo);
+    if (span < 2 * static_cast<std::uint64_t>(n)) {
+      lo_ = lo;
+      dense_.assign(static_cast<std::size_t>(span) + 1, none);
+      for (std::size_t i = 0; i < n; ++i) {
+        std::size_t& at = dense_[static_cast<std::size_t>(gid_of(i) - lo)];
+        if (at != none && !repeated) repeated = gid_of(i);
+        at = i;
+      }
+      return;
+    }
+    sorted_.resize(n);
+    for (std::size_t i = 0; i < n; ++i) sorted_[i] = {gid_of(i), i};
+    std::sort(sorted_.begin(), sorted_.end());
+    std::size_t again = none;
+    for (std::size_t k = 1; k < n; ++k) {
+      if (sorted_[k].first == sorted_[k - 1].first) again = std::min(again, sorted_[k].second);
+    }
+    if (again != none) repeated = gid_of(again);
+  }
+
+  // The position of gid g, or none.
+  [[nodiscard]] std::size_t find(GO g) const {
+    if (!dense_.empty()) {
+      if (g < lo_ || static_cast<std::uint64_t>(g) - static_cast<std::uint64_t>(lo_) >= dense_.size()) return none;
+      return dense_[static_cast<std::size_t>(g - lo_)];
+    }
+    const auto it = std::lower_bound(sorted_.begin(), sorted_.end(), std::pair<GO, std::size_t>{g, 0});
+    return it != sorted_.end() && it->first == g ? it->second : none;
+  }
+
+  static constexpr std::size_t none = ~std::size_t{0};
+  std::optional<GO> repeated;
+
+ private:
+  GO lo_ = 0;
+  std::vector<std::size_t> dense_;
+  std::vector<std::pair<GO, std::size_t>> sorted_;
+};
+
+// The local ids of a dimension's entities by gid.
+class Lids {
+ public:
+  Lids() = default;
+  Lids(const HostMesh& mesh, int d) : index_(static_cast<std::size_t>(mesh.count(d)), [g = mesh.gid(d)](std::size_t i) {
+    return g(static_cast<LO>(i));
+  }) {}
+
+  // Throws std::logic_error when no entity has gid g.
+  LO operator()(GO g) const {
+    const std::size_t at = index_.find(g);
+    if (at == GidIndex::none) throw std::logic_error("read_soma: an entity read is not in the part");
+    return static_cast<LO>(at);
+  }
+
+ private:
+  GidIndex index_;
+};
+
 // The builder's gids of dimension d, in its order.
 std::vector<GO> builder_gids(const MeshBuilder& b, int d) {
   if (d == 0) return {b.vertex_gids().begin(), b.vertex_gids().end()};
@@ -1050,15 +1138,16 @@ Prepared prepare(const Parts& in) {
     const auto dd = static_cast<std::size_t>(d);
     if (!m.written[dd]) continue;
     const Rows& r = in.rows[dd];
-    std::unordered_map<GO, std::size_t> row_of;
-    row_of.reserve(r.size());
-    for (std::size_t i = 0; i < r.size(); ++i) {
-      if (!row_of.emplace(r.gid[i], i).second) bad_file("dimension " + std::to_string(d) + " holds gid " + std::to_string(r.gid[i]) + " twice");
+    const GidIndex row_of(r.size(), [&](std::size_t i) { return r.gid[i]; });
+    if (row_of.repeated) {
+      bad_file("dimension " + std::to_string(d) + " holds gid " + std::to_string(*row_of.repeated) + " twice");
     }
     Sharing s;
     s.offsets.push_back(0);
     for (const GO g : builder_gids(b, d)) {
-      const auto& o = r.others[row_of.at(g)];
+      const std::size_t row = row_of.find(g);
+      if (row == GidIndex::none) throw std::logic_error("read_soma: the builder holds a gid not read");
+      const auto& o = r.others[row];
       s.ranks.insert(s.ranks.end(), o.begin(), o.end());
       s.offsets.push_back(static_cast<std::uint32_t>(s.ranks.size()));
     }
@@ -1097,20 +1186,6 @@ HostMesh build(const Comm& comm, const Parts& in, Ordering ordering, std::except
   return mesh;
 }
 
-std::vector<std::pair<GO, LO>> by_gid(const HostMesh& mesh, int d) {
-  std::vector<std::pair<GO, LO>> out(static_cast<std::size_t>(mesh.count(d)));
-  const auto g = mesh.gid(d);
-  for (LO e = 0; e < mesh.count(d); ++e) out[static_cast<std::size_t>(e)] = {g(e), e};
-  std::sort(out.begin(), out.end());
-  return out;
-}
-
-LO lid_of(const std::vector<std::pair<GO, LO>>& sorted, GO g) {
-  const auto it = std::lower_bound(sorted.begin(), sorted.end(), std::pair<GO, LO>{g, 0});
-  if (it == sorted.end() || it->first != g) throw std::logic_error("read_soma: an entity read is not in the part");
-  return it->second;
-}
-
 template <class T>
 std::optional<std::vector<T>> typed(const std::optional<std::vector<std::byte>>& b) {
   if (!b) return std::nullopt;
@@ -1120,7 +1195,7 @@ std::optional<std::vector<T>> typed(const std::optional<std::vector<std::byte>>&
 }
 
 template <class T>
-void install_field(HostMesh& mesh, const Parts& in, std::size_t i, const std::array<std::vector<std::pair<GO, LO>>, 4>& lids) {
+void install_field(HostMesh& mesh, const Parts& in, std::size_t i, const std::array<Lids, 4>& lids) {
   const FieldMeta& fm = in.fields[i];
   using HostDomain = Domain<Kokkos::HostSpace>;
   // Per dimension the lids with values and where they are.
@@ -1142,7 +1217,7 @@ void install_field(HostMesh& mesh, const Parts& in, std::size_t i, const std::ar
       const Rows& r = in.rows[dd];
       const FieldRows& fr = r.fields[i];
       for (std::size_t k = 0; k < fr.count.size(); ++k) {
-        if (fr.count[k] >= 0) at[dd].push_back({lid_of(lids[dd], r.gid[k]), k});
+        if (fr.count[k] >= 0) at[dd].push_back({lids[dd](r.gid[k]), k});
       }
       std::sort(at[dd].begin(), at[dd].end(), [](const At& x, const At& y) { return x.lid < y.lid; });
       if (fm.full[dd]) {
@@ -1222,7 +1297,7 @@ void install_field(HostMesh& mesh, const Parts& in, std::size_t i, const std::ar
   }
 }
 
-void install_sets(HostMesh& mesh, const Parts& in, const std::array<std::vector<std::pair<GO, LO>>, 4>& lids) {
+void install_sets(HostMesh& mesh, const Parts& in, const std::array<Lids, 4>& lids) {
   const std::size_t n = in.set_gid.size();
   if (n == 0) return;
   // (set, part, position, item): ordered sets list each part's entries in
@@ -1232,7 +1307,7 @@ void install_sets(HostMesh& mesh, const Parts& in, const std::array<std::vector<
     const auto dd = static_cast<std::size_t>(d);
     const Rows& r = in.rows[dd];
     for (const Membership& x : r.members) {
-      got.emplace_back(x.set, x.part, x.pos, SetItem{d, GO{lid_of(lids[dd], r.gid[x.row])}});
+      got.emplace_back(x.set, x.part, x.pos, SetItem{d, GO{lids[dd](r.gid[x.row])}});
     }
   }
   for (const auto& [set, pos, gid] : in.entries) got.emplace_back(set, 0, pos, SetItem{set_dim, gid});
@@ -1544,8 +1619,8 @@ HostMesh read_soma(const Comm& comm, const fs::path& path, const SomaReadOptions
   collectively(comm, [&] {
     if (built) std::rethrow_exception(built);
     const h5::Session quiet;
-    std::array<std::vector<std::pair<GO, LO>>, 4> lids;
-    for (int d = 0; d <= mesh.dim(); ++d) lids[static_cast<std::size_t>(d)] = by_gid(mesh, d);
+    std::array<Lids, 4> lids;
+    for (int d = 0; d <= mesh.dim(); ++d) lids[static_cast<std::size_t>(d)] = Lids(mesh, d);
     install_sets(mesh, in, lids);
     for (std::size_t i = 0; i < in.fields.size(); ++i) {
       dispatch_data_type(in.fields[i].type, [&]<class T>() { install_field<T>(mesh, in, i, lids); });
