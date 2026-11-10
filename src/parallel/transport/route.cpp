@@ -69,6 +69,18 @@ Rows bucket(const Rows& rows, std::size_t buckets, Key key, std::vector<std::siz
   return out;
 }
 
+// The rows by destination, as bucket gives them; rows already in that order,
+// as they often are, are moved rather than copied.
+Rows by_dest(Rows& rows, std::size_t p, std::vector<std::size_t>& starts) {
+  bool sorted = true;
+  for (std::size_t i = 1; i < rows.size() && sorted; ++i) sorted = rows.header(i - 1).dest <= rows.header(i).dest;
+  if (!sorted) return bucket(rows, p, [](const Header& h) { return static_cast<std::size_t>(h.dest); }, starts);
+  starts.assign(p + 1, 0);
+  for (std::size_t i = 0; i < rows.size(); ++i) ++starts[static_cast<std::size_t>(rows.header(i).dest) + 1];
+  for (std::size_t b = 0; b < p; ++b) starts[b + 1] += starts[b];
+  return std::move(rows);
+}
+
 std::span<const std::byte> part(const Rows& rows, const std::vector<std::size_t>& starts, std::size_t b) {
   return {rows.bytes.data() + starts[b] * rows.stride, (starts[b + 1] - starts[b]) * rows.stride};
 }
@@ -145,7 +157,7 @@ void crystal(const Comm& comm, Rows& rows) {
 void alltoallv(const Comm& comm, Rows& rows) {
   const auto p = static_cast<std::size_t>(comm.size());
   std::vector<std::size_t> starts;
-  const Rows out = bucket(rows, p, [](const Header& h) { return static_cast<std::size_t>(h.dest); }, starts);
+  const Rows out = by_dest(rows, p, starts);
   std::vector<std::uint64_t> send_counts(p), recv_counts(p);
   for (std::size_t r = 0; r < p; ++r) send_counts[r] = starts[r + 1] - starts[r];
   comm.alltoall(std::span<const std::uint64_t>(send_counts), std::span<std::uint64_t>(recv_counts));
@@ -163,8 +175,7 @@ void nbx(const Comm& comm, Rows& rows) {
   const int tag = nbx_tag + static_cast<int>(comm.next_sequence() % 2);
   const auto me = static_cast<std::size_t>(comm.rank());
   std::vector<std::size_t> starts;
-  const Rows out = bucket(rows, static_cast<std::size_t>(comm.size()),
-                          [](const Header& h) { return static_cast<std::size_t>(h.dest); }, starts);
+  const Rows out = by_dest(rows, static_cast<std::size_t>(comm.size()), starts);
   const std::span<const std::byte> self = part(out, starts, me);
   rows.bytes.assign(self.begin(), self.end());
   std::vector<Request> sends;
@@ -226,10 +237,23 @@ detail::Arrivals detail::route_host(const Comm& comm, std::span<const int> dest,
   const auto p = static_cast<std::size_t>(comm.size());
   const std::size_t limit = largest > std::numeric_limits<std::size_t>::max() / p ? std::numeric_limits<std::size_t>::max()
                                                                                    : largest * p;
-  Rows rows{sizeof(Header) + width, std::vector<std::byte>(dest.size() * (sizeof(Header) + width)), limit};
+  // Records to this rank stay where they are; only the others travel.
+  std::vector<std::pair<std::size_t, std::size_t>> self;
+  std::size_t own = 0;
   for (std::size_t i = 0; i < dest.size(); ++i) {
+    if (dest[i] != comm.rank()) continue;
+    if (!self.empty() && self.back().first + self.back().second == i) {
+      ++self.back().second;
+    } else {
+      self.emplace_back(i, 1);
+    }
+    ++own;
+  }
+  Rows rows{sizeof(Header) + width, std::vector<std::byte>((dest.size() - own) * (sizeof(Header) + width)), limit};
+  for (std::size_t i = 0, k = 0; i < dest.size(); ++i) {
+    if (dest[i] == comm.rank()) continue;
     const Header h{dest[i], comm.rank()};
-    std::byte* row = rows.bytes.data() + i * rows.stride;
+    std::byte* row = rows.bytes.data() + k++ * rows.stride;
     std::memcpy(row, &h, sizeof h);
     if (width > 0) std::memcpy(row + sizeof h, payload.data() + i * width, width);
   }
@@ -244,7 +268,16 @@ detail::Arrivals detail::route_host(const Comm& comm, std::span<const int> dest,
   for (std::size_t i = 1; i < rows.size() && sorted; ++i) sorted = rows.header(i - 1).source <= rows.header(i).source;
   std::vector<std::size_t> starts;
   Rows done = sorted ? std::move(rows) : bucket(rows, static_cast<std::size_t>(comm.size()), by_source, starts);
-  return Arrivals{done.stride, std::move(done.bytes)};
+  std::size_t before = 0, after = done.size();
+  while (before < after) {
+    const std::size_t mid = before + (after - before) / 2;
+    if (done.header(mid).source < comm.rank()) {
+      before = mid + 1;
+    } else {
+      after = mid;
+    }
+  }
+  return Arrivals{done.stride, std::move(done.bytes), before, std::move(self)};
 }
 
 }  // namespace soma::transport

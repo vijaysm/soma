@@ -25,6 +25,8 @@ All notable changes to SOMA are recorded here. The format follows
 - The configure summary line reports the Kokkos source, host and GPU backends, MPI, tests,
   GPU-aware MPI and build type.
 - `-Wall -Wextra` are applied to SOMA targets for compilers that accept them.
+- `SOMA_ENABLE_HDF5=ON` needs HDF5 1.14 or newer. SOMA files are written in the HDF5 1.14 file
+  format (`H5F_LIBVER_V114`), whatever newer library writes them.
 - CPM is at 0.43.2.
 
 ### Runtime and Comm
@@ -51,6 +53,8 @@ All notable changes to SOMA are recorded here. The format follows
   entered, for tests that bound them.
 - `Comm::allgatherv` gathers each rank's span of trivially copyable values on every rank, in
   rank order, with the counts if asked; one collective.
+- `Comm::split(color, key)` returns an owned `SplitComm` (freed with it) grouping the ranks of
+  a color in key order; a negative color joins no group. One collective.
 
 ### Topology
 
@@ -333,7 +337,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `resolve_sharing(comm, gids)` finds every rank holding each gid (the lowest owns it).
 - `build_local_part(comm, builder, ordering)` builds a rank's part with the ownership and
   sharing of every dimension it holds, kept in the internal fields `soma:sharing` (the other
-  ranks holding each shared entity) and `soma:owner` (the owner of each shared copy).
+  ranks holding each shared entity) and `soma:owner` (the owner of each shared copy). Its
+  checks and the box of every rank's vertices take one reduction, and the build one more.
 - `build_distributed_adjacencies(comm, mesh, request)` builds graphs on a part and gives
   derived edges and faces gids that do not depend on P (the largest explicit gid plus the rank
   of their sorted corner gids), sharing and ownership order; a distributed dimension that the
@@ -357,6 +362,22 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   owners, set membership with `sets`. `resolve_sharing` and `build_local_part` take ghosts;
   derived sides of ghost elements only are ghosts. `HaloExchange::update` writes ghosts,
   `reduce` leaves them. Parity with MOAB's `exchange_ghost_cells` for the first layer.
+  `add_ghosts` returns after one reduction when no rank has anything to ghost and none holds
+  ghosts. It sends each ghosting rank its ghosts' closures (after owners give the copies of
+  their shared entities what they hold) and appends them to what the rank holds, which stays in
+  place: only the ghosts are ordered (as the part built whole orders them) and only the ghosts'
+  own sides are derived. The rounds start from the elements with a shared vertex, index the
+  sides of those within `layers - 1` of them, and skip telling vertex holders in the last
+  round; owners keep the ranks they answer, so no round tells them. Copies' versions go in
+  one exchange and closures in another, with notices telling owners who holds their closure
+  entities; owners then push field values and set memberships to the ranks holding copies
+  and ghosts, which look up only their shared and ghost entities. So the cost follows the
+  ghost layer, not the part, with no gid directory: on a 64^3 box one layer takes 28 to 37
+  ms at 2 to 8 ranks (281 to 115 ms before), as MOAB's `exchange_ghost_cells` at 8 ranks,
+  two layers 47 to 83 ms, below MOAB's at 4 and 8. The part
+  is the one rebuilding it through directories gives (`detail::add_ghosts_by_rebuild`), entity
+  for entity. An entity held only for an explicit edge (such an edge's far corner) is no
+  longer lost when another rank ghosts it.
 - `build_distributed_adjacencies` keeps the sharing of the dimensions it does not extend when
   deriving beside explicit entities renews the epoch.
 - `permute_entities(mesh, dim, new_of_old, table, gids)` reorders one dimension with
@@ -388,11 +409,28 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `read_soma(comm, path, SomaReadOptions{ordering, rebalance, adjacencies})` reads a file of
   N parts at P ranks, part q on rank floor(qP/N). Owners send their shared entities, with
   field values and set memberships, to the ranks holding copies, and the sharing comes from
-  the file: a restart read (N = P) gives each rank the part it wrote with 13 collectives and
-  one routed exchange. With N < P, `rebalance` migrates elements by the curve so every rank
+  the file: a restart read (N = P) gives each rank the part it wrote with 6 collectives and
+  one routed exchange, 7 with MPI-IO at P > 1. There the file is opened once, collectively,
+  and rank 0 alone reads its metadata and where each dataset's rows are, sent to every rank
+  in one broadcast; every rank then reads its rows in one collective MPI-IO read on the file
+  HDF5 opened. HDF5 itself makes 4 broadcasts (opening the file) instead of 63, and the other
+  ranks no metadata reads. Compressed datasets, or those stored in another type or byte order,
+  are read through HDF5. With N < P, `rebalance` migrates elements by the curve so every rank
   gets some. The result equals the mesh written by gid: entities, coordinates, connectivity,
   nodes, sets in order, fields with domains, defaults, global values and formats, mesh values;
-  derived dimensions are derived again.
+  derived dimensions not written are derived again.
+- `SomaWriteOptions::derived` also writes every dimension held on some rank (derived edges and
+  faces with their gids and sharing). Dimensions written but derived in the mesh written read
+  back complete and marked derived, so building the writer's graphs derives nothing and a
+  restart makes no gid directory pass. A dimension is written for sets only when some set has
+  members of it.
+- `MpiIoHints` in `SomaWriteOptions` and `SomaReadOptions` pass `cb_nodes`, `cb_buffer_size`,
+  `romio_cb_write`/`romio_cb_read`, `striping_factor` and `striping_unit` to MPI-IO, and align
+  datasets with `H5Pset_alignment`. With `aggregators` = M in [1, P], a write sends each rank's
+  rows to the first rank of its group floor(rM/P), and only those M ranks open the file and
+  write their group's rows; a read has those ranks read their group's metadata and rows and
+  send each rank its own. The file stays one file and is the same as without aggregators.
+  M > 1 needs a parallel HDF5; invalid or differing options throw on every rank.
 - Meshes that cannot be written and files that cannot be read throw on every rank.
 - `detect_format(path)` tells a MOAB `.h5m` file from a SOMA file by content;
   `convert_mesh_file(comm, in, out, compression)` and the `soma-convert` tool convert either
@@ -433,7 +471,10 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   eight value types) in the SOMA format: each level's boxes and each field's valid points, box
   after box in curve order, in 6 collectives whatever the rank count or number of fields.
   `read_soma_amr(comm, path)` restarts it at any rank count, cut by the reader's costs, each
-  rank reading its own run of rows; ghosts are filled by the caller. `detect_format` reports
+  rank reading its own run of rows; ghosts are filled by the caller. With MPI-IO at P > 1 the
+  file is opened once: rank 0 alone reads the header and where each column is, sent to every
+  rank in one broadcast, and every rank reads its rows of all fields in one collective MPI-IO
+  read (compressed or converted columns through HDF5). `detect_format` reports
   `MeshFormat::soma_amr`, and the mesh and AMR readers each refuse the other's files.
 - `write_vtk_amr(comm, path, hierarchy, fields)` writes each rank's boxes as `.vti` pieces and
   the `.vthb` index on rank 0 once every piece is in place; the files equal those one process
@@ -473,6 +514,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   every bundled mesh and on two files MOAB writes at test time: every set's flags, members,
   sequence, children and parents, and every tag value on entities, sets and the mesh,
   variable-length and handle values included.
+- With `SOMA_ENABLE_MOAB_REFERENCE=ON`, MPI and HDF5, `test_parallel_parity_moab` reads the
+  bundled partitioned meshes with MOAB's `READ_PART` (shared entities resolved, one ghost
+  layer) and builds SOMA's parts from the same elements on each rank: for vertices and
+  elements, matched by coordinates, the local, owned, shared and ghost sets, owners, sharing
+  ranks, global owned counts, and an update of doubles and integers equal MOAB's at 1 to 8
+  ranks.
 
 ### MOAB files
 
@@ -511,6 +558,32 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   on the key, which gives the same order.
 - `sfc::hilbert_index` works without branches, with the axis count as a template parameter: the
   same keys, 3.7x faster each.
+- At the full width of two or three axes the host follows the Hilbert curve by state tables, three
+  levels a step in 3D and four in 2D, read off the transpose and checked against it: the same
+  keys, 10x (3D) and 17x (2D) faster. `MeshBuilder::build` orders (key, position) pairs and
+  moves records once: by one pass on the key's highest 16 varying bits and sorts of the small
+  buckets, ties by gid, the same order; ownership and repeated element gids are looked up in
+  tables over dense gid ranges. `Sharing::groups` sorts only shared rows. `read_soma` finds
+  local ids and rows by tables over dense gids and indexes set memberships only for copies it
+  sends. A one-rank read of a 64^3 box from a SOMA file takes 55 ms instead of 194 (MOAB 46),
+  and 132 instead of 155 at 8 ranks (MOAB 266); `build_local_part` 42 instead of 118 ms at one
+  rank and 18 instead of 32 at 8 (MOAB's `resolve_shared_ents` 235 and 68).
+- `read_h5m` finds rows and local ids by tables over dense file ids, and forwards ranged set
+  members by a search of the holders' sorted ids. `CommPlan` sends records already grouped by
+  destination in place and counts the others by rank; `route` moves rows already in destination
+  order rather than bucketing them. A one-rank read of a 64^3 box from an `.h5m` file takes
+  99 ms instead of 266 (MOAB 45), and 51 instead of 100 at 8 ranks (MOAB 107); a one-rank
+  `write_soma` 17 instead of 48 (MOAB 22).
+- Records a rank routes to itself no longer travel: `route` copies them once, by runs, into
+  their place among the arrivals. `CommPlan` is built in fewer passes and answers grouped
+  records in place. `read_h5m` keeps the elements it places in one flat list rather than a
+  vector each. `resolve_sharing` checks repeated gids and orders holders by tables over dense
+  gids, and on a single rank shares nothing without an exchange; `read_h5m` on a single rank
+  keeps every element where it was read. `SetBuilder::install` sorts the runs of every set of a
+  dimension by one count over its entities when they are dense. A one-rank read of a 64^3 box
+  from an `.h5m` file takes 43 ms instead of 99 (MOAB 48), and 75 instead of 91 at two ranks
+  (MOAB 172); from a SOMA file 47 instead of 52 (MOAB 46); `build_local_part` 27 instead of 40
+  at one rank (MOAB's `resolve_shared_ents` 232).
 - `read_h5m` places tag values by lid in one pass instead of sorting them, and builds each full
   domain once for every tag that covers it.
 - `write_h5m` writes a mesh in MOAB's legacy `.h5m` format, read back by MOAB `load_file` and
@@ -561,6 +634,13 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `bench/bench_transport` (MPI builds) times `route` with each strategy against MOAB's crystal
   router (`gs_transfer`) on dense and sparse destination patterns, checked by count and
   checksum on every rank.
+- `bench/bench_parallel` (MPI and HDF5 builds) times, at P ranks on a box of n^3 hexes in
+  partition sets that MOAB writes, the parallel read (independent and collective) against
+  `READ_PART` with resolution, `build_local_part` against `resolve_shared_ents`, `add_ghosts`
+  against `exchange_ghost_cells`, a vertex update of 1 and 3 doubles (fused and split)
+  against `exchange_tags`, and `write_soma` / `read_soma` against `WRITE_PART` and a
+  `READ_PART` load, checking owned counts and updated values. `bench/run_parallel.sh` runs it
+  over rank counts and sizes into JSON files; its header lists what a run at scale needs.
 
 ### Packaging
 

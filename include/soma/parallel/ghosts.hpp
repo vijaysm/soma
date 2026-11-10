@@ -42,13 +42,23 @@ struct GhostTargets {
 // Collective: one round per layer. A rank sends each side of dimension
 // bridge_dim of its frontier elements to every other holder of the side's
 // lowest vertex (from soma:sharing, or as told with a ghost); each holder
-// answers with the elements it owns that have the side and the holders of
-// their vertices; the asker keeps those it does not hold. Every owner of an
+// answers with the elements it owns that have the side and, but in the last
+// round, the holders of their vertices; the asker keeps those it does not
+// hold. Every owner of an
 // answer holds that vertex, so answers come from any rank, however thin the
 // parts between. Throws std::invalid_argument on every rank for options that
 // differ between ranks, a negative layer count, a bridge_dim outside
 // [0, dim), or a mesh without sharing at P > 1.
 [[nodiscard]] GhostTargets ghost_targets(const Comm& comm, const HostMesh& mesh, const GhostOptions& options);
+
+// Mesh::add_ghosts as it was first built, the reference add_ghosts is
+// checked against: each owned element placed with its closure through the
+// vertex directories (place_closure), on its sharing ranks and those
+// ghosting it, and the whole part built again, its sharing resolved and its
+// fields and sets delivered through directories. Mesh::add_ghosts instead
+// sends each ghosting rank its ghosts' closures and builds the same part
+// from them and what the rank holds.
+void add_ghosts_by_rebuild(const Comm& comm, HostMesh& mesh, const GhostOptions& options);
 
 }  // namespace detail
 

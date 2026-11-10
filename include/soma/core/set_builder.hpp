@@ -167,6 +167,7 @@ class SetBuilder {
       h.parent_offsets_[i + 1] = detail::to_offset(h.parents_.size(), "number of parents");
     }
     for (std::size_t k = 0; k < rows.size(); ++k) {
+      sort_rows(rows[k], entities(static_cast<int>(k)));
       for (auto& r : rows[k]) r = merged(std::move(r));
       h.slots_[k] = EntitySets<Kokkos::HostSpace>::Slot::packed(rows[k], entities(static_cast<int>(k)));
     }
@@ -185,9 +186,35 @@ class SetBuilder {
     std::vector<SetRun> runs;
   };
 
+  // Every row's runs by begin: by one count over the `count` entities
+  // when the rows hold a quarter as many runs or more, as parts' members do,
+  // else row by row (merged).
+  static void sort_rows(std::vector<std::vector<Interval>>& rows, LO count) {
+    std::size_t total = 0;
+    bool sorted = true;
+    for (const auto& r : rows) {
+      total += r.size();
+      sorted = sorted && std::is_sorted(r.begin(), r.end(), by_begin);
+    }
+    if (sorted || 4 * total < static_cast<std::size_t>(count)) return;
+    std::vector<std::size_t> start(static_cast<std::size_t>(count) + 2, 0);
+    for (const auto& r : rows) {
+      for (const Interval& v : r) ++start[static_cast<std::size_t>(v.begin) + 1];
+    }
+    for (std::size_t b = 1; b < start.size(); ++b) start[b] += start[b - 1];
+    std::vector<std::pair<std::size_t, Interval>> by(total);
+    for (std::size_t i = 0; i < rows.size(); ++i) {
+      for (const Interval& v : rows[i]) by[start[static_cast<std::size_t>(v.begin)]++] = {i, v};
+      rows[i].clear();
+    }
+    for (const auto& [i, v] : by) rows[i].push_back(v);
+  }
+
+  static bool by_begin(const Interval& a, const Interval& b) { return a.begin < b.begin; }
+
   // Sorted runs with overlapping and touching ones joined.
   static std::vector<Interval> merged(std::vector<Interval> r) {
-    std::sort(r.begin(), r.end(), [](const Interval& a, const Interval& b) { return a.begin < b.begin; });
+    if (!std::is_sorted(r.begin(), r.end(), by_begin)) std::sort(r.begin(), r.end(), by_begin);
     std::size_t m = 0;
     for (std::size_t j = 1; j < r.size(); ++j) {
       if (r[j].begin <= r[m].end) {

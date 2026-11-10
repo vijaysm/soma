@@ -59,6 +59,21 @@ struct TopologyAccess {
   static EntitySets<M>& sets(Mesh<M>& m) {
     return m.sets_;
   }
+  template <class M>
+  static CoordView<M>& coords(Mesh<M>& m) {
+    return m.coords_;
+  }
+  template <class M>
+  static std::array<LO, 4>& corner_ends(Mesh<M>& m) {
+    return m.corner_ends_;
+  }
+  // An empty mesh given its dimension and ordering, for entities filled in
+  // through block().
+  template <class M>
+  static void shape(Mesh<M>& m, int dim, Ordering ordering) {
+    m.dim_ = dim;
+    m.ordering_ = ordering;
+  }
 };
 }  // namespace detail
 

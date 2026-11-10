@@ -11,6 +11,7 @@
 #include <stdexcept>
 #include <tuple>
 
+#include "../core/dense_ids.hpp"
 #include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/route.hpp"
 
@@ -39,16 +40,25 @@ std::vector<std::uint32_t> Sharing::groups() const {
     if (is_ghost(*this, i)) return std::span<const int>(&ghost_owner[i], 1);
     return std::span<const int>(ranks.data() + offsets[i], offsets[i + 1] - offsets[i]);
   };
-  std::vector<std::size_t> order(n);
-  std::iota(order.begin(), order.end(), std::size_t{0});
+  // Empty rows (interior entities, most of them) come first, as group 0;
+  // only the others are sorted.
+  std::vector<std::size_t> order;
+  bool any_empty = false;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (row(i).empty()) {
+      any_empty = true;
+    } else {
+      order.push_back(i);
+    }
+  }
   const auto less = [&](std::size_t a, std::size_t b) {
     const auto x = row(a), y = row(b);
     return std::lexicographical_compare(x.begin(), x.end(), y.begin(), y.end());
   };
-  std::stable_sort(order.begin(), order.end(), less);
-  std::vector<std::uint32_t> out(n);
-  std::uint32_t group = 0;
-  for (std::size_t k = 0; k < n; ++k) {
+  std::sort(order.begin(), order.end(), less);
+  std::vector<std::uint32_t> out(n, 0);
+  std::uint32_t group = any_empty ? 1 : 0;
+  for (std::size_t k = 0; k < order.size(); ++k) {
     if (k > 0 && less(order[k - 1], order[k])) ++group;
     out[order[k]] = group;
   }
@@ -58,9 +68,7 @@ std::vector<std::uint32_t> Sharing::groups() const {
 Sharing resolve_sharing(const Comm& comm, std::span<const GO> gids, std::span<const std::uint8_t> ghost) {
   using Host = Kokkos::DefaultHostExecutionSpace;
   using Batch = transport::RecordBatch<Kokkos::HostSpace>;
-  std::vector<GO> sorted(gids.begin(), gids.end());
-  std::sort(sorted.begin(), sorted.end());
-  const bool repeated = std::adjacent_find(sorted.begin(), sorted.end()) != sorted.end();
+  const bool repeated = detail::GidIndex(gids.size(), [&](std::size_t i) { return gids[i]; }).repeated.has_value();
   if (comm.allreduce(static_cast<std::int32_t>(repeated), Op::max)) {
     throw std::invalid_argument("resolve_sharing: a rank names a gid twice");
   }
@@ -70,6 +78,15 @@ Sharing resolve_sharing(const Comm& comm, std::span<const GO> gids, std::span<co
   comm.allreduce(std::span<std::int32_t>(f), Op::max);
   if (f[0] != 0) throw std::invalid_argument("resolve_sharing: a rank gives ghost flags but not one per gid");
   const auto ghost_at = [&](std::size_t i) { return !ghost.empty() && ghost[i] != 0; };
+  if (comm.size() == 1) {
+    // A lone rank shares nothing, and no rank owns what it ghosts.
+    if (f[1] != 0) {
+      throw std::invalid_argument("resolve_sharing: a rank holds as a ghost a gid no rank holds otherwise");
+    }
+    Sharing out;
+    out.offsets.assign(gids.size() + 1, 0);
+    return out;
+  }
   // Every gid to its directory rank, with whether it is a ghost here.
   constexpr std::size_t row = sizeof(GO) + sizeof(std::int32_t);
   Batch sent(gids.size(), row, "soma::resolve_sharing");
@@ -90,7 +107,16 @@ Sharing resolve_sharing(const Comm& comm, std::span<const GO> gids, std::span<co
     std::memcpy(&k, &at_directory.payload(i, sizeof(GO)), sizeof(k));
     held[i] = {g, k, at_directory.source(i)};
   }
-  std::sort(held.begin(), held.end());
+  if (!std::is_sorted(held.begin(), held.end())) {
+    // By gid, then the few holders of each by (ghost, rank).
+    detail::stable_sort_by(held, [](const auto& h) { return std::get<0>(h); });
+    for (std::size_t a = 0, b = 0; a < held.size(); a = b) {
+      while (b < held.size() && std::get<0>(held[b]) == std::get<0>(held[a])) ++b;
+      if (b - a > 1) {
+        std::sort(held.begin() + static_cast<std::ptrdiff_t>(a), held.begin() + static_cast<std::ptrdiff_t>(b));
+      }
+    }
+  }
   // To each holder of a shared gid, one record (gid, other holder, 0) per
   // other holder; to each ghost holder one record (gid, owner, 1).
   std::vector<std::tuple<int, GO, int, std::int32_t>> notes;

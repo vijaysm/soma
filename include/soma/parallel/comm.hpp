@@ -86,6 +86,8 @@ struct Envelope {
 //
 // Reductions are defined for std::int32_t, std::int64_t, std::uint64_t and
 // double; other types fail to link.
+class SplitComm;
+
 class Comm {
  public:
   static Comm world();
@@ -192,6 +194,11 @@ class Comm {
   // which lets successive exchanges use different tags.
   [[nodiscard]] std::uint64_t next_sequence() const;
 
+  // Collective (one collective): the ranks giving the same color, ordered
+  // by key then rank, as a communicator freed with the result. A negative
+  // color joins none. Without MPI the one rank is its own group.
+  [[nodiscard]] SplitComm split(int color, int key) const;
+
 #if SOMA_ENABLE_MPI
   explicit Comm(MPI_Comm comm);
   [[nodiscard]] MPI_Comm native() const noexcept { return comm_; }
@@ -205,6 +212,27 @@ class Comm {
 #if SOMA_ENABLE_MPI
   MPI_Comm comm_ = MPI_COMM_NULL;
 #endif
+};
+
+// A communicator made by Comm::split, owned: freed when destroyed. Move-only.
+class SplitComm {
+ public:
+  SplitComm() = default;
+  SplitComm(SplitComm&& other) noexcept;
+  SplitComm& operator=(SplitComm&& other) noexcept;
+  SplitComm(const SplitComm&) = delete;
+  SplitComm& operator=(const SplitComm&) = delete;
+  ~SplitComm();
+
+  // False for a rank that gave a negative color.
+  [[nodiscard]] bool member() const noexcept { return comm_.has_value(); }
+  // The group's communicator; throws std::logic_error unless member().
+  [[nodiscard]] const Comm& comm() const;
+
+ private:
+  friend class Comm;
+  explicit SplitComm(Comm comm) : comm_(std::move(comm)) {}
+  std::optional<Comm> comm_;
 };
 
 }  // namespace soma

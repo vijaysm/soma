@@ -370,3 +370,24 @@ TEST(Comm, SerialAlltoallvSelfCountsMustAgree) {
                std::invalid_argument);
 }
 #endif
+
+// split groups ranks by color, orders them by key, counts as one collective,
+// and leaves ranks with a negative color out.
+TEST(Comm, SplitGroupsRanksByColor) {
+  const soma::Comm c = soma::Comm::world();
+  const auto before = soma::detail::comm_counts();
+  soma::SplitComm halves = c.split(c.rank() % 2, -c.rank());
+  EXPECT_EQ(soma::detail::comm_counts().collectives - before.collectives, 1U);
+  ASSERT_TRUE(halves.member());
+  const int same = (c.size() + 1 - c.rank() % 2) / 2;
+  EXPECT_EQ(halves.comm().size(), same);
+  // Keys descend with the rank, so the highest rank of a color is its rank 0.
+  EXPECT_EQ(halves.comm().rank(), (c.size() - 1 - c.rank()) / 2);
+  EXPECT_EQ(halves.comm().allreduce(1, soma::Op::sum), same);
+  const soma::SplitComm last = c.split(c.rank() + 1 == c.size() ? 0 : -1, 0);
+  EXPECT_EQ(last.member(), c.rank() + 1 == c.size());
+  if (!last.member()) EXPECT_THROW((void)last.comm(), std::logic_error);
+  soma::SplitComm moved = std::move(halves);
+  EXPECT_TRUE(moved.member());
+  EXPECT_FALSE(halves.member());  // NOLINT(bugprone-use-after-move)
+}

@@ -207,3 +207,27 @@ SOMA_INSTANTIATE_COMM(double)
 #undef SOMA_INSTANTIATE_COMM
 
 }  // namespace soma
+
+namespace soma {
+
+SplitComm Comm::split(int color, int) const {
+  detail::count_collective();
+  return color < 0 ? SplitComm{} : SplitComm(Comm(0, 1));
+}
+
+SplitComm::SplitComm(SplitComm&& other) noexcept : comm_(std::move(other.comm_)) { other.comm_.reset(); }
+
+SplitComm& SplitComm::operator=(SplitComm&& other) noexcept {
+  comm_ = std::move(other.comm_);
+  other.comm_.reset();
+  return *this;
+}
+
+SplitComm::~SplitComm() = default;
+
+const Comm& SplitComm::comm() const {
+  if (!comm_) throw std::logic_error("soma::SplitComm: this rank is in no group");
+  return *comm_;
+}
+
+}  // namespace soma

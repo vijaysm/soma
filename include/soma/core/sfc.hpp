@@ -8,11 +8,14 @@
 // close in memory. The index of a cell follows Skilling's transpose algorithm
 // (J. Skilling, "Programming the Hilbert curve", AIP Conf. Proc. 707, 2004):
 // the cell coordinates are turned into the transposed Hilbert index by Gray
-// coding in place, and the bits are then interleaved. Everything is
-// allocation-free, and everything but KeyBox::make, which runs on the host,
-// works in device code.
+// coding in place, and the bits are then interleaved. At the full width of two
+// or three axes, which mesh keys use, the host follows the same curve by state
+// tables instead, several levels a step. Everything is allocation-free, and
+// everything but KeyBox::make, which runs on the host, works in device code.
 
+#include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 
 #include <Kokkos_Core.hpp>
@@ -55,7 +58,7 @@ KOKKOS_INLINE_FUNCTION std::uint64_t spread3(std::uint64_t v) {
 // registers. They select with masks, not branches: the bits of a cell are
 // close to random, so branches on them mispredict.
 template <int N>
-KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int bits) {
+KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_transpose(const std::uint32_t* c, int bits) {
   std::uint32_t x[N];
   for (int i = 0; i < N; ++i) x[i] = c[i];
   const std::uint32_t top = std::uint32_t{1} << (bits - 1);
@@ -84,6 +87,95 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int b
     return spread3((x[0] ^ t) & low) << 2 | spread3((x[1] ^ t) & low) << 1 |
            spread3((x[2] ^ t) & low);
   }
+}
+
+// The curve at full width as a state machine over the levels, coarsest
+// first: in state s, the child cube c of a cube (its bits on the axes, the
+// first axis most significant, as in a Morton key) is digit[s][c] along the
+// curve, and is in state next[s][c]; the whole cube is in state 0. These are
+// the transpose's curve, read off it by visiting each state's cubes, the
+// state being the order in which a cube's children are visited (24 in three
+// dimensions, 4 in two); tests check the two agree.
+inline constexpr std::uint8_t digit3[24][8] = {
+    {0, 1, 3, 2, 7, 6, 4, 5}, {0, 7, 1, 6, 3, 4, 2, 5}, {0, 1, 7, 6, 3, 2, 4, 5}, {6, 1, 5, 2, 7, 0, 4, 3},
+    {4, 3, 5, 2, 7, 0, 6, 1}, {4, 5, 3, 2, 7, 6, 0, 1}, {0, 7, 3, 4, 1, 6, 2, 5}, {0, 3, 7, 4, 1, 2, 6, 5},
+    {4, 7, 3, 0, 5, 6, 2, 1}, {0, 3, 1, 2, 7, 4, 6, 5}, {4, 7, 5, 6, 3, 0, 2, 1}, {6, 7, 1, 0, 5, 4, 2, 3},
+    {4, 3, 7, 0, 5, 2, 6, 1}, {4, 5, 7, 6, 3, 2, 0, 1}, {6, 1, 7, 0, 5, 2, 4, 3}, {6, 5, 1, 2, 7, 4, 0, 3},
+    {2, 1, 5, 6, 3, 0, 4, 7}, {6, 7, 5, 4, 1, 0, 2, 3}, {2, 3, 5, 4, 1, 0, 6, 7}, {2, 5, 3, 4, 1, 6, 0, 7},
+    {2, 5, 1, 6, 3, 4, 0, 7}, {6, 5, 7, 4, 1, 2, 0, 3}, {2, 1, 3, 0, 5, 6, 4, 7}, {2, 3, 1, 0, 5, 4, 6, 7}};
+inline constexpr std::uint8_t next3[24][8] = {
+    {1, 2, 3, 0, 4, 5, 6, 0},        {7, 8, 9, 10, 11, 2, 1, 1},      {6, 0, 12, 13, 14, 2, 1, 2},
+    {15, 16, 3, 3, 9, 10, 17, 0},    {18, 5, 4, 4, 15, 16, 9, 10},    {19, 5, 4, 5, 3, 0, 20, 13},
+    {9, 10, 17, 0, 7, 8, 6, 6},      {0, 21, 13, 9, 6, 7, 12, 7},     {22, 17, 10, 23, 8, 6, 8, 12},
+    {2, 15, 1, 9, 5, 7, 4, 9},       {16, 11, 10, 1, 8, 18, 10, 4},   {17, 6, 23, 12, 11, 14, 11, 1},
+    {23, 13, 21, 22, 12, 12, 7, 8},  {20, 13, 14, 2, 12, 13, 19, 5},  {21, 22, 7, 8, 14, 14, 11, 2},
+    {3, 15, 20, 15, 0, 21, 13, 9},   {16, 3, 16, 20, 22, 17, 10, 23}, {11, 1, 17, 3, 18, 4, 17, 6},
+    {18, 19, 18, 4, 17, 3, 23, 20},  {19, 19, 18, 5, 21, 22, 15, 16}, {20, 20, 15, 16, 23, 13, 21, 22},
+    {14, 21, 2, 15, 19, 21, 5, 7},   {22, 14, 16, 11, 22, 19, 8, 18}, {23, 20, 11, 14, 23, 12, 18, 19}};
+inline constexpr std::uint8_t digit2[4][4] = {{0, 1, 3, 2}, {0, 3, 1, 2}, {2, 1, 3, 0}, {2, 3, 1, 0}};
+inline constexpr std::uint8_t next2[4][4] = {{1, 0, 2, 0}, {0, 3, 1, 1}, {2, 2, 0, 3}, {3, 1, 3, 2}};
+
+// Several levels a step: in state s, the Morton digits c of `levels` levels
+// give an entry (digits << state bits) | next state, digits `levels` * N wide.
+template <int N, int levels>
+constexpr auto hilbert_steps() {
+  constexpr int children = 1 << N, entries = 1 << (N * levels), states = N == 3 ? 24 : 4;
+  constexpr int state_bits = N == 3 ? 5 : 2;
+  std::array<std::array<std::uint16_t, entries>, states> out{};
+  for (int s = 0; s < states; ++s) {
+    for (int c = 0; c < entries; ++c) {
+      int at = s, digits = 0;
+      for (int k = levels - 1; k >= 0; --k) {
+        const int child = (c >> (N * k)) & (children - 1);
+        digits = digits << N | (N == 3 ? digit3[at][child] : digit2[at][child]);
+        at = N == 3 ? next3[at][child] : next2[at][child];
+      }
+      out[static_cast<std::size_t>(s)][static_cast<std::size_t>(c)] =
+          static_cast<std::uint16_t>(digits << state_bits | at);
+    }
+  }
+  return out;
+}
+inline constexpr auto steps3 = hilbert_steps<3, 3>();  // 21 levels: seven of three
+inline constexpr auto steps2 = hilbert_steps<2, 4>();  // 32 levels: eight of four
+
+// The full-width key by the tables, from the cell's Morton key.
+inline std::uint64_t hilbert_by_steps3(const std::uint32_t* c) {
+  const std::uint64_t m = spread3(c[0]) << 2 | spread3(c[1]) << 1 | spread3(c[2]);
+  std::uint64_t key = 0;
+  unsigned s = 0;
+  for (int shift = 54; shift >= 0; shift -= 9) {
+    const std::uint16_t e = steps3[s][(m >> shift) & 511];
+    key = key << 9 | (e >> 5);
+    s = e & 31U;
+  }
+  return key;
+}
+
+inline std::uint64_t hilbert_by_steps2(const std::uint32_t* c) {
+  const std::uint64_t m = spread2(c[0]) << 1 | spread2(c[1]);
+  std::uint64_t key = 0;
+  unsigned s = 0;
+  for (int shift = 56; shift >= 0; shift -= 8) {
+    const std::uint16_t e = steps2[s][(m >> shift) & 255];
+    key = key << 8 | (e >> 2);
+    s = e & 3U;
+  }
+  return key;
+}
+
+template <int N>
+KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int bits) {
+  if constexpr (N == 2 || N == 3) {
+    if (bits == bits_per_axis(N)) {
+      if constexpr (N == 3) {
+        KOKKOS_IF_ON_HOST((return hilbert_by_steps3(c);))
+      } else {
+        KOKKOS_IF_ON_HOST((return hilbert_by_steps2(c);))
+      }
+    }
+  }
+  return hilbert_transpose<N>(c, bits);
 }
 
 }  // namespace detail

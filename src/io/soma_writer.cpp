@@ -3,7 +3,8 @@
 
 // The SOMA format's writer: each rank lays out its owned rows
 // of every dataset, one exscan places them, and the ranks write them
-// collectively over MPI-IO, or through rank 0 with a serial HDF5.
+// collectively over MPI-IO, through M aggregators that alone open the file,
+// or through rank 0 with a serial HDF5.
 
 #include <algorithm>
 #include <array>
@@ -52,6 +53,8 @@ constexpr std::size_t chunk_bytes = std::size_t{1} << 20;
 // Message tags of the streamed sink (route uses 32000 and above).
 constexpr int tag_size = 31000;
 constexpr int tag_rows = 31001;
+constexpr int tag_group_size = 31002;
+constexpr int tag_group_rows = 31003;
 
 template <class T>
 void append(std::vector<std::byte>& out, const T& v) {
@@ -102,13 +105,15 @@ struct Agreed {
   std::uint32_t graphs = 0;
 };
 
-Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_error) {
+Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_error, bool derived,
+             std::uint64_t access) {
   const std::uint64_t hs = detail::sets_hash(mesh), hf = detail::fields_hash(mesh);
   // Maxima: flags, then each hash and its complement (equal on every rank
   // only when the maxima are complements), the dimension, then per
   // dimension input, set members, high-order nodes, the graphs held, and
-  // per dimension whether any entity is held.
-  std::array<std::uint64_t, 24> f{};
+  // per dimension whether any entity is held, then the hash of the access
+  // options and its complement.
+  std::array<std::uint64_t, 26> f{};
   f[0] = local_error.empty() ? 0 : 1;
   f[1] = mesh.edited() && comm.size() > 1 ? 1 : 0;
   f[2] = hs;
@@ -119,11 +124,17 @@ Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_er
   for (int d = 0; d <= mesh.dim(); ++d) {
     const auto k = static_cast<std::size_t>(d);
     f[7 + k] = mesh.count(d) > 0 && mesh.input(d) ? 1 : 0;
-    f[11 + k] = mesh.sets().has_members(d) ? 1 : 0;
+    // Members of some set (storage alone, as derivation leaves it, is not).
+    const auto& sets = mesh.sets();
+    for (LO s = 0; s < sets.count() && f[11 + k] == 0 && sets.has_members(d); ++s) {
+      f[11 + k] = sets.members_of(s, d).empty() ? 0 : 1;
+    }
     f[15 + k] = mesh.count(d) > 0 && d > 0 && mesh.has_nodes(d) ? 1 : 0;
     f[20 + k] = mesh.count(d) > 0 ? 1 : 0;
   }
   f[19] = mesh.adjacencies().bits();
+  f[24] = access;
+  f[25] = ~access;
   comm.allreduce(std::span<std::uint64_t>(f), Op::max);
   if (f[0] != 0) {
     if (!local_error.empty()) throw std::invalid_argument(std::string(who) + ": " + local_error);
@@ -138,11 +149,15 @@ Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_er
     throw std::invalid_argument(std::string(who) +
                                 ": the ranks' fields or mesh values differ (beyond their values on entities)");
   }
+  if (f[24] != ~f[25]) {
+    throw std::invalid_argument(std::string(who) + ": the ranks' aggregators or MPI-IO hints differ");
+  }
   Agreed a;
   a.dim = static_cast<int>(f[6]);
   for (std::size_t d = 0; d < 4; ++d) {
     a.input[d] = f[7 + d] != 0;
     a.written[d] = d == 0 || static_cast<int>(d) == a.dim || f[7 + d] != 0 || f[11 + d] != 0;
+    a.written[d] = a.written[d] || (derived && f[20 + d] != 0);
     a.nodes[d] = f[15 + d] != 0;
   }
   for (const FieldInfo& fi : mesh.fields().list()) {
@@ -165,7 +180,7 @@ Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_er
   AdjacencyRequest r = AdjacencyRequest::from_bits(held);
   for (int d = 1; d < a.dim; ++d) {
     const auto k = static_cast<std::size_t>(d);
-    if (f[20 + k] != 0 && !a.input[k] && !built[k]) r.add(d, 0);
+    if (f[20 + k] != 0 && !a.input[k] && !built[k] && !a.written[k]) r.add(d, 0);
   }
   a.graphs = r.bits();
   return a;
@@ -514,10 +529,12 @@ struct Created {
   Id file, root;
   std::vector<Id> columns, once;
   Id table;
+  std::vector<std::uint64_t> totals;  // rows of each column
 };
 
 Created create(hid_t file, const Image& img, const Placement& at, std::uint64_t parts, int compression) {
   Created c;
+  c.totals = at.total;
   c.root = h5::check(H5Gcreate2(file, soma_file::root, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT), "create /soma");
   for (const std::string& g : img.groups) {
     if (H5Lexists(c.root.get(), g.c_str(), H5P_DEFAULT) > 0) continue;
@@ -623,23 +640,30 @@ std::vector<std::uint64_t> table_rows(const Placement& at, bool last) {
   return rows;
 }
 
-void write_part(const Created& c, const Image& img, const Placement& at, std::uint64_t part, bool last, bool once,
-                hid_t dxpl) {
+// Writes the rows of `img` (one part's, or a group's) at `first`, and
+// `table`, part table rows from row `part` on (one per part, then the
+// totals after the last part), and the datasets written once when `once`.
+void write_rows(const Created& c, const Image& img, const std::vector<std::uint64_t>& first, std::uint64_t part,
+                const std::vector<std::uint64_t>& table, bool once, hid_t dxpl) {
   Writes w;
   for (std::size_t k = 0; k < img.columns.size(); ++k) {
     const Dataset& d = img.columns[k];
-    add(w, c.columns[k].get(), soma_file::memory_type(d.type), slab(c.columns[k].get(), at.first[k], d.rows(), d.width),
-        d.data.data(), at.total[k]);
+    add(w, c.columns[k].get(), soma_file::memory_type(d.type), slab(c.columns[k].get(), first[k], d.rows(), d.width),
+        d.data.data(), c.totals[k]);
   }
-  const std::vector<std::uint64_t> table = table_rows(at, last);
-  add(w, c.table.get(), H5T_NATIVE_UINT64,
-      slab(c.table.get(), part, img.columns.empty() ? 0 : (last ? 2 : 1), img.columns.size()), table.data(), 1);
+  const std::uint64_t rows = img.columns.empty() ? 0 : table.size() / img.columns.size();
+  add(w, c.table.get(), H5T_NATIVE_UINT64, slab(c.table.get(), part, rows, img.columns.size()), table.data(), 1);
   for (std::size_t k = 0; k < img.once.size(); ++k) {
     const Dataset& d = img.once[k];
     add(w, c.once[k].get(), soma_file::memory_type(d.type), slab(c.once[k].get(), 0, once ? d.rows() : 0, d.width),
         d.data.data(), d.rows());
   }
   run(w, dxpl);
+}
+
+void write_part(const Created& c, const Image& img, const Placement& at, std::uint64_t part, bool last, bool once,
+                hid_t dxpl) {
+  write_rows(c, img, at.first, part, table_rows(at, last), once, dxpl);
 }
 
 Image lay_out(const Comm& comm, const HostMesh& mesh, const Agreed& a) {
@@ -690,8 +714,8 @@ void unpack(std::span<const std::byte> in, Image& img) {
 // With MPI-IO: every rank creates the structure and writes its rows in one
 // collective transfer.
 void write_collective(const Comm& comm, const std::string& name, const Image& img, const Placement& at,
-                      int compression) {
-  const Id fapl = soma_file::file_access(comm, true);
+                      int compression, const MpiIoHints& hints) {
+  const Id fapl = soma_file::file_access(comm, true, false, hints);
   const Id file = h5::check(H5Fcreate(name.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl.get()), "create the file");
   Created c = create(file.get(), img, at, static_cast<std::uint64_t>(comm.size()), compression);
   const Id dxpl = soma_file::transfer(true);
@@ -701,7 +725,8 @@ void write_collective(const Comm& comm, const std::string& name, const Image& im
 
 // Without: rank 0 creates the file and writes its rows, then each other
 // rank's in turn, as they arrive; a failure there still drains them.
-void write_streamed(const Comm& comm, const std::string& name, Image& img, const Placement& at, int compression) {
+void write_streamed(const Comm& comm, const std::string& name, Image& img, const Placement& at, int compression,
+                    const MpiIoHints& hints) {
   if (comm.rank() != 0) {
     const std::vector<std::byte> rows = pack(img);
     const std::uint64_t n = rows.size();
@@ -716,7 +741,7 @@ void write_streamed(const Comm& comm, const std::string& name, Image& img, const
   Created c;
   const Id dxpl = soma_file::transfer(false);
   try {
-    const Id fapl = soma_file::file_access(comm, false);
+    const Id fapl = soma_file::file_access(comm, false, false, hints);
     file = h5::check(H5Fcreate(name.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl.get()), "create the file");
     c = create(file->get(), img, at, static_cast<std::uint64_t>(comm.size()), compression);
     write_part(c, img, at, 0, comm.size() == 1, true, dxpl.get());
@@ -741,6 +766,66 @@ void write_streamed(const Comm& comm, const std::string& name, Image& img, const
       failure = std::current_exception();
     }
   }
+  if (failure) std::rethrow_exception(failure);
+}
+
+// With M aggregators: each rank sends its rows to its group's first rank;
+// those M ranks alone open the file (over MPI-IO on their own communicator)
+// and each writes its group's rows, contiguous in every column, and the
+// group's part table rows. A failure in a leader still drains its members.
+void write_aggregated(const Comm& comm, const std::string& name, Image& img, const Placement& at, int compression,
+                      const MpiIoHints& hints, int m) {
+  const int p = comm.size(), me = comm.rank(), leader = soma_file::leader_of(me, m, p);
+  const SplitComm leaders = comm.split(leader == me ? 0 : -1, me);
+  if (leader != me) {
+    const std::vector<std::byte> rows = pack(img);
+    const std::uint64_t n = rows.size();
+    Request size = comm.issend(std::span<const std::uint64_t>(&n, 1), leader, tag_group_size);
+    size.wait();
+    Request data = comm.issend(std::span<const std::byte>(rows), leader, tag_group_rows);
+    data.wait();
+    return;
+  }
+  // This group's parts: this rank's, then each member's in rank order.
+  int end = me + 1;
+  while (end < p && soma_file::leader_of(end, m, p) == me) ++end;
+  std::exception_ptr failure;
+  std::vector<std::uint64_t> table = at.first, next = at.first;
+  for (std::size_t k = 0; k < img.columns.size(); ++k) next[k] += img.columns[k].rows();
+  Image member;  // a member's rows, in columns shaped like this rank's
+  for (const Dataset& d : img.columns) member.columns.push_back(Dataset{d.path, d.type, d.width, {}});
+  for (int r = me + 1; r < end; ++r) {
+    std::uint64_t n = 0;
+    Request size = comm.irecv(std::span<std::uint64_t>(&n, 1), r, tag_group_size);
+    size.wait();
+    std::vector<std::byte> rows(n);
+    Request data = comm.irecv(std::span<std::byte>(rows), r, tag_group_rows);
+    data.wait();
+    if (failure) continue;
+    try {
+      unpack(rows, member);
+      table.insert(table.end(), next.begin(), next.end());
+      for (std::size_t k = 0; k < img.columns.size(); ++k) {
+        Dataset& d = img.columns[k];
+        d.data.insert(d.data.end(), member.columns[k].data.begin(), member.columns[k].data.end());
+        next[k] += member.columns[k].rows();
+      }
+    } catch (...) {
+      failure = std::current_exception();
+    }
+  }
+  if (end == p) table.insert(table.end(), at.total.begin(), at.total.end());
+  // Every leader joins the collective calls, a failed one with nothing.
+  const Comm& group = leaders.comm();
+  const Id fapl = soma_file::file_access(group, soma_file::parallel_hdf5(), false, hints);
+  const Id file = h5::check(H5Fcreate(name.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, fapl.get()), "create the file");
+  const Created c = create(file.get(), img, at, static_cast<std::uint64_t>(p), compression);
+  const Id dxpl = soma_file::transfer(soma_file::parallel_hdf5());
+  if (failure) {
+    for (Dataset& d : img.columns) d.data.clear();
+    table.clear();
+  }
+  write_rows(c, img, at.first, static_cast<std::uint64_t>(me), table, me == 0 && !failure, dxpl.get());
   if (failure) std::rethrow_exception(failure);
 }
 
@@ -777,14 +862,18 @@ void write_soma(const Comm& comm, const HostMesh& mesh, const fs::path& path, co
     error = "this HDF5 has no deflate filter";
   } else if (static_cast<std::size_t>(mesh.count(0)) != mesh.coords().extent(0)) {
     error = "the mesh holds " + std::to_string(mesh.count(0)) + " vertices but not their coordinates";
+  } else {
+    error = soma_file::access_error(options.hints, options.aggregators, comm.size());
   }
-  const Agreed agreed = agree(comm, mesh, error);
+  const Agreed agreed =
+      agree(comm, mesh, error, options.derived, soma_file::access_hash(options.hints, options.aggregators));
   Image img = lay_out(comm, mesh, agreed);
 
-  soma_file::write_image(comm, path, img, options.compression, who);
+  soma_file::write_image(comm, path, img, options, who);
 }
 
-void soma_file::write_image(const Comm& comm, const fs::path& path, Image& img, int compression, const char* writer) {
+void soma_file::write_image(const Comm& comm, const fs::path& path, Image& img, const SomaWriteOptions& options,
+                            const char* writer) {
   // Where each part's rows go: one exscan and one sum over all columns.
   Placement at;
   for (const Dataset& d : img.columns) at.first.push_back(d.rows());
@@ -816,10 +905,12 @@ void soma_file::write_image(const Comm& comm, const fs::path& path, Image& img, 
   const bool collective = soma_file::parallel_hdf5() && comm.size() > 1 && !streamed;
   collectively(comm, path, writer, [&] {
     const h5::Session quiet;
-    if (collective) {
-      write_collective(comm, temporary, img, at, compression);
+    if (options.aggregators > 0 && soma_file::parallel_hdf5() && !streamed) {
+      write_aggregated(comm, temporary, img, at, options.compression, options.hints, options.aggregators);
+    } else if (collective) {
+      write_collective(comm, temporary, img, at, options.compression, options.hints);
     } else {
-      write_streamed(comm, temporary, img, at, compression);
+      write_streamed(comm, temporary, img, at, options.compression, options.hints);
     }
   });
   // Rank 0 renames it over `path`; the others learn whether that worked.

@@ -31,9 +31,11 @@ void copy(std::span<const std::byte> from, std::size_t i, std::span<std::byte> t
 }  // namespace
 
 CommPlan::CommPlan(const Comm& comm, std::span<const int> sent_dest, std::span<const int> arrived_source)
-    : rank_(comm.rank()) {
-  for (const int d : sent_dest) {
+    : rank_(comm.rank()), num_sent_(sent_dest.size()) {
+  for (std::size_t i = 0; i < sent_dest.size(); ++i) {
+    const int d = sent_dest[i];
     if (d < 0 || d >= comm.size()) throw std::invalid_argument("transport::CommPlan: a destination is not a rank");
+    if (i > 0 && d < sent_dest[i - 1]) grouped_ = false;
   }
   for (std::size_t i = 0; i < arrived_source.size(); ++i) {
     const int s = arrived_source[i];
@@ -41,19 +43,37 @@ CommPlan::CommPlan(const Comm& comm, std::span<const int> sent_dest, std::span<c
       throw std::invalid_argument("transport::CommPlan: the sources are not ranks grouped in ascending order");
     }
   }
-  send_perm_.resize(sent_dest.size());
-  std::iota(send_perm_.begin(), send_perm_.end(), std::size_t{0});
-  std::stable_sort(send_perm_.begin(), send_perm_.end(),
-                   [&](std::size_t a, std::size_t b) { return sent_dest[a] < sent_dest[b]; });
-  std::vector<int> packed(sent_dest.size());
-  for (std::size_t k = 0; k < packed.size(); ++k) packed[k] = sent_dest[send_perm_[k]];
-  runs(packed, send_peers_, send_offsets_);
+  // Records stably by destination: already grouped, as they often are, they
+  // are sent in place; else counted by rank, unless ranks outnumber them.
+  if (grouped_) {
+    runs(sent_dest, send_peers_, send_offsets_);
+  } else {
+    send_perm_.resize(sent_dest.size());
+    if (static_cast<std::size_t>(comm.size()) > sent_dest.size()) {
+      std::iota(send_perm_.begin(), send_perm_.end(), std::size_t{0});
+      std::stable_sort(send_perm_.begin(), send_perm_.end(),
+                       [&](std::size_t a, std::size_t b) { return sent_dest[a] < sent_dest[b]; });
+    } else {
+      std::vector<std::size_t> start(static_cast<std::size_t>(comm.size()) + 1, 0);
+      for (const int d : sent_dest) ++start[static_cast<std::size_t>(d) + 1];
+      std::partial_sum(start.begin(), start.end(), start.begin());
+      for (std::size_t i = 0; i < sent_dest.size(); ++i) {
+        send_perm_[start[static_cast<std::size_t>(sent_dest[i])]++] = i;
+      }
+    }
+    std::vector<int> packed(sent_dest.size());
+    for (std::size_t k = 0; k < packed.size(); ++k) packed[k] = sent_dest[send_perm_[k]];
+    runs(packed, send_peers_, send_offsets_);
+  }
   runs(arrived_source, recv_peers_, recv_offsets_);
-  const auto first = [](std::span<const int> v, int r) { return static_cast<std::size_t>(std::lower_bound(v.begin(), v.end(), r) - v.begin()); };
-  self_packed_ = first(packed, rank_);
-  self_arrived_ = first(arrived_source, rank_);
-  self_count_ = static_cast<std::size_t>(std::count(packed.begin(), packed.end(), rank_));
-  if (static_cast<std::size_t>(std::count(arrived_source.begin(), arrived_source.end(), rank_)) != self_count_) {
+  // This rank's run among the sent and the arrived: where it is, or would be.
+  const auto own = [&](const std::vector<int>& peers, const std::vector<std::size_t>& offsets, std::size_t& start) {
+    const auto k = static_cast<std::size_t>(std::lower_bound(peers.begin(), peers.end(), rank_) - peers.begin());
+    start = offsets[k];
+    return k < peers.size() && peers[k] == rank_ ? offsets[k + 1] - offsets[k] : std::size_t{0};
+  };
+  self_count_ = own(send_peers_, send_offsets_, self_packed_);
+  if (own(recv_peers_, recv_offsets_, self_arrived_) != self_count_) {
     throw std::invalid_argument("transport::CommPlan: the records to this rank differ in count sent and arrived");
   }
 }
@@ -93,9 +113,7 @@ CommPlan CommPlan::from_counts(const Comm& comm, std::span<const Run> sent, std:
     throw std::invalid_argument("transport::CommPlan::from_counts: the records to this rank differ in count sent and arrived");
   }
   plan.self_count_ = sent_self;
-  plan.send_perm_.resize(n);
-  std::iota(plan.send_perm_.begin(), plan.send_perm_.end(), std::size_t{0});
-  plan.grouped_ = true;
+  plan.num_sent_ = n;
   return plan;
 }
 
@@ -125,7 +143,7 @@ CommPlan::Pending CommPlan::begin_forward_bytes(const Comm& comm, std::span<cons
   std::span<const std::byte> packed = sent;
   if (!grouped_) {
     p.packed_.resize(sent.size());
-    for (std::size_t k = 0; k < send_perm_.size(); ++k) copy(sent, send_perm_[k], p.packed_, k, width);
+    for (std::size_t k = 0; k < num_sent_; ++k) copy(sent, send_perm_[k], p.packed_, k, width);
     packed = p.packed_;
   }
   p.requests_.reserve(recv_peers_.size() + send_peers_.size());
@@ -148,22 +166,27 @@ void CommPlan::reverse_bytes(const Comm& comm, std::span<const std::byte> arrive
   if (sent.size() != num_sent() * width || arrived.size() != num_arrived() * width) {
     throw std::invalid_argument("transport::CommPlan::reverse: the spans do not hold a value per record");
   }
-  std::vector<std::byte> packed(sent.size());
+  // Grouped records are answered in place; others through a packed copy.
+  std::vector<std::byte> buffer(grouped_ ? 0 : sent.size());
+  const std::span<std::byte> packed = grouped_ ? sent : std::span<std::byte>(buffer);
   std::vector<Request> r;
   for (std::size_t k = 0; k < send_peers_.size(); ++k) {
     if (send_peers_[k] == rank_) continue;
-    r.push_back(comm.irecv_bytes(std::span<std::byte>(packed).subspan(send_offsets_[k] * width,
-                                                                      (send_offsets_[k + 1] - send_offsets_[k]) * width),
-                                 send_peers_[k], reverse_tag));
+    const std::size_t count = send_offsets_[k + 1] - send_offsets_[k];
+    r.push_back(comm.irecv_bytes(packed.subspan(send_offsets_[k] * width, count * width), send_peers_[k], reverse_tag));
   }
-  for (std::size_t k = 0; k < self_count_; ++k) copy(arrived, self_arrived_ + k, packed, self_packed_ + k, width);
+  if (self_count_ > 0) {
+    std::memcpy(packed.data() + self_packed_ * width, arrived.data() + self_arrived_ * width, self_count_ * width);
+  }
   for (std::size_t k = 0; k < recv_peers_.size(); ++k) {
     if (recv_peers_[k] == rank_) continue;
     r.push_back(comm.isend_bytes(arrived.subspan(recv_offsets_[k] * width, (recv_offsets_[k + 1] - recv_offsets_[k]) * width),
                                  recv_peers_[k], reverse_tag));
   }
   Request::wait_all(r);
-  for (std::size_t k = 0; k < send_perm_.size(); ++k) copy(packed, k, sent, send_perm_[k], width);
+  if (!grouped_) {
+    for (std::size_t k = 0; k < num_sent_; ++k) copy(packed, k, sent, send_perm_[k], width);
+  }
 }
 
 }  // namespace soma::transport

@@ -24,6 +24,7 @@
 
 #include <Kokkos_Core.hpp>
 
+#include "../core/dense_ids.hpp"
 #include "h5m_read.hpp"
 #include "hdf5.hpp"
 #include "soma_layout.hpp"
@@ -93,11 +94,22 @@ void collectively(const Comm& comm, F&& f) {
   }
 }
 
-// An element of a group: its gid and its nodes (corners first) as vertex file ids.
-struct Entity {
-  GO gid = 0;
-  std::int32_t group = 0;
+// Elements of groups, flat: element i is gid[i] of group[i], its nodes
+// (corners first, as vertex file ids) nodes[at[i], at[i + 1]).
+struct Entities {
+  std::vector<GO> gid;
+  std::vector<std::int32_t> group;
+  std::vector<std::size_t> at{0};
   std::vector<GO> nodes;
+
+  [[nodiscard]] std::size_t size() const { return gid.size(); }
+  [[nodiscard]] std::span<const GO> nodes_of(std::size_t i) const { return {nodes.data() + at[i], at[i + 1] - at[i]}; }
+  void push(GO g, std::int32_t k, std::span<const GO> n) {
+    gid.push_back(g);
+    group.push_back(k);
+    nodes.insert(nodes.end(), n.begin(), n.end());
+    at.push_back(nodes.size());
+  }
 };
 
 // The rows of a group this rank read.
@@ -125,20 +137,22 @@ std::span<const GO> corners_of(const Group& g, std::span<const GO> nodes) {
 // Entities as records of `width` nodes at most: gid, group, node count, nodes.
 std::size_t record_width(std::size_t nodes) { return sizeof(GO) + 2 * sizeof(std::int32_t) + nodes * sizeof(GO); }
 
-void pack(std::byte* row, const Entity& e) {
-  put(row, 0, e.gid);
-  put(row, sizeof(GO), e.group);
-  put(row, sizeof(GO) + sizeof(std::int32_t), static_cast<std::int32_t>(e.nodes.size()));
-  std::memcpy(row + record_width(0), e.nodes.data(), e.nodes.size() * sizeof(GO));
+void pack(std::byte* row, const Entities& e, std::size_t i) {
+  const std::span<const GO> nodes = e.nodes_of(i);
+  put(row, 0, e.gid[i]);
+  put(row, sizeof(GO), e.group[i]);
+  put(row, sizeof(GO) + sizeof(std::int32_t), static_cast<std::int32_t>(nodes.size()));
+  std::memcpy(row + record_width(0), nodes.data(), nodes.size() * sizeof(GO));
 }
 
-Entity unpack(const std::byte* row) {
-  Entity e;
-  e.gid = take<GO>(row, 0);
-  e.group = take<std::int32_t>(row, sizeof(GO));
-  e.nodes.resize(static_cast<std::size_t>(take<std::int32_t>(row, sizeof(GO) + sizeof(std::int32_t))));
-  std::memcpy(e.nodes.data(), row + record_width(0), e.nodes.size() * sizeof(GO));
-  return e;
+void unpack(const std::byte* row, Entities& into) {
+  const auto n = static_cast<std::size_t>(take<std::int32_t>(row, sizeof(GO) + sizeof(std::int32_t)));
+  into.gid.push_back(take<GO>(row, 0));
+  into.group.push_back(take<std::int32_t>(row, sizeof(GO)));
+  const std::size_t at = into.nodes.size();
+  into.nodes.resize(at + n);
+  std::memcpy(into.nodes.data() + at, row + record_width(0), n * sizeof(GO));
+  into.at.push_back(into.nodes.size());
 }
 
 Batch batch(std::size_t n, std::size_t width) { return Batch(n, width, "read_h5m"); }
@@ -193,20 +207,21 @@ std::vector<std::pair<GO, int>> register_holders(const Comm& comm, const std::ve
 
 // Places the entities of lower dimension `entities` read here: each goes to
 // every rank holding all its corners, or else stays with this rank.
-std::vector<Entity> place_lower(const Comm& comm, const std::vector<Group>& groups, const std::vector<Entity>& entities,
-                                const std::vector<GO>& held, std::size_t width) {
+Entities place_lower(const Comm& comm, const std::vector<Group>& groups, const Entities& entities,
+                     const std::vector<GO>& held, std::size_t width) {
   const int size = comm.size();
   const auto home = [size](GO g) { return transport::owner(static_cast<std::uint64_t>(g), size); };
   const std::vector<std::pair<GO, int>> holders = register_holders(comm, held);
 
   // Each corner asks its directory for its holders, which tell the entity's home.
   std::vector<std::pair<GO, GO>> asks;  // (entity gid, corner)
-  for (const Entity& e : entities) {
-    std::vector<GO> c(corners_of(groups[static_cast<std::size_t>(e.group)], e.nodes).begin(),
-                      corners_of(groups[static_cast<std::size_t>(e.group)], e.nodes).end());
+  std::vector<GO> c;
+  for (std::size_t i = 0; i < entities.size(); ++i) {
+    const auto corners = corners_of(groups[static_cast<std::size_t>(entities.group[i])], entities.nodes_of(i));
+    c.assign(corners.begin(), corners.end());
     std::sort(c.begin(), c.end());
     c.erase(std::unique(c.begin(), c.end()), c.end());
-    for (const GO v : c) asks.emplace_back(e.gid, v);
+    for (const GO v : c) asks.emplace_back(entities.gid[i], v);
   }
   std::vector<int> dest(asks.size());
   for (std::size_t i = 0; i < asks.size(); ++i) dest[i] = transport::owner(static_cast<std::uint64_t>(asks[i].second), size);
@@ -227,8 +242,8 @@ std::vector<Entity> place_lower(const Comm& comm, const std::vector<Group>& grou
     put(row, sizeof(GO), told[i].second);
   });
   dest.resize(entities.size());
-  for (std::size_t i = 0; i < entities.size(); ++i) dest[i] = home(entities[i].gid);
-  const Batch homed = route(comm, dest, width, [&](std::size_t i, std::byte* row) { pack(row, entities[i]); });
+  for (std::size_t i = 0; i < entities.size(); ++i) dest[i] = home(entities.gid[i]);
+  const Batch homed = route(comm, dest, width, [&](std::size_t i, std::byte* row) { pack(row, entities, i); });
 
   // At home: the ranks that hold every corner, else the reader.
   std::vector<std::pair<GO, std::int32_t>> by_entity(heard.size());
@@ -239,17 +254,19 @@ std::vector<Entity> place_lower(const Comm& comm, const std::vector<Group>& grou
   std::vector<int> to;
   std::vector<std::size_t> which;
   for (std::size_t i = 0; i < homed.size(); ++i) {
-    const Entity e = unpack(&homed.payload(i, 0));
-    std::vector<GO> c(corners_of(groups[static_cast<std::size_t>(e.group)], e.nodes).begin(),
-                      corners_of(groups[static_cast<std::size_t>(e.group)], e.nodes).end());
+    const std::byte* row = &homed.payload(i, 0);
+    const GO gid = take<GO>(row, 0);
+    c.resize(static_cast<std::size_t>(take<std::int32_t>(row, sizeof(GO) + sizeof(std::int32_t))));
+    std::memcpy(c.data(), row + record_width(0), c.size() * sizeof(GO));
+    c.resize(corners_of(groups[static_cast<std::size_t>(take<std::int32_t>(row, sizeof(GO)))], c).size());
     std::sort(c.begin(), c.end());
     const auto k = static_cast<std::size_t>(std::unique(c.begin(), c.end()) - c.begin());
     auto it = std::lower_bound(by_entity.begin(), by_entity.end(),
-                               std::pair<GO, std::int32_t>{e.gid, std::numeric_limits<std::int32_t>::min()});
+                               std::pair<GO, std::int32_t>{gid, std::numeric_limits<std::int32_t>::min()});
     bool any = false;
-    while (it != by_entity.end() && it->first == e.gid) {
+    while (it != by_entity.end() && it->first == gid) {
       auto run = it;
-      while (run != by_entity.end() && run->first == e.gid && run->second == it->second) ++run;
+      while (run != by_entity.end() && run->first == gid && run->second == it->second) ++run;
       if (static_cast<std::size_t>(run - it) == k) {
         to.push_back(it->second);
         which.push_back(i);
@@ -264,8 +281,8 @@ std::vector<Entity> place_lower(const Comm& comm, const std::vector<Group>& grou
   }
   const Batch placed =
       route(comm, to, width, [&](std::size_t j, std::byte* row) { std::memcpy(row, &homed.payload(which[j], 0), width); });
-  std::vector<Entity> out(placed.size());
-  for (std::size_t i = 0; i < placed.size(); ++i) out[i] = unpack(&placed.payload(i, 0));
+  Entities out;
+  for (std::size_t i = 0; i < placed.size(); ++i) unpack(&placed.payload(i, 0), out);
   return out;
 }
 
@@ -429,21 +446,19 @@ void read_sets(const Comm& comm, HostMesh& mesh, hid_t tstt, const IdRange& sets
                               [&](std::size_t k, std::byte* row) { std::memcpy(row, &to_directory[k], sizeof(Member)); });
   std::vector<Member> out;
   dest.clear();
-  const auto forward = [&](const Member& m, GO id) {
-    auto it = std::lower_bound(holders.begin(), holders.end(), std::pair<GO, int>{id, std::numeric_limits<int>::min()});
-    for (; it != holders.end() && it->first == id; ++it) {
-      out.push_back({m.set, Member::one, m.pos, id, m.kind});  // last: the kind it was listed as
+  // The ids first..last held somewhere, each to every rank holding it.
+  const auto forward = [&](const Member& m, GO first, GO last) {
+    auto it =
+        std::lower_bound(holders.begin(), holders.end(), std::pair<GO, int>{first, std::numeric_limits<int>::min()});
+    for (; it != holders.end() && it->first <= last; ++it) {
+      out.push_back({m.set, Member::one, m.pos, it->first, m.kind});  // last: the kind it was listed as
       dest.push_back(it->second);
     }
   };
   for (std::size_t k = 0; k < arrived.size(); ++k) {
     Member m;
     std::memcpy(&m, &arrived.payload(k, 0), sizeof(Member));
-    if (m.kind == Member::one) {
-      forward(m, m.first);
-    } else {
-      for (GO id = m.first; id <= m.last; ++id) forward(m, id);
-    }
+    forward(m, m.first, m.kind == Member::one ? m.first : m.last);
   }
   for (const Member& m : to_all) {
     for (int r = 0; r < size; ++r) {
@@ -1168,47 +1183,47 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
   widest = static_cast<std::uint64_t>(comm.allreduce(static_cast<std::int64_t>(widest), Op::max));
   const std::size_t width = record_width(static_cast<std::size_t>(widest));
   const auto entities_of = [&](int d) {
-    std::vector<Entity> out;
+    Entities out;
     for (std::size_t k = 0; k < groups.size(); ++k) {
       if (dimension(groups[k].topology) != d) continue;
       for (std::size_t i = 0; i < slices[k].rows(groups[k]); ++i) {
-        const auto nd = slices[k].nodes(groups[k], i);
-        out.push_back({groups[k].start + static_cast<GO>(slices[k].first + i), static_cast<std::int32_t>(k),
-                       std::vector<GO>(nd.begin(), nd.end())});
+        out.push(groups[k].start + static_cast<GO>(slices[k].first + i), static_cast<std::int32_t>(k),
+                 slices[k].nodes(groups[k], i));
       }
     }
     return out;
   };
 
   // The elements of the mesh's dimension, placed by the file's parts or the
-  // curve of their corners' centroids.
+  // curve of their corners' centroids; a lone rank keeps them all.
   std::vector<char> asked(my_xyz.size() / 3, 0);
-  std::vector<Entity> placed;
-  {
-    const std::vector<Entity> top = entities_of(dim);
+  Entities placed;
+  if (size == 1) {
+    placed = entities_of(dim);
+  } else {
+    const Entities top = entities_of(dim);
     std::vector<std::uint64_t> rows;
-    for (const Entity& e : top) {
-      for (const GO v : corners_of(groups[static_cast<std::size_t>(e.group)], e.nodes)) {
+    for (std::size_t i = 0; i < top.size(); ++i) {
+      for (const GO v : corners_of(groups[static_cast<std::size_t>(top.group[i])], top.nodes_of(i))) {
         rows.push_back(static_cast<std::uint64_t>(v - nodes.start));
       }
     }
-    std::sort(rows.begin(), rows.end());
-    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    detail::sort_unique(rows);
     std::vector<char> unused(asked.size(), 0);
     const std::vector<Real> xyz = fetch_coordinates(comm, rows, vertex_rows, my_xyz, unused);
+    const detail::GidIndex row_at(rows.size(), [&](std::size_t i) { return static_cast<GO>(rows[i]); });
     std::vector<Real> centroids;
-    std::vector<GO> gids;
-    for (const Entity& e : top) {
-      const auto c = corners_of(groups[static_cast<std::size_t>(e.group)], e.nodes);
+    centroids.reserve(3 * top.size());
+    for (std::size_t i = 0; i < top.size(); ++i) {
+      const auto c = corners_of(groups[static_cast<std::size_t>(top.group[i])], top.nodes_of(i));
       std::array<Real, 3> sum{0, 0, 0};
       for (const GO v : c) {
-        const auto at = static_cast<std::size_t>(
-            std::lower_bound(rows.begin(), rows.end(), static_cast<std::uint64_t>(v - nodes.start)) - rows.begin());
+        const std::size_t at = row_at.find(v - nodes.start);
         for (std::size_t q = 0; q < 3; ++q) sum[q] += xyz[3 * at + q];
       }
       for (std::size_t q = 0; q < 3; ++q) centroids.push_back(sum[q] / static_cast<Real>(c.size()));
-      gids.push_back(e.gid);
     }
+    const std::vector<GO>& gids = top.gid;
     // The file's parts, if it has enough; the curve for elements in none.
     std::vector<int> dest = options.file_parts ? file_parts(comm, tstt.get(), sets, max_id, gids)
                                                : std::vector<int>(gids.size(), -1);
@@ -1224,14 +1239,12 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
     for (std::size_t i = 0, k = 0; i < gids.size(); ++i) {
       if (dest[i] < 0) dest[i] = by_curve[k++];
     }
-    const Batch in = route(comm, dest, width, [&](std::size_t i, std::byte* row) { pack(row, top[i]); });
-    for (std::size_t i = 0; i < in.size(); ++i) placed.push_back(unpack(&in.payload(i, 0)));
+    const Batch in = route(comm, dest, width, [&](std::size_t i, std::byte* row) { pack(row, top, i); });
+    for (std::size_t i = 0; i < in.size(); ++i) unpack(&in.payload(i, 0), placed);
   }
   const auto held_vertices = [&] {
-    std::vector<GO> v;
-    for (const Entity& e : placed) v.insert(v.end(), e.nodes.begin(), e.nodes.end());
-    std::sort(v.begin(), v.end());
-    v.erase(std::unique(v.begin(), v.end()), v.end());
+    std::vector<GO> v = placed.nodes;
+    detail::sort_unique(v);
     return v;
   };
 
@@ -1240,8 +1253,8 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
     const bool any = std::any_of(groups.begin(), groups.end(),
                                  [&](const Group& g) { return g.count > 0 && dimension(g.topology) == d; });
     if (!any) continue;
-    std::vector<Entity> got = place_lower(comm, groups, entities_of(d), held_vertices(), width);
-    placed.insert(placed.end(), std::make_move_iterator(got.begin()), std::make_move_iterator(got.end()));
+    const Entities got = size == 1 ? entities_of(d) : place_lower(comm, groups, entities_of(d), held_vertices(), width);
+    for (std::size_t i = 0; i < got.size(); ++i) placed.push(got.gid[i], got.group[i], got.nodes_of(i));
   }
 
   // The coordinates of every vertex held here; vertices no rank holds stay
@@ -1258,23 +1271,30 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
   }
 
   MeshBuilder b(dim);
-  std::sort(placed.begin(), placed.end(), [](const Entity& x, const Entity& y) { return x.gid < y.gid; });
+  // The placed entities by group, then gid.
+  std::vector<std::size_t> order(placed.size());
+  std::iota(order.begin(), order.end(), std::size_t{0});
+  const auto before = [&](std::size_t x, std::size_t y) {
+    return placed.group[x] != placed.group[y] ? placed.group[x] < placed.group[y] : placed.gid[x] < placed.gid[y];
+  };
+  if (!std::is_sorted(order.begin(), order.end(), before)) std::sort(order.begin(), order.end(), before);
   collectively(comm, [&] {
     b.add_vertices(vg, xyz);
-    for (std::size_t k = 0; k < groups.size(); ++k) {
+    for (std::size_t j = 0; j < order.size();) {
+      const std::int32_t k = placed.group[order[j]];
       std::vector<GO> gids, conn;
       std::vector<Offset> offsets{0};
-      for (const Entity& e : placed) {
-        if (e.group != static_cast<std::int32_t>(k)) continue;
-        gids.push_back(e.gid);
-        conn.insert(conn.end(), e.nodes.begin(), e.nodes.end());
+      for (; j < order.size() && placed.group[order[j]] == k; ++j) {
+        const auto n = placed.nodes_of(order[j]);
+        gids.push_back(placed.gid[order[j]]);
+        conn.insert(conn.end(), n.begin(), n.end());
         offsets.push_back(static_cast<Offset>(conn.size()));
       }
-      if (gids.empty()) continue;
-      if (groups[k].topology == Topology::polygon) {
+      const Group& g = groups[static_cast<std::size_t>(k)];
+      if (g.topology == Topology::polygon) {
         b.add_polygons(gids, offsets, conn);
       } else {
-        b.add_elements(groups[k].topology, gids, conn, groups[k].nodes);
+        b.add_elements(g.topology, gids, conn, g.nodes);
       }
     }
   });

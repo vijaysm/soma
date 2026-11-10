@@ -290,3 +290,39 @@ SOMA_INSTANTIATE_COMM(double)
 #undef SOMA_INSTANTIATE_COMM
 
 }  // namespace soma
+
+namespace soma {
+
+SplitComm Comm::split(int color, int key) const {
+  detail::count_collective();
+  MPI_Comm out = MPI_COMM_NULL;
+  check(MPI_Comm_split(comm_, color < 0 ? MPI_UNDEFINED : color, key, &out), "MPI_Comm_split");
+  if (out == MPI_COMM_NULL) return SplitComm{};
+  return SplitComm(Comm(out));
+}
+
+SplitComm::SplitComm(SplitComm&& other) noexcept : comm_(std::move(other.comm_)) { other.comm_.reset(); }
+
+SplitComm& SplitComm::operator=(SplitComm&& other) noexcept {
+  if (this != &other) {
+    SplitComm old(std::move(*this));
+    comm_ = std::move(other.comm_);
+    other.comm_.reset();
+  }
+  return *this;
+}
+
+SplitComm::~SplitComm() {
+  if (!comm_) return;
+  int finalized = 0;
+  MPI_Finalized(&finalized);
+  MPI_Comm c = comm_->native();
+  if (!finalized && c != MPI_COMM_NULL) MPI_Comm_free(&c);
+}
+
+const Comm& SplitComm::comm() const {
+  if (!comm_) throw std::logic_error("soma::SplitComm: this rank is in no group");
+  return *comm_;
+}
+
+}  // namespace soma

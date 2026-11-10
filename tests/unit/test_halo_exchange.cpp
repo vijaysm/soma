@@ -208,3 +208,31 @@ TEST(HaloExchange, ADroppedExchangeLeavesTheValues) {
   EXPECT_THROW((void)x.begin_update(c, wrong), std::invalid_argument);
   EXPECT_THROW((void)x.begin_reduce(c, wrong, soma::Op::sum), std::invalid_argument);
 }
+
+// A second update gives the same bits as the first and never writes owned
+// rows; 64-bit integers beyond what a double holds arrive exactly.
+TEST(HaloExchange, RepeatedUpdatesKeepTheBitsAndIntegersArriveExactly) {
+  const Comm c = Comm::world();
+  const soma::HostMesh m = local_mesh(c, cell_ranks(c));
+  const soma::HaloExchange<Host> x(c, m, 0);
+  const auto& t = m.segment_table(0);
+  const auto gid = m.gid(0);
+  auto v = owned_values(c, m, 11);
+  const auto before = copy_of(v);
+  x.update(c, v);
+  const auto first = copy_of(v);
+  x.update(c, v);
+  EXPECT_TRUE(same(v, first));
+  for (LO e = 0; e < t.owned_end; ++e) {
+    for (int k = 0; k < 2; ++k) EXPECT_EQ(v(e, k), before(e, k)) << "owned vertex " << gid(e);
+  }
+  constexpr std::int64_t big = std::int64_t{1} << 60;
+  soma::View2<std::int64_t, Host> n("n", static_cast<std::size_t>(m.count(0)), 3);
+  for (LO e = 0; e < m.count(0); ++e) {
+    for (int k = 0; k < 3; ++k) n(e, k) = e < t.owned_end ? big + 7 * gid(e) + k : -1;
+  }
+  x.update(c, n);
+  for (LO e = 0; e < m.count(0); ++e) {
+    for (int k = 0; k < 3; ++k) EXPECT_EQ(n(e, k), big + 7 * gid(e) + k) << "vertex " << gid(e);
+  }
+}

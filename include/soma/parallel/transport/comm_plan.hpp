@@ -68,7 +68,7 @@ class CommPlan {
   // The other ranks this one sends to and receives from, ascending.
   [[nodiscard]] std::vector<int> send_ranks() const;
   [[nodiscard]] std::vector<int> recv_ranks() const;
-  [[nodiscard]] std::size_t num_sent() const { return send_perm_.size(); }
+  [[nodiscard]] std::size_t num_sent() const { return num_sent_; }
   [[nodiscard]] std::size_t num_arrived() const { return recv_offsets_.empty() ? 0 : recv_offsets_.back(); }
 
   // Values of `width` bytes. Throws std::invalid_argument, before any
@@ -104,8 +104,9 @@ class CommPlan {
   // arrived records.
   std::vector<int> send_peers_, recv_peers_;
   std::vector<std::size_t> send_offsets_, recv_offsets_;
-  std::vector<std::size_t> send_perm_;  // packed position -> sent record
-  bool grouped_ = false;                // send_perm_ is the identity
+  std::size_t num_sent_ = 0;
+  bool grouped_ = true;                 // the sent records are packed as they are
+  std::vector<std::size_t> send_perm_;  // else packed position -> sent record
   // This rank's records to itself: how many, and where they start among the
   // packed sent records and among the arrived.
   std::size_t self_count_ = 0, self_packed_ = 0, self_arrived_ = 0;

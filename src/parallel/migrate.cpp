@@ -30,6 +30,7 @@ namespace soma {
 namespace {
 
 using detail::Batch;
+using detail::Holders;
 using detail::put;
 using detail::route;
 using detail::take;
@@ -320,10 +321,9 @@ std::uint64_t field_list_hash(const HostMesh& mesh) {
   return h.h;
 }
 
-// The graphs held on any rank, and the connectivity (never held) of each
-// dimension that some rank holds, none gave the builder and no held graph
-// builds.
-AdjacencyRequest graphs_to_rebuild(const Comm& comm, const HostMesh& mesh) {
+}  // namespace
+
+AdjacencyRequest detail::graphs_to_rebuild(const Comm& comm, const HostMesh& mesh) {
   std::array<std::int32_t, adjacency_slots + 8> f{};
   const std::uint32_t bits = mesh.adjacencies().bits();
   for (int s = 0; s < adjacency_slots; ++s) f[static_cast<std::size_t>(s)] = (bits >> s) & 1u;
@@ -348,6 +348,8 @@ AdjacencyRequest graphs_to_rebuild(const Comm& comm, const HostMesh& mesh) {
   }
   return r;
 }
+
+namespace {
 
 // A hash of what every rank's sets must agree on: gids, flags, children,
 // parents and the sets each contains.
@@ -383,65 +385,102 @@ std::uint64_t key_of(int d, GO g) { return static_cast<std::uint64_t>(g) << 2 | 
 // Records of `width` bytes about entities, each deposited by the rank that
 // owned the entity, handed to every rank of the new part holding it. A
 // delivered row is (dimension, lid on the part, depositing rank) as int32,
-// then the record; rows come in no particular order.
+// then the record; rows come in no particular order. With `push` (a part
+// that keeps the mesh's held entities in place, and the other ranks holding
+// each entity owned here), owners send their records straight to those
+// ranks and keep their own: one route. Else records meet the asks at a
+// directory.
 constexpr std::size_t delivered_header = 3 * sizeof(std::int32_t);
 
 template <class Fill>
-Batch deliver(const Comm& comm, const HostMesh& part, const std::vector<std::uint64_t>& keys, std::size_t width,
-              Fill&& fill) {
+Batch deliver(const Comm& comm, const HostMesh& part, const std::vector<std::uint64_t>& keys,
+              const std::vector<LO>& lids, std::size_t width, const Holders* push, Fill&& fill) {
   const int p = comm.size();
-  std::array<std::int32_t, 4> dims{};
-  for (const std::uint64_t k : keys) dims[k & 3u] = 1;
-  comm.allreduce(std::span<std::int32_t>(dims), Op::max);
   const auto directory_of = [p](std::uint64_t k) { return transport::owner(k, p); };
-
-  std::vector<int> to(keys.size());
-  for (std::size_t i = 0; i < keys.size(); ++i) to[i] = directory_of(keys[i]);
-  const Batch deposits = route(comm, to, sizeof(std::uint64_t) + width, [&](std::size_t i, std::byte* row) {
-    put(row, 0, keys[i]);
-    fill(i, row + sizeof(std::uint64_t));
-  });
-  std::vector<std::uint64_t> asked;
-  to.clear();
-  for (int d = 0; d <= part.dim(); ++d) {
-    if (dims[static_cast<std::size_t>(d)] == 0) continue;
-    for (LO e = 0; e < part.count(d); ++e) {
-      asked.push_back(key_of(d, part.gid(d)(e)));
-      to.push_back(directory_of(asked.back()));
-    }
-  }
-  const Batch asks = route(comm, to, sizeof(std::uint64_t), [&](std::size_t i, std::byte* row) { put(row, 0, asked[i]); });
-
-  // The directory: each ask gets every deposit of its key.
-  std::vector<std::pair<std::uint64_t, std::size_t>> held(deposits.size());
-  for (std::size_t i = 0; i < deposits.size(); ++i) held[i] = {take<std::uint64_t>(&deposits.payload(i, 0), 0), i};
-  std::sort(held.begin(), held.end());
-  std::vector<std::pair<std::size_t, std::size_t>> answers;  // (ask, deposit)
-  to.clear();
-  for (std::size_t a = 0; a < asks.size(); ++a) {
-    const auto k = take<std::uint64_t>(&asks.payload(a, 0), 0);
-    for (auto it = std::lower_bound(held.begin(), held.end(), std::pair<std::uint64_t, std::size_t>{k, 0});
-         it != held.end() && it->first == k; ++it) {
-      answers.emplace_back(a, it->second);
-      to.push_back(asks.source(a));
-    }
-  }
-  const Batch got = route(comm, to, sizeof(std::uint64_t) + sizeof(std::int32_t) + width,
-                          [&](std::size_t i, std::byte* row) {
-                            const auto [a, k] = answers[i];
-                            std::memcpy(row, &deposits.payload(k, 0), sizeof(std::uint64_t));
-                            put(row, sizeof(std::uint64_t), static_cast<std::int32_t>(deposits.source(k)));
-                            if (width > 0) {
-                              std::memcpy(row + sizeof(std::uint64_t) + sizeof(std::int32_t),
-                                          &deposits.payload(k, sizeof(std::uint64_t)), width);
-                            }
-                          });
-
+  const std::size_t answer_width = sizeof(std::uint64_t) + sizeof(std::int32_t) + width;
+  Batch got;
+  std::vector<std::tuple<std::int32_t, LO, std::size_t>> local;  // (dimension, lid, record)
   std::array<std::vector<std::pair<GO, LO>>, 4> lid;
-  for (int d = 0; d <= part.dim(); ++d) {
-    if (dims[static_cast<std::size_t>(d)] != 0) lid[static_cast<std::size_t>(d)] = lids_by_gid(part, d);
+  if (push != nullptr) {
+    std::vector<std::pair<int, std::size_t>> sent;  // (rank, record)
+    for (std::size_t i = 0; i < keys.size(); ++i) {
+      const auto d = static_cast<std::int32_t>(keys[i] & 3u);
+      local.emplace_back(d, lids[i], i);
+      const auto& h = (*push)[static_cast<std::size_t>(d)];
+      for (auto it = std::lower_bound(h.begin(), h.end(), std::pair<LO, int>{lids[i], std::numeric_limits<int>::min()});
+           it != h.end() && it->first == lids[i]; ++it) {
+        sent.emplace_back(it->second, i);
+      }
+    }
+    std::vector<int> to(sent.size());
+    for (std::size_t i = 0; i < sent.size(); ++i) to[i] = sent[i].first;
+    const auto me = static_cast<std::int32_t>(comm.rank());
+    got = route(comm, to, answer_width, [&](std::size_t i, std::byte* row) {
+      const std::size_t k = sent[i].second;
+      put(row, 0, keys[k]);
+      put(row, sizeof(std::uint64_t), me);
+      if (width > 0) fill(k, row + sizeof(std::uint64_t) + sizeof(std::int32_t));
+    });
+    // What arrives is a copy or a ghost here.
+    std::array<bool, 4> seen{};
+    for (std::size_t i = 0; i < got.size(); ++i) seen[take<std::uint64_t>(&got.payload(i, 0), 0) & 3u] = true;
+    for (int d = 0; d <= part.dim(); ++d) {
+      const auto dd = static_cast<std::size_t>(d);
+      if (!seen[dd]) continue;
+      for (LO e = part.segment_table(d).owned_end; e < part.count(d); ++e) lid[dd].emplace_back(part.gid(d)(e), e);
+      std::sort(lid[dd].begin(), lid[dd].end());
+    }
+  } else {
+    std::array<std::int32_t, 4> dims{};
+    for (const std::uint64_t k : keys) dims[k & 3u] = 1;
+    comm.allreduce(std::span<std::int32_t>(dims), Op::max);
+    std::vector<int> to(keys.size());
+    for (std::size_t i = 0; i < keys.size(); ++i) to[i] = directory_of(keys[i]);
+    const Batch deposits = route(comm, to, sizeof(std::uint64_t) + width, [&](std::size_t i, std::byte* row) {
+      put(row, 0, keys[i]);
+      fill(i, row + sizeof(std::uint64_t));
+    });
+    std::vector<std::uint64_t> asked;
+    to.clear();
+    for (int d = 0; d <= part.dim(); ++d) {
+      if (dims[static_cast<std::size_t>(d)] == 0) continue;
+      for (LO e = 0; e < part.count(d); ++e) {
+        asked.push_back(key_of(d, part.gid(d)(e)));
+        to.push_back(directory_of(asked.back()));
+      }
+    }
+    const Batch asks =
+        route(comm, to, sizeof(std::uint64_t), [&](std::size_t i, std::byte* row) { put(row, 0, asked[i]); });
+
+    // The directory: each ask gets every deposit of its key.
+    std::vector<std::pair<std::uint64_t, std::size_t>> held(deposits.size());
+    for (std::size_t i = 0; i < deposits.size(); ++i) held[i] = {take<std::uint64_t>(&deposits.payload(i, 0), 0), i};
+    std::sort(held.begin(), held.end());
+    std::vector<std::pair<std::size_t, std::size_t>> answers;  // (ask, deposit)
+    to.clear();
+    for (std::size_t a = 0; a < asks.size(); ++a) {
+      const auto k = take<std::uint64_t>(&asks.payload(a, 0), 0);
+      for (auto it = std::lower_bound(held.begin(), held.end(), std::pair<std::uint64_t, std::size_t>{k, 0});
+           it != held.end() && it->first == k; ++it) {
+        answers.emplace_back(a, it->second);
+        to.push_back(asks.source(a));
+      }
+    }
+    got = route(comm, to, answer_width, [&](std::size_t i, std::byte* row) {
+      const auto [a, k] = answers[i];
+      std::memcpy(row, &deposits.payload(k, 0), sizeof(std::uint64_t));
+      put(row, sizeof(std::uint64_t), static_cast<std::int32_t>(deposits.source(k)));
+      if (width > 0) {
+        std::memcpy(row + sizeof(std::uint64_t) + sizeof(std::int32_t), &deposits.payload(k, sizeof(std::uint64_t)),
+                    width);
+      }
+    });
+    for (int d = 0; d <= part.dim(); ++d) {
+      if (dims[static_cast<std::size_t>(d)] != 0) lid[static_cast<std::size_t>(d)] = lids_by_gid(part, d);
+    }
   }
-  Batch out(got.size(), delivered_header + width, "soma::migrate");
+
+  Batch out(got.size() + local.size(), delivered_header + width, "soma::migrate");
   for (std::size_t i = 0; i < got.size(); ++i) {
     const std::byte* row = &got.payload(i, 0);
     const auto k = take<std::uint64_t>(row, 0);
@@ -449,10 +488,19 @@ Batch deliver(const Comm& comm, const HostMesh& part, const std::vector<std::uin
     const auto g = static_cast<GO>(k >> 2);
     const auto& v = lid[static_cast<std::size_t>(d)];
     const auto it = std::lower_bound(v.begin(), v.end(), std::pair<GO, LO>{g, std::numeric_limits<LO>::min()});
+    if (it == v.end() || it->first != g) throw std::logic_error("move_entity_data: a record of an entity not held");
     std::byte* o = &out.payload(i, 0);
     put(o, 0, static_cast<std::int32_t>(d));
     put(o, sizeof(std::int32_t), static_cast<std::int32_t>(it->second));
     std::memcpy(o + 2 * sizeof(std::int32_t), row + sizeof(std::uint64_t), sizeof(std::int32_t) + width);
+  }
+  for (std::size_t i = 0; i < local.size(); ++i) {
+    const auto [d, e, k] = local[i];
+    std::byte* o = &out.payload(got.size() + i, 0);
+    put(o, 0, d);
+    put(o, sizeof(std::int32_t), static_cast<std::int32_t>(e));
+    put(o, 2 * sizeof(std::int32_t), static_cast<std::int32_t>(comm.rank()));
+    if (width > 0) fill(k, o + delivered_header);
   }
   return out;
 }
@@ -464,7 +512,7 @@ bool owned(const HostMesh& mesh, int d, LO e) { return e < mesh.segment_table(d)
 // lists the entries of each depositing rank in its order, ranks in order,
 // with its set entries as rank 0 has them. Members that are ghosts on the
 // part are kept only with `ghost_members`.
-void move_sets(const Comm& comm, const HostMesh& mesh, HostMesh& part, bool ghost_members) {
+void move_sets(const Comm& comm, const HostMesh& mesh, HostMesh& part, bool ghost_members, const Holders* push) {
   const auto& sets = mesh.sets();
   if (sets.count() == 0) return;
   const auto sgid = sets.gid();
@@ -473,7 +521,9 @@ void move_sets(const Comm& comm, const HostMesh& mesh, HostMesh& part, bool ghos
     std::int64_t pos;
   };
   std::vector<std::uint64_t> keys;
+  std::vector<LO> lids;
   std::vector<Member> members;
+  bool any_entries = false;  // alike on every rank: the sets are
   struct Entry {
     std::int32_t set;
     std::int64_t pos;
@@ -488,9 +538,11 @@ void move_sets(const Comm& comm, const HostMesh& mesh, HostMesh& part, bool ghos
         const SetEntry& x = seq[k];
         const auto pos = static_cast<std::int64_t>(k);
         if (x.slot == set_dim) {
+          any_entries = true;
           if (comm.rank() == 0) entries.push_back({si, pos, sgid(x.lid)});
         } else if (owned(mesh, x.slot, x.lid)) {
           keys.push_back(key_of(x.slot, mesh.gid(x.slot)(x.lid)));
+          lids.push_back(x.lid);
           members.push_back({si, pos});
         }
       }
@@ -501,11 +553,12 @@ void move_sets(const Comm& comm, const HostMesh& mesh, HostMesh& part, bool ghos
       for (const LO l : sets.members_of(i, d)) {
         if (!owned(mesh, d, l)) continue;
         keys.push_back(key_of(d, mesh.gid(d)(l)));
+        lids.push_back(l);
         members.push_back({si, -1});
       }
     }
   }
-  const Batch in = deliver(comm, part, keys, sizeof(Member),
+  const Batch in = deliver(comm, part, keys, lids, sizeof(Member), push,
                            [&](std::size_t k, std::byte* row) { std::memcpy(row, &members[k], sizeof(Member)); });
   std::vector<int> to;
   std::vector<Entry> sent;
@@ -515,7 +568,8 @@ void move_sets(const Comm& comm, const HostMesh& mesh, HostMesh& part, bool ghos
       sent.push_back(x);
     }
   }
-  const Batch ein = route(comm, to, sizeof(Entry), [&](std::size_t k, std::byte* row) { std::memcpy(row, &sent[k], sizeof(Entry)); });
+  const auto entry = [&](std::size_t k, std::byte* row) { std::memcpy(row, &sent[k], sizeof(Entry)); };
+  const Batch ein = any_entries ? route(comm, to, sizeof(Entry), entry) : Batch{};
 
   struct In {
     std::int32_t set, from;
@@ -595,11 +649,12 @@ void sort_unique(std::vector<LO>& v) {
 // A field of fixed length: each value point row of an entity is deposited by
 // the entity's owner as (row within the entity, its components).
 template <class T>
-void move_field(const Comm& comm, const HostMesh& mesh, const FieldInfo& info, HostMesh& part) {
+void move_field(const Comm& comm, const HostMesh& mesh, const FieldInfo& info, HostMesh& part, const Holders* push) {
   const auto f = mesh.fields().template get<T>(info.id);
   const Domain<Kokkos::HostSpace>& dom = f.domain();
   const auto nc = static_cast<std::size_t>(f.ncomp());
   std::vector<std::uint64_t> keys;
+  std::vector<LO> lids;
   std::vector<std::pair<LO, LO>> rows;  // (row, row within the entity)
   for (int b = 0; b < dom.num_blocks(); ++b) {
     const int d = dom.info(b).dim;
@@ -609,12 +664,13 @@ void move_field(const Comm& comm, const HostMesh& mesh, const FieldInfo& info, H
       const RowRange r = f.space().entity_rows(d, l);
       for (LO k = r.begin; k < r.end; ++k) {
         keys.push_back(key_of(d, mesh.gid(d)(l)));
+        lids.push_back(l);
         rows.emplace_back(k, k - r.begin);
       }
     }
   }
   const std::size_t width = sizeof(std::int32_t) + nc * sizeof(T);
-  const Batch in = deliver(comm, part, keys, width, [&](std::size_t i, std::byte* row) {
+  const Batch in = deliver(comm, part, keys, lids, width, push, [&](std::size_t i, std::byte* row) {
     put(row, 0, static_cast<std::int32_t>(rows[i].second));
     for (std::size_t c = 0; c < nc; ++c) put(row, sizeof(std::int32_t) + c * sizeof(T), f.view()(rows[i].first, c));
   });
@@ -652,10 +708,12 @@ void move_field(const Comm& comm, const HostMesh& mesh, const FieldInfo& info, H
 // A field of variable length: an entity's owner deposits (-1, nothing) for
 // the entity, then (k, value k) for each of its values.
 template <class T>
-void move_var_field(const Comm& comm, const HostMesh& mesh, const FieldInfo& info, HostMesh& part) {
+void move_var_field(const Comm& comm, const HostMesh& mesh, const FieldInfo& info, HostMesh& part,
+                    const Holders* push) {
   const auto f = mesh.fields().template get_var<T>(info.id);
   const Domain<Kokkos::HostSpace>& dom = f.domain();
   std::vector<std::uint64_t> keys;
+  std::vector<LO> lids;
   std::vector<std::pair<std::int32_t, T>> recs;
   for (int b = 0; b < dom.num_blocks(); ++b) {
     const int d = dom.info(b).dim;
@@ -664,18 +722,21 @@ void move_var_field(const Comm& comm, const HostMesh& mesh, const FieldInfo& inf
       if (!owned(mesh, d, l)) continue;
       const std::uint64_t key = key_of(d, mesh.gid(d)(l));
       keys.push_back(key);
+      lids.push_back(l);
       recs.emplace_back(-1, T{});
       const auto v = f.value_or_default(d, l);
       for (std::size_t k = 0; k < v.size(); ++k) {
         keys.push_back(key);
+        lids.push_back(l);
         recs.emplace_back(static_cast<std::int32_t>(k), v[k]);
       }
     }
   }
-  const Batch in = deliver(comm, part, keys, sizeof(std::int32_t) + sizeof(T), [&](std::size_t i, std::byte* row) {
-    put(row, 0, recs[i].first);
-    put(row, sizeof(std::int32_t), recs[i].second);
-  });
+  const Batch in =
+      deliver(comm, part, keys, lids, sizeof(std::int32_t) + sizeof(T), push, [&](std::size_t i, std::byte* row) {
+        put(row, 0, recs[i].first);
+        put(row, sizeof(std::int32_t), recs[i].second);
+      });
   struct Value {
     int d;
     LO lid;
@@ -722,15 +783,15 @@ void move_var_field(const Comm& comm, const HostMesh& mesh, const FieldInfo& inf
 }
 
 // Every field but the internal ones, in id order, with its tag format.
-void move_fields(const Comm& comm, const HostMesh& mesh, HostMesh& part) {
+void move_fields(const Comm& comm, const HostMesh& mesh, HostMesh& part, const Holders* push) {
   const auto& from = mesh.fields();
   for (const FieldInfo& info : from.list()) {
     if (internal(info.name)) continue;
     dispatch_data_type(info.type, [&]<class T>() {
       if (info.variable) {
-        move_var_field<T>(comm, mesh, info, part);
+        move_var_field<T>(comm, mesh, info, part, push);
       } else {
-        move_field<T>(comm, mesh, info, part);
+        move_field<T>(comm, mesh, info, part, push);
       }
       const TagFormat& t = from.tag_format(info.family);
       if (t != TagFormat{}) {
@@ -923,13 +984,18 @@ HostMesh detail::build_placed(const Comm& comm, const HostMesh& mesh, const Plac
     }
     i = j;
   }
-  const AdjacencyRequest graphs = graphs_to_rebuild(comm, mesh);
+  const AdjacencyRequest graphs = detail::graphs_to_rebuild(comm, mesh);
   HostMesh part = build_local_part(comm, std::move(b), marked, ordering);
   if (!graphs.empty()) build_distributed_adjacencies(comm, part, graphs);
-  move_sets(comm, mesh, part, ghosts == nullptr || ghosts->sets);
-  move_fields(comm, mesh, part);
-  part.values() = mesh.values();
+  detail::move_entity_data(comm, mesh, part, ghosts == nullptr || ghosts->sets, nullptr);
   return part;
+}
+
+void detail::move_entity_data(const Comm& comm, const HostMesh& mesh, HostMesh& part, bool ghost_members,
+                              const Holders* push) {
+  move_sets(comm, mesh, part, ghost_members, push);
+  move_fields(comm, mesh, part, push);
+  part.values() = mesh.values();
 }
 
 }  // namespace soma

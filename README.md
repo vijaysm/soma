@@ -4,7 +4,7 @@ Kokkos-native unstructured mesh infrastructure: read a mesh on the host, mirror 
 (topology, coordinates, and only the adjacencies and fields you ask for) to a device, and
 traverse, query, and manipulate mesh and fields with the same kernels on GPUs or host threads.
 
-**Required:** Kokkos >= 5.0. **Optional:** MPI, HDF5, GoogleTest, MOAB (tests and benchmarks
+**Required:** Kokkos >= 5.0. **Optional:** MPI, HDF5 >= 1.14, GoogleTest, MOAB (tests and benchmarks
 only), KokkosKernels, ArborX, PETSc.
 
 ```bash

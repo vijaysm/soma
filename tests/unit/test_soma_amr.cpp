@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <hdf5.h>
 #include <Kokkos_Core.hpp>
 
 #include "soma/amr/hierarchy.hpp"
@@ -74,6 +75,23 @@ void expect_restarted(const soma::AmrCheckpoint& c, const Hierarchy& whole, cons
   EXPECT_THROW((void)c.field<double>("v"), std::invalid_argument);
 }
 
+// Rewrites a dataset of doubles of a file as big-endian doubles, the same
+// values.
+void make_big_endian(const fs::path& p, const char* path) {
+  const hid_t f = H5Fopen(p.c_str(), H5F_ACC_RDWR, H5P_DEFAULT);
+  hid_t ds = H5Dopen2(f, path, H5P_DEFAULT);
+  const hid_t space = H5Dget_space(ds);
+  std::vector<double> v(static_cast<std::size_t>(H5Sget_simple_extent_npoints(space)));
+  H5Dread(ds, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, v.data());
+  H5Dclose(ds);
+  H5Ldelete(f, path, H5P_DEFAULT);
+  ds = H5Dcreate2(f, path, H5T_IEEE_F64BE, space, H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+  H5Dwrite(ds, H5T_NATIVE_DOUBLE, H5S_ALL, H5S_ALL, H5P_DEFAULT, v.data());
+  H5Dclose(ds);
+  H5Sclose(space);
+  H5Fclose(f);
+}
+
 }  // namespace
 
 // Written at P, read at P, at one rank, and written by one rank and read at
@@ -106,6 +124,14 @@ TEST(SomaAmr, RestartsAtAnyRankCount) {
   }
   c.barrier();
   expect_restarted(soma::read_soma_amr(c, dir.path("one.soma")), whole, w);
+  // Written through aggregators, the same checkpoint.
+#ifdef H5_HAVE_PARALLEL
+  const int aggregators = (c.size() + 1) / 2;
+#else
+  const int aggregators = 1;
+#endif
+  soma::write_soma(c, part, {{"u", p.u}, {"n", p.n}}, dir.path("gathered.soma"), {.aggregators = aggregators});
+  expect_restarted(soma::read_soma_amr(c, dir.path("gathered.soma")), whole, w);
   // Costs given to the reader cut the levels by them.
   soma::SomaAmrReadOptions o;
   o.cost = [](int, const Box& b) { return b.lo(0) < 32 ? 1.0 : 5.0; };
@@ -117,6 +143,25 @@ TEST(SomaAmr, RestartsAtAnyRankCount) {
               Distribution::along_curve(weighted.hierarchy.boxes(l), c.size(), cost).owner);
   }
   expect_restarted(weighted, whole, w);
+}
+
+// Columns read through HDF5 rather than straight from the file (compressed,
+// or one level of a field in another byte order beside the others) restart
+// the same.
+TEST(SomaAmr, CompressedAndConvertedColumnsRestart) {
+  const Comm c = Comm::world();
+  const Scratch dir(c, "soma_amr");
+  const Hierarchy whole = ringed(Hierarchy(geometry(), options()));
+  Fields w = fields_of(whole);
+  whole.fill_halo(w.u, Interp::linear, Wall{});
+  const Hierarchy part = ringed(Hierarchy(c, geometry(), options()));
+  const Fields p = fields_of(part);
+  soma::write_soma(c, part, {{"u", p.u}, {"n", p.n}}, dir.path("zipped.soma"), {.compression = 1});
+  expect_restarted(soma::read_soma_amr(c, dir.path("zipped.soma")), whole, w);
+  soma::write_soma(c, part, {{"u", p.u}, {"n", p.n}}, dir.path("big.soma"));
+  if (c.rank() == 0) make_big_endian(dir.path("big.soma"), "soma/amr/fields/f0/l1");
+  c.barrier();
+  expect_restarted(soma::read_soma_amr(c, dir.path("big.soma")), whole, w);
 }
 
 // Writing and reading take a number of collectives that depends neither on
@@ -135,8 +180,14 @@ TEST(SomaAmr, CollectivesDoNotGrow) {
     (void)soma::read_soma_amr(c, dir.path("count.soma"));
     const auto read = soma::detail::comm_counts();
     EXPECT_EQ(written.collectives - before.collectives, 6U);
-    // Two agreements and the hierarchy's construction (none of its own).
-    EXPECT_EQ(read.collectives - written.collectives, 2U);
+    // Two agreements and the hierarchy's construction (none of its own);
+    // with MPI-IO on more than one rank, rank 0's header besides.
+#ifdef H5_HAVE_PARALLEL
+    const std::uint64_t header = c.size() > 1 ? 1 : 0;
+#else
+    const std::uint64_t header = 0;
+#endif
+    EXPECT_EQ(read.collectives - written.collectives, 2U + header);
     EXPECT_EQ(read.routes, before.routes);
   }
 }
@@ -150,6 +201,11 @@ TEST(SomaAmr, FailuresThrowOnEveryRank) {
   const fs::path out = dir.path("bad.soma");
   EXPECT_THROW(soma::write_soma(c, part, {{"u", p.u}}, out, {.compression = 10}), std::invalid_argument);
   EXPECT_THROW(soma::write_soma(c, part, {{"u", p.u}, {"u", p.u}}, out), std::invalid_argument);
+  EXPECT_THROW(soma::write_soma(c, part, {{"u", p.u}}, out, {.aggregators = c.size() + 1}), std::invalid_argument);
+  if (c.size() > 1) {
+    const int mine = c.rank() == 0 ? 1 : 0;
+    EXPECT_THROW(soma::write_soma(c, part, {{"u", p.u}}, out, {.aggregators = mine}), std::invalid_argument);
+  }
   // A field of another hierarchy.
   const Hierarchy other(c, geometry(), options());
   const auto q = other.make_field<double>(IndexType::cell(), 1, 0);
