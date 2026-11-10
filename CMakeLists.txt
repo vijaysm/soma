@@ -31,6 +31,7 @@ set(SOMA_KOKKOS_GPU "AUTO" CACHE STRING
   "GPU backend of a fetched Kokkos: AUTO, NONE, CUDA, HIP, SYCL")
 set_property(CACHE SOMA_KOKKOS_GPU PROPERTY STRINGS AUTO NONE CUDA HIP SYCL)
 option(SOMA_ENABLE_MOAB_REFERENCE "Build MOAB reference tests and benchmarks" OFF)
+option(SOMA_ENABLE_EXAMPLES "Build the example programs (requires SOMA_ENABLE_HDF5)" OFF)
 option(SOMA_ENABLE_MOAB_COMPAT "MOAB's API over SOMA meshes (soma::compat)" OFF)
 option(SOMA_LO_64 "64-bit local ordinals (ABI-breaking)" OFF)
 option(SOMA_OFFSET_64 "64-bit CSR offsets (ABI-breaking)" OFF)
@@ -154,6 +155,13 @@ endif()
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   add_subdirectory(bench)
+endif()
+
+if(SOMA_ENABLE_EXAMPLES)
+  if(NOT SOMA_ENABLE_HDF5)
+    message(FATAL_ERROR "SOMA_ENABLE_EXAMPLES needs SOMA_ENABLE_HDF5")
+  endif()
+  add_subdirectory(examples)
 endif()
 
 if(SOMA_INSTALL)
