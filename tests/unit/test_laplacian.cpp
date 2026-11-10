@@ -191,6 +191,32 @@ TEST(Laplacian, DistributedSweepsAreTheSerialOnes) {
   }
 }
 
+// With a tolerance, every rank stops after the sweep the serial run stops
+// after, on the same largest move, at the same coordinates.
+TEST(Laplacian, DistributedToleranceStopsWhereSerialDoes) {
+  const Comm c = Comm::world();
+  std::vector<GO> all;
+  for (int cell = 0; cell < nx * ny; ++cell) all.push_back(1000 + cell);
+  soma::HostMesh whole = soma::build_local_part(Comm::self(), cells_builder(all));
+  perturb(whole, 0.3);
+  soma::SmoothOptions o;
+  o.iterations = 1000;
+  o.tolerance = 1e-4;
+  const soma::SmoothReport serial = soma::laplacian_smooth(Comm::self(), whole, o);
+  ASSERT_LT(serial.iterations, o.iterations);
+  const auto want = by_gid(whole);
+  for (int kind = 0; kind < 4; ++kind) {
+    SCOPED_TRACE(testing::Message() << "partition " << kind);
+    soma::HostMesh m = soma::build_local_part(c, local_builder(partition(c, kind), c.rank()));
+    m.add_ghosts(c, soma::GhostOptions{1, 0, false});
+    perturb(m, 0.3);
+    const soma::SmoothReport r = soma::laplacian_smooth(c, m, o);
+    EXPECT_EQ(r.iterations, serial.iterations);
+    EXPECT_EQ(r.largest_move, serial.largest_move);
+    for (const auto& [gid, p] : by_gid(m)) EXPECT_EQ(p, want.at(gid)) << "vertex " << gid;
+  }
+}
+
 #if SOMA_TEST_HDF5
 // A hex mesh read in parallel with its file's parts smooths as it does read
 // whole on one rank.
