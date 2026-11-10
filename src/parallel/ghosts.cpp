@@ -1106,7 +1106,10 @@ void ghost(const Comm& comm, HostMesh& mesh, const GhostOptions& options, bool r
 
 }  // namespace
 
-void add_ghosts(const Comm& comm, HostMesh& mesh, const GhostOptions& options) { ghost(comm, mesh, options, false); }
+void add_ghosts(const Comm& comm, HostMesh& mesh, const GhostOptions& options) {
+  ghost(comm, mesh, options, false);
+  TopologyAccess::ghosts(mesh) = {options.layers, options.layers > 0 ? options.bridge_dim : 0};
+}
 
 void add_ghosts_by_rebuild(const Comm& comm, HostMesh& mesh, const GhostOptions& options) {
   ghost(comm, mesh, options, true);

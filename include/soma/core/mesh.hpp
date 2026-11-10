@@ -212,6 +212,10 @@ class Mesh {
     detail::remove_ghosts(comm, *this);
     return *this;
   }
+  // The layers and bridge dimension of the ghosts add_ghosts last placed:
+  // 0 and 0 for a mesh without ghosts. Copies and mirrors keep them.
+  int ghost_layers() const noexcept { return ghosts_[0]; }
+  int ghost_bridge_dim() const noexcept { return ghosts_[1]; }
   // True for the dimensions MeshBuilder was given entities of (vertices
   // always), also after derivation adopts them; false for derived-only ones.
   bool input(int d) const { return block(d).input; }
@@ -325,6 +329,7 @@ class Mesh {
     std::swap(dim_, o.dim_);
     std::swap(corner_ends_, o.corner_ends_);
     std::swap(ordering_, o.ordering_);
+    std::swap(ghosts_, o.ghosts_);
     for (std::size_t d = 0; d < 4; ++d) std::swap(ents_[d], o.ents_[d]);
     std::swap(coords_, o.coords_);
     std::swap(epoch_, o.epoch_);
@@ -410,6 +415,7 @@ class Mesh {
       t.tail = s.tail;
     }
     out.ordering_ = ordering_;
+    out.ghosts_ = ghosts_;
     if (o.dims[0]) out.corner_ends_ = corner_ends_;
     if (o.coordinates) transfer(out.coords_, coords_, alias);
     if (o.adj_source == TransferOptions::AdjSource::copy) {
@@ -456,6 +462,7 @@ class Mesh {
   int dim_ = 0;
   std::array<LO, 4> corner_ends_{};  // by Ownership
   Ordering ordering_ = default_ordering;
+  std::array<int, 2> ghosts_{0, 0};  // add_ghosts' layers and bridge_dim
   std::array<EntityBlock<MemSpace>, 4> ents_{};
   CoordView<MemSpace> coords_;
   std::uint64_t epoch_ = 1;
