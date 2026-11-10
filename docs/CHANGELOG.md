@@ -28,6 +28,8 @@ All notable changes to SOMA are recorded here. The format follows
 - `SOMA_ENABLE_HDF5=ON` needs HDF5 1.14 or newer. SOMA files are written in the HDF5 1.14 file
   format (`H5F_LIBVER_V114`), whatever newer library writes them.
 - CPM is at 0.43.2.
+- `SOMA_ENABLE_EXAMPLES=ON` builds the example programs (it needs `SOMA_ENABLE_HDF5`); with
+  tests on, each runs on a bundled mesh.
 
 ### Runtime and Comm
 
@@ -362,6 +364,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   owners, set membership with `sets`. `resolve_sharing` and `build_local_part` take ghosts;
   derived sides of ghost elements only are ghosts. `HaloExchange::update` writes ghosts,
   `reduce` leaves them. Parity with MOAB's `exchange_ghost_cells` for the first layer.
+  `Mesh::ghost_layers()` and `ghost_bridge_dim()` record the ghosts held (0 after
+  `remove_ghosts`), and copies keep them.
   `add_ghosts` returns after one reduction when no rank has anything to ghost and none holds
   ghosts. It sends each ghosting rank its ghosts' closures (after owners give the copies of
   their shared entities what they hold) and appends them to what the rank holds, which stays in
@@ -479,6 +483,22 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `write_vtk_amr(comm, path, hierarchy, fields)` writes each rank's boxes as `.vti` pieces and
   the `.vthb` index on rank 0 once every piece is in place; the files equal those one process
   writes.
+
+### Algorithms
+
+- `soma::laplacian_smooth(comm, mesh, SmoothOptions)` (`soma/algorithms/laplacian.hpp`) moves
+  each free owned vertex to the mean of its neighbours' coordinates, Jacobi, for `iterations`
+  sweeps or until no vertex moves farther than `tolerance`. Neighbours are the other corners of
+  the entities of dimension `bridge_dim` around a vertex (the cells by default, as MOAB's
+  LaplacianSmoother; 1 for edges), read off the cells' canonical sides. The skin stays, or the
+  vertices of a `fixed` mask. Each vertex sums in ascending gid order, so the result is the
+  same, bit for bit, on any number of ranks and threads. On more than one rank the mesh needs a
+  ghost layer through vertices; a halo update refreshes copies and ghosts after every sweep.
+- It equals MOAB's smoother bit for bit on one rank and within 1e-14 on ghosted partitions of
+  one to eight ranks. Ten sweeps of a 64^3 box of hexes, setup included, one thread a rank:
+  128 ms against MOAB's 8222 at one rank, 29 against 468 at eight.
+- `examples/laplacian_smooth.cpp` reads a `.h5m` or SOMA file on any number of ranks, adds a
+  ghost layer, smooths and writes a SOMA file (a VTK file on one rank).
 
 ### Testing
 
