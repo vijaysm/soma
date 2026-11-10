@@ -53,6 +53,31 @@ void sort_unique(std::vector<T>& v) {
   v.erase(std::unique(v.begin(), v.end()), v.end());
 }
 
+// Orders `v` stably by the integer key_of(element): by counting over the
+// keys' range when it is under twice their count, else by std::stable_sort.
+template <class T, class KeyOf>
+void stable_sort_by(std::vector<T>& v, KeyOf key_of) {
+  if (v.size() < 2) return;
+  using K = decltype(key_of(v[0]));
+  const auto [lo, span] = value_range<K>(v.size(), [&](std::size_t i) { return key_of(v[i]); });
+  if (span >= 2 * static_cast<std::uint64_t>(v.size())) {
+    std::stable_sort(v.begin(), v.end(), [&](const T& x, const T& y) { return key_of(x) < key_of(y); });
+    return;
+  }
+  const auto slot = [&](const T& x) {
+    return static_cast<std::size_t>(static_cast<std::uint64_t>(key_of(x)) - static_cast<std::uint64_t>(lo));
+  };
+  std::vector<std::size_t> start(static_cast<std::size_t>(span) + 2, 0);
+  for (const T& x : v) ++start[slot(x) + 1];
+  for (std::size_t k = 1; k < start.size(); ++k) start[k] += start[k - 1];
+  std::vector<T> out(v.size());
+  for (T& x : v) {
+    const std::size_t at = start[slot(x)]++;
+    out[at] = std::move(x);
+  }
+  v = std::move(out);
+}
+
 // Positions by gid, of n gids gid_of(0..n): a table over the gids' range when
 // it is at most twice their count, else (gid, position) pairs sorted by gid.
 // `repeated` is the first gid, in position order, given again, if any.

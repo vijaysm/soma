@@ -458,6 +458,31 @@ TEST(EntitySets, RunsBuildRowsWithoutListingThem) {
   EXPECT_EQ(s.data(0).extent(0), 0u);
 }
 
+// Members out of order and, over all sets, dense in their entities (as
+// parts' are): sorted by one count, repeats, touching and overlapping runs
+// join, and gaps stay.
+TEST(EntitySets, DenseUnsortedMembersJoinAsSortedOnesDo) {
+  soma::HostMesh mesh = soma::testing::box_mesh({10, 10, 1, soma::Topology::quad});
+  std::vector<SetItem> down;
+  for (GO f = 59; f >= 40; --f) {
+    if (f != 45 && f != 52) down.push_back({2, f});
+  }
+  down.push_back({2, 50});
+  soma::SetBuilder b;
+  b.add(SetSpec{1, soma::set_unique, down, {}, {}}, {{2, 60, 3}, {2, 51, 2}});
+  b.add(SetSpec{2, soma::set_unique, {{2, 30}, {2, 12}, {2, 11}, {2, 10}}, {}, {}}, {{2, 31, 2}, {2, 28, 2}});
+  std::move(b).install(mesh);
+  const auto& s = mesh.sets();
+  std::vector<LO> first;
+  for (LO f = 40; f < 63; ++f) {
+    if (f != 45) first.push_back(f);
+  }
+  EXPECT_EQ(soma_test::vec(s.members_of(0, 2)), first);
+  EXPECT_EQ(soma_test::vec(s.members_of(1, 2)), (std::vector<LO>{10, 11, 12, 28, 29, 30, 31, 32}));
+  EXPECT_EQ(s.members_of(0, 2).kind, soma::DomainKind::intervals);
+  EXPECT_EQ(s.data(2).extent(0), 5u + 5u);  // rows of 2 runs each
+}
+
 TEST(EntitySets, InstallRejectsBadRuns) {
   using soma::SetRun;
   const auto rejected = [](const std::vector<SetRun>& runs, std::uint8_t flags, const std::string& needle) {

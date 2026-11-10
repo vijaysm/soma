@@ -558,9 +558,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   on the key, which gives the same order.
 - `sfc::hilbert_index` works without branches, with the axis count as a template parameter: the
   same keys, 3.7x faster each.
-- At the full width of two or three axes the host follows the Hilbert curve by state tables, two
+- At the full width of two or three axes the host follows the Hilbert curve by state tables, three
   levels a step in 3D and four in 2D, read off the transpose and checked against it: the same
-  keys, 7x (3D) and 17x (2D) faster. `MeshBuilder::build` orders (key, position) pairs and
+  keys, 10x (3D) and 17x (2D) faster. `MeshBuilder::build` orders (key, position) pairs and
   moves records once: by one pass on the key's highest 16 varying bits and sorts of the small
   buckets, ties by gid, the same order; ownership and repeated element gids are looked up in
   tables over dense gid ranges. `Sharing::groups` sorts only shared rows. `read_soma` finds
@@ -574,6 +574,16 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   order rather than bucketing them. A one-rank read of a 64^3 box from an `.h5m` file takes
   99 ms instead of 266 (MOAB 45), and 51 instead of 100 at 8 ranks (MOAB 107); a one-rank
   `write_soma` 17 instead of 48 (MOAB 22).
+- Records a rank routes to itself no longer travel: `route` copies them once, by runs, into
+  their place among the arrivals. `CommPlan` is built in fewer passes and answers grouped
+  records in place. `read_h5m` keeps the elements it places in one flat list rather than a
+  vector each. `resolve_sharing` checks repeated gids and orders holders by tables over dense
+  gids, and on a single rank shares nothing without an exchange; `read_h5m` on a single rank
+  keeps every element where it was read. `SetBuilder::install` sorts the runs of every set of a
+  dimension by one count over its entities when they are dense. A one-rank read of a 64^3 box
+  from an `.h5m` file takes 43 ms instead of 99 (MOAB 48), and 75 instead of 91 at two ranks
+  (MOAB 172); from a SOMA file 47 instead of 52 (MOAB 46); `build_local_part` 27 instead of 40
+  at one rank (MOAB's `resolve_shared_ents` 232).
 - `read_h5m` places tag values by lid in one pass instead of sorting them, and builds each full
   domain once for every tag that covers it.
 - `write_h5m` writes a mesh in MOAB's legacy `.h5m` format, read back by MOAB `load_file` and

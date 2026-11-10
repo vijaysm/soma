@@ -136,18 +136,17 @@ constexpr auto hilbert_steps() {
   }
   return out;
 }
-inline constexpr auto steps3 = hilbert_steps<3, 2>();  // 21 levels: one, then ten of two
+inline constexpr auto steps3 = hilbert_steps<3, 3>();  // 21 levels: seven of three
 inline constexpr auto steps2 = hilbert_steps<2, 4>();  // 32 levels: eight of four
 
 // The full-width key by the tables, from the cell's Morton key.
 inline std::uint64_t hilbert_by_steps3(const std::uint32_t* c) {
   const std::uint64_t m = spread3(c[0]) << 2 | spread3(c[1]) << 1 | spread3(c[2]);
-  const auto first = static_cast<unsigned>(m >> 60) & 7U;
-  std::uint64_t key = digit3[0][first];
-  unsigned s = next3[0][first];
-  for (int shift = 54; shift >= 0; shift -= 6) {
-    const std::uint16_t e = steps3[s][(m >> shift) & 63];
-    key = key << 6 | (e >> 5);
+  std::uint64_t key = 0;
+  unsigned s = 0;
+  for (int shift = 54; shift >= 0; shift -= 9) {
+    const std::uint16_t e = steps3[s][(m >> shift) & 511];
+    key = key << 9 | (e >> 5);
     s = e & 31U;
   }
   return key;

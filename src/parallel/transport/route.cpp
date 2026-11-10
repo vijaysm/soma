@@ -237,10 +237,23 @@ detail::Arrivals detail::route_host(const Comm& comm, std::span<const int> dest,
   const auto p = static_cast<std::size_t>(comm.size());
   const std::size_t limit = largest > std::numeric_limits<std::size_t>::max() / p ? std::numeric_limits<std::size_t>::max()
                                                                                    : largest * p;
-  Rows rows{sizeof(Header) + width, std::vector<std::byte>(dest.size() * (sizeof(Header) + width)), limit};
+  // Records to this rank stay where they are; only the others travel.
+  std::vector<std::pair<std::size_t, std::size_t>> self;
+  std::size_t own = 0;
   for (std::size_t i = 0; i < dest.size(); ++i) {
+    if (dest[i] != comm.rank()) continue;
+    if (!self.empty() && self.back().first + self.back().second == i) {
+      ++self.back().second;
+    } else {
+      self.emplace_back(i, 1);
+    }
+    ++own;
+  }
+  Rows rows{sizeof(Header) + width, std::vector<std::byte>((dest.size() - own) * (sizeof(Header) + width)), limit};
+  for (std::size_t i = 0, k = 0; i < dest.size(); ++i) {
+    if (dest[i] == comm.rank()) continue;
     const Header h{dest[i], comm.rank()};
-    std::byte* row = rows.bytes.data() + i * rows.stride;
+    std::byte* row = rows.bytes.data() + k++ * rows.stride;
     std::memcpy(row, &h, sizeof h);
     if (width > 0) std::memcpy(row + sizeof h, payload.data() + i * width, width);
   }
@@ -255,7 +268,16 @@ detail::Arrivals detail::route_host(const Comm& comm, std::span<const int> dest,
   for (std::size_t i = 1; i < rows.size() && sorted; ++i) sorted = rows.header(i - 1).source <= rows.header(i).source;
   std::vector<std::size_t> starts;
   Rows done = sorted ? std::move(rows) : bucket(rows, static_cast<std::size_t>(comm.size()), by_source, starts);
-  return Arrivals{done.stride, std::move(done.bytes)};
+  std::size_t before = 0, after = done.size();
+  while (before < after) {
+    const std::size_t mid = before + (after - before) / 2;
+    if (done.header(mid).source < comm.rank()) {
+      before = mid + 1;
+    } else {
+      after = mid;
+    }
+  }
+  return Arrivals{done.stride, std::move(done.bytes), before, std::move(self)};
 }
 
 }  // namespace soma::transport
