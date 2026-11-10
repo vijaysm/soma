@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "../core/dense_ids.hpp"
 #include "../parallel/records.hpp"
 #include "hdf5.hpp"
 #include "soma/core/mesh_builder.hpp"
@@ -44,6 +45,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using detail::Batch;
+using detail::GidIndex;
 using h5::Id;
 using soma_file::dim_group;
 using soma_file::field_group;
@@ -1001,62 +1003,6 @@ void collectively(const Comm& comm, F&& f) {
     bad_file(code == 2 ? "another rank's datasets do not match the part table" : "failed on another rank");
   }
 }
-
-// Positions by gid, of n gids gid_of(0..n): an array over the gids' range when
-// it is at most twice their count (as a file's or a mesh's gids usually are),
-// else (gid, position) pairs sorted by gid. `repeated` is the first gid, in
-// position order, given again, if any.
-class GidIndex {
- public:
-  GidIndex() = default;
-  template <class GidOf>
-  GidIndex(std::size_t n, GidOf gid_of) {
-    if (n == 0) return;
-    GO lo = gid_of(0), hi = lo;
-    for (std::size_t i = 1; i < n; ++i) {
-      lo = std::min(lo, gid_of(i));
-      hi = std::max(hi, gid_of(i));
-    }
-    // Unsigned, since hi - lo overflows GO for gids spanning its range.
-    const std::uint64_t span = static_cast<std::uint64_t>(hi) - static_cast<std::uint64_t>(lo);
-    if (span < 2 * static_cast<std::uint64_t>(n)) {
-      lo_ = lo;
-      dense_.assign(static_cast<std::size_t>(span) + 1, none);
-      for (std::size_t i = 0; i < n; ++i) {
-        std::size_t& at = dense_[static_cast<std::size_t>(gid_of(i) - lo)];
-        if (at != none && !repeated) repeated = gid_of(i);
-        at = i;
-      }
-      return;
-    }
-    sorted_.resize(n);
-    for (std::size_t i = 0; i < n; ++i) sorted_[i] = {gid_of(i), i};
-    std::sort(sorted_.begin(), sorted_.end());
-    std::size_t again = none;
-    for (std::size_t k = 1; k < n; ++k) {
-      if (sorted_[k].first == sorted_[k - 1].first) again = std::min(again, sorted_[k].second);
-    }
-    if (again != none) repeated = gid_of(again);
-  }
-
-  // The position of gid g, or none.
-  [[nodiscard]] std::size_t find(GO g) const {
-    if (!dense_.empty()) {
-      if (g < lo_ || static_cast<std::uint64_t>(g) - static_cast<std::uint64_t>(lo_) >= dense_.size()) return none;
-      return dense_[static_cast<std::size_t>(g - lo_)];
-    }
-    const auto it = std::lower_bound(sorted_.begin(), sorted_.end(), std::pair<GO, std::size_t>{g, 0});
-    return it != sorted_.end() && it->first == g ? it->second : none;
-  }
-
-  static constexpr std::size_t none = ~std::size_t{0};
-  std::optional<GO> repeated;
-
- private:
-  GO lo_ = 0;
-  std::vector<std::size_t> dense_;
-  std::vector<std::pair<GO, std::size_t>> sorted_;
-};
 
 // The local ids of a dimension's entities by gid.
 class Lids {

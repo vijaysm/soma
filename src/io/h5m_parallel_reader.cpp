@@ -24,6 +24,7 @@
 
 #include <Kokkos_Core.hpp>
 
+#include "../core/dense_ids.hpp"
 #include "h5m_read.hpp"
 #include "hdf5.hpp"
 #include "soma_layout.hpp"
@@ -429,21 +430,19 @@ void read_sets(const Comm& comm, HostMesh& mesh, hid_t tstt, const IdRange& sets
                               [&](std::size_t k, std::byte* row) { std::memcpy(row, &to_directory[k], sizeof(Member)); });
   std::vector<Member> out;
   dest.clear();
-  const auto forward = [&](const Member& m, GO id) {
-    auto it = std::lower_bound(holders.begin(), holders.end(), std::pair<GO, int>{id, std::numeric_limits<int>::min()});
-    for (; it != holders.end() && it->first == id; ++it) {
-      out.push_back({m.set, Member::one, m.pos, id, m.kind});  // last: the kind it was listed as
+  // The ids first..last held somewhere, each to every rank holding it.
+  const auto forward = [&](const Member& m, GO first, GO last) {
+    auto it =
+        std::lower_bound(holders.begin(), holders.end(), std::pair<GO, int>{first, std::numeric_limits<int>::min()});
+    for (; it != holders.end() && it->first <= last; ++it) {
+      out.push_back({m.set, Member::one, m.pos, it->first, m.kind});  // last: the kind it was listed as
       dest.push_back(it->second);
     }
   };
   for (std::size_t k = 0; k < arrived.size(); ++k) {
     Member m;
     std::memcpy(&m, &arrived.payload(k, 0), sizeof(Member));
-    if (m.kind == Member::one) {
-      forward(m, m.first);
-    } else {
-      for (GO id = m.first; id <= m.last; ++id) forward(m, id);
-    }
+    forward(m, m.first, m.kind == Member::one ? m.first : m.last);
   }
   for (const Member& m : to_all) {
     for (int r = 0; r < size; ++r) {
@@ -1192,18 +1191,17 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
         rows.push_back(static_cast<std::uint64_t>(v - nodes.start));
       }
     }
-    std::sort(rows.begin(), rows.end());
-    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    detail::sort_unique(rows);
     std::vector<char> unused(asked.size(), 0);
     const std::vector<Real> xyz = fetch_coordinates(comm, rows, vertex_rows, my_xyz, unused);
+    const detail::GidIndex row_at(rows.size(), [&](std::size_t i) { return static_cast<GO>(rows[i]); });
     std::vector<Real> centroids;
     std::vector<GO> gids;
     for (const Entity& e : top) {
       const auto c = corners_of(groups[static_cast<std::size_t>(e.group)], e.nodes);
       std::array<Real, 3> sum{0, 0, 0};
       for (const GO v : c) {
-        const auto at = static_cast<std::size_t>(
-            std::lower_bound(rows.begin(), rows.end(), static_cast<std::uint64_t>(v - nodes.start)) - rows.begin());
+        const std::size_t at = row_at.find(v - nodes.start);
         for (std::size_t q = 0; q < 3; ++q) sum[q] += xyz[3 * at + q];
       }
       for (std::size_t q = 0; q < 3; ++q) centroids.push_back(sum[q] / static_cast<Real>(c.size()));
@@ -1230,8 +1228,7 @@ HostMesh read(const Comm& comm, const fs::path& path, const H5mReadOptions& opti
   const auto held_vertices = [&] {
     std::vector<GO> v;
     for (const Entity& e : placed) v.insert(v.end(), e.nodes.begin(), e.nodes.end());
-    std::sort(v.begin(), v.end());
-    v.erase(std::unique(v.begin(), v.end()), v.end());
+    detail::sort_unique(v);
     return v;
   };
 

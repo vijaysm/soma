@@ -41,10 +41,20 @@ CommPlan::CommPlan(const Comm& comm, std::span<const int> sent_dest, std::span<c
       throw std::invalid_argument("transport::CommPlan: the sources are not ranks grouped in ascending order");
     }
   }
+  // Records stably by destination: already grouped, as they often are, they
+  // are sent in place; else counted by rank, unless ranks outnumber them.
   send_perm_.resize(sent_dest.size());
   std::iota(send_perm_.begin(), send_perm_.end(), std::size_t{0});
-  std::stable_sort(send_perm_.begin(), send_perm_.end(),
-                   [&](std::size_t a, std::size_t b) { return sent_dest[a] < sent_dest[b]; });
+  grouped_ = std::is_sorted(sent_dest.begin(), sent_dest.end());
+  if (!grouped_ && static_cast<std::size_t>(comm.size()) > sent_dest.size()) {
+    std::stable_sort(send_perm_.begin(), send_perm_.end(),
+                     [&](std::size_t a, std::size_t b) { return sent_dest[a] < sent_dest[b]; });
+  } else if (!grouped_) {
+    std::vector<std::size_t> start(static_cast<std::size_t>(comm.size()) + 1, 0);
+    for (const int d : sent_dest) ++start[static_cast<std::size_t>(d) + 1];
+    std::partial_sum(start.begin(), start.end(), start.begin());
+    for (std::size_t i = 0; i < sent_dest.size(); ++i) send_perm_[start[static_cast<std::size_t>(sent_dest[i])]++] = i;
+  }
   std::vector<int> packed(sent_dest.size());
   for (std::size_t k = 0; k < packed.size(); ++k) packed[k] = sent_dest[send_perm_[k]];
   runs(packed, send_peers_, send_offsets_);

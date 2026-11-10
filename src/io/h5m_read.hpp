@@ -23,6 +23,7 @@
 #include <utility>
 #include <vector>
 
+#include "../core/dense_ids.hpp"
 #include "hdf5.hpp"
 #include "soma/core/handle_ref.hpp"
 #include "soma/core/lid_runs.hpp"
@@ -288,10 +289,26 @@ class Locator {
     }
     for (int d = 0; d <= mesh.dim(); ++d) {
       const auto gid = mesh.gid(d);
+      const auto n = static_cast<std::size_t>(gid.extent(0));
       auto& p = pairs_[static_cast<std::size_t>(d)];
-      p.resize(gid.extent(0));
-      for (std::size_t l = 0; l < p.size(); ++l) p[l] = {gid(l), static_cast<LO>(l)};
-      if (!std::is_sorted(p.begin(), p.end())) std::sort(p.begin(), p.end());
+      p.resize(n);
+      // By gid: through a table over the gids' range when it is at most twice
+      // their count (kept for lid), else by sorting.
+      const auto [lo, span] = n == 0 ? std::pair<GO, std::uint64_t>{0, 0}
+                                     : detail::value_range<GO>(n, [&](std::size_t l) { return gid(l); });
+      if (n > 0 && span < 2 * static_cast<std::uint64_t>(n)) {
+        auto& table = table_[static_cast<std::size_t>(d)];
+        table_lo_[static_cast<std::size_t>(d)] = lo;
+        table.assign(static_cast<std::size_t>(span) + 1, invalid_lo);
+        for (std::size_t l = 0; l < n; ++l) table[static_cast<std::size_t>(gid(l) - lo)] = static_cast<LO>(l);
+        std::size_t k = 0;
+        for (std::size_t g = 0; g < table.size(); ++g) {
+          if (table[g] != invalid_lo) p[k++] = {lo + static_cast<GO>(g), table[g]};
+        }
+      } else {
+        for (std::size_t l = 0; l < n; ++l) p[l] = {gid(l), static_cast<LO>(l)};
+        if (!std::is_sorted(p.begin(), p.end())) std::sort(p.begin(), p.end());
+      }
       auto& sg = segs_[static_cast<std::size_t>(d)];
       for (const auto& [g, l] : p) {
         if (!sg.empty() && g == sg.back().gid + sg.back().len && l == sg.back().lid + sg.back().len) {
@@ -314,6 +331,8 @@ class Locator {
 
   LO lid(int dim, GO id) const {
     if (dim == set_dim) return static_cast<LO>(id - set_first_);
+    const auto& table = table_[static_cast<std::size_t>(dim)];
+    if (!table.empty()) return table[static_cast<std::size_t>(id - table_lo_[static_cast<std::size_t>(dim)])];
     const auto& p = pairs_[static_cast<std::size_t>(dim)];
     const auto it = std::lower_bound(p.begin(), p.end(), std::pair<GO, LO>{id, 0});
     return it->second;
@@ -359,6 +378,8 @@ class Locator {
   };
   std::vector<IdRange> ranges_;
   std::array<std::vector<std::pair<GO, LO>>, 4> pairs_;
+  std::array<std::vector<LO>, 4> table_;  // lid by gid - table_lo_, over a dense range
+  std::array<GO, 4> table_lo_{};
   std::array<std::vector<Seg>, 4> segs_;
   GO set_first_ = 1;
 };

@@ -568,6 +568,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   sends. A one-rank read of a 64^3 box from a SOMA file takes 55 ms instead of 194 (MOAB 46),
   and 132 instead of 155 at 8 ranks (MOAB 266); `build_local_part` 42 instead of 118 ms at one
   rank and 18 instead of 32 at 8 (MOAB's `resolve_shared_ents` 235 and 68).
+- `read_h5m` finds rows and local ids by tables over dense file ids, and forwards ranged set
+  members by a search of the holders' sorted ids. `CommPlan` sends records already grouped by
+  destination in place and counts the others by rank; `route` moves rows already in destination
+  order rather than bucketing them. A one-rank read of a 64^3 box from an `.h5m` file takes
+  99 ms instead of 266 (MOAB 45), and 51 instead of 100 at 8 ranks (MOAB 107); a one-rank
+  `write_soma` 17 instead of 48 (MOAB 22).
 - `read_h5m` places tag values by lid in one pass instead of sorting them, and builds each full
   domain once for every tag that covers it.
 - `write_h5m` writes a mesh in MOAB's legacy `.h5m` format, read back by MOAB `load_file` and
