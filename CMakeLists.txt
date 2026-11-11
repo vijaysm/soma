@@ -33,6 +33,7 @@ set_property(CACHE SOMA_KOKKOS_GPU PROPERTY STRINGS AUTO NONE CUDA HIP SYCL)
 option(SOMA_ENABLE_MOAB_REFERENCE "Build MOAB reference tests and benchmarks" OFF)
 option(SOMA_ENABLE_EXAMPLES "Build the example programs (requires SOMA_ENABLE_HDF5)" OFF)
 option(SOMA_ENABLE_MOAB_COMPAT "MOAB's API over SOMA meshes (soma::compat)" OFF)
+option(SOMA_ENABLE_KOKKOSKERNELS "KokkosSparse views of SOMA matrices (set KokkosKernels_ROOT)" OFF)
 option(SOMA_LO_64 "64-bit local ordinals (ABI-breaking)" OFF)
 option(SOMA_OFFSET_64 "64-bit CSR offsets (ABI-breaking)" OFF)
 option(SOMA_DEBUG "Device-side bounds and contract checks" OFF)
@@ -56,6 +57,9 @@ if(SOMA_ENABLE_MPI)
 endif()
 if(SOMA_ENABLE_HDF5)
   include(SomaHdf5)
+endif()
+if(SOMA_ENABLE_KOKKOSKERNELS)
+  find_package(KokkosKernels REQUIRED)
 endif()
 
 string(TOUPPER "${SOMA_GPU_AWARE_MPI}" SOMA_GPU_AWARE_MPI_MODE)
@@ -120,6 +124,9 @@ endif()
 if(SOMA_ENABLE_HDF5)
   target_link_libraries(soma PRIVATE HDF5::HDF5)
 endif()
+if(SOMA_ENABLE_KOKKOSKERNELS)
+  target_link_libraries(soma PUBLIC Kokkos::kokkoskernels)
+endif()
 
 if(SOMA_ENABLE_MOAB_COMPAT)
   add_library(soma_compat src/compat/range.cpp src/compat/cn.cpp src/compat/error.cpp src/compat/core.cpp
@@ -175,5 +182,6 @@ message(STATUS "SOMA ${PROJECT_VERSION}: Kokkos ${SOMA_KOKKOS_VERSION_FOUND}"
   " MPI=${SOMA_ENABLE_MPI} HDF5=${SOMA_ENABLE_HDF5} tests=${SOMA_ENABLE_TESTS}"
   " GPU-aware-MPI=${SOMA_GPU_AWARE_MPI_RESOLVED}"
   " MOAB-reference=${SOMA_ENABLE_MOAB_REFERENCE} MOAB-compat=${SOMA_ENABLE_MOAB_COMPAT}"
+  " KokkosKernels=${SOMA_ENABLE_KOKKOSKERNELS}"
   " LO64=${SOMA_LO_64}"
   " build=${CMAKE_BUILD_TYPE}")

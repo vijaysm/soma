@@ -14,6 +14,7 @@
 #cmakedefine01 SOMA_LO_64
 #cmakedefine01 SOMA_OFFSET_64
 #cmakedefine01 SOMA_DEBUG
+#cmakedefine01 SOMA_ENABLE_KOKKOSKERNELS
 
 // Compile-time default for passing device buffers to MPI. The transport layer
 // also honours the environment variable SOMA_GPU_AWARE_MPI=0|1 at runtime, so

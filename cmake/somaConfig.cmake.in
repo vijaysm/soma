@@ -9,6 +9,7 @@ set(SOMA_ENABLE_MPI @SOMA_ENABLE_MPI@)
 set(SOMA_ENABLE_HDF5 @SOMA_ENABLE_HDF5@)
 set(SOMA_LO_64 @SOMA_LO_64@)
 set(SOMA_OFFSET_64 @SOMA_OFFSET_64@)
+set(SOMA_ENABLE_KOKKOSKERNELS @SOMA_ENABLE_KOKKOSKERNELS@)
 # "installed" or "fetched", as configured; fetched means Kokkos was installed
 # alongside SOMA, into this prefix.
 set(SOMA_KOKKOS_SOURCE "@SOMA_KOKKOS_SOURCE@")
@@ -36,6 +37,9 @@ endif()
 find_dependency(Kokkos 5.0)
 if(SOMA_ENABLE_MPI)
   find_dependency(MPI COMPONENTS CXX)
+endif()
+if(SOMA_ENABLE_KOKKOSKERNELS)
+  find_dependency(KokkosKernels)
 endif()
 # The static library links HDF5 privately; consumers still link it.
 if(SOMA_ENABLE_HDF5)
