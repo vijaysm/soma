@@ -778,6 +778,10 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   host and device backends (`space`, `git`, `host_backend`, `device_backend`).
   `bench/compare_bench.py` diffs two JSON-lines runs, flags changes inside the measurement
   spread, and keeps rows present on one side only; `bench/results/` holds committed baselines.
+- `bench/scaling_table.py` summarizes one run: per workflow and mesh, the Serial time, the host
+  backend's speedup and parallel efficiency at every thread count, the device time and its
+  speedup over Serial and over the fastest host row; then ns per op against the problem size
+  for every workflow and space, so a cost per op that grows with size shows.
 
 ### Packaging
 
