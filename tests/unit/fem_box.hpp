@@ -7,6 +7,7 @@
 // Boxes for the finite element tests, perturbed and dealt to the ranks.
 
 #include <array>
+#include <cmath>
 #include <cstdint>
 #include <set>
 #include <utility>
@@ -49,12 +50,21 @@ inline std::array<Real, 3> shift(GO g, const std::array<Real, 3>& x, const soma:
   return d;
 }
 
+// A smooth map of the unit box onto itself, its faces fixed: refinements of
+// a box mesh mapped by it form one family of curved, non-affine meshes.
+inline std::array<Real, 3> warp(const std::array<Real, 3>& x, bool three) {
+  constexpr Real pi = 3.14159265358979323846;
+  const Real bump = 0.03 * std::sin(pi * x[0]) * std::sin(pi * x[1]) * (three ? std::sin(pi * x[2]) : 1);
+  return {x[0] + bump, x[1] - bump, three ? x[2] + bump : x[2]};
+}
+
 // How box_part deals a box.
 struct Part {
   int deal = 0;           // 0: blocks of consecutive cell gids; 1: round robin
   int layers = 1;         // ghost layers on more than one rank
   int bridge = 0;         // through vertices
   bool perturb = true;    // interior vertices moved by shift()
+  bool smooth = false;    // instead, the box mapped by warp(): the same map at every refinement
   bool orphan = false;    // the last rank also holds a vertex no cell has
 };
 
@@ -84,6 +94,11 @@ inline soma::HostMesh box_part(const Comm& c, const soma::testing::BoxSpec& spec
   for (const LO v : used) {
     gids.push_back(vg(v));
     const std::array<Real, 3> p = {x(v, 0), x(v, 1), x(v, 2)};
+    if (part.smooth) {
+      const auto w = warp(p, solid(spec.element));
+      xyz.insert(xyz.end(), w.begin(), w.end());
+      continue;
+    }
     const auto d = part.perturb ? shift(vg(v), p, spec) : std::array<Real, 3>{};
     for (int q = 0; q < 3; ++q) xyz.push_back(p[static_cast<std::size_t>(q)] + d[static_cast<std::size_t>(q)]);
   }

@@ -28,9 +28,9 @@
 // A space keeps views into the mesh: it is valid while the mesh is alive and
 // its topology unchanged. Coordinates may move between assemblies, so long
 // as copies and ghosts hold their owners' (laplacian_smooth leaves them so):
-// owned rows read them. Vectors passed in hold cols() entries on every rank;
-// a rank whose do not throws std::invalid_argument and leaves the others in
-// the exchange.
+// owned rows read them. Vectors updated hold exactly cols() entries on every
+// rank; a rank whose do not throws std::invalid_argument and leaves the
+// others in the exchange.
 
 #include <cstdint>
 #include <optional>
@@ -289,7 +289,7 @@ class FemSpace {
 
   // Collective: each owner's entries of x overwrite its copies and ghosts.
   void update(const Comm& comm, const View1<Real, MemSpace>& x) const {
-    if (x.extent(0) < static_cast<std::size_t>(cols_)) throw std::invalid_argument("FemSpace: a vector too short");
+    if (x.extent(0) != static_cast<std::size_t>(cols_)) throw std::invalid_argument("FemSpace: a vector not of cols()");
     if (halo_) halo_->update(comm, View2<Real, MemSpace>(x.data(), x.extent(0), 1));
   }
 
