@@ -6,6 +6,8 @@
 # with MPI).
 add_executable(laplacian_smooth laplacian_smooth.cpp)
 target_link_libraries(laplacian_smooth PRIVATE soma soma_warnings)
+add_executable(poisson poisson.cpp)
+target_link_libraries(poisson PRIVATE soma soma_warnings)
 
 if(SOMA_ENABLE_TESTS)
   set(in "${PROJECT_SOURCE_DIR}/data/64bricks_1khex.h5m")
@@ -17,5 +19,16 @@ if(SOMA_ENABLE_TESTS)
               $<TARGET_FILE:laplacian_smooth> ${MPIEXEC_POSTFLAGS} --iterations 5 --tolerance 1e-9 ${in}
               ${CMAKE_CURRENT_BINARY_DIR}/smoothed_np2.soma)
     set_tests_properties(example_laplacian_smooth.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2)
+  endif()
+  # Both runs give the solution's largest value, whatever the ranks and assembly.
+  add_test(NAME example_poisson COMMAND poisson ${in} ${CMAKE_CURRENT_BINARY_DIR}/poisson.vtk)
+  set_tests_properties(example_poisson PROPERTIES PASS_REGULAR_EXPRESSION "max u 9[.]090723e-01")
+  if(SOMA_ENABLE_MPI)
+    add_test(NAME example_poisson.np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:poisson> ${MPIEXEC_POSTFLAGS} --assembly colored ${in}
+              ${CMAKE_CURRENT_BINARY_DIR}/poisson_np2.soma)
+    set_tests_properties(example_poisson.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
+      PASS_REGULAR_EXPRESSION "max u 9[.]090723e-01")
   endif()
 endif()

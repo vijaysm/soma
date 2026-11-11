@@ -30,6 +30,11 @@ All notable changes to SOMA are recorded here. The format follows
 - CPM is at 0.43.2.
 - `SOMA_ENABLE_EXAMPLES=ON` builds the example programs (it needs `SOMA_ENABLE_HDF5`); with
   tests on, each runs on a bundled mesh.
+- `SOMA_ENABLE_KOKKOSKERNELS=ON` finds KokkosKernels (built with the installed Kokkos SOMA
+  uses; a fetched Kokkos is a configure error). `SOMA_ENABLE_PETSC=ON` (with MPI) finds PETSc
+  3.19 or later, real double scalars, through its pkg-config file under `PETSC_DIR` (and
+  `PETSC_ARCH`). A PETSc that carries its own MOAB cannot be built with the MOAB reference.
+  Both are replayed for consumers by `somaConfig.cmake`.
 
 ### Runtime and Comm
 
@@ -499,6 +504,33 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   128 ms against MOAB's 8222 at one rank, 29 against 468 at eight.
 - `examples/laplacian_smooth.cpp` reads a `.h5m` or SOMA file on any number of ranks, adds a
   ghost layer, smooths and writes a SOMA file (a VTK file on one rank).
+- `soma/algorithms/fem.hpp` holds linear finite element kernels for triangles, quads, tets
+  and hexes (P1 and Q1): Gauss rules, shape functions and their gradients, the least Jacobian
+  over the corners and the Gauss points, and element stiffness, mass, load and squared error.
+  An inverted, degenerate or non-finite cell gives zero matrices and a NaN error.
+- `soma::FemSpace<MemSpace>(comm, mesh, Assembly)` (`soma/algorithms/fem_space.hpp`) numbers
+  a mesh's vertices for linear elements: rows are the owned vertices, columns all the rank's
+  vertices in gid order. It builds the sparsity once and assembles the stiffness matrix
+  (`laplacian`) and a load vector (`load`) by `Assembly::gather` (each row sums its cells in
+  gid order: the same, bit for bit, on any number of ranks and threads), `atomic`
+  (`Kokkos::atomic_add`), or `colored` (cells colored greedily by gid, a color at a time:
+  the same on any number of threads). `boundary()` marks the skin's vertices, `update` the
+  halo, `numbering` a global index of the owned vertices rank by rank. On more than one rank
+  the mesh needs a ghost layer through vertices. High-order, edited or inverted meshes, a
+  missing ghost layer and vertices in no cell are rejected on every rank.
+- `soma::CsrMatrix` with `multiply` and `apply_dirichlet` (`soma/algorithms/csr.hpp`), and
+  `soma::cg` (`soma/algorithms/cg.hpp`): Jacobi-preconditioned conjugate gradients, two
+  allreduces and one halo update an iteration, confirming convergence with the true residual.
+  A manufactured solution's L2 error falls as h^2 on smoothly warped boxes of all four element
+  types (rates checked between 1.9 and 2.2).
+- `soma::to_kokkos_sparse` (`soma/algorithms/kokkos_sparse.hpp`, `SOMA_ENABLE_KOKKOSKERNELS`)
+  views a `CsrMatrix` as a `KokkosSparse::CrsMatrix` without a copy;
+  `soma::to_petsc_matrix`, `to_petsc_vector` and `from_petsc_vector`
+  (`soma/algorithms/petsc.hpp`, `SOMA_ENABLE_PETSC`) make PETSc `MATAIJ` matrices (by COO) and
+  vectors in `FemSpace::numbering` order. PETSc's CG with Jacobi takes the iterations SOMA's
+  takes, to one, and reaches its solution to 1e-9.
+- `examples/poisson.cpp` solves -lap u = 1, u = 0 on the boundary, on a `.h5m` or SOMA mesh on
+  any number of ranks, by any assembly, and writes u as a vertex field.
 
 ### Testing
 
@@ -659,7 +691,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `READ_PART` with resolution, `build_local_part` against `resolve_shared_ents`, `add_ghosts`
   against `exchange_ghost_cells`, a vertex update of 1 and 3 doubles (fused and split)
   against `exchange_tags`, and `write_soma` / `read_soma` against `WRITE_PART` and a
-  `READ_PART` load, checking owned counts and updated values. `bench/run_parallel.sh` runs it
+  `READ_PART` load, checking owned counts and updated values. Its `smooth` and `poisson`
+  sections time Laplacian smoothing against MOAB's, and `FemSpace`, the three assemblies and
+  CG alone. `bench/run_parallel.sh` runs it
   over rank counts and sizes into JSON files; its header lists what a run at scale needs.
 
 ### Packaging
