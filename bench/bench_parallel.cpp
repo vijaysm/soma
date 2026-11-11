@@ -18,12 +18,16 @@
 //   * smooth: 10 Jacobi Laplacian sweeps of the ghosted mesh's vertices,
 //     perturbed by gid, (laplacian_smooth, its setup included, against
 //     MOAB's smoother of bench/moab_smooth.hpp);
+//   * poisson: -lap u = 1, u = 0 on the boundary, by trilinear elements on
+//     the smoothed ghosted mesh, SOMA alone (MOAB has no FEM): the space
+//     (FemSpace) for each assembly, the stiffness matrix gathered, by atomics
+//     and colored, and Jacobi CG to a relative residual of 1e-10;
 //   * write and restart: write_soma and read_soma at the same P against
 //     write_file PARALLEL=WRITE_PART and load_file READ_PART.
 //
 // Every result is checked: the owned hexes and vertices add up to the box's,
-// and ghost vertices hold their owners' values after each update; a mismatch
-// exits with status 2.
+// ghost vertices hold their owners' values after each update, the three
+// assemblies agree and CG converges; a mismatch exits with status 2.
 //
 //   mpiexec -n P bench_parallel [--json] [--repeats N] [--n edge] [--parts K] [--dir path]
 
@@ -49,6 +53,9 @@
 #include "MBParallelConventions.h"
 #include "moab_box.hpp"
 #include "moab_smooth.hpp"
+#include "soma/algorithms/cg.hpp"
+#include "soma/algorithms/csr.hpp"
+#include "soma/algorithms/fem_space.hpp"
 #include "soma/algorithms/laplacian.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/io/h5m.hpp"
@@ -68,6 +75,11 @@ using soma::HostMesh;
 using soma::LO;
 using Host = Kokkos::HostSpace;
 using soma::bench::check;
+
+// The Poisson load.
+struct One {
+  KOKKOS_INLINE_FUNCTION double operator()(double, double, double) const { return 1; }
+};
 
 const char* const read_part = "PARALLEL=READ_PART;PARTITION=PARALLEL_PARTITION;PARTITION_DISTRIBUTE";
 
@@ -338,6 +350,57 @@ int main(int argc, char** argv) {
     for (LO e = 0; e < owned_end; ++e) ssum += sx(e, 0) + 2 * sx(e, 1) + 3 * sx(e, 2);
     ssum = comm.allreduce(ssum, soma::Op::sum);
     ok = agree(comm, std::abs(ssum - msum) <= 1e-12 * std::max(1.0, std::abs(msum))) && ok;
+  }
+
+  // ---- poisson ----
+  {
+    const std::pair<soma::Assembly, const char*> methods[] = {
+        {soma::Assembly::gather, "gather"}, {soma::Assembly::atomic, "atomic"}, {soma::Assembly::colored, "colored"}};
+    // The gathered matrix's entries, copied before the boundary rows change.
+    std::optional<soma::View1<double, Host>> values;
+    std::optional<soma::View1<LO, Host>> columns;
+    double largest = 0, worst = 0;
+    for (const auto& [method, name] : methods) {
+      std::optional<soma::FemSpace<Host>> space;
+      runner.run("fem_space", std::string("soma_fem_space_") + name, cells, [&] { space.reset(); },
+                 [&] { space.emplace(comm, *ghosted, method); });
+      std::optional<soma::CsrMatrix<Host>> a;
+      runner.run("assemble", std::string("soma_assemble_") + name, cells, [&] { a.reset(); },
+                 [&] { a.emplace(space->laplacian(comm)); });
+      const std::size_t nnz = a->values.extent(0);
+      if (!values) {
+        values.emplace("values", nnz);
+        columns.emplace("columns", nnz);
+        Kokkos::deep_copy(*values, a->values);
+        Kokkos::deep_copy(*columns, a->columns);
+        for (std::size_t k = 0; k < nnz; ++k) largest = std::max(largest, std::abs((*values)(k)));
+      } else if (nnz != values->extent(0)) {
+        worst = INFINITY;
+      } else {
+        for (std::size_t k = 0; k < nnz; ++k) {
+          if (a->columns(k) != (*columns)(k)) worst = INFINITY;
+          worst = std::max(worst, std::abs(a->values(k) - (*values)(k)));
+        }
+      }
+      if (method != soma::Assembly::gather) continue;
+      auto b = space->load(comm, One{});
+      const auto zero = space->vector();
+      soma::apply_dirichlet(*a, b, space->boundary(), soma::View1<const double, Host>(zero));
+      const auto u = space->vector();
+      soma::CgOptions co;
+      co.rtol = 1e-10;
+      soma::CgReport report;
+      runner.run("poisson", "soma_cg", points, [&] { Kokkos::deep_copy(u, 0.0); },
+                 [&] { report = soma::cg(comm, *space, *a, soma::View1<const double, Host>(b), u, co); });
+      if (comm.rank() == 0 && !json) {
+        std::cout << "  cg: " << report.iterations << " iterations, residual " << std::scientific << report.residual
+                  << std::defaultfloat << "\n";
+      }
+      ok = agree(comm, report.converged) && ok;
+    }
+    worst = comm.allreduce(worst, soma::Op::max);
+    largest = comm.allreduce(largest, soma::Op::max);
+    ok = agree(comm, worst <= 1e-13 * largest) && ok;
   }
 
   // ---- write and restart ----

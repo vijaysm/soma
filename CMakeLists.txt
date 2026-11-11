@@ -33,6 +33,8 @@ set_property(CACHE SOMA_KOKKOS_GPU PROPERTY STRINGS AUTO NONE CUDA HIP SYCL)
 option(SOMA_ENABLE_MOAB_REFERENCE "Build MOAB reference tests and benchmarks" OFF)
 option(SOMA_ENABLE_EXAMPLES "Build the example programs (requires SOMA_ENABLE_HDF5)" OFF)
 option(SOMA_ENABLE_MOAB_COMPAT "MOAB's API over SOMA meshes (soma::compat)" OFF)
+option(SOMA_ENABLE_KOKKOSKERNELS "KokkosSparse views of SOMA matrices (set KokkosKernels_ROOT)" OFF)
+option(SOMA_ENABLE_PETSC "PETSc matrices and vectors from SOMA's (set PETSC_DIR)" OFF)
 option(SOMA_LO_64 "64-bit local ordinals (ABI-breaking)" OFF)
 option(SOMA_OFFSET_64 "64-bit CSR offsets (ABI-breaking)" OFF)
 option(SOMA_DEBUG "Device-side bounds and contract checks" OFF)
@@ -56,6 +58,21 @@ if(SOMA_ENABLE_MPI)
 endif()
 if(SOMA_ENABLE_HDF5)
   include(SomaHdf5)
+endif()
+if(SOMA_ENABLE_KOKKOSKERNELS)
+  # KokkosKernels finds the Kokkos it was built with when no Kokkos is found
+  # yet, which a fetched Kokkos is not.
+  if(SOMA_KOKKOS_SOURCE STREQUAL "fetched")
+    message(FATAL_ERROR "SOMA_ENABLE_KOKKOSKERNELS needs an installed Kokkos (Kokkos_ROOT), the one KokkosKernels "
+      "was built with")
+  endif()
+  find_package(KokkosKernels REQUIRED)
+endif()
+if(SOMA_ENABLE_PETSC)
+  if(NOT SOMA_ENABLE_MPI)
+    message(FATAL_ERROR "SOMA_ENABLE_PETSC needs SOMA_ENABLE_MPI")
+  endif()
+  include(SomaPetsc)
 endif()
 
 string(TOUPPER "${SOMA_GPU_AWARE_MPI}" SOMA_GPU_AWARE_MPI_MODE)
@@ -89,7 +106,8 @@ target_compile_options(soma_warnings INTERFACE
   "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang,IntelLLVM,NVHPC>:-Wall;-Wextra>")
 
 set(SOMA_SOURCES src/runtime/scope_guard.cpp src/runtime/options.cpp src/core/segments.cpp src/fields/node_tables.cpp src/core/mesh_builder.cpp src/core/mesh_edit.cpp src/core/permute.cpp src/testing/box_mesh.cpp src/io/vtk_writer.cpp src/io/vtk_reader.cpp src/amr/box_list.cpp src/amr/box_array.cpp src/amr/halo.cpp src/amr/copy.cpp src/amr/interlevel.cpp src/amr/flux_register.cpp src/amr/cluster.cpp src/amr/hierarchy.cpp src/amr/vtk_amr.cpp src/parallel/transport/route.cpp src/parallel/transport/comm_plan.cpp src/parallel/transport/sort.cpp src/parallel/comm_counts.cpp src/parallel/partition.cpp src/parallel/sharing.cpp src/parallel/distributed.cpp src/parallel/migrate.cpp src/parallel/ghosts.cpp
-                 src/algorithms/smoothing_graph.cpp)
+                 src/algorithms/smoothing_graph.cpp src/algorithms/vertex_graph.cpp
+                 src/algorithms/fem_space.cpp)
 if(SOMA_ENABLE_MPI)
   list(APPEND SOMA_SOURCES src/parallel/comm_mpi.cpp)
 else()
@@ -119,6 +137,12 @@ endif()
 if(SOMA_ENABLE_HDF5)
   target_link_libraries(soma PRIVATE HDF5::HDF5)
 endif()
+if(SOMA_ENABLE_KOKKOSKERNELS)
+  target_link_libraries(soma PUBLIC Kokkos::kokkoskernels)
+endif()
+if(SOMA_ENABLE_PETSC)
+  target_link_libraries(soma PUBLIC PkgConfig::PETSC)
+endif()
 
 if(SOMA_ENABLE_MOAB_COMPAT)
   add_library(soma_compat src/compat/range.cpp src/compat/cn.cpp src/compat/error.cpp src/compat/core.cpp
@@ -142,6 +166,17 @@ endif()
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   include(SomaMoab)
+  # A PETSc built with --download-moab carries MOAB's headers, which would come
+  # before the reference MOAB's in the tests and benchmarks (soma's include
+  # directories come first), and its own MOAB library.
+  if(SOMA_ENABLE_PETSC)
+    foreach(_soma_dir IN LISTS PETSC_INCLUDE_DIRS)
+      if(EXISTS "${_soma_dir}/moab/Core.hpp")
+        message(FATAL_ERROR "The PETSc under ${SOMA_PETSC_PKGCONFIG_DIR} has its own MOAB (${_soma_dir}/moab), which "
+          "would shadow the reference MOAB: turn off SOMA_ENABLE_MOAB_REFERENCE or use a PETSc without MOAB")
+      endif()
+    endforeach()
+  endif()
 endif()
 
 if(SOMA_ENABLE_HDF5)
@@ -174,5 +209,6 @@ message(STATUS "SOMA ${PROJECT_VERSION}: Kokkos ${SOMA_KOKKOS_VERSION_FOUND}"
   " MPI=${SOMA_ENABLE_MPI} HDF5=${SOMA_ENABLE_HDF5} tests=${SOMA_ENABLE_TESTS}"
   " GPU-aware-MPI=${SOMA_GPU_AWARE_MPI_RESOLVED}"
   " MOAB-reference=${SOMA_ENABLE_MOAB_REFERENCE} MOAB-compat=${SOMA_ENABLE_MOAB_COMPAT}"
+  " KokkosKernels=${SOMA_ENABLE_KOKKOSKERNELS} PETSc=${SOMA_ENABLE_PETSC}"
   " LO64=${SOMA_LO_64}"
   " build=${CMAKE_BUILD_TYPE}")

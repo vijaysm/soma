@@ -53,14 +53,14 @@ Real coordinate(Real length, std::int64_t i, std::int64_t n) {
 
 BoxCounts box_counts(const BoxSpec& spec) {
   const Topology t = spec.element;
-  if (t != Topology::hex && t != Topology::quad && t != Topology::tri) {
+  if (t != Topology::hex && t != Topology::tet && t != Topology::quad && t != Topology::tri) {
     throw std::invalid_argument(std::string("box_mesh: unsupported element topology '") + name(t) +
-                                "' (supported: hex, quad, tri)");
+                                "' (supported: hex, tet, quad, tri)");
   }
   check_cells("nx", spec.nx);
   check_cells("ny", spec.ny);
   check_cells("nz", spec.nz);
-  const bool solid = t == Topology::hex;
+  const bool solid = t == Topology::hex || t == Topology::tet;
   if (!solid && spec.nz != 1) {
     throw std::invalid_argument(std::string("box_mesh: nz must be 1 for ") + name(t) +
                                 " elements (got " + std::to_string(spec.nz) + ")");
@@ -80,7 +80,8 @@ BoxCounts box_counts(const BoxSpec& spec) {
                                solid ? nz + 1 : 1, lo_max, "vertices", "LO");
   const std::int64_t cells = checked_product(checked_product(nx, ny, lo_max, "elements", "LO"), nz,
                                              lo_max, "elements", "LO");
-  c.elements = checked_product(cells, t == Topology::tri ? 2 : 1, lo_max, "elements", "LO");
+  const std::int64_t split = t == Topology::tri ? 2 : t == Topology::tet ? 6 : 1;
+  c.elements = checked_product(cells, split, lo_max, "elements", "LO");
   c.connectivity =
       checked_product(c.elements, num_vertices(t), offset_max, "connectivity entries", "Offset");
   return c;
@@ -89,7 +90,7 @@ BoxCounts box_counts(const BoxSpec& spec) {
 HostMesh box_mesh(const BoxSpec& spec) {
   const BoxCounts counts = box_counts(spec);
   const Topology t = spec.element;
-  const bool solid = t == Topology::hex;
+  const bool solid = t == Topology::hex || t == Topology::tet;
   const std::int64_t nx = spec.nx;
   const std::int64_t ny = spec.ny;
   const std::int64_t nz = spec.nz;
@@ -128,7 +129,26 @@ HostMesh box_mesh(const BoxSpec& spec) {
         const GO v1 = vertex(i + 1, j, k);
         const GO v2 = vertex(i + 1, j + 1, k);
         const GO v3 = vertex(i, j + 1, k);
-        if (solid) {
+        if (t == Topology::tet) {
+          // Kuhn's split: one tet per order of the axes, along the path from the
+          // cube's first corner to its last; odd orders swap the last two corners
+          // so every tet has positive volume. Every cube splits alike, so faces
+          // match.
+          static constexpr int order[6][3] = {{0, 1, 2}, {1, 2, 0}, {2, 0, 1},
+                                              {0, 2, 1}, {2, 1, 0}, {1, 0, 2}};
+          for (int o = 0; o < 6; ++o) {
+            std::int64_t at[3] = {i, j, k};
+            GO c[4];
+            c[0] = vertex(at[0], at[1], at[2]);
+            for (int s = 0; s < 3; ++s) {
+              ++at[order[o][s]];
+              c[s + 1] = vertex(at[0], at[1], at[2]);
+            }
+            if (o >= 3) std::swap(c[2], c[3]);
+            element_gids.push_back(static_cast<GO>(6 * cell + o + 1));
+            conn.insert(conn.end(), {c[0], c[1], c[2], c[3]});
+          }
+        } else if (solid) {
           element_gids.push_back(static_cast<GO>(1 + cell));
           conn.insert(conn.end(), {v0, v1, v2, v3, vertex(i, j, k + 1), vertex(i + 1, j, k + 1),
                                    vertex(i + 1, j + 1, k + 1), vertex(i, j + 1, k + 1)});
