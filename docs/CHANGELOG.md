@@ -56,6 +56,13 @@ All notable changes to SOMA are recorded here. The format follows
 - The fixed-width types `LO`, `Offset`, `GO` and `Real` are defined in `soma/core/types.hpp`.
   `SOMA_LO_64` and `SOMA_OFFSET_64` select 64-bit widths.
 - `Comm::exscan` on a span scans each entry on its own (one call for a vector of counts).
+- `soma::reproducible()` (`set_reproducible`, `SOMA_REPRODUCIBLE=0|1`,
+  `--soma-reproducible[=0|1]`), off by default, asks algorithms for results the same bit for
+  bit on any number of ranks and threads, for one build, at some cost.
+- `soma::ExactSums<K>` (`soma/parallel/exact_sum.hpp`) sums doubles exactly into 68 radix-2^32
+  digits and rounds once, to nearest: the same bits in any order and split. A Kokkos reducer
+  (`ExactSumReducer`, `reduce_exact`) and `allreduce_exact` (one allreduce of integers) carry
+  it over threads and ranks; a term not finite makes its sum NaN.
 - `detail::comm_counts()` counts the collectives and routed exchanges this process has
   entered, for tests that bound them.
 - `Comm::allgatherv` gathers each rank's span of trivially copyable values on every rank, in
@@ -539,6 +546,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   own. On a 64^3 box of warped hexes, one rank: assembly 776 ms to 237 at one thread (123 to 33
   at eight), the space 397 to 199. `least_jacobian` is NaN for a cell with a coordinate not
   finite or a determinant that overflows; a NaN no longer gives way to a later determinant.
+- Reproducible (`soma::reproducible()`, or `CgOptions::reproducible` for one solve), a
+  `FemSpace` gathers whatever assembly it is asked for (`assembly()` tells), and its `dot()`
+  and `cg` sum exactly, with as many allreduces: CG gives the same iterates and solution, bit
+  for bit, on any number of ranks and threads. Ranks must agree on the switch (every rank
+  throws otherwise), and a reproducible solve needs a gathering space. On the 64^3 box CG
+  takes 1.30 times as long at one thread, 1.14 at eight.
 - `examples/poisson.cpp` solves -lap u = 1, u = 0 on the boundary, on a `.h5m` or SOMA mesh on
   any number of ranks, by any assembly, and writes u as a vertex field.
 
