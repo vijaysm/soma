@@ -24,7 +24,7 @@ bool fem_supported(const Mesh<Kokkos::HostSpace>& mesh) {
   return true;
 }
 
-FemPlan fem_plan(const Mesh<Kokkos::HostSpace>& mesh) {
+FemPlan fem_plan(const Mesh<Kokkos::HostSpace>& mesh, Assembly assembly) {
   const int dim = mesh.dim();
   const MeshView<Kokkos::HostSpace> m = mesh.view();
   const LO rows = mesh.segment_table(0).owned_end, cells = mesh.count(dim);
@@ -43,6 +43,11 @@ FemPlan fem_plan(const Mesh<Kokkos::HostSpace>& mesh) {
   }
 
   VertexRows pattern = vertex_graph(mesh, dim, rows, true, &around);
+  if (assembly != Assembly::gather) {
+    CellGroups groups = cell_groups(mesh, rows, assembly == Assembly::colored, around);
+    p.group_offsets = std::move(groups.offsets);
+    p.group_cells = std::move(groups.cells);
+  }
   p.offsets = std::move(pattern.offsets);
   p.columns = std::move(pattern.targets);
   p.around_offsets = std::move(around.offsets);
@@ -79,6 +84,31 @@ FemPlan fem_plan(const Mesh<Kokkos::HostSpace>& mesh) {
       p.slot_offsets[ti + 1] = static_cast<Offset>(p.slots.size());
     }
     for (Offset k = first; k < p.offsets[vi + 1]; ++k) place[column(k)] = -1;
+  }
+  if (assembly != Assembly::gather) {
+    // For the grouped cells in turn, each pair of corners (a, b): where b
+    // lands in a's row, -1 where a is not an owned row.
+    p.cell_slot_offsets.assign(p.group_cells.size() + 1, 0);
+    for (std::size_t i = 0; i < p.group_cells.size(); ++i) {
+      const auto n = static_cast<Offset>(m.num_vertices(dim, p.group_cells[i]));
+      p.cell_slot_offsets[i + 1] = p.cell_slot_offsets[i] + n * n;
+    }
+    p.cell_slots.assign(static_cast<std::size_t>(p.cell_slot_offsets.back()), -1);
+    for (std::size_t i = 0; i < p.group_cells.size(); ++i) {
+      const LO e = p.group_cells[i], n = m.num_vertices(dim, e);
+      for (LO a = 0; a < n; ++a) {
+        const LO v = m.vertex(dim, e, a);
+        if (v >= rows) continue;
+        const auto vi = static_cast<std::size_t>(v);
+        const Offset first = p.offsets[vi];
+        for (Offset k = first; k < p.offsets[vi + 1]; ++k) place[column(k)] = static_cast<LO>(k - first);
+        for (LO b = 0; b < n; ++b) {
+          const auto at = static_cast<std::size_t>(p.cell_slot_offsets[i] + a * n + b);
+          p.cell_slots[at] = place[static_cast<std::size_t>(m.vertex(dim, e, b))];
+        }
+        for (Offset k = first; k < p.offsets[vi + 1]; ++k) place[column(k)] = -1;
+      }
+    }
   }
   p.skin = skin(mesh);
   return p;

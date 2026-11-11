@@ -21,9 +21,11 @@
 // without messages. It must also hold its sharing fields, as a mirror does
 // with TransferOptions::everything().
 //
-// Assembly gathers: the element matrices are computed once per cell, then
-// each owned row sums its cells' entries, the cells ascending by gid. The
-// result is the same, bit for bit, on any number of ranks and threads.
+// Assembly gathers by default: the element matrices are computed once per
+// cell, then each owned row sums its cells' entries, the cells ascending by
+// gid. The result is the same, bit for bit, on any number of ranks and
+// threads. Atomic and colored assembly (Assembly) compute each element
+// matrix where it is added, storing none.
 //
 // A space keeps views into the mesh: it is valid while the mesh is alive and
 // its topology unchanged. Coordinates may move between assemblies, so long
@@ -53,6 +55,16 @@
 
 namespace soma {
 
+// How a space assembles its matrices:
+//   gather   each owned row sums its cells' entries, the cells by gid: the
+//            same, bit for bit, on any number of ranks and threads;
+//   atomic   each cell with an owned corner adds its entries to the owned
+//            rows with atomic additions: order and so rounding vary;
+//   colored  cells sharing no vertex form a color; the colors take turns,
+//            the cells of one adding without atomics: the same on any number
+//            of threads, not of ranks.
+enum class Assembly : std::uint8_t { gather, atomic, colored };
+
 namespace detail {
 
 // What a space works from, built once on the host.
@@ -70,6 +82,14 @@ struct FemPlan {
   std::vector<Offset> matrix_offsets;  // per cell: start of its n x n entries
   std::vector<Offset> vector_offsets;  // per cell: start of its n entries
   std::vector<std::uint8_t> skin;      // per vertex, this rank's verdict
+  // atomic and colored: the cells with an owned corner, by color (one
+  // group for atomic); for each of them in that order, where corner b lands
+  // in corner a's row (-1 where a is not an owned row), n x n from
+  // cell_slot_offsets[i].
+  std::vector<Offset> group_offsets;
+  std::vector<LO> group_cells;
+  std::vector<Offset> cell_slot_offsets;
+  std::vector<LO> cell_slots;
   LO orphans = 0;    // owned vertices no cell here has: their rows are empty
   bool fits = true;  // false: a size exceeds Offset, and nothing else is set
 };
@@ -79,7 +99,7 @@ struct FemPlan {
 bool fem_supported(const Mesh<Kokkos::HostSpace>& mesh);
 
 // Host only; the mesh supported.
-FemPlan fem_plan(const Mesh<Kokkos::HostSpace>& mesh);
+FemPlan fem_plan(const Mesh<Kokkos::HostSpace>& mesh, Assembly assembly);
 
 template <class T, class MemSpace>
 View1<T, MemSpace> to_space(const std::vector<T>& v, const char* label) {
@@ -180,6 +200,37 @@ void gather_load(LO rows, const View1<Offset, MemSpace>& around_offsets, const V
   Exec{}.fence();
 }
 
+// Cells cells[first, last) add their stiffness matrices to the owned rows,
+// atomically or not. The caller fences.
+template <bool Atomic, class MemSpace>
+void scatter_cells(const MeshView<MemSpace>& view, LO rows, const View1<LO, MemSpace>& cells, Offset first,
+                   Offset last, const View1<Offset, MemSpace>& offsets, const View1<Offset, MemSpace>& slot_offsets,
+                   const View1<LO, MemSpace>& cell_slots, const View1<Real, MemSpace>& values) {
+  using Exec = typename MemSpace::execution_space;
+  const int dim = view.dim;
+  Kokkos::parallel_for(
+      "soma::FemSpace::scatter", Kokkos::RangePolicy<Exec, Kokkos::IndexType<Offset>>(first, last),
+      KOKKOS_LAMBDA(const Offset i) {
+        const LO e = cells(i);
+        const fem::Cell c = fem::cell_of(view, dim, e);
+        Real k[fem::max_nodes][fem::max_nodes];
+        fem::stiffness(c, k);
+        for (int a = 0; a < c.n; ++a) {
+          const LO v = view.vertex(dim, e, a);
+          if (v >= rows) continue;
+          const Offset row = offsets(v), base = slot_offsets(i) + a * c.n;
+          for (int b = 0; b < c.n; ++b) {
+            Real& entry = values(row + cell_slots(base + b));
+            if constexpr (Atomic) {
+              Kokkos::atomic_add(&entry, k[a][b]);
+            } else {
+              entry += k[a][b];
+            }
+          }
+        }
+      });
+}
+
 template <class MemSpace>
 Real local_dot(LO rows, const View1<const Real, MemSpace>& x, const View1<const Real, MemSpace>& y) {
   using Exec = typename MemSpace::execution_space;
@@ -199,8 +250,9 @@ class FemSpace {
   // mesh is not of dimension 2 or 3, has unremoved edits, holds a cell
   // without elements here (only tri, quad, tet, hex) or one whose Jacobian
   // is not positive throughout, or, on more than one rank, has no ghost
-  // layer through vertices.
-  FemSpace(const Comm& comm, const Mesh<MemSpace>& mesh) : view_(mesh.view()) {
+  // layer through vertices. `assembly` is how laplacian() assembles.
+  FemSpace(const Comm& comm, const Mesh<MemSpace>& mesh, Assembly assembly = Assembly::gather)
+      : view_(mesh.view()), assembly_(assembly) {
     const Mesh<Kokkos::HostSpace>* host = nullptr;
     std::optional<Mesh<Kokkos::HostSpace>> mirror;
     if constexpr (std::is_same_v<MemSpace, Kokkos::HostSpace>) {
@@ -212,7 +264,7 @@ class FemSpace {
     const bool bad = mesh.edited() || !detail::fem_supported(*host) ||
                      (comm.size() > 1 && (mesh.ghost_layers() < 1 || mesh.ghost_bridge_dim() != 0));
     detail::FemPlan p;
-    if (!bad) p = detail::fem_plan(*host);
+    if (!bad) p = detail::fem_plan(*host, assembly);
     const bool usable = !bad && p.fits;
     Real flags[4] = {bad ? Real{1} : Real{0}, p.fits ? Real{0} : Real{1}, static_cast<Real>(p.orphans),
                      usable ? static_cast<Real>(detail::bad_cells(view_)) : Real{0}};
@@ -239,6 +291,10 @@ class FemSpace {
     matrix_total_ = p.matrix_offsets.back();
     vector_total_ = p.vector_offsets.back();
     vector_offsets_ = detail::to_space<Offset, MemSpace>(p.vector_offsets, "soma::FemSpace::vector_offsets");
+    cell_slot_offsets_ = detail::to_space<Offset, MemSpace>(p.cell_slot_offsets, "soma::FemSpace::cell_slot_offsets");
+    cell_slots_ = detail::to_space<LO, MemSpace>(p.cell_slots, "soma::FemSpace::cell_slots");
+    group_offsets_ = p.group_offsets;
+    group_cells_ = detail::to_space<LO, MemSpace>(p.group_cells, "soma::FemSpace::group_cells");
     if (comm.size() > 1) halo_.emplace(comm, mesh, 0);
     // Owners' verdicts: a ghost's far corners look like skin here.
     boundary_ = detail::to_space<std::uint8_t, MemSpace>(p.skin, "soma::FemSpace::boundary");
@@ -266,9 +322,24 @@ class FemSpace {
   CsrMatrix<MemSpace> laplacian(const Comm& comm) const {
     check_cells(comm);
     CsrMatrix<MemSpace> a = pattern();
-    const auto element = detail::element_matrices(view_, matrix_offsets_, matrix_total_);
-    detail::gather_rows(rows_, offsets_, around_offsets_, around_cells_, around_corner_, slot_offsets_, slots_,
-                        matrix_offsets_, element, a.values);
+    if (assembly_ == Assembly::gather) {
+      const auto element = detail::element_matrices(view_, matrix_offsets_, matrix_total_);
+      detail::gather_rows(rows_, offsets_, around_offsets_, around_cells_, around_corner_, slot_offsets_, slots_,
+                          matrix_offsets_, element, a.values);
+      return a;
+    }
+    // Launches on one instance run in turn: the colors need no fence apart.
+    for (std::size_t g = 0; g + 1 < group_offsets_.size(); ++g) {
+      const Offset first = group_offsets_[g], last = group_offsets_[g + 1];
+      if (assembly_ == Assembly::atomic) {
+        detail::scatter_cells<true>(view_, rows_, group_cells_, first, last, offsets_, cell_slot_offsets_,
+                                    cell_slots_, a.values);
+      } else {
+        detail::scatter_cells<false>(view_, rows_, group_cells_, first, last, offsets_, cell_slot_offsets_,
+                                     cell_slots_, a.values);
+      }
+    }
+    typename MemSpace::execution_space{}.fence();
     return a;
   }
 
@@ -313,6 +384,7 @@ class FemSpace {
   }
 
   MeshView<MemSpace> view_;
+  Assembly assembly_ = Assembly::gather;
   LO rows_ = 0;
   LO cols_ = 0;
   View1<Offset, MemSpace> offsets_;
@@ -326,6 +398,10 @@ class FemSpace {
   View1<Offset, MemSpace> vector_offsets_;
   Offset matrix_total_ = 0;
   Offset vector_total_ = 0;
+  View1<Offset, MemSpace> cell_slot_offsets_;
+  View1<LO, MemSpace> cell_slots_;
+  std::vector<Offset> group_offsets_;
+  View1<LO, MemSpace> group_cells_;
   View1<std::uint8_t, MemSpace> boundary_;
   std::optional<HaloExchange<MemSpace>> halo_;
 };

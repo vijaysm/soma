@@ -20,6 +20,7 @@
 #include "soma/algorithms/fem.hpp"
 #include "soma/algorithms/fem_space.hpp"
 #include "soma/algorithms/laplacian.hpp"
+#include "soma/algorithms/vertex_graph.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
@@ -484,7 +485,8 @@ TEST(FemSpace, BadMeshesThrowOnEveryRank) {
   expect_message(c, prisms, "other than a tri, quad, tet or hex");
 }
 
-// The local operations refuse vectors too short for the matrix.
+// The local operations refuse vectors too short for the matrix; an update
+// any vector not of cols() entries.
 TEST(FemSpace, ShortVectorsAreRefused) {
   const soma::HostMesh mesh = box_part(Comm::self(), spec_of(Topology::quad, 3));
   const Space space(Comm::self(), mesh);
@@ -500,4 +502,111 @@ TEST(FemSpace, ShortVectorsAreRefused) {
                std::invalid_argument);
   EXPECT_THROW(soma::apply_dirichlet(a, Vector(y), space.boundary(), CV(shorter)), std::invalid_argument);
   EXPECT_THROW(space.update(Comm::self(), shorter), std::invalid_argument);
+  const Vector longer("longer", static_cast<std::size_t>(space.cols() + 1));
+  EXPECT_THROW(space.update(Comm::self(), longer), std::invalid_argument);
+}
+
+// Colors partition the cells with an owned corner and no two cells of a
+// color share an owned vertex (only owned rows are written). Greedy coloring
+// by gid needs at least as many colors as there are cells around an owned
+// vertex and at most one more than a cell's conflicts; on a whole box of
+// quads or hexes exactly 2^d. The small box leaves some ranks no cells.
+TEST(FemSpace, CellColorsAreValidAndFew) {
+  const Comm c = Comm::world();
+  for (const Topology t : all) {
+    for (const soma::testing::BoxSpec& spec : {spec_of(t, 6), soma::testing::BoxSpec{2, 1, 1, t, 1.0, 1.0, 1.0}}) {
+      for (const int deal : {0, 1}) {
+        SCOPED_TRACE(testing::Message() << soma::name(t) << " " << spec.nx << " deal " << deal);
+        const soma::HostMesh mesh = box_part(c, spec, Part{.deal = deal, .perturb = false});
+        const int dim = mesh.dim();
+        const auto m = mesh.view();
+        const LO rows = mesh.segment_table(0).owned_end;
+        const soma::detail::CellGroups g =
+            soma::detail::cell_groups(mesh, rows, true, soma::detail::cells_around(mesh, rows));
+        std::set<LO> seen;
+        for (std::size_t k = 0; k + 1 < g.offsets.size(); ++k) {
+          EXPECT_LT(g.offsets[k], g.offsets[k + 1]) << "color " << k << " empty";
+          std::set<LO> used;
+          for (Offset i = g.offsets[k]; i < g.offsets[k + 1]; ++i) {
+            const LO e = g.cells[static_cast<std::size_t>(i)];
+            EXPECT_TRUE(seen.insert(e).second) << "cell " << e << " twice";
+            for (LO p = 0; p < m.num_vertices(dim, e); ++p) {
+              const LO v = m.vertex(dim, e, p);
+              if (v < rows) EXPECT_TRUE(used.insert(v).second) << "color " << k << " shares vertex " << v;
+            }
+          }
+        }
+        std::map<LO, std::set<LO>> around;  // owned vertex: its cells
+        for (LO e = 0; e < mesh.count(dim); ++e) {
+          for (LO p = 0; p < m.num_vertices(dim, e); ++p) {
+            if (m.vertex(dim, e, p) < rows) around[m.vertex(dim, e, p)].insert(e);
+          }
+        }
+        std::set<LO> active;
+        for (const auto& [v, cells] : around) active.insert(cells.begin(), cells.end());
+        EXPECT_EQ(seen, active);
+        const std::size_t colors = g.offsets.size() - 1;
+        std::size_t clique = 0, conflicts = 0;
+        for (const auto& [v, cells] : around) clique = std::max(clique, cells.size());
+        for (const LO e : active) {
+          std::set<LO> others;
+          for (LO p = 0; p < m.num_vertices(dim, e); ++p) {
+            const auto it = around.find(m.vertex(dim, e, p));
+            if (it != around.end()) others.insert(it->second.begin(), it->second.end());
+          }
+          conflicts = std::max(conflicts, others.size() - 1);
+        }
+        EXPECT_GE(colors, clique);
+        EXPECT_LE(colors, active.empty() ? 0 : conflicts + 1);
+        if (c.size() == 1 && spec.nx == 7 && (t == Topology::quad || t == Topology::hex)) {
+          EXPECT_EQ(colors, std::size_t{1} << dim);
+        }
+      }
+    }
+  }
+}
+
+// Atomic and colored assembly give the gather's matrix to rounding, and
+// colored assembly the same bits every time.
+TEST(FemSpace, AssemblyMethodsAgree) {
+  const Comm c = Comm::world();
+  for (const Topology t : all) {
+    for (const int deal : {0, 1}) {
+      SCOPED_TRACE(testing::Message() << soma::name(t) << " deal " << deal);
+      const soma::HostMesh mesh = box_part(c, spec_of(t, 4), Part{.deal = deal});
+      const Entries gather = by_gid(mesh, Space(c, mesh).laplacian(c));
+      Real scale = 0;
+      for (const auto& [rc, v] : gather) scale = std::max(scale, std::abs(v));
+      for (const soma::Assembly method : {soma::Assembly::atomic, soma::Assembly::colored}) {
+        const Space space(c, mesh, method);
+        const Entries got = by_gid(mesh, space.laplacian(c));
+        ASSERT_EQ(got.size(), gather.size());
+        Real worst = 0;
+        for (const auto& [rc, v] : got) worst = std::max(worst, std::abs(v - gather.at(rc)));
+        EXPECT_LE(worst, 1e-14 * scale) << "method " << static_cast<int>(method);
+        if (method == soma::Assembly::colored) {
+          // The colors in turn, each cell's entries added sequentially: the
+          // same bits, so no thread count changes them.
+          const int dim = mesh.dim();
+          const auto m = mesh.view();
+          const auto vg = mesh.gid(0);
+          const LO rows = mesh.segment_table(0).owned_end;
+          const soma::detail::CellGroups groups =
+              soma::detail::cell_groups(mesh, rows, true, soma::detail::cells_around(mesh, rows));
+          Entries replay;
+          for (const LO e : groups.cells) {
+            const fem::Cell cell = fem::cell_of(m, dim, e);
+            Real k[fem::max_nodes][fem::max_nodes];
+            fem::stiffness(cell, k);
+            for (int p = 0; p < cell.n; ++p) {
+              if (m.vertex(dim, e, p) >= rows) continue;
+              for (int q = 0; q < cell.n; ++q) replay[{vg(m.vertex(dim, e, p)), vg(m.vertex(dim, e, q))}] += k[p][q];
+            }
+          }
+          EXPECT_EQ(first_difference(got, replay), "");
+          EXPECT_EQ(first_difference(by_gid(mesh, space.laplacian(c)), got), "");
+        }
+      }
+    }
+  }
 }

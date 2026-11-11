@@ -134,6 +134,51 @@ CellsAround cells_around(const Mesh<Kokkos::HostSpace>& mesh, LO rows) {
   return a;
 }
 
+CellGroups cell_groups(const Mesh<Kokkos::HostSpace>& mesh, LO rows, bool color, const CellsAround& around) {
+  const int dim = mesh.dim();
+  const MeshView<Kokkos::HostSpace> m = mesh.view();
+  const auto gid = mesh.gid(dim);
+  const LO cells = mesh.count(dim);
+  std::vector<std::pair<GO, LO>> active;
+  for (LO e = 0; e < cells; ++e) {
+    bool owned = false;
+    for (LO k = 0; k < m.num_vertices(dim, e) && !owned; ++k) owned = m.vertex(dim, e, k) < rows;
+    if (owned) active.emplace_back(gid(e), e);
+  }
+  std::sort(active.begin(), active.end());
+  std::vector<int> colors(static_cast<std::size_t>(cells), -1);
+  int count = active.empty() ? 0 : 1;
+  if (color) {
+    // A color is forbidden to cell e when stamped e by a colored neighbour
+    // through a vertex of [0, rows): only those rows are written.
+    std::vector<LO> forbidden;
+    for (const auto& [g, e] : active) {
+      for (LO k = 0; k < m.num_vertices(dim, e); ++k) {
+        if (m.vertex(dim, e, k) >= rows) continue;
+        const auto v = static_cast<std::size_t>(m.vertex(dim, e, k));
+        for (Offset t = around.offsets[v]; t < around.offsets[v + 1]; ++t) {
+          const int c = colors[static_cast<std::size_t>(around.cells[static_cast<std::size_t>(t)])];
+          if (c >= 0) forbidden[static_cast<std::size_t>(c)] = e;
+        }
+      }
+      int c = 0;
+      while (c < static_cast<int>(forbidden.size()) && forbidden[static_cast<std::size_t>(c)] == e) ++c;
+      if (c == static_cast<int>(forbidden.size())) forbidden.push_back(-1);
+      colors[static_cast<std::size_t>(e)] = c;
+      count = std::max(count, c + 1);
+    }
+  }
+  const auto color_of = [&](LO e) { return static_cast<std::size_t>(color ? colors[static_cast<std::size_t>(e)] : 0); };
+  CellGroups out;
+  out.offsets.assign(static_cast<std::size_t>(count) + 1, 0);
+  for (const auto& [g, e] : active) ++out.offsets[color_of(e) + 1];
+  for (std::size_t c = 0; c + 1 < out.offsets.size(); ++c) out.offsets[c + 1] += out.offsets[c];
+  out.cells.resize(active.size());
+  std::vector<Offset> at(out.offsets.begin(), out.offsets.end() - 1);
+  for (const auto& [g, e] : active) out.cells[static_cast<std::size_t>(at[color_of(e)]++)] = e;
+  return out;
+}
+
 std::vector<std::uint8_t> skin(const Mesh<Kokkos::HostSpace>& mesh) {
   // The sides of dimension dim - 1, as sorted corner lids, by their least
   // corner; a side found once among those of its least corner is on the

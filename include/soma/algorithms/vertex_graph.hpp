@@ -43,6 +43,17 @@ CellsAround cells_around(const Mesh<Kokkos::HostSpace>& mesh, LO rows);
 VertexRows vertex_graph(const Mesh<Kokkos::HostSpace>& mesh, int bridge_dim, LO rows, bool diagonal,
                         const CellsAround* around = nullptr);
 
+// The cells with a corner in [0, rows), by color: color c's cells are
+// cells[offsets[c], offsets[c + 1]), ascending by gid, and no two of a color
+// share a vertex of [0, rows). Greedy, the cells taken by gid, each the
+// least color its colored neighbours leave. With `color` false, all of them
+// as one color. `around` is cells_around(mesh, rows).
+struct CellGroups {
+  std::vector<Offset> offsets;
+  std::vector<LO> cells;
+};
+CellGroups cell_groups(const Mesh<Kokkos::HostSpace>& mesh, LO rows, bool color, const CellsAround& around);
+
 // Per vertex: 1 for a corner of a side of dimension dim - 1 that only one
 // cell here has. On a ghosted mesh only the owned vertices' verdicts are the
 // global ones: the far corners of the outer ghost cells look like skin.
