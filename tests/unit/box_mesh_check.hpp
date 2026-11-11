@@ -31,13 +31,14 @@ struct BoxShape {
 
 inline BoxShape shape_of(const soma::testing::BoxSpec& s) {
   BoxShape b;
-  const bool solid = s.element == soma::Topology::hex;
+  const bool solid = s.element == soma::Topology::hex || s.element == soma::Topology::tet;
   b.px = s.nx + 1;
   b.py = s.ny + 1;
   b.pz = solid ? s.nz + 1 : 1;
   b.cells = static_cast<std::int64_t>(s.nx) * s.ny * (solid ? s.nz : 1);
   b.vertices = b.px * b.py * b.pz;
-  b.elements = s.element == soma::Topology::tri ? 2 * b.cells : b.cells;
+  const std::int64_t per_cell = s.element == soma::Topology::tri ? 2 : s.element == soma::Topology::tet ? 6 : 1;
+  b.elements = per_cell * b.cells;
   b.arity = soma::num_vertices(s.element);
   b.dim = solid ? 3 : 2;
   return b;
@@ -47,7 +48,8 @@ inline BoxShape shape_of(const soma::testing::BoxSpec& s) {
 inline std::vector<soma::GO> expected_vertices(const soma::testing::BoxSpec& s, soma::GO gid) {
   const BoxShape b = shape_of(s);
   const bool tri = s.element == soma::Topology::tri;
-  const std::int64_t cell = tri ? (gid - 1) / 2 : gid - 1;
+  const bool tet = s.element == soma::Topology::tet;
+  const std::int64_t cell = tri ? (gid - 1) / 2 : tet ? (gid - 1) / 6 : gid - 1;
   const std::int64_t i = cell % s.nx;
   const std::int64_t j = (cell / s.nx) % s.ny;
   const std::int64_t k = cell / (static_cast<std::int64_t>(s.nx) * s.ny);
@@ -57,6 +59,18 @@ inline std::vector<soma::GO> expected_vertices(const soma::testing::BoxSpec& s, 
   if (s.element == soma::Topology::hex) {
     return {v(i, j, k),         v(i + 1, j, k),         v(i + 1, j + 1, k),     v(i, j + 1, k),
             v(i, j, k + 1),     v(i + 1, j, k + 1),     v(i + 1, j + 1, k + 1), v(i, j + 1, k + 1)};
+  }
+  if (tet) {
+    // Kuhn paths from (i, j, k) to (i+1, j+1, k+1) along x y z, y z x, z x y,
+    // then x z y, z y x, y x z with their last two corners swapped.
+    switch ((gid - 1) % 6) {
+      case 0: return {v(i, j, k), v(i + 1, j, k), v(i + 1, j + 1, k), v(i + 1, j + 1, k + 1)};
+      case 1: return {v(i, j, k), v(i, j + 1, k), v(i, j + 1, k + 1), v(i + 1, j + 1, k + 1)};
+      case 2: return {v(i, j, k), v(i, j, k + 1), v(i + 1, j, k + 1), v(i + 1, j + 1, k + 1)};
+      case 3: return {v(i, j, k), v(i + 1, j, k), v(i + 1, j + 1, k + 1), v(i + 1, j, k + 1)};
+      case 4: return {v(i, j, k), v(i, j, k + 1), v(i + 1, j + 1, k + 1), v(i, j + 1, k + 1)};
+      default: return {v(i, j, k), v(i, j + 1, k), v(i + 1, j + 1, k + 1), v(i + 1, j + 1, k)};
+    }
   }
   if (!tri) return {v(i, j, 0), v(i + 1, j, 0), v(i + 1, j + 1, 0), v(i, j + 1, 0)};
   if ((gid - 1) % 2 == 0) return {v(i, j, 0), v(i + 1, j, 0), v(i + 1, j + 1, 0)};

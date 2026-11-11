@@ -93,8 +93,8 @@ TEST(BoxMeshOrdering, TheCurveHoldsTheSameEntitiesAndTheSameCoordinatesPerGid) {
 }
 
 TEST(BoxMeshOrdering, TheCurveReordersWhatFileOrderLeavesByGid) {
-  for (const Topology t : {Topology::quad, Topology::tri, Topology::hex}) {
-    const int nz = t == Topology::hex ? 8 : 1;
+  for (const Topology t : {Topology::quad, Topology::tri, Topology::hex, Topology::tet}) {
+    const int nz = t == Topology::hex || t == Topology::tet ? 8 : 1;
     const auto by_file = soma::testing::box_mesh(spec_of(8, 8, nz, t, Ordering::file));
     const auto by_curve = soma::testing::box_mesh(spec_of(8, 8, nz, t, Ordering::type_major_sfc));
     const int dim = by_file.dim();

@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -59,7 +60,9 @@ std::vector<BoxSpec> sample_specs() {
           make_spec(1, 1, 1, Topology::tri),
           make_spec(2, 2, 1, Topology::tri),
           make_spec(5, 6, 1, Topology::tri, 0.1, 0.3),
-          make_spec(3, 9, 1, Topology::tri, 0.7, 0.9)};
+          make_spec(3, 9, 1, Topology::tri, 0.7, 0.9),
+          make_spec(1, 1, 1, Topology::tet),
+          make_spec(3, 2, 4, Topology::tet, 0.1, 0.3, 0.7)};
 }
 
 std::string describe(const BoxSpec& s) {
@@ -90,6 +93,7 @@ double host_measure(const soma::HostMesh& m, int dim, LO e) {
   const int n = static_cast<int>(m.conn_offsets(dim)(e + 1) - m.conn_offsets(dim)(e));
   std::array<Point, 8> p{};
   for (int k = 0; k < n; ++k) p[static_cast<std::size_t>(k)] = corner(m, dim, e, k);
+  if (dim == 3 && n == 4) return tet_volume(p[0], p[1], p[2], p[3]);
   if (n == 8) {
     return tet_volume(p[0], p[1], p[3], p[4]) + tet_volume(p[1], p[2], p[3], p[6]) +
            tet_volume(p[1], p[4], p[5], p[6]) + tet_volume(p[3], p[4], p[6], p[7]) +
@@ -104,18 +108,19 @@ double host_measure(const soma::HostMesh& m, int dim, LO e) {
   return 0.5 * twice;
 }
 
+bool solid(const BoxSpec& s) { return s.element == Topology::hex || s.element == Topology::tet; }
+
 double expected_measure(const BoxSpec& s) {
-  const double cell = s.lx * s.ly * (s.element == Topology::hex ? s.lz : 1.0) /
-                      (static_cast<double>(s.nx) * s.ny * (s.element == Topology::hex ? s.nz : 1));
-  return s.element == Topology::tri ? 0.5 * cell : cell;
+  const double cell = s.lx * s.ly * (solid(s) ? s.lz : 1.0) /
+                      (static_cast<double>(s.nx) * s.ny * (solid(s) ? s.nz : 1));
+  return s.element == Topology::tri ? 0.5 * cell : s.element == Topology::tet ? cell / 6 : cell;
 }
 
-double box_measure(const BoxSpec& s) {
-  return s.lx * s.ly * (s.element == Topology::hex ? s.lz : 1.0);
-}
+double box_measure(const BoxSpec& s) { return s.lx * s.ly * (solid(s) ? s.lz : 1.0); }
 
-// Device-callable kernels, dispatching on the vertex count (8 hex, 4 quad, 3
-// triangle). The measure of a hex is the sum of six tetrahedra around the v0-v6
+// Device-callable kernels, dispatching on the dimension and vertex count (8
+// hex, 4 tet or quad, 3 triangle). The measure of a tet is its determinant over
+// six, of a hex is the sum of six tetrahedra around the v0-v6
 // diagonal, of a quad half the cross product of its diagonals, of a triangle
 // half the cross product of two edges.
 KOKKOS_INLINE_FUNCTION double tet_det(const double* a, const double* b, const double* c,
@@ -140,6 +145,7 @@ KOKKOS_INLINE_FUNCTION double signed_measure(const soma::MeshView<M>& v, int dim
   for (LO k = 0; k < n && k < 8; ++k) {
     for (int c = 0; c < 3; ++c) p[k][c] = v.x(v.vertex(dim, e, k), c);
   }
+  if (dim == 3 && n == 4) return tet_det(p[0], p[1], p[2], p[3]);
   if (n == 8) {
     return tet_det(p[0], p[1], p[2], p[6]) + tet_det(p[0], p[2], p[3], p[6]) +
            tet_det(p[0], p[3], p[7], p[6]) + tet_det(p[0], p[7], p[4], p[6]) +
@@ -435,7 +441,7 @@ TEST(BoxMesh, BoundaryVerticesAreTheTotalMinusTheInteriorClosedForm) {
   for (const BoxSpec& spec : soma_test::sample_specs()) {
     SCOPED_TRACE(soma_test::describe(spec));
     const auto mesh = soma::testing::box_mesh(spec);
-    const bool solid = spec.element == Topology::hex;
+    const bool solid = soma_test::solid(spec);
     LO boundary = 0;
     for (LO v = 0; v < mesh.count(0); ++v) {
       const bool on_x = mesh.coords()(v, 0) == 0.0 || mesh.coords()(v, 0) == spec.lx;
@@ -448,10 +454,11 @@ TEST(BoxMesh, BoundaryVerticesAreTheTotalMinusTheInteriorClosedForm) {
   }
 }
 
-TEST(BoxMesh, EveryTopologyOtherThanHexQuadTriIsRejectedByName) {
+TEST(BoxMesh, EveryTopologyOtherThanHexTetQuadTriIsRejectedByName) {
   for (int t = 0; t < soma::topology_count; ++t) {
     const auto topology = static_cast<Topology>(t);
-    if (topology == Topology::hex || topology == Topology::quad || topology == Topology::tri) {
+    if (topology == Topology::hex || topology == Topology::tet || topology == Topology::quad ||
+        topology == Topology::tri) {
       continue;
     }
     SCOPED_TRACE(soma::name(topology));
@@ -459,7 +466,52 @@ TEST(BoxMesh, EveryTopologyOtherThanHexQuadTriIsRejectedByName) {
         soma_test::make_spec(2, 2, 2, topology), soma::name(topology));
   }
   soma_test::expect_throws_naming<std::invalid_argument>(
-      soma_test::make_spec(2, 2, 2, Topology::tet), "supported: hex, quad, tri");
+      soma_test::make_spec(2, 2, 2, Topology::prism), "supported: hex, tet, quad, tri");
+}
+
+// Kuhn's split: six tets a hex, each of positive volume a sixth of the
+// hex's, and every triangle either on the box's boundary (one tet) or
+// shared by exactly two.
+TEST(BoxMesh, TetsSplitEveryHexIntoSixConformingTets) {
+  const soma::testing::BoxSpec spec{3, 2, 4, Topology::tet, 1.5, 1.0, 2.0};
+  const auto mesh = soma::testing::box_mesh(spec);
+  ASSERT_EQ(mesh.count(3), 6 * 3 * 2 * 4);
+  ASSERT_EQ(mesh.count(0), 4 * 3 * 5);
+  const double cell = 1.5 / 3 * 1.0 / 2 * 2.0 / 4;
+  const auto x = mesh.coords();
+  const auto gid = mesh.gid(0);
+  const soma::MeshView<Kokkos::HostSpace> v = mesh.view();
+  std::map<std::array<GO, 3>, int> faces;
+  double total = 0;
+  for (LO e = 0; e < mesh.count(3); ++e) {
+    ASSERT_EQ(v.topology(3, e), Topology::tet);
+    LO c[4];
+    for (LO k = 0; k < 4; ++k) c[k] = v.vertex(3, e, k);
+    double d[3][3];
+    for (int r = 0; r < 3; ++r) {
+      for (int q = 0; q < 3; ++q) d[r][q] = x(c[r + 1], q) - x(c[0], q);
+    }
+    const double det = d[0][0] * (d[1][1] * d[2][2] - d[1][2] * d[2][1]) -
+                       d[0][1] * (d[1][0] * d[2][2] - d[1][2] * d[2][0]) +
+                       d[0][2] * (d[1][0] * d[2][1] - d[1][1] * d[2][0]);
+    ASSERT_NEAR(det / 6, cell / 6, 1e-13) << "tet " << e;
+    total += det / 6;
+    for (int skip = 0; skip < 4; ++skip) {
+      std::array<GO, 3> f{};
+      for (int k = 0, n = 0; k < 4; ++k) {
+        if (k != skip) f[static_cast<std::size_t>(n++)] = gid(c[k]);
+      }
+      std::sort(f.begin(), f.end());
+      ++faces[f];
+    }
+  }
+  EXPECT_NEAR(total, 1.5 * 1.0 * 2.0, 1e-12);
+  int boundary = 0;
+  for (const auto& [f, n] : faces) {
+    ASSERT_LE(n, 2);
+    boundary += n == 1 ? 1 : 0;
+  }
+  EXPECT_EQ(boundary, 2 * 2 * (3 * 2 + 2 * 4 + 3 * 4));
 }
 
 TEST(BoxMesh, CellCountsBelowOneAreRejectedByAxis) {
@@ -582,17 +634,18 @@ TEST(BoxCounts, EachCountIsCheckedAgainstTheWidthOfItsType) {
       {1000, 1000, 1000, Topology::hex},       {1290, 1290, 1290, Topology::hex},
       {1, 1, 1, Topology::hex},                {2147483647, 1, 1, Topology::quad},
       {1, 1, 2147483647, Topology::hex},       {2097150, 2097151, 2097151, Topology::hex},
-      {2097151, 2097151, 2097151, Topology::hex}, {2147483647, 2147483647, 1, Topology::tri}};
+      {2097151, 2097151, 2097151, Topology::hex}, {2147483647, 2147483647, 1, Topology::tri},
+      {720, 720, 720, Topology::tet}};
   const auto lo_max = static_cast<std::int64_t>(std::numeric_limits<LO>::max());
   const auto offset_max = static_cast<std::int64_t>(std::numeric_limits<soma::Offset>::max());
   for (const Case& c : cases) {
     const BoxSpec spec = soma_test::make_spec(c.nx, c.ny, c.nz, c.element);
     SCOPED_TRACE(soma_test::describe(spec));
-    const bool solid = c.element == Topology::hex;
+    const bool solid = c.element == Topology::hex || c.element == Topology::tet;
     const std::int64_t px = c.nx + std::int64_t{1};
     const std::int64_t py = c.ny + std::int64_t{1};
     const std::int64_t pz = solid ? c.nz + std::int64_t{1} : 1;
-    const std::int64_t per_cell = c.element == Topology::tri ? 2 : 1;
+    const std::int64_t per_cell = c.element == Topology::tri ? 2 : c.element == Topology::tet ? 6 : 1;
     const int arity = soma::num_vertices(c.element);
     const bool vertices_fit = fits(px, py, lo_max) && fits(px * py, pz, lo_max);
     const bool elements_fit = fits(c.nx, c.ny, lo_max) &&
@@ -620,8 +673,8 @@ TEST(BoxCounts, EachCountIsCheckedAgainstTheWidthOfItsType) {
 // before box_mesh is asked to allocate an impossible amount of memory.
 TEST(BoxCounts, SizesFarBeyondAnyTypeOverflowBeforeAnythingIsAllocated) {
   constexpr int big = std::numeric_limits<int>::max();
-  for (const Topology t : {Topology::hex, Topology::tri, Topology::quad}) {
-    const BoxSpec spec = soma_test::make_spec(big, big, t == Topology::hex ? big : 1, t);
+  for (const Topology t : {Topology::hex, Topology::tet, Topology::tri, Topology::quad}) {
+    const BoxSpec spec = soma_test::make_spec(big, big, t == Topology::hex || t == Topology::tet ? big : 1, t);
     ASSERT_THROW((void)soma::testing::box_counts(spec), std::overflow_error) << soma::name(t);
     EXPECT_THROW((void)soma::testing::box_mesh(spec), std::overflow_error) << soma::name(t);
   }
