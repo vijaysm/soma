@@ -243,6 +243,15 @@ Real local_dot(LO rows, const View1<const Real, MemSpace>& x, const View1<const 
 
 }  // namespace detail
 
+// A global numbering of the vertices: owned vertices take first, first + 1,
+// ... rank by rank, copies and ghosts their owners' numbers; total over all.
+template <class MemSpace>
+struct Numbering {
+  View1<GO, MemSpace> index;  // per vertex here
+  GO first = 0;
+  GO total = 0;
+};
+
 template <class MemSpace>
 class FemSpace {
  public:
@@ -369,6 +378,24 @@ class FemSpace {
                 const View1<Real, MemSpace>& y) const {
     update(comm, x);
     soma::multiply(a, View1<const Real, MemSpace>(x), y);
+  }
+
+  // Collective: the vertices numbered rank by rank, as global matrices and
+  // vectors number their rows (one exscan, one allreduce, one update).
+  Numbering<MemSpace> numbering(const Comm& comm) const {
+    using Exec = typename MemSpace::execution_space;
+    Numbering<MemSpace> out;
+    out.first = comm.exscan(static_cast<GO>(rows_));
+    out.total = comm.allreduce(static_cast<GO>(rows_), Op::sum);
+    out.index = View1<GO, MemSpace>("soma::FemSpace::numbering", static_cast<std::size_t>(cols_));
+    const auto index = out.index;
+    const GO first = out.first;
+    Kokkos::parallel_for(
+        "soma::FemSpace::numbering", Kokkos::RangePolicy<Exec, Kokkos::IndexType<LO>>(0, rows_),
+        KOKKOS_LAMBDA(const LO v) { index(v) = first + v; });
+    Exec{}.fence();
+    if (halo_) halo_->update(comm, View2<GO, MemSpace>(index.data(), index.extent(0), 1));
+    return out;
   }
 
   // Collective: the sum of x[i] y[i] over every rank's owned vertices.

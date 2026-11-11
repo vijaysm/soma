@@ -10,6 +10,7 @@ set(SOMA_ENABLE_HDF5 @SOMA_ENABLE_HDF5@)
 set(SOMA_LO_64 @SOMA_LO_64@)
 set(SOMA_OFFSET_64 @SOMA_OFFSET_64@)
 set(SOMA_ENABLE_KOKKOSKERNELS @SOMA_ENABLE_KOKKOSKERNELS@)
+set(SOMA_ENABLE_PETSC @SOMA_ENABLE_PETSC@)
 # "installed" or "fetched", as configured; fetched means Kokkos was installed
 # alongside SOMA, into this prefix.
 set(SOMA_KOKKOS_SOURCE "@SOMA_KOKKOS_SOURCE@")
@@ -39,7 +40,19 @@ if(SOMA_ENABLE_MPI)
   find_dependency(MPI COMPONENTS CXX)
 endif()
 if(SOMA_ENABLE_KOKKOSKERNELS)
+  if(NOT KokkosKernels_DIR AND NOT "@KokkosKernels_DIR@" STREQUAL "")
+    set(KokkosKernels_DIR "@KokkosKernels_DIR@")
+  endif()
   find_dependency(KokkosKernels)
+endif()
+# The PETSc SOMA was built with, found again through its pkg-config file. A
+# consumer that has found PETSc itself keeps its PkgConfig::PETSC.
+if(SOMA_ENABLE_PETSC AND NOT TARGET PkgConfig::PETSC)
+  find_dependency(PkgConfig)
+  set(_soma_pkg_config_path "$ENV{PKG_CONFIG_PATH}")
+  set(ENV{PKG_CONFIG_PATH} "@SOMA_PETSC_PKGCONFIG_DIR@:$ENV{PKG_CONFIG_PATH}")
+  pkg_check_modules(PETSC REQUIRED IMPORTED_TARGET PETSc>=3.19)
+  set(ENV{PKG_CONFIG_PATH} "${_soma_pkg_config_path}")
 endif()
 # The static library links HDF5 privately; consumers still link it.
 if(SOMA_ENABLE_HDF5)

@@ -40,12 +40,16 @@ TEST(KokkosSparse, ViewsShareTheMatrixAndMultiplyAlike) {
       space.multiply(c, a, x, y);  // updates x's copies and ghosts
       KokkosSparse::spmv("N", Real{1}, k, x, Real{0}, Kokkos::subview(z, std::make_pair(LO{0}, a.rows)));
       Kokkos::fence();
+      // Rounding apart (a vendor or device spmv may sum a row in another
+      // order), bounded by the sum of the row's |a_ij x_j|.
       Real worst = 0, scale = 0;
       for (LO i = 0; i < a.rows; ++i) {
+        Real row = 0;
+        for (soma::Offset k = a.offsets(i); k < a.offsets(i + 1); ++k) row += std::abs(a.values(k) * x(a.columns(k)));
         worst = std::max(worst, std::abs(z(i) - y(i)));
-        scale = std::max(scale, std::abs(y(i)));
+        scale = std::max(scale, row);
       }
-      EXPECT_EQ(worst, 0) << "scale " << scale;
+      EXPECT_LE(worst, 1e-13 * scale);
     }
   }
 }

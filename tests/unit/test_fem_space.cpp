@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <map>
 #include <set>
+#include <span>
 #include <sstream>
 #include <string>
 #include <stdexcept>
@@ -608,5 +609,29 @@ TEST(FemSpace, AssemblyMethodsAgree) {
         }
       }
     }
+  }
+}
+
+// The numbering runs through the ranks' owned vertices in turn; a copy or a
+// ghost carries its owner's number, so numbers map one to one onto gids.
+TEST(FemSpace, NumberingIsContiguousAndAgreesOnEveryHolder) {
+  const Comm c = Comm::world();
+  for (const int deal : {0, 1}) {
+    SCOPED_TRACE(testing::Message() << "deal " << deal);
+    const soma::HostMesh mesh = box_part(c, spec_of(Topology::tet, 4), Part{.deal = deal});
+    const Space space(c, mesh);
+    const soma::Numbering<Kokkos::HostSpace> n = space.numbering(c);
+    EXPECT_EQ(n.total, static_cast<GO>(soma::testing::box_mesh(spec_of(Topology::tet, 4)).count(0)));
+    EXPECT_EQ(n.first, c.exscan(static_cast<GO>(space.rows())));
+    for (LO v = 0; v < space.rows(); ++v) EXPECT_EQ(n.index(v), n.first + v);
+    // gid -> number, from the owners, checked against every holder's.
+    std::vector<GO> by_gid(static_cast<std::size_t>(n.total) + 1, 0);
+    for (LO v = 0; v < space.rows(); ++v) by_gid[static_cast<std::size_t>(mesh.gid(0)(v))] = n.index(v) + 1;
+    c.allreduce(std::span<GO>(by_gid), soma::Op::max);
+    LO wrong = 0;
+    for (LO v = 0; v < space.cols(); ++v) {
+      wrong += by_gid[static_cast<std::size_t>(mesh.gid(0)(v))] == n.index(v) + 1 ? 0 : 1;
+    }
+    EXPECT_EQ(wrong, 0);
   }
 }
