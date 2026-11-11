@@ -89,7 +89,8 @@ target_compile_options(soma_warnings INTERFACE
   "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang,IntelLLVM,NVHPC>:-Wall;-Wextra>")
 
 set(SOMA_SOURCES src/runtime/scope_guard.cpp src/runtime/options.cpp src/core/segments.cpp src/fields/node_tables.cpp src/core/mesh_builder.cpp src/core/mesh_edit.cpp src/core/permute.cpp src/testing/box_mesh.cpp src/io/vtk_writer.cpp src/io/vtk_reader.cpp src/amr/box_list.cpp src/amr/box_array.cpp src/amr/halo.cpp src/amr/copy.cpp src/amr/interlevel.cpp src/amr/flux_register.cpp src/amr/cluster.cpp src/amr/hierarchy.cpp src/amr/vtk_amr.cpp src/parallel/transport/route.cpp src/parallel/transport/comm_plan.cpp src/parallel/transport/sort.cpp src/parallel/comm_counts.cpp src/parallel/partition.cpp src/parallel/sharing.cpp src/parallel/distributed.cpp src/parallel/migrate.cpp src/parallel/ghosts.cpp
-                 src/algorithms/smoothing_graph.cpp)
+                 src/algorithms/smoothing_graph.cpp src/algorithms/vertex_graph.cpp
+                 src/algorithms/fem_space.cpp)
 if(SOMA_ENABLE_MPI)
   list(APPEND SOMA_SOURCES src/parallel/comm_mpi.cpp)
 else()
