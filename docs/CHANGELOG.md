@@ -536,9 +536,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   (`soma/algorithms/petsc.hpp`, `SOMA_ENABLE_PETSC`) make PETSc `MATAIJ` matrices (by COO) and
   vectors in `FemSpace::numbering` order. PETSc's CG with Jacobi takes the iterations SOMA's
   takes, to one, and reaches its solution to 1e-9.
-- On a 64^3 box of hexes, one thread a rank, the space takes 396 ms, gathered assembly 786 and
-  CG to 1e-10 526 at one rank; 76, 146 and 133 at eight. Atomic and colored assembly time the
-  same as gathered to within 3 % at one rank.
+- On a 64^3 box of hexes, one thread a rank (bench_parallel), the space takes 202 ms,
+  gathered assembly 246 and CG to 1e-10 518 at one rank; 40, 53 and 148 at eight. Atomic and
+  colored assembly time the same as gathered to within 2 % at one rank.
 - The element kernels skip work without changing a bit of the matrices: corner determinants
   are read off the cells' edges, the degree-2 Gauss points' determinants serve both the
   validity check and the integration, the stiffness matrix is filled by symmetry, and
@@ -550,8 +550,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `FemSpace` gathers whatever assembly it is asked for (`assembly()` tells), and its `dot()`
   and `cg` sum exactly, with as many allreduces: CG gives the same iterates and solution, bit
   for bit, on any number of ranks and threads. Ranks must agree on the switch (every rank
-  throws otherwise), and a reproducible solve needs a gathering space. On the 64^3 box CG
-  takes 1.30 times as long at one thread, 1.14 at eight.
+  throws otherwise), and a reproducible solve needs a gathering space. On the 64^3 box, one
+  thread a rank, CG takes 1.28 times as long at one rank and 1.13 to 1.23 at two to eight;
+  1.14 at eight threads on one rank.
 - `examples/poisson.cpp` solves -lap u = 1, u = 0 on the boundary, on a `.h5m` or SOMA mesh on
   any number of ranks, by any assembly, and writes u as a vertex field.
 
