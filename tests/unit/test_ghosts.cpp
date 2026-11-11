@@ -109,6 +109,23 @@ TEST(Ghosts, LayersFollowTheGlobalRuleOnSliverPartitions) {
   }
 }
 
+// The mesh keeps the options of the ghosts it holds, which copies keep and
+// removing the ghosts clears.
+TEST(Ghosts, TheMeshRecordsItsLayers) {
+  const Comm c = Comm::world();
+  soma::HostMesh m = soma::build_local_part(c, local_builder(cell_ranks(c), c.rank()));
+  EXPECT_EQ(m.ghost_layers(), 0);
+  EXPECT_EQ(m.ghost_bridge_dim(), 0);
+  m.add_ghosts(c, soma::GhostOptions{2, 1, false});
+  EXPECT_EQ(m.ghost_layers(), 2);
+  EXPECT_EQ(m.ghost_bridge_dim(), 1);
+  EXPECT_EQ(m.clone().ghost_layers(), 2);
+  EXPECT_EQ(m.clone().ghost_bridge_dim(), 1);
+  m.remove_ghosts(c);
+  EXPECT_EQ(m.ghost_layers(), 0);
+  EXPECT_EQ(m.ghost_bridge_dim(), 0);
+}
+
 TEST(Ghosts, BadOptionsThrowOnEveryRank) {
   const Comm c = Comm::world();
   const soma::HostMesh m = soma::build_local_part(c, local_builder(cell_ranks(c), c.rank()));

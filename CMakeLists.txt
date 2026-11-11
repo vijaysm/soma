@@ -31,6 +31,7 @@ set(SOMA_KOKKOS_GPU "AUTO" CACHE STRING
   "GPU backend of a fetched Kokkos: AUTO, NONE, CUDA, HIP, SYCL")
 set_property(CACHE SOMA_KOKKOS_GPU PROPERTY STRINGS AUTO NONE CUDA HIP SYCL)
 option(SOMA_ENABLE_MOAB_REFERENCE "Build MOAB reference tests and benchmarks" OFF)
+option(SOMA_ENABLE_EXAMPLES "Build the example programs (requires SOMA_ENABLE_HDF5)" OFF)
 option(SOMA_ENABLE_MOAB_COMPAT "MOAB's API over SOMA meshes (soma::compat)" OFF)
 option(SOMA_LO_64 "64-bit local ordinals (ABI-breaking)" OFF)
 option(SOMA_OFFSET_64 "64-bit CSR offsets (ABI-breaking)" OFF)
@@ -87,7 +88,8 @@ add_library(soma_warnings INTERFACE)
 target_compile_options(soma_warnings INTERFACE
   "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang,IntelLLVM,NVHPC>:-Wall;-Wextra>")
 
-set(SOMA_SOURCES src/runtime/scope_guard.cpp src/runtime/options.cpp src/core/segments.cpp src/fields/node_tables.cpp src/core/mesh_builder.cpp src/core/mesh_edit.cpp src/core/permute.cpp src/testing/box_mesh.cpp src/io/vtk_writer.cpp src/io/vtk_reader.cpp src/amr/box_list.cpp src/amr/box_array.cpp src/amr/halo.cpp src/amr/copy.cpp src/amr/interlevel.cpp src/amr/flux_register.cpp src/amr/cluster.cpp src/amr/hierarchy.cpp src/amr/vtk_amr.cpp src/parallel/transport/route.cpp src/parallel/transport/comm_plan.cpp src/parallel/transport/sort.cpp src/parallel/comm_counts.cpp src/parallel/partition.cpp src/parallel/sharing.cpp src/parallel/distributed.cpp src/parallel/migrate.cpp src/parallel/ghosts.cpp)
+set(SOMA_SOURCES src/runtime/scope_guard.cpp src/runtime/options.cpp src/core/segments.cpp src/fields/node_tables.cpp src/core/mesh_builder.cpp src/core/mesh_edit.cpp src/core/permute.cpp src/testing/box_mesh.cpp src/io/vtk_writer.cpp src/io/vtk_reader.cpp src/amr/box_list.cpp src/amr/box_array.cpp src/amr/halo.cpp src/amr/copy.cpp src/amr/interlevel.cpp src/amr/flux_register.cpp src/amr/cluster.cpp src/amr/hierarchy.cpp src/amr/vtk_amr.cpp src/parallel/transport/route.cpp src/parallel/transport/comm_plan.cpp src/parallel/transport/sort.cpp src/parallel/comm_counts.cpp src/parallel/partition.cpp src/parallel/sharing.cpp src/parallel/distributed.cpp src/parallel/migrate.cpp src/parallel/ghosts.cpp
+                 src/algorithms/smoothing_graph.cpp)
 if(SOMA_ENABLE_MPI)
   list(APPEND SOMA_SOURCES src/parallel/comm_mpi.cpp)
 else()
@@ -153,6 +155,13 @@ endif()
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   add_subdirectory(bench)
+endif()
+
+if(SOMA_ENABLE_EXAMPLES)
+  if(NOT SOMA_ENABLE_HDF5)
+    message(FATAL_ERROR "SOMA_ENABLE_EXAMPLES needs SOMA_ENABLE_HDF5")
+  endif()
+  add_subdirectory(examples)
 endif()
 
 if(SOMA_INSTALL)

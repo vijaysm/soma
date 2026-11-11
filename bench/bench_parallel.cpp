@@ -15,6 +15,9 @@
 //   * halo: an update of a vertex field of 1 and 3 doubles over shared and
 //     ghost vertices (HaloExchange, fused and split into begin and end,
 //     against exchange_tags);
+//   * smooth: 10 Jacobi Laplacian sweeps of the ghosted mesh's vertices,
+//     perturbed by gid, (laplacian_smooth, its setup included, against
+//     MOAB's smoother of bench/moab_smooth.hpp);
 //   * write and restart: write_soma and read_soma at the same P against
 //     write_file PARALLEL=WRITE_PART and load_file READ_PART.
 //
@@ -25,6 +28,7 @@
 //   mpiexec -n P bench_parallel [--json] [--repeats N] [--n edge] [--parts K] [--dir path]
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
@@ -44,6 +48,8 @@
 #include "moab/ParallelComm.hpp"
 #include "MBParallelConventions.h"
 #include "moab_box.hpp"
+#include "moab_smooth.hpp"
+#include "soma/algorithms/laplacian.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/io/h5m.hpp"
 #include "soma/io/soma_file.hpp"
@@ -278,6 +284,60 @@ int main(int argc, char** argv) {
     runner.compare(t1, t3);
     check_soma();
     ok = agree(comm, good) && ok;
+  }
+
+  // ---- smooth ----
+  {
+    constexpr int sweeps = 10;
+    // A small displacement by gid, the same on every rank.
+    const auto moved = [](GO g, double x, int q) { return x + 1e-3 * std::sin(static_cast<double>(g) * (q + 1)); };
+    moab::Range all;
+    check(mg->core.get_entities_by_dimension(0, 0, all), "get_entities_by_dimension");
+    // Ghosts arrive without their gids.
+    check(mg->pc->exchange_tags(mg->core.globalId_tag(), all), "exchange_tags");
+    std::vector<int> ids(all.size());
+    if (!all.empty()) check(mg->core.tag_get_data(mg->core.globalId_tag(), all, ids.data()), "tag_get_data");
+    std::vector<double> start(3 * all.size());
+    for (std::size_t i = 0; i < all.size(); ++i) {
+      for (int q = 0; q < 3; ++q) {
+        const std::size_t k = 3 * i + static_cast<std::size_t>(q);
+        start[k] = moved(ids[i], xyz[k], q);
+      }
+    }
+    const auto t1 = runner.run(
+        "smooth", "moab_laplacian", points,
+        [&] {
+          if (!all.empty()) check(mg->core.set_coords(all, start.data()), "set_coords");
+        },
+        [&] { soma::bench::moab_laplacian(mg->core, mg->pc, 3, sweeps); });
+    moab::Range mine = all;
+    check(mg->pc->filter_pstatus(mine, PSTATUS_NOT_OWNED, PSTATUS_NOT), "filter_pstatus");
+    std::vector<double> mxyz(3 * mine.size());
+    if (!mine.empty()) check(mg->core.get_coords(mine, mxyz.data()), "get_coords");
+    double msum = 0;
+    for (std::size_t i = 0; i < mine.size(); ++i) msum += mxyz[3 * i] + 2 * mxyz[3 * i + 1] + 3 * mxyz[3 * i + 2];
+    msum = comm.allreduce(msum, soma::Op::sum);
+
+    std::vector<double> sstart(3 * static_cast<std::size_t>(nv));
+    const auto at = [](LO e, int q) { return 3 * static_cast<std::size_t>(e) + static_cast<std::size_t>(q); };
+    for (LO e = 0; e < nv; ++e) {
+      for (int q = 0; q < 3; ++q) sstart[at(e, q)] = moved(ghosted->gid(0)(e), sx(e, q), q);
+    }
+    soma::SmoothOptions o;
+    o.iterations = sweeps;
+    const auto t2 = runner.run(
+        "smooth", "soma_laplacian", points,
+        [&] {
+          for (LO e = 0; e < nv; ++e) {
+            for (int q = 0; q < 3; ++q) sx(e, q) = sstart[at(e, q)];
+          }
+        },
+        [&] { (void)soma::laplacian_smooth(comm, *ghosted, o); });
+    runner.compare(t1, t2);
+    double ssum = 0;
+    for (LO e = 0; e < owned_end; ++e) ssum += sx(e, 0) + 2 * sx(e, 1) + 3 * sx(e, 2);
+    ssum = comm.allreduce(ssum, soma::Op::sum);
+    ok = agree(comm, std::abs(ssum - msum) <= 1e-12 * std::max(1.0, std::abs(msum))) && ok;
   }
 
   // ---- write and restart ----

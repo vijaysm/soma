@@ -60,6 +60,10 @@ struct TopologyAccess {
     return m.sets_;
   }
   template <class M>
+  static std::array<int, 2>& ghosts(Mesh<M>& m) {
+    return m.ghosts_;
+  }
+  template <class M>
   static CoordView<M>& coords(Mesh<M>& m) {
     return m.coords_;
   }
