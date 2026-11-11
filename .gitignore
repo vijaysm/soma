@@ -6,3 +6,4 @@ build/
 CMakeUserPresets.json
 __pycache__/
 .superpowers/
+build-*/

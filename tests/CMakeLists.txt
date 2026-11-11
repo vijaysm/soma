@@ -266,4 +266,19 @@ if(SOMA_INSTALL)
       -DMPIEXEC=${MPIEXEC_EXECUTABLE}
       -P ${PROJECT_SOURCE_DIR}/tests/packaging/run_packaging_test.cmake)
   set_tests_properties(packaging.find_package PROPERTIES TIMEOUT 300)
+  # The consumer is configured and built with the same compiler as SOMA. An
+  # MPI wrapper picks its host compiler from the environment, so the values
+  # that were set when SOMA was configured travel with the test; otherwise a
+  # shell whose OMPI_CXX is nvcc_wrapper fails the consumer configure under a
+  # CUDA-language Kokkos while SOMA itself built.
+  set(_soma_wrapper_env "")
+  foreach(var OMPI_CXX OMPI_CC MPICH_CXX MPICH_CC CUDAHOSTCXX)
+    if(DEFINED ENV{${var}})
+      list(APPEND _soma_wrapper_env "${var}=$ENV{${var}}")
+    endif()
+  endforeach()
+  if(_soma_wrapper_env)
+    set_tests_properties(packaging.find_package PROPERTIES ENVIRONMENT "${_soma_wrapper_env}")
+  endif()
+  unset(_soma_wrapper_env)
 endif()

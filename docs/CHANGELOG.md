@@ -794,5 +794,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `SOMA_INSTALL` defaults to ON only when SOMA is the top-level project.
 - An out-of-tree packaging test installs to a clean prefix, builds a consumer, and runs it (at
   two ranks for MPI builds). It also works with multi-config generators through `ctest -C`.
+  The `OMPI_CXX`, `OMPI_CC`, `MPICH_CXX`, `MPICH_CC` and `CUDAHOSTCXX` values of the configure
+  environment travel with the test, so the consumer sees the same host compiler behind an MPI
+  wrapper as SOMA did (a shell whose `OMPI_CXX` is `nvcc_wrapper` failed the consumer
+  configure under a CUDA-language Kokkos while SOMA itself had built).
 - With `SOMA_ENABLE_MOAB_REFERENCE=ON`, the HDF5 config whose targets MOAB links by name is
   loaded from the `HDF5_DIR` MOAB records when MOAB's own hard-coded path misses.
