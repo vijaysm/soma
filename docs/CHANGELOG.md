@@ -234,6 +234,13 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   (`AdjSource::copy`) or built on the destination (`AdjSource::rebuild`, the default). A graph
   needs both of its dimensions in `dims`. `clone()` copies every held graph. A memory space
   without a default execution space compiles, and asking it to rebuild throws.
+- A mirror from a space the host cannot read into a host space maps the pages of every
+  destination View of 1 MiB or more from the host backend's threads before the copy. A fresh
+  allocation is unmapped until written, and the CUDA driver stages a pageable destination and
+  faults its pages one at a time: on a PCIe 2.0 x16 link (GTX 1050 Ti) those copies ran at
+  1.85 GB/s against 5.4 GB/s into mapped pages, so `mirror_out` of a 2M-hex mesh with every
+  graph took 0.60 s and now takes 0.40 s (4M quads: 0.44 s to 0.30 s). Host-to-device and
+  host-to-host copies are unchanged.
 
 ### Entity sets and value kinds
 

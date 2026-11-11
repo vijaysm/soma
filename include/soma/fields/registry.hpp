@@ -905,10 +905,7 @@ class FieldRegistry {
   template <class Out, class V>
   static Out copy_of(const V& src, bool alias) {
     if (alias) return Kokkos::create_mirror_view_and_copy(typename Out::memory_space{}, src);
-    auto out = Kokkos::create_mirror(Kokkos::view_alloc(typename Out::memory_space{}, Kokkos::WithoutInitializing),
-                                     src);
-    Kokkos::deep_copy(out, src);
-    return out;
+    return detail::mirror_and_copy<typename Out::memory_space>(src);
   }
 
   template <class T>

@@ -84,9 +84,7 @@ void rebuild_adjacencies(Mesh<MemSpace>& mesh, AdjacencyRequest req);
 
 template <class Dst, class V>
 auto deep_mirror(const V& src) {
-  auto out = Kokkos::create_mirror(Kokkos::view_alloc(Dst{}, Kokkos::WithoutInitializing), src);
-  Kokkos::deep_copy(out, src);
-  return out;
+  return mirror_and_copy<Dst>(src);
 }
 }  // namespace detail
 
