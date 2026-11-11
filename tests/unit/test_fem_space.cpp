@@ -463,15 +463,19 @@ TEST(FemSpace, BadMeshesThrowOnEveryRank) {
   }
   // A cell turned inside out on the last rank only, before and after.
   soma::HostMesh mesh = box_part(c, spec);
-  const Space space(c, mesh);
+  const Space space(c, mesh), atomic(c, mesh, soma::Assembly::atomic), colored(c, mesh, soma::Assembly::colored);
   const auto x = mesh.coords();
   const Real keep = x(0, 0);
   if (c.rank() == c.size() - 1) x(0, 0) = 50;
   EXPECT_THROW((void)space.laplacian(c), std::invalid_argument);
+  EXPECT_THROW((void)atomic.laplacian(c), std::invalid_argument);
+  EXPECT_THROW((void)colored.laplacian(c), std::invalid_argument);
   EXPECT_THROW((void)space.load(c, Load{}), std::invalid_argument);
   EXPECT_THROW(Space(c, mesh), std::invalid_argument);
   x(0, 0) = keep;
   EXPECT_NO_THROW((void)space.laplacian(c));
+  EXPECT_NO_THROW((void)atomic.laplacian(c));
+  EXPECT_NO_THROW((void)colored.laplacian(c));
   // A mesh of prisms, on the first rank only.
   soma::MeshBuilder b(3);
   if (c.rank() == 0) {

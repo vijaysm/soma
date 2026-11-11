@@ -532,6 +532,13 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - On a 64^3 box of hexes, one thread a rank, the space takes 396 ms, gathered assembly 786 and
   CG to 1e-10 526 at one rank; 76, 146 and 133 at eight. Atomic and colored assembly time the
   same as gathered to within 3 % at one rank.
+- The element kernels skip work without changing a bit of the matrices: corner determinants
+  are read off the cells' edges, the degree-2 Gauss points' determinants serve both the
+  validity check and the integration, the stiffness matrix is filled by symmetry, and
+  `laplacian()` and `load()` count bad cells as they assemble instead of in a pass of their
+  own. On a 64^3 box of warped hexes, one rank: assembly 776 ms to 237 at one thread (123 to 33
+  at eight), the space 397 to 199. `least_jacobian` is NaN for a cell with a coordinate not
+  finite or a determinant that overflows; a NaN no longer gives way to a later determinant.
 - `examples/poisson.cpp` solves -lap u = 1, u = 0 on the boundary, on a `.h5m` or SOMA mesh on
   any number of ranks, by any assembly, and writes u as a vertex field.
 

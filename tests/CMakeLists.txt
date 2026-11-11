@@ -55,6 +55,12 @@ soma_add_test(test_distributed_mesh SOURCES unit/test_distributed_mesh.cpp RANKS
 soma_add_test(test_migrate SOURCES unit/test_migrate.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_ghosts SOURCES unit/test_ghosts.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_fem_elements SOURCES unit/test_fem_elements.cpp)
+# Its bit-for-bit checks compare kernels inlined in different places: they
+# hold where each expression is contracted alike, not under -ffp-contract=fast
+# (the CUDA and HIP default).
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(test_fem_elements PRIVATE -ffp-contract=on)
+endif()
 soma_add_test(test_fem_space SOURCES unit/test_fem_space.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_cg SOURCES unit/test_cg.cpp RANKS 1 2 3 4 5 7 8)
 if(SOMA_ENABLE_KOKKOSKERNELS)

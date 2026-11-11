@@ -122,10 +122,11 @@ LO bad_cells(const MeshView<MemSpace>& view) {
   return bad;
 }
 
-// The element stiffness matrices of every cell, at matrix_offsets.
+// The element stiffness matrices of every cell, at matrix_offsets; `bad`
+// counts the cells whose Jacobian is not positive throughout.
 template <class MemSpace>
 View1<Real, MemSpace> element_matrices(const MeshView<MemSpace>& view, const View1<Offset, MemSpace>& at,
-                                       Offset total) {
+                                       Offset total, const Kokkos::View<LO, MemSpace>& bad) {
   using Exec = typename MemSpace::execution_space;
   const int dim = view.dim;
   View1<Real, MemSpace> out(Kokkos::view_alloc(Kokkos::WithoutInitializing, "soma::FemSpace::element_matrices"),
@@ -135,7 +136,7 @@ View1<Real, MemSpace> element_matrices(const MeshView<MemSpace>& view, const Vie
       KOKKOS_LAMBDA(const LO e) {
         const fem::Cell c = fem::cell_of(view, dim, e);
         Real k[fem::max_nodes][fem::max_nodes];
-        fem::stiffness(c, k);
+        if (!(fem::stiffness(c, k) > 0)) Kokkos::atomic_inc(&bad());
         for (int a = 0; a < c.n; ++a) {
           for (int b = 0; b < c.n; ++b) out(at(e) + a * c.n + b) = k[a][b];
         }
@@ -143,10 +144,11 @@ View1<Real, MemSpace> element_matrices(const MeshView<MemSpace>& view, const Vie
   return out;
 }
 
-// The element load vectors of every cell, at vector_offsets.
+// The element load vectors of every cell, at vector_offsets; `bad` counts
+// as element_matrices does.
 template <class MemSpace, class F>
 View1<Real, MemSpace> element_loads(const MeshView<MemSpace>& view, const View1<Offset, MemSpace>& at, Offset total,
-                                    const F& f) {
+                                    const F& f, const Kokkos::View<LO, MemSpace>& bad) {
   using Exec = typename MemSpace::execution_space;
   const int dim = view.dim;
   View1<Real, MemSpace> out(Kokkos::view_alloc(Kokkos::WithoutInitializing, "soma::FemSpace::element_loads"),
@@ -156,7 +158,7 @@ View1<Real, MemSpace> element_loads(const MeshView<MemSpace>& view, const View1<
       KOKKOS_LAMBDA(const LO e) {
         const fem::Cell c = fem::cell_of(view, dim, e);
         Real r[fem::max_nodes];
-        fem::load(c, f, r);
+        if (!(fem::load(c, f, r) > 0)) Kokkos::atomic_inc(&bad());
         for (int a = 0; a < c.n; ++a) out(at(e) + a) = r[a];
       });
   return out;
@@ -201,11 +203,13 @@ void gather_load(LO rows, const View1<Offset, MemSpace>& around_offsets, const V
 }
 
 // Cells cells[first, last) add their stiffness matrices to the owned rows,
-// atomically or not. The caller fences.
+// atomically or not; `bad` counts as element_matrices does. The caller
+// fences.
 template <bool Atomic, class MemSpace>
 void scatter_cells(const MeshView<MemSpace>& view, LO rows, const View1<LO, MemSpace>& cells, Offset first,
                    Offset last, const View1<Offset, MemSpace>& offsets, const View1<Offset, MemSpace>& slot_offsets,
-                   const View1<LO, MemSpace>& cell_slots, const View1<Real, MemSpace>& values) {
+                   const View1<LO, MemSpace>& cell_slots, const View1<Real, MemSpace>& values,
+                   const Kokkos::View<LO, MemSpace>& bad) {
   using Exec = typename MemSpace::execution_space;
   const int dim = view.dim;
   Kokkos::parallel_for(
@@ -214,7 +218,7 @@ void scatter_cells(const MeshView<MemSpace>& view, LO rows, const View1<LO, MemS
         const LO e = cells(i);
         const fem::Cell c = fem::cell_of(view, dim, e);
         Real k[fem::max_nodes][fem::max_nodes];
-        fem::stiffness(c, k);
+        if (!(fem::stiffness(c, k) > 0)) Kokkos::atomic_inc(&bad());
         for (int a = 0; a < c.n; ++a) {
           const LO v = view.vertex(dim, e, a);
           if (v >= rows) continue;
@@ -326,15 +330,17 @@ class FemSpace {
   }
 
   // Collective: the stiffness matrix of -div grad (no boundary conditions).
-  // Throws std::invalid_argument on every rank if a cell has inverted since
-  // the space was made.
+  // Throws std::invalid_argument on every rank if a cell it assembles has
+  // inverted since the space was made (gather assembles every cell here,
+  // atomic and colored those with an owned corner), once assembly is done.
   CsrMatrix<MemSpace> laplacian(const Comm& comm) const {
-    check_cells(comm);
     CsrMatrix<MemSpace> a = pattern();
+    const Kokkos::View<LO, MemSpace> bad("soma::FemSpace::bad");
     if (assembly_ == Assembly::gather) {
-      const auto element = detail::element_matrices(view_, matrix_offsets_, matrix_total_);
+      const auto element = detail::element_matrices(view_, matrix_offsets_, matrix_total_, bad);
       detail::gather_rows(rows_, offsets_, around_offsets_, around_cells_, around_corner_, slot_offsets_, slots_,
                           matrix_offsets_, element, a.values);
+      check_cells(comm, bad);
       return a;
     }
     // Launches on one instance run in turn: the colors need no fence apart.
@@ -342,24 +348,27 @@ class FemSpace {
       const Offset first = group_offsets_[g], last = group_offsets_[g + 1];
       if (assembly_ == Assembly::atomic) {
         detail::scatter_cells<true>(view_, rows_, group_cells_, first, last, offsets_, cell_slot_offsets_,
-                                    cell_slots_, a.values);
+                                    cell_slots_, a.values, bad);
       } else {
         detail::scatter_cells<false>(view_, rows_, group_cells_, first, last, offsets_, cell_slot_offsets_,
-                                     cell_slots_, a.values);
+                                     cell_slots_, a.values, bad);
       }
     }
     typename MemSpace::execution_space{}.fence();
+    check_cells(comm, bad);
     return a;
   }
 
   // Collective: b[v] = integral of f N_v for the owned vertices (0 for the
-  // others); f(x, y, z) device-callable. Throws as laplacian() does.
+  // others); f(x, y, z) device-callable. Throws as laplacian() does, f having
+  // been called at the points of cells checked by then.
   template <class F>
   View1<Real, MemSpace> load(const Comm& comm, const F& f) const {
-    check_cells(comm);
     View1<Real, MemSpace> b = vector("soma::FemSpace::load");
-    const auto element = detail::element_loads(view_, vector_offsets_, vector_total_, f);
+    const Kokkos::View<LO, MemSpace> bad("soma::FemSpace::bad");
+    const auto element = detail::element_loads(view_, vector_offsets_, vector_total_, f, bad);
     detail::gather_load(rows_, around_offsets_, around_cells_, around_corner_, vector_offsets_, element, b);
+    check_cells(comm, bad);
     return b;
   }
 
@@ -404,8 +413,11 @@ class FemSpace {
   }
 
  private:
-  void check_cells(const Comm& comm) const {
-    if (comm.allreduce(static_cast<Real>(detail::bad_cells(view_)), Op::max) != 0) {
+  // Collective, after the kernels that counted `bad` have finished.
+  void check_cells(const Comm& comm, const Kokkos::View<LO, MemSpace>& bad) const {
+    LO here = 0;
+    Kokkos::deep_copy(here, bad);
+    if (comm.allreduce(static_cast<Real>(here), Op::max) != 0) {
       throw std::invalid_argument("FemSpace: a rank holds an inverted or degenerate cell");
     }
   }
