@@ -529,6 +529,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   (`soma/algorithms/petsc.hpp`, `SOMA_ENABLE_PETSC`) make PETSc `MATAIJ` matrices (by COO) and
   vectors in `FemSpace::numbering` order. PETSc's CG with Jacobi takes the iterations SOMA's
   takes, to one, and reaches its solution to 1e-9.
+- On a 64^3 box of hexes, one thread a rank, the space takes 396 ms, gathered assembly 786 and
+  CG to 1e-10 526 at one rank; 76, 146 and 133 at eight. Atomic and colored assembly time the
+  same as gathered to within 3 % at one rank.
 - `examples/poisson.cpp` solves -lap u = 1, u = 0 on the boundary, on a `.h5m` or SOMA mesh on
   any number of ranks, by any assembly, and writes u as a vertex field.
 

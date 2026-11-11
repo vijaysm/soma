@@ -45,7 +45,7 @@ TEST(KokkosSparse, ViewsShareTheMatrixAndMultiplyAlike) {
       Real worst = 0, scale = 0;
       for (LO i = 0; i < a.rows; ++i) {
         Real row = 0;
-        for (soma::Offset k = a.offsets(i); k < a.offsets(i + 1); ++k) row += std::abs(a.values(k) * x(a.columns(k)));
+        for (soma::Offset e = a.offsets(i); e < a.offsets(i + 1); ++e) row += std::abs(a.values(e) * x(a.columns(e)));
         worst = std::max(worst, std::abs(z(i) - y(i)));
         scale = std::max(scale, row);
       }
