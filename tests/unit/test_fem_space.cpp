@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <map>
@@ -463,15 +464,19 @@ TEST(FemSpace, BadMeshesThrowOnEveryRank) {
   }
   // A cell turned inside out on the last rank only, before and after.
   soma::HostMesh mesh = box_part(c, spec);
-  const Space space(c, mesh);
+  const Space space(c, mesh), atomic(c, mesh, soma::Assembly::atomic), colored(c, mesh, soma::Assembly::colored);
   const auto x = mesh.coords();
   const Real keep = x(0, 0);
   if (c.rank() == c.size() - 1) x(0, 0) = 50;
   EXPECT_THROW((void)space.laplacian(c), std::invalid_argument);
+  EXPECT_THROW((void)atomic.laplacian(c), std::invalid_argument);
+  EXPECT_THROW((void)colored.laplacian(c), std::invalid_argument);
   EXPECT_THROW((void)space.load(c, Load{}), std::invalid_argument);
   EXPECT_THROW(Space(c, mesh), std::invalid_argument);
   x(0, 0) = keep;
   EXPECT_NO_THROW((void)space.laplacian(c));
+  EXPECT_NO_THROW((void)atomic.laplacian(c));
+  EXPECT_NO_THROW((void)colored.laplacian(c));
   // A mesh of prisms, on the first rank only.
   soma::MeshBuilder b(3);
   if (c.rank() == 0) {
@@ -609,6 +614,84 @@ TEST(FemSpace, AssemblyMethodsAgree) {
         }
       }
     }
+  }
+}
+
+namespace {
+
+// soma::reproducible() set for a scope.
+struct Reproducible {
+  bool saved = soma::reproducible();
+  explicit Reproducible(bool on) { soma::set_reproducible(on); }
+  ~Reproducible() { soma::set_reproducible(saved); }
+};
+
+std::uint64_t bits(Real x) { return std::bit_cast<std::uint64_t>(x); }
+
+}  // namespace
+
+// Reproducible: every assembly gathers (and says so), and dots are the
+// serial ones bit for bit, in one allreduce. Not, the dots differ from the
+// serial ones in some partition.
+TEST(FemSpace, ReproducibleSpacesGatherAndDotExactly) {
+  const Comm c = Comm::world();
+  int plain_differ = 0;
+  for (const bool on : {true, false}) {
+    const Reproducible scope(on);
+    for (const Topology t : {Topology::tri, Topology::hex}) {
+      const soma::testing::BoxSpec spec = spec_of(t, 5);
+      const soma::HostMesh whole = box_part(Comm::self(), spec);
+      const Space serial(Comm::self(), whole);
+      Vector sx = serial.vector(), sy = serial.vector();
+      for (LO i = 0; i < whole.count(0); ++i) {
+        sx(i) = std::sin(0.37 * static_cast<Real>(whole.gid(0)(i)));
+        sy(i) = std::cos(0.11 * static_cast<Real>(whole.gid(0)(i))) * 1e3;
+      }
+      const Real want = serial.dot(Comm::self(), sx, sy);
+      for (const int deal : {0, 1}) {
+        SCOPED_TRACE(testing::Message() << on << " " << soma::name(t) << " deal " << deal);
+        const soma::HostMesh mesh = box_part(c, spec, Part{.deal = deal});
+        const Space gathered(c, mesh);
+        EXPECT_EQ(gathered.reproducible(), on);
+        const Matrix a = gathered.laplacian(c);
+        for (const soma::Assembly m : {soma::Assembly::atomic, soma::Assembly::colored}) {
+          const Space other(c, mesh, m);
+          EXPECT_EQ(other.assembly(), on ? soma::Assembly::gather : m);
+          if (!on) continue;
+          const Matrix b = other.laplacian(c);
+          LO differ = 0;
+          for (std::size_t k = 0; k < a.values.extent(0); ++k) differ += bits(a.values(k)) == bits(b.values(k)) ? 0 : 1;
+          EXPECT_EQ(differ, 0);
+        }
+        Vector x = gathered.vector(), y = gathered.vector();
+        for (LO i = 0; i < mesh.count(0); ++i) {
+          x(i) = std::sin(0.37 * static_cast<Real>(mesh.gid(0)(i)));
+          y(i) = std::cos(0.11 * static_cast<Real>(mesh.gid(0)(i))) * 1e3;
+        }
+        const auto before = soma::detail::comm_counts().collectives;
+        const Real d = gathered.dot(c, x, y);
+        EXPECT_EQ(soma::detail::comm_counts().collectives - before, 1u);
+        if (on) {
+          EXPECT_EQ(bits(d), bits(want));
+        } else {
+          plain_differ += bits(d) == bits(want) ? 0 : 1;
+        }
+      }
+    }
+  }
+  if (c.size() > 1) EXPECT_GT(plain_differ, 0);
+}
+
+// Ranks that differ in soma::reproducible() cannot make a space: every rank
+// throws.
+TEST(FemSpace, RanksMustAgreeOnReproducible) {
+  const Comm c = Comm::world();
+  const soma::HostMesh mesh = box_part(c, spec_of(Topology::quad, 4));
+  const Reproducible scope(c.size() > 1 && c.rank() == c.size() - 1);
+  if (c.size() > 1) {
+    expect_message(c, mesh, "differ in soma::reproducible()");
+  } else {
+    EXPECT_NO_THROW(Space(c, mesh));
   }
 }
 

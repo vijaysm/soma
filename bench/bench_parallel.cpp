@@ -21,7 +21,8 @@
 //   * poisson: -lap u = 1, u = 0 on the boundary, by trilinear elements on
 //     the smoothed ghosted mesh, SOMA alone (MOAB has no FEM): the space
 //     (FemSpace) for each assembly, the stiffness matrix gathered, by atomics
-//     and colored, and Jacobi CG to a relative residual of 1e-10;
+//     and colored, and Jacobi CG to a relative residual of 1e-10, with
+//     plain and with exact (reproducible) sums;
 //   * write and restart: write_soma and read_soma at the same P against
 //     write_file PARALLEL=WRITE_PART and load_file READ_PART.
 //
@@ -397,6 +398,12 @@ int main(int argc, char** argv) {
                   << std::defaultfloat << "\n";
       }
       ok = agree(comm, report.converged) && ok;
+      // The same solve with exact sums: the same bits on any P.
+      co.reproducible = true;
+      soma::CgReport exact;
+      runner.run("poisson", "soma_cg_reproducible", points, [&] { Kokkos::deep_copy(u, 0.0); },
+                 [&] { exact = soma::cg(comm, *space, *a, soma::View1<const double, Host>(b), u, co); });
+      ok = agree(comm, exact.converged) && ok;
     }
     worst = comm.allreduce(worst, soma::Op::max);
     largest = comm.allreduce(largest, soma::Op::max);

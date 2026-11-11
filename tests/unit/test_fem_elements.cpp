@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <random>
 #include <utility>
 #include <vector>
@@ -130,6 +132,119 @@ bool positive_definite(const Matrix& k, int n) {
     }
   }
   return true;
+}
+
+// The kernels written plainly, as a reference: every determinant and
+// gradient from at_point as it was first written (copied here, so that the
+// reference does not move with the library), the full matrices.
+Real plain_at_point(const fem::Cell& c, const Real* xi, Real* n, Real (*g)[3]) {
+  Real dn[fem::max_nodes][3];
+  const int nodes = fem::shape(c.topology, xi, n, dn);
+  const int d = c.dim;
+  Real j[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};  // j[i][k] = d x_i / d xi_k
+  for (int a = 0; a < nodes; ++a) {
+    for (int i = 0; i < d; ++i) {
+      for (int k = 0; k < d; ++k) j[i][k] += c.x[a][i] * dn[a][k];
+    }
+  }
+  Real det = 0;
+  Real inv[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};  // inv[k][i] = d xi_k / d x_i
+  if (d == 2) {
+    det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
+    if (det == 0) return 0;
+    inv[0][0] = j[1][1] / det;
+    inv[0][1] = -j[0][1] / det;
+    inv[1][0] = -j[1][0] / det;
+    inv[1][1] = j[0][0] / det;
+  } else {
+    const Real c00 = j[1][1] * j[2][2] - j[1][2] * j[2][1];
+    const Real c01 = j[1][2] * j[2][0] - j[1][0] * j[2][2];
+    const Real c02 = j[1][0] * j[2][1] - j[1][1] * j[2][0];
+    det = j[0][0] * c00 + j[0][1] * c01 + j[0][2] * c02;
+    if (det == 0) return 0;
+    inv[0][0] = c00 / det;
+    inv[1][0] = c01 / det;
+    inv[2][0] = c02 / det;
+    inv[0][1] = (j[0][2] * j[2][1] - j[0][1] * j[2][2]) / det;
+    inv[1][1] = (j[0][0] * j[2][2] - j[0][2] * j[2][0]) / det;
+    inv[2][1] = (j[0][1] * j[2][0] - j[0][0] * j[2][1]) / det;
+    inv[0][2] = (j[0][1] * j[1][2] - j[0][2] * j[1][1]) / det;
+    inv[1][2] = (j[0][2] * j[1][0] - j[0][0] * j[1][2]) / det;
+    inv[2][2] = (j[0][0] * j[1][1] - j[0][1] * j[1][0]) / det;
+  }
+  for (int a = 0; a < nodes; ++a) {
+    for (int i = 0; i < 3; ++i) {
+      Real s = 0;
+      for (int k = 0; k < d; ++k) s += dn[a][k] * inv[k][i];
+      g[a][i] = i < d ? s : 0;
+    }
+  }
+  return det;
+}
+
+Real plain_least(const fem::Cell& c) {
+  Real n[fem::max_nodes], g[fem::max_nodes][3];
+  if (simplex(c.topology)) {
+    const Real centre[3] = {Real{1} / 4, Real{1} / 4, Real{1} / 4};
+    return plain_at_point(c, centre, n, g);
+  }
+  const auto ref = reference_corners(c.topology);
+  Real least = 0;
+  for (int a = 0; a < c.n; ++a) {
+    const Real det = plain_at_point(c, ref[static_cast<std::size_t>(a)].data(), n, g);
+    least = a == 0 || !(det >= least) ? det : least;
+  }
+  const fem::Quadrature q = fem::quadrature(c.topology, 2);
+  for (int p = 0; p < q.n; ++p) {
+    const Real det = plain_at_point(c, q.xi[p], n, g);
+    least = !(det >= least) ? det : least;
+  }
+  return least;
+}
+
+template <class Body>
+Real plain_integrate(const fem::Cell& c, int degree, const Body& body) {
+  const Real least = plain_least(c);
+  if (!(least > 0)) return least;
+  const fem::Quadrature q = fem::quadrature(c.topology, degree);
+  for (int p = 0; p < q.n; ++p) {
+    Real n[fem::max_nodes], g[fem::max_nodes][3];
+    const Real w = q.w[p] * plain_at_point(c, q.xi[p], n, g);
+    body(w, n, g);
+  }
+  return least;
+}
+
+std::uint64_t bits(Real x) { return std::bit_cast<std::uint64_t>(x); }
+
+// Cells of every topology, affine and distorted, some of them inverted or
+// with a corner collapsed onto its neighbour.
+std::vector<fem::Cell> assorted_cells(std::mt19937& rng) {
+  std::vector<fem::Cell> out;
+  std::uniform_real_distribution<Real> big(-0.7, 0.7);
+  for (const Topology t : all) {
+    for (int i = 0; i < 200; ++i) {
+      out.push_back(cell(t, random_affine(dim_of(t), rng)));
+      if (dim_of(t) == 2) {
+        // In the plane z = 3.25, not z = 0.
+        fem::Cell lifted = out.back();
+        for (int k = 0; k < lifted.n; ++k) lifted.x[k][2] = 3.25;
+        out.push_back(lifted);
+      }
+      if (simplex(t)) continue;
+      out.push_back(distorted(t, rng));
+      fem::Cell c = cell(t, Affine{});
+      for (int k = 0; k < c.n; ++k) {
+        for (int j = 0; j < c.dim; ++j) c.x[k][j] += big(rng);
+      }
+      out.push_back(c);
+      c = cell(t, Affine{});
+      const int a = i % c.n;
+      for (int j = 0; j < 3; ++j) c.x[a][j] = c.x[a ^ 1][j];
+      out.push_back(c);
+    }
+  }
+  return out;
 }
 
 }  // namespace
@@ -314,6 +429,135 @@ TEST(FemElements, SquaredErrorIntegratesTheDifference) {
     auto square = [](Real x, Real, Real) { return x * x; };
     EXPECT_NEAR(fem::squared_error(cell(t, Affine{}), u, square), monomial_integral(t, 4, 0, 0), 1e-14);
   }
+}
+
+// A corner's Jacobian read off its edges is the one at_point sums, bit for
+// bit, inverted and degenerate cells included.
+TEST(FemElements, CornerDeterminantsAreAtPointsBitForBit) {
+  std::mt19937 rng(17);
+  int inverted = 0, flat = 0;
+  for (const fem::Cell& c : assorted_cells(rng)) {
+    if (simplex(c.topology)) continue;
+    const auto ref = reference_corners(c.topology);
+    for (int a = 0; a < c.n; ++a) {
+      Real n[fem::max_nodes], g[fem::max_nodes][3];
+      const Real want = plain_at_point(c, ref[static_cast<std::size_t>(a)].data(), n, g);
+      ASSERT_EQ(bits(fem::detail::det_at_corner(c, a)), bits(want)) << soma::name(c.topology) << " corner " << a;
+      inverted += want < 0 ? 1 : 0;
+      flat += want == 0 ? 1 : 0;
+    }
+  }
+  EXPECT_GT(inverted, 0);
+  EXPECT_GT(flat, 0);
+}
+
+// The kernels give what the plain reference gives, bit for bit: the least
+// determinant, and the matrices and loads (zero where the cell is bad).
+TEST(FemElements, KernelsAreThePlainReferenceBitForBit) {
+  std::mt19937 rng(23);
+  const auto f = [](Real x, Real y, Real z) { return 1 + x - 2 * y + x * z; };
+  int bad = 0;
+  for (const fem::Cell& c : assorted_cells(rng)) {
+    SCOPED_TRACE(soma::name(c.topology));
+    const Real least = plain_least(c);
+    ASSERT_EQ(bits(fem::least_jacobian(c)), bits(least));
+    bad += least > 0 ? 0 : 1;
+    Matrix k{}, want{};
+    ASSERT_EQ(bits(fem::stiffness(c, k)), bits(least));
+    plain_integrate(c, simplex(c.topology) ? 0 : 2, [&](Real w, const Real*, const Real(*g)[3]) {
+      for (int a = 0; a < c.n; ++a) {
+        for (int b = 0; b < c.n; ++b) want[a][b] += w * (g[a][0] * g[b][0] + g[a][1] * g[b][1] + g[a][2] * g[b][2]);
+      }
+    });
+    Matrix m{}, mwant{};
+    ASSERT_EQ(bits(fem::mass(c, m)), bits(least));
+    plain_integrate(c, 2, [&](Real w, const Real* n, const Real(*)[3]) {
+      for (int a = 0; a < c.n; ++a) {
+        for (int b = 0; b < c.n; ++b) mwant[a][b] += w * n[a] * n[b];
+      }
+    });
+    Real r[fem::max_nodes] = {}, rwant[fem::max_nodes] = {};
+    ASSERT_EQ(bits(fem::load(c, f, r)), bits(least));
+    plain_integrate(c, 2, [&](Real w, const Real* n, const Real(*)[3]) {
+      Real x[3];
+      fem::point(c, n, x);
+      const Real fx = f(x[0], x[1], x[2]);
+      for (int a = 0; a < c.n; ++a) rwant[a] += w * fx * n[a];
+    });
+    for (int a = 0; a < c.n; ++a) {
+      ASSERT_EQ(bits(r[a]), bits(rwant[a])) << "load " << a;
+      for (int b = 0; b < c.n; ++b) {
+        ASSERT_EQ(bits(k[a][b]), bits(want[a][b])) << "stiffness " << a << " " << b;
+        ASSERT_EQ(bits(m[a][b]), bits(mwant[a][b])) << "mass " << a << " " << b;
+      }
+    }
+  }
+  EXPECT_GT(bad, 0);
+}
+
+// A cell whose coordinates are not finite, or whose determinants overflow,
+// is not usable: least_jacobian is NaN and the matrices zero, wherever in the
+// cell the first bad determinant falls.
+TEST(FemElements, OverflowingAndInfiniteCellsAreNotUsable) {
+  std::mt19937 rng(29);
+  for (const Topology t : all) {
+    for (int i = 0; i < 50; ++i) {
+      fem::Cell c = simplex(t) ? cell(t, random_affine(dim_of(t), rng)) : distorted(t, rng);
+      fem::Cell huge = c, inf = c;
+      // Determinants of coordinates near 2^360 (three factors) or 2^520 (two)
+      // overflow.
+      const Real scale = std::ldexp(1.0, dim_of(t) == 3 ? 360 : 520);
+      for (int k = 0; k < c.n; ++k) {
+        for (int j = 0; j < c.dim; ++j) huge.x[k][j] *= scale;
+      }
+      inf.x[i % c.n][i % c.dim] = (i % 2 == 0 ? 1 : -1) * std::numeric_limits<Real>::infinity();
+      // A quad's or hex's corner far out: the cofactors where every column
+      // holds an edge to it overflow (inf - inf), though the determinant
+      // itself would not. (A simplex's columns are not all such edges.)
+      fem::Cell far = c;
+      for (int j = 0; j < c.dim; ++j) far.x[i % c.n][j] = std::ldexp(1.0, 600);
+      std::vector<fem::Cell> bad_cells{huge, inf};
+      if (!simplex(t)) bad_cells.push_back(far);
+      if (dim_of(t) == 2) {
+        // In the plane z = inf: z enters no determinant, but no point is
+        // finite.
+        fem::Cell lifted = c;
+        for (int k = 0; k < c.n; ++k) lifted.x[k][2] = std::numeric_limits<Real>::infinity();
+        bad_cells.push_back(lifted);
+      }
+      for (const fem::Cell& bad : bad_cells) {
+        SCOPED_TRACE(soma::name(t));
+        EXPECT_TRUE(std::isnan(fem::least_jacobian(bad)));
+        Matrix k, m;
+        Real r[fem::max_nodes];
+        EXPECT_TRUE(std::isnan(fem::stiffness(bad, k)));
+        EXPECT_TRUE(std::isnan(fem::mass(bad, m)));
+        EXPECT_TRUE(std::isnan(fem::load(bad, [](Real, Real, Real) { return Real{1}; }, r)));
+        for (int a = 0; a < c.n; ++a) {
+          EXPECT_EQ(r[a], 0);
+          for (int b = 0; b < c.n; ++b) {
+            EXPECT_EQ(k[a][b], 0);
+            EXPECT_EQ(m[a][b], 0);
+          }
+        }
+      }
+    }
+  }
+}
+
+// The fold of least_jacobian: the lesser determinant, a NaN or an overflow
+// sticking whatever follows.
+TEST(FemElements, TheLeastDeterminantKeepsANaN) {
+  const Real nan = std::numeric_limits<Real>::quiet_NaN(), inf = std::numeric_limits<Real>::infinity();
+  EXPECT_EQ(fem::detail::lesser(2, 1), 1);
+  EXPECT_EQ(fem::detail::lesser(1, 2), 1);
+  EXPECT_EQ(fem::detail::lesser(1, -3), -3);
+  EXPECT_EQ(fem::detail::lesser(inf, 0.5), 0.5);
+  EXPECT_TRUE(std::isnan(fem::detail::lesser(1, nan)));
+  EXPECT_TRUE(std::isnan(fem::detail::lesser(nan, 1)));
+  EXPECT_TRUE(std::isnan(fem::detail::lesser(nan, -1)));
+  EXPECT_TRUE(std::isnan(fem::detail::lesser(1, inf)));
+  EXPECT_TRUE(std::isnan(fem::detail::lesser(1, -inf)));
 }
 
 TEST(FemElements, InvertedAndFlatCellsAreReported) {

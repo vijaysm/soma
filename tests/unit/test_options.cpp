@@ -38,10 +38,16 @@ struct Args {
 
 struct Restore {
   double saved = soma::compress_threshold();
-  Restore() { ::unsetenv("SOMA_COMPRESS_THRESHOLD"); }
+  bool exact = soma::reproducible();
+  Restore() {
+    ::unsetenv("SOMA_COMPRESS_THRESHOLD");
+    ::unsetenv("SOMA_REPRODUCIBLE");
+  }
   ~Restore() {
     ::unsetenv("SOMA_COMPRESS_THRESHOLD");
+    ::unsetenv("SOMA_REPRODUCIBLE");
     soma::set_compress_threshold(saved);
+    soma::set_reproducible(exact);
   }
 };
 
@@ -110,4 +116,49 @@ TEST(Options, ScopeGuardReadsThem) {
   EXPECT_EQ(a.left(), (std::vector<std::string>{"app", "rest"}));
   Args b({"app", "--soma-compress-threshold=2"});
   EXPECT_THROW({ const soma::ScopeGuard bad(b.argc, b.argv); }, std::invalid_argument);
+}
+
+// The reproducible switch: off by default, the environment then the command
+// line (bare, =1 or =0), anything else refused with nothing changed.
+TEST(Options, ReproducibleIsASwitch) {
+  const Restore restore;
+  soma::set_reproducible(false);
+  Args none({"app", "--soma-reproducibleness", "--soma-reproducible-x=1"});
+  soma::parse_options(none.argc, none.argv);
+  EXPECT_FALSE(soma::reproducible());
+  EXPECT_EQ(none.left(), (std::vector<std::string>{"app", "--soma-reproducibleness", "--soma-reproducible-x=1"}));
+
+  ::setenv("SOMA_REPRODUCIBLE", "1", 1);
+  Args env({"app"});
+  soma::parse_options(env.argc, env.argv);
+  EXPECT_TRUE(soma::reproducible());
+  Args off({"app", "--soma-reproducible=0", "x"});
+  soma::parse_options(off.argc, off.argv);
+  EXPECT_FALSE(soma::reproducible());
+  EXPECT_EQ(off.left(), (std::vector<std::string>{"app", "x"}));
+  ::unsetenv("SOMA_REPRODUCIBLE");
+  Args bare({"app", "--soma-reproducible", "--soma-compress-threshold=0.25"});
+  soma::parse_options(bare.argc, bare.argv);
+  EXPECT_TRUE(soma::reproducible());
+  EXPECT_EQ(soma::compress_threshold(), 0.25);
+  EXPECT_EQ(bare.left(), (std::vector<std::string>{"app"}));
+
+  soma::set_reproducible(false);
+  soma::set_compress_threshold(0.3);
+  for (const std::string bad : {"", "2", "yes", "1 ", "01"}) {
+    Args a({"app", "--soma-reproducible", "--soma-compress-threshold=0.1", "--soma-reproducible=" + bad});
+    try {
+      soma::parse_options(a.argc, a.argv);
+      ADD_FAILURE() << "accepted '" << bad << "'";
+    } catch (const std::invalid_argument& e) {
+      EXPECT_NE(std::string(e.what()).find("--soma-reproducible"), std::string::npos) << e.what();
+    }
+    EXPECT_EQ(a.argc, 4) << bad;
+    EXPECT_FALSE(soma::reproducible()) << bad;
+    EXPECT_EQ(soma::compress_threshold(), 0.3) << bad;
+  }
+  ::setenv("SOMA_REPRODUCIBLE", "true", 1);
+  Args a({"app"});
+  EXPECT_THROW(soma::parse_options(a.argc, a.argv), std::invalid_argument);
+  EXPECT_FALSE(soma::reproducible());
 }

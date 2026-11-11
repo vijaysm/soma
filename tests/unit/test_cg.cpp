@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <limits>
 #include <map>
@@ -53,6 +55,7 @@ struct Solution {
   Vector u;
   soma::CgReport report;
   Real l2 = 0;  // ||u_h - u|| over the box
+  unsigned long collectives = 0;  // cg's
 };
 
 // -lap u = f with u = 0 on the boundary, solved by CG.
@@ -65,7 +68,9 @@ Solution solve(const Comm& c, const soma::HostMesh& mesh, const soma::CgOptions&
   soma::apply_dirichlet(a, b, space.boundary(), CVector(zero));
   Solution s;
   s.u = space.vector();
+  const auto before = soma::detail::comm_counts().collectives;
   s.report = soma::cg(c, space, a, CVector(b), s.u, o);
+  s.collectives = soma::detail::comm_counts().collectives - before;
   const auto view = mesh.view();
   Real local = 0;
   for (LO e = 0; e < mesh.segment_table(d).owned_end; ++e) {
@@ -146,6 +151,90 @@ TEST(Cg, DistributedSolvesAreTheSerialOne) {
       for (const auto& [g, v] : by_gid(mesh, u)) ASSERT_NEAR(v, want.at(g), 1e-9) << "vertex " << g;
     }
   }
+}
+
+// Reproducible, the solve on any partition is the serial one bit for bit:
+// as many iterations, the same residual, the same value at every vertex, in
+// as many collectives. Set library-wide (the space reads it) or per solve
+// alike. Not reproducible, partitions round differently somewhere.
+TEST(Cg, ReproducibleSolvesAreTheSerialOneBitForBit) {
+  const Comm c = Comm::world();
+  const bool saved = soma::reproducible();
+  soma::CgOptions o;
+  o.rtol = 1e-12;
+  int plain_differ = 0;
+  for (const int mode : {0, 1, 2}) {  // library-wide, per solve, neither
+    soma::set_reproducible(mode == 0);
+    soma::CgOptions m = o;
+    if (mode == 1) m.reproducible = true;
+    for (const Topology t : all) {
+      const soma::testing::BoxSpec spec = fem_test::spec_of(t, 6);
+      const soma::HostMesh whole = box_part(Comm::self(), spec);
+      const Solution serial = solve(Comm::self(), whole, m);
+      ASSERT_TRUE(serial.report.converged);
+      const auto want = by_gid(whole, serial.u);
+      for (const int deal : {0, 1}) {
+        SCOPED_TRACE(testing::Message() << "mode " << mode << " " << soma::name(t) << " deal " << deal);
+        const soma::HostMesh mesh = box_part(c, spec, fem_test::Part{.deal = deal});
+        const Solution r = solve(c, mesh, m);
+        ASSERT_TRUE(r.report.converged);
+        int differ = 0;
+        for (const auto& [g, v] : by_gid(mesh, r.u)) {
+          differ += std::bit_cast<std::uint64_t>(v) == std::bit_cast<std::uint64_t>(want.at(g)) ? 0 : 1;
+        }
+        differ = static_cast<int>(c.allreduce(static_cast<Real>(differ), soma::Op::sum));
+        if (mode == 2) {
+          plain_differ += differ;
+          continue;
+        }
+        EXPECT_EQ(differ, 0);
+        EXPECT_EQ(r.report.iterations, serial.report.iterations);
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(r.report.residual),
+                  std::bit_cast<std::uint64_t>(serial.report.residual));
+        EXPECT_EQ(r.collectives, 3u + 2u * static_cast<unsigned>(r.report.iterations));
+      }
+    }
+  }
+  soma::set_reproducible(saved);
+  if (c.size() > 1) EXPECT_GT(plain_differ, 0);
+}
+
+// Exact sums cannot make a matrix assembled atomically or by colors the same
+// on every partition: asked to be reproducible over such a space, every rank
+// throws.
+TEST(Cg, ReproducibleNeedsAGatheringSpace) {
+  const Comm c = Comm::world();
+  const soma::HostMesh mesh = box_part(c, fem_test::spec_of(Topology::quad, 4));
+  for (const soma::Assembly m : {soma::Assembly::atomic, soma::Assembly::colored}) {
+    const Space space(c, mesh, m);
+    Matrix a = space.laplacian(c);
+    Vector b = space.load(c, Source{2}), u = space.vector();
+    soma::apply_dirichlet(a, b, space.boundary(), CVector(space.vector()));
+    soma::CgOptions o;
+    o.reproducible = true;
+    EXPECT_THROW((void)soma::cg(c, space, a, CVector(b), u, o), std::invalid_argument);
+    o.reproducible = false;
+    EXPECT_TRUE(soma::cg(c, space, a, CVector(b), u, o).converged);
+  }
+}
+
+// Digests of a solve, reproducible and not, for compare_threads.cmake, which
+// runs this at several thread counts: the reproducible digests must agree.
+TEST(Cg, SolutionDigests) {
+  const Comm self = Comm::self();
+  const bool saved = soma::reproducible();
+  for (const bool on : {true, false}) {
+    soma::set_reproducible(on);
+    std::uint64_t h = 1469598103934665603ull;
+    for (const Topology t : {Topology::tet, Topology::hex}) {
+      const Solution s = solve(self, box_part(self, fem_test::spec_of(t, 12)), soma::CgOptions{});
+      ASSERT_TRUE(s.report.converged);
+      for (std::size_t i = 0; i < s.u.extent(0); ++i) h = (h ^ std::bit_cast<std::uint64_t>(s.u(i))) * 1099511628211ull;
+    }
+    std::printf("digest %s %016llx\n", on ? "reproducible" : "plain", static_cast<unsigned long long>(h));
+  }
+  std::printf("concurrency %d\n", Kokkos::DefaultHostExecutionSpace().concurrency());
+  soma::set_reproducible(saved);
 }
 
 // Without the preconditioner the same solution; from the solution itself no

@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2022-2026, Vijay Mahadevan.
+
+# Runs EXE --gtest_filter=FILTER at 1, 3 and 4 host threads (KOKKOS_NUM_THREADS)
+# and compares the "digest reproducible" lines it prints: they must agree.
+# The "digest plain" lines must differ somewhere when a run had more than
+# one thread, so that the comparison could fail.
+set(reproducible "")
+set(plain "")
+set(threaded OFF)
+foreach(n IN ITEMS 1 3 4)
+  set(ENV{KOKKOS_NUM_THREADS} ${n})
+  execute_process(COMMAND ${EXE} --gtest_filter=${FILTER} OUTPUT_VARIABLE out ERROR_VARIABLE err RESULT_VARIABLE rc)
+  if(NOT rc EQUAL 0)
+    message(FATAL_ERROR "${EXE} at ${n} threads failed (${rc}):\n${out}\n${err}")
+  endif()
+  string(REGEX MATCH "digest reproducible ([0-9a-f]+)" _ "${out}")
+  list(APPEND reproducible "${CMAKE_MATCH_1}")
+  string(REGEX MATCH "digest plain ([0-9a-f]+)" _ "${out}")
+  list(APPEND plain "${CMAKE_MATCH_1}")
+  string(REGEX MATCH "concurrency ([0-9]+)" _ "${out}")
+  if(CMAKE_MATCH_1 GREATER 1)
+    set(threaded ON)
+  endif()
+endforeach()
+list(REMOVE_DUPLICATES reproducible)
+list(LENGTH reproducible distinct)
+if(NOT distinct EQUAL 1 OR reproducible STREQUAL "")
+  message(FATAL_ERROR "reproducible digests differ across thread counts: ${reproducible}")
+endif()
+list(REMOVE_DUPLICATES plain)
+list(LENGTH plain distinct_plain)
+if(threaded AND distinct_plain EQUAL 1)
+  message(FATAL_ERROR "plain digests agree across thread counts: the comparison proves nothing")
+endif()
+message(STATUS "reproducible digest ${reproducible} at 1, 3 and 4 threads; plain digests: ${plain}")

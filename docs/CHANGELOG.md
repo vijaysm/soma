@@ -56,6 +56,13 @@ All notable changes to SOMA are recorded here. The format follows
 - The fixed-width types `LO`, `Offset`, `GO` and `Real` are defined in `soma/core/types.hpp`.
   `SOMA_LO_64` and `SOMA_OFFSET_64` select 64-bit widths.
 - `Comm::exscan` on a span scans each entry on its own (one call for a vector of counts).
+- `soma::reproducible()` (`set_reproducible`, `SOMA_REPRODUCIBLE=0|1`,
+  `--soma-reproducible[=0|1]`), off by default, asks algorithms for results the same bit for
+  bit on any number of ranks and threads, for one build, at some cost.
+- `soma::ExactSums<K>` (`soma/parallel/exact_sum.hpp`) sums doubles exactly into 68 radix-2^32
+  digits and rounds once, to nearest: the same bits in any order and split. A Kokkos reducer
+  (`ExactSumReducer`, `reduce_exact`) and `allreduce_exact` (one allreduce of integers) carry
+  it over threads and ranks; a term not finite makes its sum NaN.
 - `detail::comm_counts()` counts the collectives and routed exchanges this process has
   entered, for tests that bound them.
 - `Comm::allgatherv` gathers each rank's span of trivially copyable values on every rank, in
@@ -529,9 +536,23 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   (`soma/algorithms/petsc.hpp`, `SOMA_ENABLE_PETSC`) make PETSc `MATAIJ` matrices (by COO) and
   vectors in `FemSpace::numbering` order. PETSc's CG with Jacobi takes the iterations SOMA's
   takes, to one, and reaches its solution to 1e-9.
-- On a 64^3 box of hexes, one thread a rank, the space takes 396 ms, gathered assembly 786 and
-  CG to 1e-10 526 at one rank; 76, 146 and 133 at eight. Atomic and colored assembly time the
-  same as gathered to within 3 % at one rank.
+- On a 64^3 box of hexes, one thread a rank (bench_parallel), the space takes 202 ms,
+  gathered assembly 246 and CG to 1e-10 518 at one rank; 40, 53 and 148 at eight. Atomic and
+  colored assembly time the same as gathered to within 2 % at one rank.
+- The element kernels skip work without changing a bit of the matrices: corner determinants
+  are read off the cells' edges, the degree-2 Gauss points' determinants serve both the
+  validity check and the integration, the stiffness matrix is filled by symmetry, and
+  `laplacian()` and `load()` count bad cells as they assemble instead of in a pass of their
+  own. On a 64^3 box of warped hexes, one rank: assembly 776 ms to 237 at one thread (123 to 33
+  at eight), the space 397 to 199. `least_jacobian` is NaN for a cell with a coordinate not
+  finite or a determinant that overflows; a NaN no longer gives way to a later determinant.
+- Reproducible (`soma::reproducible()`, or `CgOptions::reproducible` for one solve), a
+  `FemSpace` gathers whatever assembly it is asked for (`assembly()` tells), and its `dot()`
+  and `cg` sum exactly, with as many allreduces: CG gives the same iterates and solution, bit
+  for bit, on any number of ranks and threads. Ranks must agree on the switch (every rank
+  throws otherwise), and a reproducible solve needs a gathering space. On the 64^3 box, one
+  thread a rank, CG takes 1.28 times as long at one rank and 1.13 to 1.23 at two to eight;
+  1.14 at eight threads on one rank.
 - `examples/poisson.cpp` solves -lap u = 1, u = 0 on the boundary, on a `.h5m` or SOMA mesh on
   any number of ranks, by any assembly, and writes u as a vertex field.
 

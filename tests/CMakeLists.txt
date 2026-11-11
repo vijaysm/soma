@@ -47,6 +47,7 @@ endfunction()
 
 soma_add_test(test_smoke SOURCES unit/test_smoke.cpp)
 soma_add_test(test_comm SOURCES unit/test_comm.cpp RANKS 1 2 3 4 8)
+soma_add_test(test_exact_sum SOURCES unit/test_exact_sum.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_transport SOURCES unit/test_transport.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_key_ranks SOURCES unit/test_key_ranks.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_partition SOURCES unit/test_partition.cpp RANKS 1 2 3 4 5 7 8)
@@ -55,8 +56,18 @@ soma_add_test(test_distributed_mesh SOURCES unit/test_distributed_mesh.cpp RANKS
 soma_add_test(test_migrate SOURCES unit/test_migrate.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_ghosts SOURCES unit/test_ghosts.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_fem_elements SOURCES unit/test_fem_elements.cpp)
+# Its bit-for-bit checks compare kernels inlined in different places: they
+# hold where each expression is contracted alike, not under -ffp-contract=fast
+# (the CUDA and HIP default).
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+  target_compile_options(test_fem_elements PRIVATE -ffp-contract=on)
+endif()
 soma_add_test(test_fem_space SOURCES unit/test_fem_space.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_cg SOURCES unit/test_cg.cpp RANKS 1 2 3 4 5 7 8)
+# Reproducible CG is the same bit for bit at any number of threads.
+add_test(NAME test_cg.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_cg> -DFILTER=Cg.SolutionDigests
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/unit/compare_threads.cmake)
+set_tests_properties(test_cg.threads PROPERTIES TIMEOUT 300)
 if(SOMA_ENABLE_KOKKOSKERNELS)
   soma_add_test(test_kokkos_sparse SOURCES unit/test_kokkos_sparse.cpp RANKS 1 2 3 4 5 7 8)
 endif()

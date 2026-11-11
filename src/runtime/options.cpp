@@ -16,6 +16,7 @@ namespace soma {
 namespace {
 
 std::atomic<double> threshold{default_compress_threshold};
+std::atomic<bool> exact{false};
 
 double parse_threshold(const char* text, const char* source) {
   const std::string what = std::string(source) + ": '" + text + "' is not a fraction in [0, 1]";
@@ -26,7 +27,17 @@ double parse_threshold(const char* text, const char* source) {
   return v;
 }
 
+bool parse_switch(const char* text, const char* source) {
+  if (std::strcmp(text, "1") == 0) return true;
+  if (std::strcmp(text, "0") == 0) return false;
+  throw std::invalid_argument(std::string(source) + ": '" + text + "' is not 0 or 1");
+}
+
 }  // namespace
+
+bool reproducible() noexcept { return exact.load(std::memory_order_relaxed); }
+
+void set_reproducible(bool on) noexcept { exact.store(on, std::memory_order_relaxed); }
 
 double compress_threshold() noexcept { return threshold.load(std::memory_order_relaxed); }
 
@@ -37,13 +48,24 @@ void set_compress_threshold(double t) {
 
 void parse_options(int& argc, char**& argv) {
   static constexpr char flag[] = "--soma-compress-threshold=";
-  const auto ours = [&](int i) { return std::strncmp(argv[i], flag, sizeof flag - 1) == 0; };
+  static constexpr char repro[] = "--soma-reproducible";
+  const auto is_threshold = [&](int i) { return std::strncmp(argv[i], flag, sizeof flag - 1) == 0; };
+  const auto is_repro = [&](int i) {
+    return std::strncmp(argv[i], repro, sizeof repro - 1) == 0 &&
+           (argv[i][sizeof repro - 1] == '\0' || argv[i][sizeof repro - 1] == '=');
+  };
+  const auto ours = [&](int i) { return is_threshold(i) || is_repro(i); };
   double t = compress_threshold();
+  bool r = reproducible();
   if (const char* env = std::getenv("SOMA_COMPRESS_THRESHOLD"); env != nullptr) t = parse_threshold(env, "SOMA_COMPRESS_THRESHOLD");
+  if (const char* env = std::getenv("SOMA_REPRODUCIBLE"); env != nullptr) r = parse_switch(env, "SOMA_REPRODUCIBLE");
   for (int i = 1; i < argc; ++i) {
-    if (ours(i)) t = parse_threshold(argv[i] + sizeof flag - 1, "--soma-compress-threshold");
+    if (is_threshold(i)) t = parse_threshold(argv[i] + sizeof flag - 1, "--soma-compress-threshold");
+    if (is_repro(i)) {
+      r = argv[i][sizeof repro - 1] == '\0' || parse_switch(argv[i] + sizeof repro, "--soma-reproducible");
+    }
   }
-  // Every value read: only now change argv and the threshold.
+  // Every value read: only now change argv and the options.
   int kept = argc > 0 ? 1 : 0;
   for (int i = kept; i < argc; ++i) {
     if (!ours(i)) argv[kept++] = argv[i];
@@ -51,6 +73,7 @@ void parse_options(int& argc, char**& argv) {
   for (int i = kept; i < argc; ++i) argv[i] = nullptr;
   argc = kept;
   threshold.store(t, std::memory_order_relaxed);
+  exact.store(r, std::memory_order_relaxed);
 }
 
 }  // namespace soma

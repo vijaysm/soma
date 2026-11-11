@@ -207,37 +207,66 @@ KOKKOS_INLINE_FUNCTION Cell cell_of(const MeshView<MemSpace>& m, int dim, LO e) 
   return c;
 }
 
-// At reference point xi: the shape functions n, their physical gradients g,
-// and the Jacobian's determinant (negative for an inverted cell, 0 for a
-// degenerate one, when g is left unset).
-KOKKOS_INLINE_FUNCTION Real at_point(const Cell& c, const Real* xi, Real* n, Real (*g)[3]) {
-  Real dn[max_nodes][3];
+namespace detail {
+
+// The Jacobian j[i][k] = d x_i / d xi_k at reference point xi, with the
+// shape values n and reference gradients dn there; the node count.
+KOKKOS_INLINE_FUNCTION int jacobian(const Cell& c, const Real* xi, Real* n, Real (*dn)[3], Real (*j)[3]) {
   const int nodes = shape(c.topology, xi, n, dn);
   const int d = c.dim;
-  Real j[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};  // j[i][k] = d x_i / d xi_k
+  for (int i = 0; i < 3; ++i) {
+    for (int k = 0; k < 3; ++k) j[i][k] = 0;
+  }
   for (int a = 0; a < nodes; ++a) {
     for (int i = 0; i < d; ++i) {
       for (int k = 0; k < d; ++k) j[i][k] += c.x[a][i] * dn[a][k];
     }
   }
+  return nodes;
+}
+
+// The determinant of the d x d Jacobian j; 0 (not -0) when it vanishes.
+KOKKOS_INLINE_FUNCTION Real determinant(int d, const Real (*j)[3]) {
   Real det = 0;
-  Real inv[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};  // inv[k][i] = d xi_k / d x_i
   if (d == 2) {
     det = j[0][0] * j[1][1] - j[0][1] * j[1][0];
-    if (det == 0) return 0;
-    inv[0][0] = j[1][1] / det;
-    inv[0][1] = -j[0][1] / det;
-    inv[1][0] = -j[1][0] / det;
-    inv[1][1] = j[0][0] / det;
   } else {
     const Real c00 = j[1][1] * j[2][2] - j[1][2] * j[2][1];
     const Real c01 = j[1][2] * j[2][0] - j[1][0] * j[2][2];
     const Real c02 = j[1][0] * j[2][1] - j[1][1] * j[2][0];
     det = j[0][0] * c00 + j[0][1] * c01 + j[0][2] * c02;
-    if (det == 0) return 0;
-    inv[0][0] = c00 / det;
-    inv[1][0] = c01 / det;
-    inv[2][0] = c02 / det;
+  }
+  return det == 0 ? Real{0} : det;
+}
+
+// The Jacobian's determinant at xi alone, as at_point gives it.
+KOKKOS_INLINE_FUNCTION Real det_at(const Cell& c, const Real* xi) {
+  Real n[max_nodes], dn[max_nodes][3], j[3][3];
+  jacobian(c, xi, n, dn, j);
+  return determinant(c.dim, j);
+}
+
+}  // namespace detail
+
+// At reference point xi: the shape functions n, their physical gradients g,
+// and the Jacobian's determinant (negative for an inverted cell, 0 for a
+// degenerate one, when g is left unset).
+KOKKOS_INLINE_FUNCTION Real at_point(const Cell& c, const Real* xi, Real* n, Real (*g)[3]) {
+  Real dn[max_nodes][3], j[3][3];  // j[i][k] = d x_i / d xi_k
+  const int nodes = detail::jacobian(c, xi, n, dn, j);
+  const int d = c.dim;
+  const Real det = detail::determinant(d, j);
+  if (det == 0) return 0;
+  Real inv[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};  // inv[k][i] = d xi_k / d x_i
+  if (d == 2) {
+    inv[0][0] = j[1][1] / det;
+    inv[0][1] = -j[0][1] / det;
+    inv[1][0] = -j[1][0] / det;
+    inv[1][1] = j[0][0] / det;
+  } else {
+    inv[0][0] = (j[1][1] * j[2][2] - j[1][2] * j[2][1]) / det;
+    inv[1][0] = (j[1][2] * j[2][0] - j[1][0] * j[2][2]) / det;
+    inv[2][0] = (j[1][0] * j[2][1] - j[1][1] * j[2][0]) / det;
     inv[0][1] = (j[0][2] * j[2][1] - j[0][1] * j[2][2]) / det;
     inv[1][1] = (j[0][0] * j[2][2] - j[0][2] * j[2][0]) / det;
     inv[2][1] = (j[0][1] * j[2][0] - j[0][0] * j[2][1]) / det;
@@ -255,40 +284,116 @@ KOKKOS_INLINE_FUNCTION Real at_point(const Cell& c, const Real* xi, Real* n, Rea
   return det;
 }
 
-// The smallest Jacobian determinant over the cell's corners and the Gauss
-// points of the rules below: positive for a usable cell. NaN for a cell not
-// usable here at all: of n = 0, a topology without these elements, or of
-// dimension 2 with corners off one plane z = const. The determinant of a
-// simplex is constant; that of a quad or hex is checked at its corners too,
-// where a folded cell inverts first.
-KOKKOS_INLINE_FUNCTION Real least_jacobian(const Cell& c) {
-  const Real nan = Kokkos::Experimental::quiet_NaN_v<Real>;
-  if (c.n == 0 || c.n != nodes_of(c.topology) || c.dim != dimension(c.topology)) return nan;
-  if (c.dim == 2) {
-    for (int a = 1; a < c.n; ++a) {
-      if (c.x[a][2] != c.x[0][2]) return nan;
+namespace detail {
+
+// Whether least_jacobian(c) is NaN before any determinant: n = 0, a
+// topology without these elements, a coordinate not finite, or a 2D cell off
+// one plane z = const.
+KOKKOS_INLINE_FUNCTION bool unusable(const Cell& c) {
+  if (c.n == 0 || c.n != nodes_of(c.topology) || c.dim != dimension(c.topology)) return true;
+  for (int a = 0; a < c.n; ++a) {
+    for (int i = 0; i < 3; ++i) {
+      if (!Kokkos::isfinite(c.x[a][i])) return true;
     }
   }
-  Real n[max_nodes], g[max_nodes][3];
-  const Real centre[3] = {Real{1} / 4, Real{1} / 4, Real{1} / 4};
-  if (c.topology == Topology::tri || c.topology == Topology::tet) return at_point(c, centre, n, g);
-  // A NaN determinant stays NaN through !(det >= least).
+  if (c.dim == 2) {
+    for (int a = 1; a < c.n; ++a) {
+      if (c.x[a][2] != c.x[0][2]) return true;
+    }
+  }
+  return false;
+}
+
+// The lesser of least and det, where a determinant not finite (one that
+// overflowed) counts as NaN and a NaN, once in, stays.
+KOKKOS_INLINE_FUNCTION Real lesser(Real least, Real det) {
+  if (!Kokkos::isfinite(det)) return Kokkos::Experimental::quiet_NaN_v<Real>;
+  return Kokkos::isnan(least) || det >= least ? least : det;
+}
+
+// The determinant at corner a of a quad or hex. There a shape function's
+// reference gradient along xi_k is +-1/2 for the corner and its neighbour
+// along k and 0 for the others, so column k of the Jacobian is half the
+// edge to that neighbour, signed: the sum at_point forms, bit for bit for
+// finite coordinates (the halves are exact, the zero terms add nothing)
+// where the compiler contracts each expression alike (-ffp-contract=on or
+// off; fast may fuse the determinant differently where it is inlined).
+KOKKOS_INLINE_FUNCTION Real det_at_corner(const Cell& c, int a) {
   constexpr Real sx[8] = {-1, 1, 1, -1, -1, 1, 1, -1};
   constexpr Real sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
   constexpr Real sz[8] = {-1, -1, -1, -1, 1, 1, 1, 1};
-  Real least = 0;
-  for (int a = 0; a < c.n; ++a) {
-    const Real xi[3] = {sx[a], sy[a], c.dim == 3 ? sz[a] : 0};
-    const Real det = at_point(c, xi, n, g);
-    least = a == 0 || !(det >= least) ? det : least;
+  const int d = c.dim;
+  const int along[3] = {a ^ 1, (a & 4) | ((a & 3) ^ 3), a ^ 4};
+  const Real sign[3] = {sx[a], sy[a], sz[a]};
+  Real j[3][3] = {{0, 0, 0}, {0, 0, 0}, {0, 0, 0}};
+  for (int k = 0; k < d; ++k) {
+    const Real h = sign[k] / 2;
+    for (int i = 0; i < d; ++i) j[i][k] = c.x[a][i] * h + c.x[along[k]][i] * -h;
   }
+  return determinant(d, j);
+}
+
+// The smallest determinant over a quad's or hex's corners, as lesser folds.
+KOKKOS_INLINE_FUNCTION Real least_at_corners(const Cell& c) {
+  Real least = Kokkos::Experimental::infinity_v<Real>;
+  for (int a = 0; a < c.n; ++a) least = lesser(least, det_at_corner(c, a));
+  return least;
+}
+
+}  // namespace detail
+
+// The smallest Jacobian determinant over the cell's corners and the Gauss
+// points of the rules below: positive for a usable cell. NaN for a cell not
+// usable here at all: of n = 0, a topology without these elements, a
+// coordinate not finite, a determinant that overflows, or of dimension 2
+// with corners off one plane z = const. The determinant of a simplex is
+// constant; that of a quad or hex is checked at its corners too, where a
+// folded cell inverts first.
+KOKKOS_INLINE_FUNCTION Real least_jacobian(const Cell& c) {
+  if (detail::unusable(c)) return Kokkos::Experimental::quiet_NaN_v<Real>;
+  const Real centre[3] = {Real{1} / 4, Real{1} / 4, Real{1} / 4};
+  if (c.topology == Topology::tri || c.topology == Topology::tet) {
+    return detail::lesser(Kokkos::Experimental::infinity_v<Real>, detail::det_at(c, centre));
+  }
+  Real least = detail::least_at_corners(c);
   const Quadrature q = quadrature(c.topology, 2);
+  for (int p = 0; p < q.n; ++p) least = detail::lesser(least, detail::det_at(c, q.xi[p]));
+  return least;
+}
+
+namespace detail {
+
+// Calls body(w, n, g) at each point of the rule of `degree` with w the
+// weight times the Jacobian's determinant, and returns least_jacobian(c).
+// Unless that is > 0, body may have run on some points and what it made is
+// to be discarded. A quad's or hex's degree-2 rule is the one
+// least_jacobian checks: its determinants serve both.
+template <class Body>
+KOKKOS_INLINE_FUNCTION Real integrate(const Cell& c, int degree, const Body& body) {
+  const Quadrature q = quadrature(c.topology, degree);
+  const bool shared = (c.topology == Topology::quad || c.topology == Topology::hex) && degree >= 2 && degree <= 3;
+  Real least = Kokkos::Experimental::quiet_NaN_v<Real>;
+  if (!shared) {
+    least = least_jacobian(c);
+    if (!(least > 0)) return least;
+  } else {
+    if (unusable(c)) return least;
+    least = least_at_corners(c);
+    if (!(least > 0)) return least_jacobian(c);
+  }
   for (int p = 0; p < q.n; ++p) {
+    Real n[max_nodes], g[max_nodes][3];
     const Real det = at_point(c, q.xi[p], n, g);
-    least = !(det >= least) ? det : least;
+    if (shared) {
+      least = lesser(least, det);
+      if (!(least > 0)) return least_jacobian(c);
+    }
+    body(q.w[p] * det, n, g);
   }
   return least;
 }
+
+}  // namespace detail
 
 // The stiffness matrix k[a][b] = integral of grad N_a . grad N_b (exact for
 // simplices and for parallelogram-shaped quads and hexes). Returns
@@ -297,16 +402,15 @@ KOKKOS_INLINE_FUNCTION Real stiffness(const Cell& c, Real (*k)[max_nodes]) {
   for (int a = 0; a < c.n; ++a) {
     for (int b = 0; b < c.n; ++b) k[a][b] = 0;
   }
-  const Real least = least_jacobian(c);
-  if (!(least > 0)) return least;
   const bool simplex = c.topology == Topology::tri || c.topology == Topology::tet;
-  const Quadrature q = quadrature(c.topology, simplex ? 0 : 2);
-  for (int p = 0; p < q.n; ++p) {
-    Real n[max_nodes], g[max_nodes][3];
-    const Real w = q.w[p] * at_point(c, q.xi[p], n, g);
+  // The upper triangle, then its mirror: g_a . g_b is g_b . g_a, bit for bit.
+  const Real least = detail::integrate(c, simplex ? 0 : 2, [&](Real w, const Real*, const Real (*g)[3]) {
     for (int a = 0; a < c.n; ++a) {
-      for (int b = 0; b < c.n; ++b) k[a][b] += w * (g[a][0] * g[b][0] + g[a][1] * g[b][1] + g[a][2] * g[b][2]);
+      for (int b = a; b < c.n; ++b) k[a][b] += w * (g[a][0] * g[b][0] + g[a][1] * g[b][1] + g[a][2] * g[b][2]);
     }
+  });
+  for (int a = 0; a < c.n; ++a) {
+    for (int b = 0; b < c.n; ++b) k[a][b] = !(least > 0) ? 0 : b < a ? k[b][a] : k[a][b];
   }
   return least;
 }
@@ -317,14 +421,14 @@ KOKKOS_INLINE_FUNCTION Real mass(const Cell& c, Real (*m)[max_nodes]) {
   for (int a = 0; a < c.n; ++a) {
     for (int b = 0; b < c.n; ++b) m[a][b] = 0;
   }
-  const Real least = least_jacobian(c);
-  if (!(least > 0)) return least;
-  const Quadrature q = quadrature(c.topology, 2);
-  for (int p = 0; p < q.n; ++p) {
-    Real n[max_nodes], g[max_nodes][3];
-    const Real w = q.w[p] * at_point(c, q.xi[p], n, g);
+  const Real least = detail::integrate(c, 2, [&](Real w, const Real* n, const Real (*)[3]) {
     for (int a = 0; a < c.n; ++a) {
       for (int b = 0; b < c.n; ++b) m[a][b] += w * n[a] * n[b];
+    }
+  });
+  if (!(least > 0)) {
+    for (int a = 0; a < c.n; ++a) {
+      for (int b = 0; b < c.n; ++b) m[a][b] = 0;
     }
   }
   return least;
@@ -343,15 +447,14 @@ KOKKOS_INLINE_FUNCTION void point(const Cell& c, const Real* n, Real* x) {
 template <class F>
 KOKKOS_INLINE_FUNCTION Real load(const Cell& c, const F& f, Real* r) {
   for (int a = 0; a < c.n; ++a) r[a] = 0;
-  const Real least = least_jacobian(c);
-  if (!(least > 0)) return least;
-  const Quadrature q = quadrature(c.topology, 2);
-  for (int p = 0; p < q.n; ++p) {
-    Real n[max_nodes], g[max_nodes][3], x[3];
-    const Real w = q.w[p] * at_point(c, q.xi[p], n, g);
+  const Real least = detail::integrate(c, 2, [&](Real w, const Real* n, const Real (*)[3]) {
+    Real x[3];
     point(c, n, x);
     const Real fx = f(x[0], x[1], x[2]);
     for (int a = 0; a < c.n; ++a) r[a] += w * fx * n[a];
+  });
+  if (!(least > 0)) {
+    for (int a = 0; a < c.n; ++a) r[a] = 0;
   }
   return least;
 }
