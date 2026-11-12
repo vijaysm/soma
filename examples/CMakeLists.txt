@@ -6,10 +6,13 @@
 # with MPI).
 add_executable(laplacian_smooth laplacian_smooth.cpp)
 target_link_libraries(laplacian_smooth PRIVATE soma soma_warnings)
+soma_target_kokkos_sources(laplacian_smooth)
 add_executable(poisson poisson.cpp)
 target_link_libraries(poisson PRIVATE soma soma_warnings)
+soma_target_kokkos_sources(poisson)
 add_executable(advect advect.cpp)
 target_link_libraries(advect PRIVATE soma soma_warnings)
+soma_target_kokkos_sources(advect)
 
 if(SOMA_ENABLE_TESTS)
   set(in "${PROJECT_SOURCE_DIR}/data/64bricks_1khex.h5m")

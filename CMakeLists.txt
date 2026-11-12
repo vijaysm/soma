@@ -158,6 +158,7 @@ if(SOMA_ENABLE_MOAB_COMPAT)
   add_library(soma_compat src/compat/range.cpp src/compat/cn.cpp src/compat/error.cpp src/compat/core.cpp
     src/compat/core_tags.cpp src/compat/core_sets.cpp src/compat/core_io.cpp src/compat/scd.cpp src/compat/prog_options.cpp)
   add_library(soma::compat ALIAS soma_compat)
+  soma_target_kokkos_sources(soma_compat)
   target_link_libraries(soma_compat PUBLIC soma PRIVATE $<BUILD_INTERFACE:soma_warnings>)
   # Drop-in mode: MOAB's include paths (moab/Core.hpp, ...) name soma::compat.
   add_library(soma_compat_dropin INTERFACE)
