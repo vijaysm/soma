@@ -452,6 +452,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `convert_mesh_file(comm, in, out, compression)` and the `soma-convert` tool convert either
   way (legacy files are read in parallel; SOMA files are gathered on rank 0 and written by
   `write_h5m`, which stays serial).
+- `read_file(comm, path)` and `write_file(comm, mesh, path)` (`soma/io/mesh_file.hpp`) read
+  and write a mesh without naming its format: a read goes by content (SOMA, MOAB `.h5m`, or
+  legacy VTK, read on rank 0 and dealt to the ranks along the curve with its fields), a write
+  by extension (`.soma` in parallel; `.h5m` and `.vtk` gathered and written by rank 0). A
+  failure of rank 0 alone reaches every rank. `detect_format` also recognises legacy VTK
+  files. The examples use them.
 
 ### Patch-based AMR
 
