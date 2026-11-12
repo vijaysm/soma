@@ -36,8 +36,11 @@
 // tets turned unlike), throws on every rank.
 //
 // The merge tolerance (a length, the same on every rank) decides when a
-// corner is on a clipping line or plane, merges clipped corners closer than
-// it, and drops overlaps thinner than it.
+// corner is on a clipping line or plane (one outside by at most it goes onto
+// it), merges clipped corners closer than it, and drops overlaps thinner
+// than it. Merging moves areas by up to about the tolerance times a cell's
+// perimeter, so weights sum to one to that: keep it far below the cells'
+// size (the default 1e-12 suits cells of any size above about 1e-6).
 //
 // The meshes may be partitioned differently and need no ghosts. Each rank
 // shares the bounding box of its owned target cells (an allgather of P
@@ -84,6 +87,7 @@ namespace detail {
 // cells, columns the source cells that arrived here.
 struct RemapPlan {
   LO bad_target = 0, bad_source = 0;  // cells refused
+  LO overflow = 0;                    // overlaps too big to clip (never, by the capacities)
   bool supported = true;
   std::vector<Offset> offsets;    // per owned target cell
   std::vector<LO> columns;        // arrived source cell
@@ -113,10 +117,12 @@ class RemapOperator {
   // differs between ranks.
   RemapOperator(const Comm& comm, const Mesh<MemSpace>& source, const Mesh<MemSpace>& target,
                 const RemapOptions& options = {}) {
+    // Agreed through a flag, as a NaN may drop out of a max on some ranks.
     const Real tol = options.merge_tolerance;
-    Real agree[2] = {tol, -tol};
+    const bool good = tol > 0 && Kokkos::isfinite(tol);
+    Real agree[3] = {good ? Real{0} : Real{1}, good ? tol : 0, good ? -tol : 0};
     comm.allreduce(std::span<Real>(agree), Op::max);
-    if (!(agree[0] == -agree[1]) || !(tol > 0) || !Kokkos::isfinite(tol)) {
+    if (agree[0] != 0 || agree[1] != -agree[2]) {
       throw std::invalid_argument("RemapOperator: the merge tolerance is not finite and positive, or differs between "
                                   "ranks");
     }
@@ -135,14 +141,16 @@ class RemapOperator {
         ht = &*mt;
       }
       const bool usable = !source.edited() && !target.edited();
-      Real flags[3] = {usable ? Real{0} : Real{1}, 0, 0};
+      Real flags[4] = {usable ? Real{0} : Real{1}, 0, 0, 0};
       comm.allreduce(std::span<Real>(flags, 1), Op::max);
       if (flags[0] != 0) throw std::invalid_argument("RemapOperator: a rank's source or target mesh has edits");
       p = detail::remap_plan(comm, *hs, *ht, tol);
       flags[0] = p.supported ? 0 : 1;
       flags[1] = static_cast<Real>(p.bad_source);
       flags[2] = static_cast<Real>(p.bad_target);
+      flags[3] = static_cast<Real>(p.overflow);
       comm.allreduce(std::span<Real>(flags), Op::max);
+      if (flags[3] != 0) throw std::invalid_argument("RemapOperator: an overlap overflowed the clipping capacity");
       if (flags[0] != 0) {
         throw std::invalid_argument("RemapOperator: a rank's meshes are not both of dimension 2 or both of 3, have "
                                     "high-order nodes, or hold a cell other than a triangle, quad or polygon of at "

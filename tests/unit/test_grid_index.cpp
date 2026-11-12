@@ -113,6 +113,15 @@ TEST(GridIndex, BinsFollowTheBoxes) {
   EXPECT_GE(b[0], 2);
 }
 
+// Tiny boxes scattered over a plane: the bins stay within the budget.
+TEST(GridIndex, SparseBoxesStayWithinTheBinBudget) {
+  for (const std::size_t n : {1000u, 20000u}) {
+    const auto b = Index(random_boxes(n, 1e-6, true, 13)).bins();
+    EXPECT_LE(static_cast<double>(b[0]) * b[1] * b[2], 2.0 * static_cast<double>(n));
+    EXPECT_EQ(b[2], 1);
+  }
+}
+
 TEST(GridIndex, EmptyInputsAndBadBoxes) {
   const Boxes none("none", 0, 6);
   const auto pairs = Index(none).query(random_boxes(5, 0.1, false, 1));

@@ -120,10 +120,11 @@ TEST(TetClip, AFineSplitRecoversATet) {
   EXPECT_NEAR(sum, volume(t), 1e-15);
 }
 
-// A copy moved by less than the tolerance is the tet; a sliver thinner than
-// it is nothing.
+// A copy moved by less than the tolerance overlaps the tet but for a band no
+// thicker than the move (corners within it go onto the planes); a sliver
+// thinner than the tolerance is nothing.
 TEST(TetClip, TheMergeToleranceRemovesSlivers) {
-  EXPECT_NEAR(overlap(unit(), unit(1e-14, -1e-14, 1e-14), eps), 1.0 / 6, 1e-15);
+  EXPECT_NEAR(overlap(unit(), unit(1e-14, -1e-14, 1e-14), eps), 1.0 / 6, 1e-14);
   // A unit cube's Kuhn tets against the cube moved by 1e-13 along x: the
   // 1e-13 slab beyond it is a sliver.
   Real moved = 0;

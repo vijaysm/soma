@@ -9,10 +9,11 @@
 // inner side as at most three tets, and the volumes summed. Callable in
 // kernels; fixed capacity, no allocation.
 //
-// A cut classifies each corner by its signed distance to the plane: within
-// eps (the merge tolerance, a length) it is on the plane and kept, so a
-// corner never moves by less than eps and no piece thinner than eps is made
-// along a face. Of the corners kept (k of 4):
+// A cut classifies each corner by its signed distance to the plane: a corner
+// outside by at most eps (the merge tolerance, a length) is moved onto it
+// and kept, one inside is kept as it is, so that of two cells sharing a face
+// one, not both, takes the band between, and no piece thinner than eps is
+// made along a face. Of the corners kept (k of 4):
 //
 //   4  the tet;
 //   3  a prism (the three, and the points where their edges to the fourth
@@ -94,44 +95,48 @@ KOKKOS_INLINE_FUNCTION bool face_plane(const Point3& a, const Point3& b, const P
 // (count in, count out); false where out would overflow.
 KOKKOS_INLINE_FUNCTION bool cut(const Tet& t, const Plane& h, Real eps, Tet* out, int& count) {
   Real d[4];
+  Point3 q[4];  // the corners, those in the band moved onto the plane
   int in[4], outside[4], ni = 0, no = 0;
   for (int i = 0; i < 4; ++i) {
     d[i] = dot(h.n, t.p[i]) - h.c;
-    if (d[i] <= eps) {
+    q[i] = t.p[i];
+    if (d[i] > 0 && d[i] <= eps) {
+      q[i] = {t.p[i].x - d[i] * h.n.x, t.p[i].y - d[i] * h.n.y, t.p[i].z - d[i] * h.n.z};
+      d[i] = 0;
+    }
+    if (d[i] <= 0) {
       in[ni++] = i;
     } else {
       outside[no++] = i;
     }
   }
-  // Where edge (i, o) crosses the plane: i inside (d <= eps), o outside (d > eps).
+  // Where edge (i, o) crosses the plane: i inside (d <= 0), o beyond the band.
   const auto cross_at = [&](int i, int o) {
-    const Real di = d[i] < 0 ? d[i] : 0;  // a corner on the plane is the crossing itself
-    if (di == 0) return t.p[i];
-    const Real s = di / (di - d[o]);
-    return Point3{t.p[i].x + s * (t.p[o].x - t.p[i].x), t.p[i].y + s * (t.p[o].y - t.p[i].y),
-                  t.p[i].z + s * (t.p[o].z - t.p[i].z)};
+    if (d[i] == 0) return q[i];  // a corner on the plane is the crossing itself
+    const Real s = d[i] / (d[i] - d[o]);
+    return Point3{q[i].x + s * (q[o].x - q[i].x), q[i].y + s * (q[o].y - q[i].y), q[i].z + s * (q[o].z - q[i].z)};
   };
   const int need = ni == 4 || ni == 1 ? 1 : ni == 0 ? 0 : 3;
   if (count + need > tet_capacity) return false;
   if (ni == 4) {
-    out[count++] = t;
+    out[count++] = {{q[0], q[1], q[2], q[3]}};
   } else if (ni == 1) {
     const int a = in[0];
-    out[count++] = {{t.p[a], cross_at(a, outside[0]), cross_at(a, outside[1]), cross_at(a, outside[2])}};
+    out[count++] = {{q[a], cross_at(a, outside[0]), cross_at(a, outside[1]), cross_at(a, outside[2])}};
   } else if (ni == 3) {
     // Prism: a, b, c and ad, bd, cd.
     const int a = in[0], b = in[1], c = in[2], o = outside[0];
     const Point3 ad = cross_at(a, o), bd = cross_at(b, o), cd = cross_at(c, o);
-    out[count++] = {{t.p[a], t.p[b], t.p[c], ad}};
-    out[count++] = {{t.p[b], t.p[c], ad, bd}};
-    out[count++] = {{t.p[c], ad, bd, cd}};
+    out[count++] = {{q[a], q[b], q[c], ad}};
+    out[count++] = {{q[b], q[c], ad, bd}};
+    out[count++] = {{q[c], ad, bd, cd}};
   } else if (ni == 2) {
     // Wedge: triangle (a, ac, ad) swept to (b, bc, bd).
     const int a = in[0], b = in[1], c = outside[0], e = outside[1];
     const Point3 ac = cross_at(a, c), ad = cross_at(a, e), bc = cross_at(b, c), bd = cross_at(b, e);
-    out[count++] = {{t.p[a], ac, ad, t.p[b]}};
-    out[count++] = {{ac, ad, t.p[b], bc}};
-    out[count++] = {{ad, t.p[b], bc, bd}};
+    out[count++] = {{q[a], ac, ad, q[b]}};
+    out[count++] = {{ac, ad, q[b], bc}};
+    out[count++] = {{ad, q[b], bc, bd}};
   }
   return true;
 }

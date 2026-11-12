@@ -18,6 +18,7 @@ using soma::Real;
 using soma::detail::clip;
 using soma::detail::convex;
 using soma::detail::Polygon;
+using soma::detail::simple;
 using soma::detail::triangulate;
 using soma::detail::twice_area;
 
@@ -163,6 +164,58 @@ TEST(Polygon, EarClippingSplitsRandomStars) {
       sum += twice_area(piece);
     }
     if (!positive || std::abs(sum - twice_area(p)) > 1e-13) ++failed;
+  }
+  EXPECT_EQ(failed, 0);
+}
+
+// A bowtie and a pentagram turn left at every corner, or nearly, and are not
+// simple; an L with corners in a line is.
+TEST(Polygon, SelfCrossingPolygonsAreNotSimple) {
+  EXPECT_FALSE(simple(poly({0.227, 0.319, 0.978, 0.456, 0.308, 0.264, 0.087, 0.419})));
+  std::vector<Real> star;
+  for (int i = 0; i < 5; ++i) {
+    const Real t = 1.2566370614359172 * 2 * i;  // every second corner of a pentagon
+    star.insert(star.end(), {std::cos(t), std::sin(t)});
+  }
+  const Polygon pentagram = poly(star);
+  EXPECT_TRUE(convex(pentagram, eps));  // locally
+  EXPECT_FALSE(simple(pentagram));
+  EXPECT_TRUE(simple(poly({0, 0, 1, 0, 2, 0, 2, 1, 1, 1, 1, 2, 0, 2})));
+  EXPECT_FALSE(simple(poly({0, 0, 2, 0, 2, 2, 1, 0, 0, 2})));  // a corner on an edge
+}
+
+// Two 64-gons (the most a cell may have) overlap in up to 128 corners: the
+// overlap is kept, in either order.
+TEST(Polygon, OverlapsOfManyCornersFit) {
+  for (const int n : {40, 64}) {
+    Polygon a, b;
+    for (int i = 0; i < n; ++i) {
+      const Real t = 6.283185307179586 * i / n;
+      a.push(std::cos(t), std::sin(t));
+      b.push(std::cos(t + 3.141592653589793 / n), std::sin(t + 3.141592653589793 / n));
+    }
+    Polygon out;
+    const Real ab = clip(a, b, eps, out);
+    EXPECT_EQ(out.n, 2 * n);
+    EXPECT_GT(ab, 0.99 * twice_area(a) / 2);
+    EXPECT_NEAR(ab, clip(b, a, eps, out), 1e-14);
+  }
+}
+
+// Ears are found whatever the tolerance.
+TEST(Polygon, EarClippingDoesNotDependOnTheTolerance) {
+  std::mt19937 gen(9);
+  std::uniform_real_distribution<Real> u(0, 1);
+  int tri[3 * soma::detail::polygon_capacity];
+  int failed = 0;
+  for (int trial = 0; trial < 2000; ++trial) {
+    const int k = 4 + trial % 28;
+    Polygon p;
+    for (int i = 0; i < k; ++i) {
+      const Real r = 0.2 + u(gen), t = 6.283185307179586 * (i + 0.8 * u(gen)) / k;
+      p.push(r * std::cos(t), r * std::sin(t));
+    }
+    failed += triangulate(p, 1e-2, tri) == k - 2 ? 0 : 1;
   }
   EXPECT_EQ(failed, 0);
 }

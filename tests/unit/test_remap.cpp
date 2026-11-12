@@ -219,6 +219,22 @@ TEST(Remap, SmallCellsKeepTheirWeights) {
   EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-13);
 }
 
+// A tolerance far larger than rounding, still far below the cells: corners
+// in the band beyond a cell's edge go onto it, and the weights still sum to
+// one to rounding.
+TEST(Remap, AModerateToleranceKeepsTheWeights) {
+  const Comm c = Comm::world();
+  const soma::HostMesh source = build(c, grid(7, 9, false, 1), 0), target = build(c, grid(10, 10, true, 2), 1);
+  const Remap remap(c, source, target, {.merge_tolerance = 1e-4});
+  Real worst = 0;
+  for (LO r = 0; r < remap.rows(); ++r) {
+    Real weight = 0;
+    for (Offset e = remap.offsets()(r); e < remap.offsets()(r + 1); ++e) weight += remap.weights()(e);
+    worst = std::max(worst, std::abs(weight - 1));
+  }
+  EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-13);
+}
+
 // sum_T |T| u_T = sum_S |S| u_S.
 TEST(Remap, MassIsConserved) {
   const Comm c = Comm::world();
@@ -381,6 +397,26 @@ TEST(Remap, BadMeshesThrowOnEveryRank) {
     EXPECT_NE(message(mesh, good).find("source mesh holds a cell"), std::string::npos);
     EXPECT_NE(message(good, mesh).find("target mesh holds a cell"), std::string::npos);
   }
+  // Crossing themselves, with area: a bowtie of unequal halves, a pentagram.
+  Cells crossing;
+  crossing.type = Topology::polygon;
+  crossing.vg = {1, 2, 3, 4};
+  crossing.xyz = {0.227, 0.319, 0, 0.978, 0.456, 0, 0.308, 0.264, 0, 0.087, 0.419, 0};
+  crossing.cells = {{1, 2, 3, 4}};
+  Cells pentagram;
+  pentagram.type = Topology::polygon;
+  for (int i = 0; i < 5; ++i) {
+    const Real t = 1.2566370614359172 * 2 * i;
+    pentagram.vg.push_back(i + 1);
+    pentagram.xyz.insert(pentagram.xyz.end(), {0.5 + 0.4 * std::cos(t), 0.5 + 0.4 * std::sin(t), 0});
+  }
+  pentagram.cells = {{1, 2, 3, 4, 5}};
+  for (const Cells& bad : {crossing, pentagram}) {
+    EXPECT_NE(message(good, build(c, bad, 2)).find("target mesh holds a cell"), std::string::npos);
+  }
+  // A tolerance not a number, on the first rank only: every rank throws.
+  EXPECT_NE(message(good, good, {.merge_tolerance = c.rank() == 0 ? std::nan("") : 1e-12}).find("tolerance"),
+            std::string::npos);
   // A mesh of tets.
   Cells tets;
   tets.dim = 3;

@@ -91,12 +91,11 @@ bool canonical_polygon(const Mesh<Host>& mesh, LO e, Real eps, Polygon& p) {
     longest = std::max(longest, std::hypot(p.x[j] - p.x[i], p.y[j] - p.y[i]));
   }
   const Real twice = twice_area(p);
-  return flat && std::isfinite(twice) && twice >= eps * longest;
+  return flat && std::isfinite(twice) && twice >= eps * longest && simple(p);
 }
 
 // A plane cell's pieces: itself if convex, else its ear-clipping triangles;
-// its area. False where it is bad or crosses itself (no ears, or triangles
-// not adding up to its area).
+// its area. False where it is bad (crossing itself among them).
 bool plane_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& measure) {
   Polygon p;
   if (!canonical_polygon(mesh, e, eps, p)) return false;
@@ -108,17 +107,11 @@ bool plane_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& mea
   }
   int tri[3 * polygon_capacity];
   const int k = triangulate(p, eps, tri);
-  Real sum = 0;
   for (int t = 0; t < k; ++t) {
-    Polygon piece;
-    for (int i = 0; i < 3; ++i) {
-      piece.push(p.x[tri[3 * t + i]], p.y[tri[3 * t + i]]);
-      out.corner(p.x[tri[3 * t + i]], p.y[tri[3 * t + i]], 0);
-    }
-    sum += twice_area(piece);
+    for (int i = 0; i < 3; ++i) out.corner(p.x[tri[3 * t + i]], p.y[tri[3 * t + i]], 0);
     out.close_piece();
   }
-  return k > 0 && std::abs(sum - 2 * measure) <= 1e-10 * 2 * measure;
+  return k == p.n - 2;
 }
 
 // A volume cell's tets: a tet itself, its corners in gid order; another cell
@@ -326,6 +319,7 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
   const GridIndex<Host> index(sbox, eps);
   const auto pairs = index.query(qbox);
   std::vector<Real> area(pairs.boxes.extent(0), 0);
+  LO overflow = 0;
   // Piece i of a Pieces as a polygon or a tet.
   const auto polygon = [](const Pieces& q, Offset i, Polygon& out) {
     out.n = 0;
@@ -339,8 +333,9 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
     for (std::size_t k = 0; k < 4; ++k) out.p[k] = {q.xyz[c + 3 * k], q.xyz[c + 3 * k + 1], q.xyz[c + 3 * k + 2]};
     return out;
   };
-  Kokkos::parallel_for(
-      "soma::remap.clip", Kokkos::RangePolicy<Exec, Kokkos::IndexType<LO>>(0, nt), [&](const LO t) {
+  Kokkos::parallel_reduce(
+      "soma::remap.clip", Kokkos::RangePolicy<Exec, Kokkos::IndexType<LO>>(0, nt),
+      [&](const LO t, LO& over) {
         const auto ti = static_cast<std::size_t>(t);
         Polygon a, b, out;
         for (Offset k = pairs.offsets(t); k < pairs.offsets(t + 1); ++k) {
@@ -349,18 +344,25 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
           for (Offset i = tp.cell[ti]; i < tp.cell[ti + 1]; ++i) {
             if (dim == 2) polygon(tp, i, a);
             for (Offset j = sp.cell[s]; j < sp.cell[s + 1]; ++j) {
+              Real piece = 0;
               if (dim == 2) {
                 polygon(sp, j, b);
-                sum += clip(a, b, eps, out);
+                piece = clip(a, b, eps, out);
               } else {
-                sum += overlap(tet(tp, i), tet(sp, j), eps);
+                piece = overlap(tet(tp, i), tet(sp, j), eps);
+              }
+              if (piece < 0) {
+                ++over;
+              } else {
+                sum += piece;
               }
             }
           }
           area[static_cast<std::size_t>(k)] = sum;
         }
-      });
-  Exec{}.fence();
+      },
+      overflow);
+  p.overflow = overflow;
 
   // Rows of the overlaps that are something, ordered by source gid.
   p.offsets.assign(static_cast<std::size_t>(nt) + 1, 0);

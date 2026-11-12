@@ -85,9 +85,11 @@ class GridIndex {
       if (count_[a] < 1) count_[a] = 1;
       total *= count_[a];
     }
-    // Over budget: shrink every axis alike.
+    // Over budget: shrink alike the axes that have more than one bin.
     if (total > budget) {
-      const Real f = std::cbrt(budget / total);
+      int axes = 0;
+      for (const int c : count_) axes += c > 1 ? 1 : 0;
+      const Real f = std::pow(budget / total, Real{1} / axes);
       for (auto& c : count_) c = Kokkos::max(1, static_cast<int>(Kokkos::floor(c * f)));
     }
     for (std::size_t a = 0; a < 3; ++a) {

@@ -9,11 +9,13 @@
 // into triangles. Callable in kernels; fixed-capacity, no allocation.
 //
 // One tolerance, the merge tolerance eps (a length), governs every decision:
-// a point within eps of a clipping line counts as on it, consecutive corners
-// closer than eps merge into one, and a piece with fewer than three corners
-// left or an area below eps^2 is no piece. A polygon is convex when no corner
-// turns clockwise by more than eps (as a distance from the line through its
-// neighbours); corners in a line are allowed.
+// a point outside a clipping line by at most eps is moved onto it (one
+// inside is kept, so that of two cells sharing an edge one, not both, takes
+// the band between), consecutive corners closer than eps merge into one, and
+// a piece with fewer than three corners left or an area below eps^2 is no
+// piece. A polygon is convex when no corner turns clockwise by more than eps
+// (as a distance from the line through its neighbours); corners in a line
+// are allowed. A polygon is simple when no two edges but neighbours meet.
 //
 // The overlap of convex polygons is Sutherland and Hodgman's clipping (1974):
 // the subject cut by the half-plane left of each edge of the clip polygon in
@@ -32,19 +34,21 @@
 
 namespace soma::detail {
 
-// Corners a polygon may have; an overlap of two has at most the sum.
+// Corners a cell's polygon may have; an overlap of two has at most the sum,
+// which a Polygon holds.
 inline constexpr int polygon_capacity = 64;
+inline constexpr int polygon_storage = 2 * polygon_capacity;
 
 struct Polygon {
   int n = 0;
-  Real x[polygon_capacity] = {}, y[polygon_capacity] = {};
+  Real x[polygon_storage] = {}, y[polygon_storage] = {};
 
   KOKKOS_INLINE_FUNCTION void push(Real px, Real py) {
-    if (n < polygon_capacity) {
+    if (n < polygon_storage) {
       x[n] = px;
       y[n] = py;
     }
-    ++n;  // past capacity: the caller sees n > polygon_capacity
+    ++n;  // past storage: the caller sees n > polygon_storage
   }
 };
 
@@ -68,7 +72,7 @@ KOKKOS_INLINE_FUNCTION Real turn(Real ax, Real ay, Real bx, Real by, Real cx, Re
 // Consecutive corners closer than eps merged (the first of a run kept), in
 // place; a last corner within eps of the first goes too.
 KOKKOS_INLINE_FUNCTION void merge_corners(Polygon& p, Real eps) {
-  if (p.n > polygon_capacity) return;
+  if (p.n > polygon_storage) return;
   int m = 0;
   for (int i = 0; i < p.n; ++i) {
     if (m > 0 && Kokkos::hypot(p.x[i] - p.x[m - 1], p.y[i] - p.y[m - 1]) < eps) continue;
@@ -93,8 +97,38 @@ KOKKOS_INLINE_FUNCTION bool convex(const Polygon& p, Real eps) {
   return true;
 }
 
+// Segments ab and cd meet: cross, or touch (an end on the other).
+KOKKOS_INLINE_FUNCTION bool segments_meet(Real ax, Real ay, Real bx, Real by, Real cx, Real cy, Real dx, Real dy) {
+  const Real o1 = turn(ax, ay, bx, by, cx, cy), o2 = turn(ax, ay, bx, by, dx, dy);
+  const Real o3 = turn(cx, cy, dx, dy, ax, ay), o4 = turn(cx, cy, dx, dy, bx, by);
+  if (((o1 > 0 && o2 < 0) || (o1 < 0 && o2 > 0)) && ((o3 > 0 && o4 < 0) || (o3 < 0 && o4 > 0))) return true;
+  // q, on the line through p and r, between them.
+  const auto within = [](Real px, Real py, Real qx, Real qy, Real rx, Real ry) {
+    return Kokkos::fmin(px, rx) <= qx && qx <= Kokkos::fmax(px, rx) && Kokkos::fmin(py, ry) <= qy &&
+           qy <= Kokkos::fmax(py, ry);
+  };
+  return (o1 == 0 && within(ax, ay, cx, cy, bx, by)) || (o2 == 0 && within(ax, ay, dx, dy, bx, by)) ||
+         (o3 == 0 && within(cx, cy, ax, ay, dx, dy)) || (o4 == 0 && within(cx, cy, bx, by, dx, dy));
+}
+
+// No two edges of p but neighbours meet (O(n^2)).
+KOKKOS_INLINE_FUNCTION bool simple(const Polygon& p) {
+  if (p.n < 3 || p.n > polygon_capacity) return false;
+  for (int i = 0; i < p.n; ++i) {
+    const int i1 = i + 1 == p.n ? 0 : i + 1;
+    for (int j = i + 2; j < p.n; ++j) {
+      if (i == 0 && j == p.n - 1) continue;  // neighbours through the first corner
+      const int j1 = j + 1 == p.n ? 0 : j + 1;
+      if (segments_meet(p.x[i], p.y[i], p.x[i1], p.y[i1], p.x[j], p.y[j], p.x[j1], p.y[j1])) return false;
+    }
+  }
+  return true;
+}
+
 // The overlap of convex counter-clockwise polygons s and c, into out; its
-// area (0 where none). out starts where s's clipping leaves it.
+// area (0 where none, negative where the overlap overflows polygon_storage,
+// which two polygons of at most polygon_capacity corners never do). out
+// starts where s's clipping leaves it.
 KOKKOS_INLINE_FUNCTION Real clip(const Polygon& s, const Polygon& c, Real eps, Polygon& out) {
   Polygon a = s, b;
   for (int e = 0; e < c.n && a.n > 0; ++e) {
@@ -102,22 +136,26 @@ KOKKOS_INLINE_FUNCTION Real clip(const Polygon& s, const Polygon& c, Real eps, P
     const Real ex = c.x[f] - c.x[e], ey = c.y[f] - c.y[e];
     const Real len = Kokkos::hypot(ex, ey);
     if (!(len > 0)) continue;
-    // Signed distance of a point to the left of edge e.
+    // Signed distance of a point to the left of edge e (inside where >= 0).
     const auto side = [&](Real px, Real py) { return (ex * (py - c.y[e]) - ey * (px - c.x[e])) / len; };
     b.n = 0;
     for (int i = 0; i < a.n; ++i) {
       const int j = i + 1 == a.n ? 0 : i + 1;
       const Real di = side(a.x[i], a.y[i]), dj = side(a.x[j], a.y[j]);
-      if (di >= -eps) b.push(a.x[i], a.y[i]);
-      // Crossing strictly from one side to the other: the point on the line.
-      if ((di > eps && dj < -eps) || (di < -eps && dj > eps)) {
+      if (di >= 0) {
+        b.push(a.x[i], a.y[i]);
+      } else if (di >= -eps) {
+        b.push(a.x[i] + di * ey / len, a.y[i] - di * ex / len);  // onto the line
+      }
+      // From inside to beyond the band, or back: the point on the line.
+      if ((di >= 0 && dj < -eps) || (di < -eps && dj >= 0)) {
         const Real t = di / (di - dj);
         b.push(a.x[i] + t * (a.x[j] - a.x[i]), a.y[i] + t * (a.y[j] - a.y[i]));
       }
     }
-    if (b.n > polygon_capacity) {
-      out.n = polygon_capacity + 1;
-      return 0;
+    if (b.n > polygon_storage) {
+      out.n = 0;
+      return -1;
     }
     merge_corners(b, eps);
     a = b;
@@ -137,8 +175,10 @@ KOKKOS_INLINE_FUNCTION Real clip(const Polygon& s, const Polygon& c, Real eps, P
 
 // A counter-clockwise simple polygon's triangles by ear clipping, as corner
 // triples into tri (3 per triangle, at most n - 2); their count, or -1 where
-// no ear is found (the polygon crosses itself, or has too many corners).
+// no ear is found (the polygon crosses itself, or has too many corners). An
+// ear turns strictly counter-clockwise; eps plays no part.
 KOKKOS_INLINE_FUNCTION int triangulate(const Polygon& p, Real eps, int* tri) {
+  (void)eps;
   if (p.n < 3 || p.n > polygon_capacity) return -1;
   int left[polygon_capacity];
   int m = p.n, count = 0;
@@ -147,8 +187,7 @@ KOKKOS_INLINE_FUNCTION int triangulate(const Polygon& p, Real eps, int* tri) {
     bool cut = false;
     for (int k = 0; k < m && !cut; ++k) {
       const int a = left[k == 0 ? m - 1 : k - 1], b = left[k], c = left[k + 1 == m ? 0 : k + 1];
-      const Real base = Kokkos::hypot(p.x[c] - p.x[a], p.y[c] - p.y[a]);
-      if (!(turn(p.x[a], p.y[a], p.x[b], p.y[b], p.x[c], p.y[c]) > eps * base)) continue;  // not convex
+      if (!(turn(p.x[a], p.y[a], p.x[b], p.y[b], p.x[c], p.y[c]) > 0)) continue;  // not convex
       // No other corner inside or on the triangle (a, b, c), but for one
       // at the place of one of its corners: a corner on the cut would leave
       // a degenerate piece.
