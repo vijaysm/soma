@@ -238,8 +238,12 @@ struct Level {
 template <class T>
 void carry(const HostMesh& in, HostMesh& out, const FieldInfo& info, int d, const std::vector<LO>& parent,
            const std::vector<std::pair<GO, LO>>& in_vertex, GO vmax, const std::vector<NewVertex>& added) {
-  const auto from = in.fields().template get<T>(info.id).view();
-  auto to = out.fields().template add_tag<T>(info.name, d, info.ncomp).view();
+  const auto source = in.fields().template get<T>(info.id);
+  const auto from = source.view();
+  FieldOptions<T> options;
+  if (source.has_default()) options.default_value = source.default_value();
+  if (source.has_global()) options.global_value = source.global_value();
+  auto to = out.fields().template add_tag<T>(info.name, d, info.ncomp, std::move(options)).view();
   const auto ncomp = static_cast<std::size_t>(info.ncomp);
   if (d != 0) {
     for (std::size_t c = 0; c < parent.size(); ++c) {
@@ -327,7 +331,8 @@ Level refine_once(const Comm& comm, const HostMesh& mesh) {
   const auto wx = work.coords();
   // Largest vertex, edge, face and cell gids, most children; then the gid
   // ranges they make, checked against overflow.
-  std::array<GO, 6> top{0, 0, 0, std::numeric_limits<GO>::min(), 0, std::numeric_limits<GO>::min()};
+  std::array<GO, 5> top{0, 0, 0, std::numeric_limits<GO>::min(), 0};
+  GO least = std::numeric_limits<GO>::max();
   for (LO v = 0; v < work.count(0); ++v) top[0] = std::max(top[0], wv(v));
   for (LO e = 0; e < work.count(1); ++e) top[1] = std::max(top[1], we(e));
   if (dim == 3) {
@@ -335,7 +340,7 @@ Level refine_once(const Comm& comm, const HostMesh& mesh) {
   }
   for (LO e = 0; e < cells; ++e) {
     top[3] = std::max(top[3], wc(e));
-    top[5] = std::max(top[5], -wc(e));
+    least = std::min(least, wc(e));
     const Topology t = w.topology(dim, e);
     top[4] = std::max<GO>(top[4], t == Topology::polygon ? static_cast<GO>(w.num_vertices(dim, e))
                                   : t == Topology::tri || t == Topology::quad ? 4
@@ -343,16 +348,16 @@ Level refine_once(const Comm& comm, const HostMesh& mesh) {
                                                            : 8);
   }
   comm.allreduce(std::span<GO>(top), Op::max);
+  least = comm.allreduce(least, Op::min);
   // Cells are numbered from the least cell gid, cmin, as 1.
   const GO vmax = top[0], emax = top[1], fmax = top[2], kmax = top[4];
-  const GO cmin = top[5] == std::numeric_limits<GO>::min() ? 1 : -top[5];
-  constexpr GO most = std::numeric_limits<GO>::max();
   const bool cells_here = top[3] != std::numeric_limits<GO>::min();  // on some rank
-  if (cells_here && cmin < 0 && top[3] > most + cmin) {
-    throw std::invalid_argument("refine_uniform: the refined mesh's gids would not fit a GO");
-  }
-  const GO span = cells_here && top[3] - cmin < most ? top[3] - cmin + 1 : 0;
-  if (vmax > most - emax || vmax + emax > most - fmax || vmax + emax + fmax > most - span ||
+  const GO cmin = cells_here ? least : 1;
+  constexpr GO most = std::numeric_limits<GO>::max();
+  // span = top[3] - cmin + 1 cell numbers, without overflow.
+  const bool wide = cells_here && (cmin < 0 ? top[3] >= most + cmin : top[3] - cmin >= most);
+  const GO span = cells_here && !wide ? top[3] - cmin + 1 : 0;
+  if (wide || vmax > most - emax || vmax + emax > most - fmax || vmax + emax + fmax > most - span ||
       (span > 0 && kmax > most / span)) {
     throw std::invalid_argument("refine_uniform: the refined mesh's gids would not fit a GO");
   }
@@ -522,9 +527,37 @@ Level refine_once(const Comm& comm, const HostMesh& mesh) {
   return out;
 }
 
-}  // namespace
+// Whether a plane cell lies on one side of the lines from its corners'
+// average to its sides: each triangle (centre, v_i, v_i+1) turns as the cell
+// does (as its area vector, so cells off the xy plane are judged in their own
+// plane). Otherwise some of its children would turn against it.
+bool star_shaped(const HostMesh& mesh, LO e) {
+  const MeshView<Host> m = mesh.view();
+  const auto x = mesh.coords();
+  const LO n = m.num_vertices(2, e);
+  std::vector<P3> p;
+  for (LO i = 0; i < n; ++i) {
+    const LO v = m.vertex(2, e, i);
+    p.push_back({x(v, 0), x(v, 1), x(v, 2)});
+  }
+  const P3 c = average(p);
+  const auto cross = [](const P3& a, const P3& b) {
+    return P3{a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+  };
+  std::vector<P3> turns;
+  P3 normal;
+  for (std::size_t i = 0; i < p.size(); ++i) {
+    turns.push_back(cross(p[i] - c, p[(i + 1) % p.size()] - c));
+    normal = normal + turns.back();
+  }
+  return std::all_of(turns.begin(), turns.end(), [&](const P3& t) {
+    return t.x * normal.x + t.y * normal.y + t.z * normal.z > 0;
+  });
+}
 
-RefineResult refine_uniform(const Comm& comm, const HostMesh& mesh, RefineOptions options) {
+// Collective: throws std::invalid_argument on every rank if any rank's mesh
+// cannot be refined or the ranks disagree on the levels or the dimension.
+void check(const Comm& comm, const HostMesh& mesh, int levels) {
   const int dim = mesh.dim();
   int bad = 0;
   if (dim != 2 && dim != 3) {
@@ -536,22 +569,41 @@ RefineResult refine_uniform(const Comm& comm, const HostMesh& mesh, RefineOption
     for (LO e = 0; e < m.count(dim) && bad == 0; ++e) {
       if (!supported_cell(m.topology(dim, e), dim)) bad = 3;
     }
+    const LO owned = mesh.segment_table(dim).owned_end;
+    for (LO e = 0; dim == 2 && e < owned && bad == 0; ++e) {
+      if (m.topology(2, e) != Topology::tri && !star_shaped(mesh, e)) bad = 5;
+    }
   }
-  if (options.levels < 1) bad = 4;
-  bad = comm.allreduce(bad, Op::max);
-  if (bad == 1) throw std::invalid_argument("refine_uniform: a rank's mesh is not of dimension 2 or 3");
-  if (bad == 2) throw std::invalid_argument("refine_uniform: a rank's mesh has edits or high-order nodes");
-  if (bad == 3) {
-    throw std::invalid_argument("refine_uniform: a rank's mesh holds a cell other than a tri, quad or polygon (2D) or "
-                                "a tet, hex, prism or pyramid (3D)");
+  if (levels < 1) bad = std::max(bad, 4);
+  std::array<int, 5> agree{bad, levels, -levels, dim, -dim};
+  comm.allreduce(std::span<int>(agree), Op::max);
+  if (agree[1] != -agree[2]) throw std::invalid_argument("refine_uniform: the ranks differ in levels");
+  if (agree[3] != -agree[4]) throw std::invalid_argument("refine_uniform: the ranks' meshes differ in dimension");
+  switch (agree[0]) {
+    case 1: throw std::invalid_argument("refine_uniform: the mesh is not of dimension 2 or 3");
+    case 2: throw std::invalid_argument("refine_uniform: a rank's mesh has edits or high-order nodes");
+    case 3:
+      throw std::invalid_argument("refine_uniform: a rank's mesh holds a cell other than a tri, quad or polygon (2D) "
+                                  "or a tet, hex, prism or pyramid (3D)");
+    case 4: throw std::invalid_argument("refine_uniform: levels must be at least 1");
+    case 5:
+      throw std::invalid_argument("refine_uniform: a rank's mesh holds a quad or polygon that is not star-shaped "
+                                  "about its corners' average (its children would turn against it)");
+    default: break;
   }
-  if (bad == 4) throw std::invalid_argument("refine_uniform: levels must be at least 1");
+}
 
+}  // namespace
+
+RefineResult refine_uniform(const Comm& comm, const HostMesh& mesh, RefineOptions options) {
+  check(comm, mesh, options.levels);
+  const int dim = mesh.dim();
   RefineResult out;
   Level level = refine_once(comm, mesh);
   out.parent = std::move(level.parent);
   out.dropped = std::move(level.dropped);
   for (int l = 1; l < options.levels; ++l) {
+    check(comm, level.mesh, options.levels);
     Level next = refine_once(comm, level.mesh);
     for (LO& p : next.parent) p = out.parent[static_cast<std::size_t>(p)];
     out.parent = std::move(next.parent);

@@ -44,13 +44,24 @@
 //
 // Each rank refines the cells it owns; the result has no ghosts (add them
 // again as needed). Fields carry over where they are dense (one value per
-// entity of a full domain, per-entity layout, not variable, not handles):
-// a cell field's children take the parent's value (so integrals of cell
-// averages are kept), a vertex field of floating values keeps the values of
-// the old vertices and gives a new one the average of its corners (exact for
-// linear, bilinear and trilinear fields). Other fields, edge and face fields,
-// and integer vertex fields are dropped and named in `dropped`; the internal
-// soma: fields are rebuilt.
+// entity of a full domain, per-entity layout, not variable, not handles),
+// with their default and global values: a cell field's children take the
+// parent's value (so integrals of cell averages are kept), a vertex field of
+// floating values keeps the values of the old vertices and gives a new one
+// the average of its corners (exact for linear, bilinear and trilinear
+// fields). Vertex values are read where a rank holds them, shared copies and
+// ghosts included, so these must hold their owners' values (update them
+// first) for ranks to agree. Other fields, edge and face fields, and integer
+// vertex fields are dropped and named in `dropped`; the internal soma:
+// fields are rebuilt.
+//
+// A child's corners are its parent's mapped from reference coordinates, so a
+// cell not star-shaped about its corners' average (a non-convex quad or
+// polygon; in 3D, a strongly distorted cell) would have children turned
+// against it: plane cells are checked and refused, volume cells are not.
+//
+// The refinement runs on the host (a HostMesh in, built with
+// build_local_part); a device mesh is mirrored to the host and back.
 
 #include <string>
 #include <vector>
@@ -80,8 +91,9 @@ struct RefineResult {
 
 // Collective. Throws std::invalid_argument on every rank if any rank's mesh
 // is not of dimension 2 (tris, quads, polygons) or 3 (tets, hexes, prisms,
-// pyramids), has edits or high-order nodes, or if levels < 1; or if a gid
-// of the refined mesh would not fit a GO.
+// pyramids), has edits or high-order nodes, or a quad or polygon not
+// star-shaped about its corners' average; if levels < 1 or the ranks differ
+// in levels or dimension; or if a gid of the refined mesh would not fit a GO.
 [[nodiscard]] RefineResult refine_uniform(const Comm& comm, const HostMesh& mesh, RefineOptions options = {});
 
 }  // namespace soma

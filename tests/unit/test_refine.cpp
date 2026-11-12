@@ -14,6 +14,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -27,6 +28,7 @@
 #include "soma/algorithms/refine.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/parallel/distributed.hpp"
+#include "soma/parallel/ghosts.hpp"
 #include "soma/topology/sides.hpp"
 
 using soma::Comm;
@@ -250,6 +252,7 @@ struct Case {
   Cells cells;
   Real fine_vertices;  // closed form
   Real fine_cells;
+  bool twice = true;  // its children can be refined again
 };
 
 std::vector<Case> cases() {
@@ -258,7 +261,8 @@ std::vector<Case> cases() {
           {"tris", plane(5, 4, 1), 11.0 * 9, 4.0 * 40},
           // 4 blocks of 2 by 2, an octagon (8 quads) and a quad (4) each: 25
           // vertices, 32 edges (two grid edges a block are no cell's), 8 centres.
-          {"octagons", plane(4, 4, 2), 25.0 + 32 + 8, 4.0 * 12},
+          // Not twice: an L's child at its inner corner is a dart, not star-shaped.
+          {"octagons", plane(4, 4, 2), 25.0 + 32 + 8, 4.0 * 12, false},
           {"hexes", volume(3, 3, 3, Topology::hex), cube(3), 8.0 * 27},
           {"tets", volume(3, 3, 3, Topology::tet), cube(3), 8.0 * 6 * 27},
           {"prisms", volume(3, 3, 3, Topology::prism), cube(3), 8.0 * 2 * 27},
@@ -442,13 +446,15 @@ TEST(Refine, DistributedRefinementIsTheSerialOneBitForBit) {
   }
 }
 
-// Vertex fields of floating values: linear ones come through exactly. Cell
-// fields: children take the parent's value. Integer vertex fields are dropped.
+// Vertex fields of floating values: linear ones come through two levels
+// exactly, with their default values. Cell fields: children take the
+// parent's value. Integer vertex fields are dropped.
 TEST(Refine, FieldsCarryOver) {
   const Comm c = Comm::world();
   const auto linear = [](const std::array<Real, 3>& p) { return 1 + 2 * p[0] - 3 * p[1] + 0.5 * p[2]; };
   for (const Case& k : cases()) {
     SCOPED_TRACE(k.name);
+    if (!k.twice) continue;
     soma::HostMesh mesh = build(c, k.cells, 0);
     const int d = mesh.dim();
     auto u = mesh.fields().add_tag<double>("u", 0, 2).view();
@@ -463,7 +469,9 @@ TEST(Refine, FieldsCarryOver) {
       mat(static_cast<std::size_t>(e), 0) = static_cast<std::int32_t>(mesh.gid(d)(e) % 7);
     }
     (void)mesh.fields().add_tag<std::int32_t>("flag", 0, 1);
-    const auto fine = soma::refine_uniform(c, mesh);
+    auto f = mesh.fields().add_tag<float>("f", 0, 1, {.default_value = std::vector<float>{-1}}).view();
+    for (LO v = 0; v < mesh.count(0); ++v) f(static_cast<std::size_t>(v), 0) = 0.25f;
+    const auto fine = soma::refine_uniform(c, mesh, {.levels = 2});
     EXPECT_EQ(fine.dropped, std::vector<std::string>{"flag"});
     const auto fu = fine.mesh.fields().get<double>("u", 0).view();
     const auto fq = fine.mesh.fields().get<double>("q", d).view();
@@ -478,6 +486,10 @@ TEST(Refine, FieldsCarryOver) {
       const auto p = static_cast<std::size_t>(fine.parent[static_cast<std::size_t>(e)]);
       wrong += fq(static_cast<std::size_t>(e), 0) == q(p, 0) && fm(static_cast<std::size_t>(e), 0) == mat(p, 0) ? 0 : 1;
     }
+    const auto ff = fine.mesh.fields().get<float>("f", 0);
+    ASSERT_TRUE(ff.has_default());
+    EXPECT_EQ(ff.default_value(), std::vector<float>{-1});
+    for (LO v = 0; v < fine.mesh.count(0); ++v) wrong += ff.view()(static_cast<std::size_t>(v), 0) == 0.25f ? 0 : 1;
     EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-14);
     EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
   }
@@ -488,6 +500,7 @@ TEST(Refine, TwoLevelsAreOneLevelTwice) {
   const Comm c = Comm::world();
   for (const Case& k : cases()) {
     SCOPED_TRACE(k.name);
+    if (!k.twice) continue;
     const soma::HostMesh mesh = build(c, k.cells, 0);
     const int d = mesh.dim();
     const auto two = soma::refine_uniform(c, mesh, {.levels = 2});
@@ -512,6 +525,88 @@ TEST(Refine, TwoLevelsAreOneLevelTwice) {
     }
     EXPECT_EQ(c.allreduce(static_cast<Real>(differ), soma::Op::sum), 0);
   }
+}
+
+// Ghosts and explicit edges in the input change nothing; ranks without
+// cells take part.
+TEST(Refine, GhostsEdgesAndEmptyRanksChangeNothing) {
+  const Comm c = Comm::world();
+  const auto same = [&](const soma::RefineResult& a, const soma::RefineResult& b, int d) {
+    std::map<GO, std::vector<GO>> cells;
+    const auto am = a.mesh.view();
+    for (LO e = 0; e < a.mesh.count(d); ++e) {
+      auto& corners = cells[a.mesh.gid(d)(e)];
+      for (LO i = 0; i < am.num_vertices(d, e); ++i) corners.push_back(a.mesh.gid(0)(am.vertex(d, e, i)));
+    }
+    const auto bm = b.mesh.view();
+    LO differ = a.mesh.count(d) == b.mesh.count(d) ? 0 : 1;
+    for (LO e = 0; e < b.mesh.count(d); ++e) {
+      std::vector<GO> corners;
+      for (LO i = 0; i < bm.num_vertices(d, e); ++i) corners.push_back(b.mesh.gid(0)(bm.vertex(d, e, i)));
+      const auto it = cells.find(b.mesh.gid(d)(e));
+      differ += it != cells.end() && it->second == corners ? 0 : 1;
+    }
+    return c.allreduce(static_cast<Real>(differ), soma::Op::sum);
+  };
+  for (const Case& k : cases()) {
+    SCOPED_TRACE(k.name);
+    const int d = k.cells.dim;
+    const soma::HostMesh plain = build(c, k.cells, 0);
+    soma::HostMesh more = build(c, k.cells, 0);
+    soma::build_distributed_adjacencies(c, more, soma::AdjacencyRequest{}.add(d, 1));
+    if (c.size() > 1) more.add_ghosts(c, soma::GhostOptions{1, 0});
+    EXPECT_EQ(same(soma::refine_uniform(c, plain), soma::refine_uniform(c, more), d), 0);
+  }
+  // One cell on the first rank, two levels.
+  const soma::HostMesh one = build(c, plane(1, 1, 0), 2);
+  const auto fine = soma::refine_uniform(c, one, {.levels = 2});
+  EXPECT_EQ(owned_count(c, fine.mesh, 2), 16);
+  EXPECT_EQ(owned_count(c, fine.mesh, 0), 25);
+}
+
+// A U-shaped polygon is not star-shaped about its corners' average.
+TEST(Refine, ACellNotStarShapedIsRefused) {
+  const Comm c = Comm::world();
+  Cells g = plane(3, 2, 0);
+  g.cells.clear();
+  // The corners of a 3 by 2 grid round a U open at the top middle cell.
+  const auto id = [](int i, int j) { return static_cast<GO>(j * 4 + i + 1); };
+  g.cells.push_back({Topology::polygon, {id(0, 0), id(1, 0), id(2, 0), id(3, 0), id(3, 1), id(3, 2), id(2, 2),
+                                         id(2, 1), id(1, 1), id(1, 2), id(0, 2), id(0, 1)}});
+  EXPECT_THROW((void)soma::refine_uniform(c, build(c, g, 2)), std::invalid_argument);
+  // L-shaped octagons refine once, but the child at the inner corner is a
+  // dart: not again.
+  const soma::HostMesh ls = build(c, plane(4, 4, 2), 0);
+  const auto once = soma::refine_uniform(c, ls);
+  EXPECT_THROW((void)soma::refine_uniform(c, once.mesh), std::invalid_argument);
+  EXPECT_THROW((void)soma::refine_uniform(c, ls, {.levels = 2}), std::invalid_argument);
+}
+
+// The largest and least cell gids GO holds: their numbers would not fit.
+TEST(Refine, GidsThatWouldNotFitThrow) {
+  const Comm c = Comm::world();
+  for (const std::array<GO, 2> gids : {std::array<GO, 2>{0, std::numeric_limits<GO>::max()},
+                                       std::array<GO, 2>{-1, std::numeric_limits<GO>::max() - 1},
+                                       std::array<GO, 2>{std::numeric_limits<GO>::min(), 5}}) {
+    soma::MeshBuilder b(2);
+    if (c.rank() == 0) {
+      b.add_vertices(std::vector<GO>{1, 2, 3, 4}, std::vector<Real>{0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0});
+      b.add_elements(Topology::tri, std::vector<GO>{gids[0], gids[1]}, std::vector<GO>{1, 2, 3, 1, 3, 4});
+    }
+    const soma::HostMesh mesh = soma::build_local_part(c, std::move(b));
+    EXPECT_THROW((void)soma::refine_uniform(c, mesh), std::invalid_argument);
+  }
+}
+
+// Ranks that differ in levels or dimension throw together, not hang.
+TEST(Refine, RanksThatDisagreeThrowTogether) {
+  const Comm c = Comm::world();
+  if (c.size() == 1) GTEST_SKIP() << "needs two ranks";
+  const soma::HostMesh mesh = build(c, plane(4, 4, 0), 0);
+  EXPECT_THROW((void)soma::refine_uniform(c, mesh, {.levels = 1 + c.rank() % 2}), std::invalid_argument);
+  soma::MeshBuilder b(c.rank() == 0 ? 3 : 2);
+  const soma::HostMesh mixed = std::move(b).build();
+  EXPECT_THROW((void)soma::refine_uniform(c, mixed), std::invalid_argument);
 }
 
 TEST(Refine, BadInputThrowsOnEveryRank) {
