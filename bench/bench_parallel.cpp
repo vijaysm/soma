@@ -428,13 +428,13 @@ int main(int argc, char** argv) {
   {
     constexpr int steps = 10;
     std::optional<soma::FvSpace<Host>> space;
-    runner.run("fv_space", "soma_fv_space", cells, [&] { space.reset(); }, [&] { space.emplace(comm, *ghosted); });
+    runner.run("fv_space", "soma_fv_space", host_name, cells, [&] { space.reset(); }, [&] { space.emplace(comm, *ghosted); });
     const auto phi = space->normal_flux(Uniform{});
     const soma::View1<const double, Host> fluxes(phi);
     const double dt = 0.9 * space->max_dt(comm, fluxes);
     const auto u = space->vector();
     // A constant state, the same value flowing in: it stays, to rounding.
-    runner.run("advect", "soma_upwind", cells, [&] { Kokkos::deep_copy(u, 1.0); },
+    runner.run("advect", "soma_upwind", host_name, cells, [&] { Kokkos::deep_copy(u, 1.0); },
                [&] {
                  for (int n = 0; n < steps; ++n) space->step(comm, fluxes, u, dt, 1.0);
                });
@@ -442,12 +442,12 @@ int main(int argc, char** argv) {
     for (LO e = 0; e < space->cols(); ++e) worst = std::max(worst, std::abs(u(e) - 1));
     ok = agree(comm, worst <= 1e-12) && ok;
     double plain = 0, rounded = 0;
-    runner.run("advect", "soma_total", cells, [] {}, [&] { plain = space->total(comm, u); });
+    runner.run("advect", "soma_total", host_name, cells, [] {}, [&] { plain = space->total(comm, u); });
     const bool saved = soma::reproducible();
     soma::set_reproducible(true);
     {
       const soma::FvSpace<Host> exact(comm, *ghosted);
-      runner.run("advect", "soma_total_reproducible", cells, [] {}, [&] { rounded = exact.total(comm, u); });
+      runner.run("advect", "soma_total_reproducible", host_name, cells, [] {}, [&] { rounded = exact.total(comm, u); });
     }
     soma::set_reproducible(saved);
     ok = agree(comm, std::abs(plain - rounded) <= 1e-12 * std::abs(rounded)) && ok;

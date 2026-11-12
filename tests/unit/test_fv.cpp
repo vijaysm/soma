@@ -45,7 +45,7 @@ using Velocity = Kokkos::Array<Real, 3>;
 
 namespace {
 
-constexpr std::array<Topology, 4> all = {Topology::tri, Topology::quad, Topology::tet, Topology::hex};
+constexpr std::array<Topology, 4> every_topology = {Topology::tri, Topology::quad, Topology::tet, Topology::hex};
 
 // A constant velocity.
 struct Uniform {
@@ -124,7 +124,7 @@ void expect_message(const Comm& c, const soma::HostMesh& mesh, const std::string
 // box; every boundary face is some rank's, once.
 TEST(Fv, CellsCloseAndFillTheBox) {
   const Comm c = Comm::world();
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     SCOPED_TRACE(soma::name(t));
     const soma::testing::BoxSpec spec = spec_of(t, 5);
     const soma::HostMesh mesh = box_part(c, spec, Part{.perturb = false, .smooth = true});
@@ -155,7 +155,7 @@ TEST(Fv, CellsCloseAndFillTheBox) {
 // same value: to rounding, step after step.
 TEST(Fv, ConstantStatesStay) {
   const Comm c = Comm::world();
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     SCOPED_TRACE(soma::name(t));
     const soma::HostMesh mesh = box_part(c, spec_of(t, 6));
     const Space space(c, mesh);
@@ -177,7 +177,7 @@ TEST(Fv, TheTotalIsConserved) {
   const bool saved = soma::reproducible();
   for (const bool exact : {false, true}) {
     soma::set_reproducible(exact);
-    for (const Topology t : all) {
+    for (const Topology t : every_topology) {
       SCOPED_TRACE(testing::Message() << soma::name(t) << " exact " << exact);
       const soma::HostMesh mesh = box_part(c, spec_of(t, 6));
       const Space space(c, mesh);
@@ -197,7 +197,7 @@ TEST(Fv, TheTotalIsConserved) {
 // On any partition, the steps are the serial ones bit for bit.
 TEST(Fv, DistributedStepsAreTheSerialOnesBitForBit) {
   const Comm c = Comm::world();
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     const soma::testing::BoxSpec spec = spec_of(t, 6);
     const soma::HostMesh whole = box_part(Comm::self(), spec);
     const Vector serial = advected(Comm::self(), whole, 30);
@@ -238,7 +238,7 @@ TEST(Fv, TheLargestStepIsTheCellCrossingTime) {
 // A bump carried by a uniform flow: the error falls at first order.
 TEST(Fv, UpwindConvergesAtFirstOrder) {
   const Comm c = Comm::world();
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     SCOPED_TRACE(soma::name(t));
     std::vector<Real> errors;
     for (const int n : solid(t) ? std::vector<int>{8, 16, 32} : std::vector<int>{16, 32, 64}) {
