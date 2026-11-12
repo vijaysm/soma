@@ -878,7 +878,8 @@ TEST(H5mMoabFormat, ReadsASparseTagStoredDense) {
   EXPECT_EQ(values("S", quads), std::vector<int>{-7});  // the default
   EXPECT_EQ(values("M", verts), (std::vector<int>{1, 2, 3, 4}));
   EXPECT_EQ(values("M", quads), std::vector<int>{9});
-  for (const auto& [name, held] : {std::pair<const char*, std::size_t>{"S", 4}, {"M", 5}}) {
+  using Named = std::pair<const char*, std::size_t>;
+  for (const auto& [name, held] : {Named{"S", 4}, Named{"M", 5}}) {
     moab::Tag t;
     check(mb.tag_get_handle(name, t), name);
     moab::Range tagged;

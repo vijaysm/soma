@@ -119,7 +119,8 @@ Snapshot snapshot(const HostMesh& m) {
       seq.emplace_back(x.slot, x.slot == soma::set_dim ? GO{x.lid} : gid(m, x.slot, x.lid));
     }
   }
-  for (const auto& [name, d] : {std::pair<const char*, int>{"vertex", 0}, {"edge", 1}, {"face", 2}, {"cell", 3}}) {
+  using Named = std::pair<const char*, int>;
+  for (const auto& [name, d] : {Named{"vertex", 0}, Named{"edge", 1}, Named{"face", 2}, Named{"cell", 3}}) {
     if (d <= m.dim() && m.fields().contains(name)) s.fields[name] = fixed_by_gid(m, name, d);
     const std::string var = std::string(name) + "_var";
     if (d <= m.dim() && m.fields().contains(var)) s.fields[var] = var_by_gid(m, var, d);
