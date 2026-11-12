@@ -294,6 +294,11 @@ TEST(Remap3d, BadMeshesThrowOnEveryRank) {
   for (std::size_t v = 0; v < flat.vg.size(); ++v) flat.xyz[3 * v + 2] = 0;
   EXPECT_NE(message(build(c, flat, 2), good).find("source mesh holds a cell"), std::string::npos);
   EXPECT_NE(message(good, build(c, flat, 2)).find("target mesh holds a cell"), std::string::npos);
+  // A hex with a top corner pushed below its bottom: not star-shaped about
+  // its centroid.
+  Cells folded = grid(1, 1, 1, Topology::hex, 0);
+  folded.xyz[3 * 6 + 2] = -0.9;  // the corner (0, 1, 1)
+  EXPECT_NE(message(good, build(c, folded, 2)).find("target mesh holds a cell"), std::string::npos);
   // A plane mesh against a volume mesh.
   Cells plane;
   plane.dim = 2;
