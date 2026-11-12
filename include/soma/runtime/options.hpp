@@ -28,6 +28,13 @@
 // it is made) and agree on it across ranks; an option of their own
 // (CgOptions::reproducible) overrides it.
 //
+// "One build" is one compiler and one set of flags: a host kernel and a
+// device kernel are two, and differ in the last bit where one contracts
+// a * b + c into a fused multiply-add (nvcc does by default). That is a
+// compile-time choice no run-time switch reaches: configure with
+// SOMA_FP_CONTRACT=OFF (SOMA_FP_CONTRACT_OFF in soma/config.hpp) for a build
+// that contracts nowhere.
+//
 //   SOMA_REPRODUCIBLE=1 ./app                    # 0 or 1
 //   ./app --soma-reproducible                    # on; or --soma-reproducible=0|1
 //                                                # (a value after a space is not its)

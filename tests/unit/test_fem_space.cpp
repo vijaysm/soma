@@ -25,6 +25,7 @@
 #include "soma/algorithms/fem_space.hpp"
 #include "soma/algorithms/laplacian.hpp"
 #include "soma/algorithms/vertex_graph.hpp"
+#include "soma/config.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
@@ -300,12 +301,14 @@ TEST(FemSpace, MovedCoordinatesAssembleAsSerialOnes) {
 }
 
 // A space in the default execution space's memory assembles what the host
-// one does: bit for bit where that space is a host one, to rounding on a
-// device, whose compiler contracts a * b + c into an fma where the host's
-// need not (nvcc's default).
+// one does: bit for bit where that space is a host one or the build
+// contracts nowhere (SOMA_FP_CONTRACT=OFF), to rounding on a device
+// otherwise, whose compiler contracts a * b + c into an fma where the
+// host's need not (nvcc's default).
 TEST(FemSpace, DefaultMemorySpaceAssemblesTheHostMatrix) {
   using Mem = Kokkos::DefaultExecutionSpace::memory_space;
-  constexpr bool on_host = std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>;
+  constexpr bool bitwise =
+      std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace> || SOMA_FP_CONTRACT_OFF;
   const Comm c = Comm::world();
   for (const Topology t : {Topology::tri, Topology::hex}) {
     SCOPED_TRACE(soma::name(t));
@@ -318,7 +321,7 @@ TEST(FemSpace, DefaultMemorySpaceAssemblesTheHostMatrix) {
                       Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, a.values)};
     const Space reference(c, host);
     const Entries got = by_gid(host, back), want = by_gid(host, reference.laplacian(c));
-    if (on_host) {
+    if (bitwise) {
       EXPECT_EQ(first_difference(got, want), "");
       continue;
     }

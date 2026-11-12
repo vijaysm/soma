@@ -27,6 +27,15 @@ All notable changes to SOMA are recorded here. The format follows
 - `SOMA_GPU_AWARE_MPI` (`AUTO`, `ON`, `OFF`) sets the compile-time default for passing device
   buffers to MPI. The generated `soma/config.hpp` also honors the environment variable
   `SOMA_GPU_AWARE_MPI=0|1` at run time.
+- `SOMA_FP_CONTRACT` (`DEFAULT`, `OFF`) turns floating-point contraction off for the library
+  and for every target that links it: `-ffp-contract=off` for GCC, Clang and IntelLLVM, and
+  `-fmad=false` with the host flag passed through for nvcc, which contracts `a * b + c` into an
+  fma in device kernels by default. A kernel then rounds the same on the host and on the
+  device; `reproducible` alone promises that only within one build of one compiler. `DEFAULT`
+  keeps each compiler's own setting. `OFF` is a configure error with a compiler outside that
+  list, with a CUDA Kokkos not built as the CMake CUDA language, and with SYCL.
+  `soma/config.hpp` records it as `SOMA_FP_CONTRACT_OFF`, the configure summary as
+  `fp-contract=`. Verified with g++ 13 and nvcc 12.5; its cost in speed is not measured.
 - On AppleClang, SOMA seeds `FindOpenMP` from Homebrew libomp so that Kokkos with its OpenMP
   backend can be found.
 - The configure summary line reports the Kokkos source, host and GPU backends, MPI, tests,
@@ -632,10 +641,11 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   AMR VTK test's value function now has exact products, and
   `FemSpace.DefaultMemorySpaceAssemblesTheHostMatrix` stays bitwise on a host default space and
   bounds the difference by 8 epsilon of the largest entry on a device (1.25 epsilon measured
-  on a GTX 1050 Ti with nvcc 12.5, at 1 to 4 ranks). Source spellings nvcc 12.5 rejects are
-  gone: a namespace-scope constant named `all`, a string-literal default for a
-  `const std::string&` parameter (`ProgOptions`), and braced range-for lists whose later
-  elements are bare braces.
+  on a GTX 1050 Ti with nvcc 12.5, at 1 to 4 ranks). In a `SOMA_FP_CONTRACT=OFF` build it is
+  bitwise on the device too (the same card, 1 to 4 ranks). Source spellings nvcc 12.5 rejects
+  are gone: a namespace-scope constant named `all` (the FEM and FV tests), a string-literal
+  default for a `const std::string&` parameter (`ProgOptions`), and braced range-for lists
+  whose later elements are bare braces.
 - The exception-safety test exports its symbols (`ENABLE_EXPORTS`), so the backtrace rule
   that skips Kokkos's own deallocation sees Kokkos frames with a statically linked Kokkos on
   glibc too (they were invisible to `backtrace_symbols`, and the injected failure aborted).

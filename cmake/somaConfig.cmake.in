@@ -11,6 +11,8 @@ set(SOMA_LO_64 @SOMA_LO_64@)
 set(SOMA_OFFSET_64 @SOMA_OFFSET_64@)
 set(SOMA_ENABLE_KOKKOSKERNELS @SOMA_ENABLE_KOKKOSKERNELS@)
 set(SOMA_ENABLE_PETSC @SOMA_ENABLE_PETSC@)
+# DEFAULT or OFF; OFF comes with the compile flags, on the soma::soma target.
+set(SOMA_FP_CONTRACT @SOMA_FP_CONTRACT_MODE@)
 # "installed" or "fetched", as configured; fetched means Kokkos was installed
 # alongside SOMA, into this prefix.
 set(SOMA_KOKKOS_SOURCE "@SOMA_KOKKOS_SOURCE@")

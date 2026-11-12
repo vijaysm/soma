@@ -22,4 +22,8 @@
 // GPU-aware MPI can be turned off for debugging without rebuilding.
 #define SOMA_GPU_AWARE_MPI_DEFAULT @SOMA_GPU_AWARE_MPI_DEFAULT@
 
+// 1 where the build turned floating-point contraction off (SOMA_FP_CONTRACT=OFF):
+// no a * b + c becomes a fused multiply-add, on the host or on the device.
+#define SOMA_FP_CONTRACT_OFF @SOMA_FP_CONTRACT_OFF@
+
 #endif  // SOMA_CONFIG_HPP_
