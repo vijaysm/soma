@@ -3,28 +3,26 @@
 
 // advect [--steps N] [--cfl C] <in> <out>
 //
-// Reads a MOAB .h5m or SOMA file of triangles, quads, tets or hexes (on as
-// many ranks as it runs on), adds a ghost layer through vertices, and carries
+// Reads a MOAB .h5m, SOMA or legacy VTK file of triangles, quads, tets or
+// hexes (soma::read_file, on as many ranks as it runs on), adds a ghost layer through vertices, and carries
 // a Gaussian bump around the centre of the mesh's bounding box by a rigid
 // rotation in the xy plane: first-order upwind finite volumes
 // (soma::FvSpace), forward Euler, N steps (default 100) at C (default 0.5)
 // times the largest stable step, nothing flowing in. Writes u as the cell
-// field "u", with the ghosts removed, to a SOMA file, or on one rank to a
-// legacy VTK file when <out> ends in .vtk. Exit status: 0 done, 1 failed, 2
-// bad arguments.
+// field "u", with the ghosts removed, to <out> as a SOMA, MOAB .h5m or
+// legacy VTK file by its extension (soma::write_file). Exit status: 0 done,
+// 1 failed, 2 bad arguments.
 
 #include <cmath>
 #include <cstdio>
 #include <exception>
-#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <Kokkos_Core.hpp>
 
 #include "soma/algorithms/fv.hpp"
-#include "soma/io/h5m.hpp"
-#include "soma/io/soma_file.hpp"
-#include "soma/io/vtk_writer.hpp"
+#include "soma/io/mesh_file.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/ghosts.hpp"
 #include "soma/runtime/scope_guard.hpp"
@@ -72,8 +70,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   try {
-    const soma::MeshFormat format = soma::detect_format(in);
-    soma::HostMesh mesh = format == soma::MeshFormat::soma ? soma::read_soma(comm, in) : soma::read_h5m(comm, in);
+    soma::HostMesh mesh = soma::read_file(comm, in);
     mesh.add_ghosts(comm, soma::GhostOptions{1, 0, false});
     // The bounding box, for the centre of rotation and the bump.
     const auto x = mesh.coords();
@@ -118,14 +115,7 @@ int main(int argc, char** argv) {
       for (soma::LO e = 0; e < space.cols(); ++e) values(e, 0) = u(e);
     }
     mesh.remove_ghosts(comm);
-    const bool vtk = out.size() > 4 && out.compare(out.size() - 4, 4, ".vtk") == 0;
-    if (vtk && comm.size() > 1) throw std::invalid_argument("a .vtk output needs one rank");
-    if (vtk) {
-      const std::string fields[] = {"u"};
-      soma::write_vtk(mesh, out, fields);
-    } else {
-      soma::write_soma(comm, mesh, out);
-    }
+    soma::write_file(comm, mesh, out, {.vtk_fields = std::vector<std::string>{"u"}});
     if (comm.rank() == 0) {
       std::printf("%s: %d steps of %.3e; total %.15e before, %.15e after; wrote %s\n", argv[0], steps, dt, before,
                   after, out.c_str());

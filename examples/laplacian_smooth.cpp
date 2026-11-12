@@ -3,21 +3,20 @@
 
 // laplacian_smooth [--iterations K] [--bridge-dim B] [--tolerance T] <in> <out>
 //
-// Reads a MOAB .h5m or SOMA file (on as many ranks as it runs on), adds a
-// ghost layer through vertices, smooths the vertex coordinates by K Jacobi
-// Laplacian sweeps (soma::laplacian_smooth; the skin stays), removes the
-// ghosts and writes a SOMA file, or on one rank a legacy VTK file when <out>
-// ends in .vtk. Exit status: 0 done, 1 failed, 2 bad arguments.
+// Reads a MOAB .h5m, SOMA or legacy VTK file (soma::read_file, on as many
+// ranks as it runs on), adds a ghost layer through vertices, smooths the
+// vertex coordinates by K Jacobi Laplacian sweeps (soma::laplacian_smooth;
+// the skin stays), removes the ghosts and writes <out> as a SOMA, MOAB .h5m
+// or legacy VTK file by its extension (soma::write_file). Exit status: 0
+// done, 1 failed, 2 bad arguments.
 
 #include <cstdio>
 #include <exception>
-#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include "soma/algorithms/laplacian.hpp"
-#include "soma/io/h5m.hpp"
-#include "soma/io/soma_file.hpp"
-#include "soma/io/vtk_writer.hpp"
+#include "soma/io/mesh_file.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/ghosts.hpp"
 #include "soma/runtime/scope_guard.hpp"
@@ -56,18 +55,11 @@ int main(int argc, char** argv) {
     return 2;
   }
   try {
-    const soma::MeshFormat format = soma::detect_format(in);
-    soma::HostMesh mesh = format == soma::MeshFormat::soma ? soma::read_soma(comm, in) : soma::read_h5m(comm, in);
+    soma::HostMesh mesh = soma::read_file(comm, in);
     mesh.add_ghosts(comm, soma::GhostOptions{1, 0, false});
     const soma::SmoothReport report = soma::laplacian_smooth(comm, mesh, options);
     mesh.remove_ghosts(comm);
-    const bool vtk = out.size() > 4 && out.compare(out.size() - 4, 4, ".vtk") == 0;
-    if (vtk && comm.size() > 1) throw std::invalid_argument("a .vtk output needs one rank");
-    if (vtk) {
-      soma::write_vtk(mesh, out);
-    } else {
-      soma::write_soma(comm, mesh, out);
-    }
+    soma::write_file(comm, mesh, out, {.vtk_fields = std::vector<std::string>{}});
     if (comm.rank() == 0) {
       std::printf("%s: %d sweep%s", argv[0], report.iterations, report.iterations == 1 ? "" : "s");
       if (options.tolerance > 0) std::printf(", last largest move %.3e", report.largest_move);
