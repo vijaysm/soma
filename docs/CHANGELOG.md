@@ -593,6 +593,20 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `Intx2MeshInPlane` to rounding.
 - `examples/remap.cpp` remaps a cell field from a `.h5m` or SOMA mesh onto a grid of triangles
   or tets over its bounding box and prints both totals.
+- `soma::refine_uniform(comm, mesh, RefineOptions)` (`soma/algorithms/refine.hpp`) splits
+  every edge of a plane mesh of triangles, quads and polygons, or a volume mesh of tets, hexes,
+  prisms and pyramids (mixed meshes included), into two, `levels` times: tris and quads into
+  4, polygons into n quads about their centroid, tets into 8 (the octahedron on its shortest
+  diagonal), hexes and prisms into 8, pyramids into 6 pyramids and 4 tets. Every quad face gets
+  a centre, so meshes stay conforming. New vertices are corner averages in gid order and gids
+  follow from edge, face and cell gids, so the refined mesh is the same, gid for gid and bit
+  for bit, on any number of ranks; children stay on their parent's rank. It returns child ->
+  parent and parent -> children maps; dense cell fields pass to children and floating vertex
+  fields are averaged onto new vertices (exact for linear fields); other fields are named as
+  dropped. Matches MOAB's `NestedRefine` on tri, quad, tet and hex meshes (tets up to ties
+  between equally short diagonals).
+- `examples/refine.cpp` refines a `.h5m` or SOMA mesh `--levels` times and prints the counts
+  and the error of a linear vertex field.
 
 ### Testing
 
@@ -757,7 +771,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   sections time Laplacian smoothing against MOAB's, and `FemSpace`, the three assemblies and
   CG alone; its `advect` section, `FvSpace` and upwind steps alone; its `remap` section, a
   `RemapOperator` between plane grids built and applied, against MOAB's in-plane intersection
-  at one rank, and between volume grids. `bench/run_parallel.sh` runs it
+  at one rank, and between volume grids; its `refine` section, `refine_uniform` of hexes and
+  tets, against MOAB's `NestedRefine` of the hexes at one rank. `bench/run_parallel.sh` runs it
   over rank counts and sizes into JSON files; its header lists what a run at scale needs.
 
 ### Packaging
