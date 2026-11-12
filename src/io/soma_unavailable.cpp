@@ -6,6 +6,7 @@
 
 #include "soma/io/soma_amr.hpp"
 #include "soma/io/soma_file.hpp"
+#include "soma/io/vtk_reader.hpp"
 
 namespace soma {
 
@@ -47,6 +48,8 @@ AmrCheckpoint read_soma_amr(const Comm&, const std::filesystem::path& path, cons
 
 void detail::soma_streamed_sink(bool) noexcept {}
 
-MeshFormat detect_format(const std::filesystem::path&) { return MeshFormat::unknown; }
+MeshFormat detect_format(const std::filesystem::path& path) {
+  return detail::legacy_vtk_header(path) ? MeshFormat::legacy_vtk : MeshFormat::unknown;
+}
 
 }  // namespace soma

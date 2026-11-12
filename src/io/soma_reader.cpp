@@ -33,6 +33,7 @@
 #include "soma/fields/domain_mesh.hpp"
 #include "soma/fields/space.hpp"
 #include "soma/io/soma_file.hpp"
+#include "soma/io/vtk_reader.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/migrate.hpp"
 #include "soma/parallel/partition.hpp"
@@ -1599,6 +1600,7 @@ HostMesh read_soma(const fs::path& path, const SomaReadOptions& options) {
 }
 
 MeshFormat detect_format(const fs::path& path) {
+  if (detail::legacy_vtk_header(path)) return MeshFormat::legacy_vtk;
   const h5::Session quiet;
   if (H5Fis_accessible(path.c_str(), H5P_DEFAULT) <= 0) return MeshFormat::unknown;
   const hid_t id = H5Fopen(path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);

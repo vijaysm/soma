@@ -100,7 +100,7 @@ struct SomaReadOptions {
   int aggregators = 0;
 };
 
-enum class MeshFormat : std::uint8_t { legacy_h5m, soma, soma_amr, unknown };
+enum class MeshFormat : std::uint8_t { legacy_h5m, soma, soma_amr, legacy_vtk, unknown };
 
 void write_soma(const Comm& comm, const HostMesh& mesh, const std::filesystem::path& path,
                 const SomaWriteOptions& options = {});
@@ -126,8 +126,9 @@ namespace detail {
 void soma_streamed_sink(bool on) noexcept;
 }  // namespace detail
 
-// The format of an HDF5 file by its content (/tstt, /soma with a mesh, or
-// /soma with an AMR checkpoint); unknown for any other file, or one that
+// The format of a file by its content: an HDF5 file by /tstt, /soma with a
+// mesh, or /soma with an AMR checkpoint (unknown without HDF5); a legacy
+// VTK file by its header line; unknown for any other file, or one that
 // cannot be opened.
 MeshFormat detect_format(const std::filesystem::path& path);
 

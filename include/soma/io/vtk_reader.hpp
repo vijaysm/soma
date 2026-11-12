@@ -67,6 +67,12 @@ namespace soma {
 
 HostMesh read_vtk(const std::filesystem::path& path);
 
+namespace detail {
+// Whether the file opens with a legacy VTK header, "# vtk DataFile" (case
+// aside); false for a file that cannot be read.
+bool legacy_vtk_header(const std::filesystem::path& path);
+}  // namespace detail
+
 }  // namespace soma
 
 #endif  // SOMA_IO_VTK_READER_HPP_

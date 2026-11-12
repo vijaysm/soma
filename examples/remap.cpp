@@ -4,21 +4,20 @@
 // remap [--n N] [--tolerance T] <in> <out>
 //
 // Reads a plane mesh of triangles, quads or polygons, or a volume mesh of
-// tets, hexes, prisms or pyramids, from a MOAB .h5m or SOMA file (on as many
-// ranks as it runs on), gives each cell the value of 2 + sin(x) cos(y) at
+// tets, hexes, prisms or pyramids, from a MOAB .h5m, SOMA or legacy VTK file
+// (soma::read_file, on as many ranks as it runs on), gives each cell the value of 2 + sin(x) cos(y) at
 // its corners' mean, and remaps it conservatively (soma::RemapOperator) onto
 // a grid over the mesh's bounding box: N by N squares (default 24) each cut
 // into two triangles, or N^3 cubes each cut into six tets. The grid covers every
 // source cell, so the total sum |S| u_S comes through; both totals are
-// printed. Writes the grid with the cell field "u" to a SOMA file, or on one
-// rank to a legacy VTK file when <out> ends in .vtk. Exit status: 0 done,
-// 1 failed, 2 bad arguments.
+// printed. Writes the grid with the cell field "u" to <out> as a SOMA, MOAB
+// .h5m or legacy VTK file by its extension (soma::write_file). Exit status:
+// 0 done, 1 failed, 2 bad arguments.
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -26,9 +25,7 @@
 
 #include "soma/algorithms/remap.hpp"
 #include "soma/core/mesh_builder.hpp"
-#include "soma/io/h5m.hpp"
-#include "soma/io/soma_file.hpp"
-#include "soma/io/vtk_writer.hpp"
+#include "soma/io/mesh_file.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/runtime/scope_guard.hpp"
@@ -147,9 +144,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   try {
-    const soma::MeshFormat format = soma::detect_format(in);
-    const soma::HostMesh source =
-        format == soma::MeshFormat::soma ? soma::read_soma(comm, in) : soma::read_h5m(comm, in);
+    const soma::HostMesh source = soma::read_file(comm, in);
     // The source's bounding box, a little wider so that no corner sits on its edge.
     const auto x = source.coords();
     double lo[3], hi[3];
@@ -185,14 +180,7 @@ int main(int argc, char** argv) {
     }
     before = comm.allreduce(before, soma::Op::sum);
     after = comm.allreduce(after, soma::Op::sum);
-    const bool vtk = out.size() > 4 && out.compare(out.size() - 4, 4, ".vtk") == 0;
-    if (vtk && comm.size() > 1) throw std::invalid_argument("a .vtk output needs one rank");
-    if (vtk) {
-      const std::string fields[] = {"u"};
-      soma::write_vtk(target, out, fields);
-    } else {
-      soma::write_soma(comm, target, out);
-    }
+    soma::write_file(comm, target, out, {.vtk_fields = std::vector<std::string>{"u"}});
     if (comm.rank() == 0) {
       std::printf("%s: %d^%d grid; total %.10e on the source, %.10e on the grid; wrote %s\n", argv[0], n, dim, before,
                   after, out.c_str());

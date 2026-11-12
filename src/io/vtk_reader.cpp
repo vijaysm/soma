@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <charconv>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -851,6 +852,15 @@ HostMesh build(const Grid& g, const std::vector<int>& cell_dim, int dim) {
 }
 
 }  // namespace
+
+bool detail::legacy_vtk_header(const fs::path& path) {
+  std::ifstream in(path, std::ios::binary);
+  std::string line(14, '\0');
+  if (!in.read(line.data(), static_cast<std::streamsize>(line.size()))) return false;
+  std::transform(line.begin(), line.end(), line.begin(),
+                 [](char c) { return static_cast<char>(std::tolower(static_cast<unsigned char>(c))); });
+  return line == "# vtk datafile";
+}
 
 HostMesh read_vtk(const fs::path& path) {
   std::ifstream in(path, std::ios::binary);
