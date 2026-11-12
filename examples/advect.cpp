@@ -103,7 +103,7 @@ int main(int argc, char** argv) {
         double c[3] = {0, 0, 0};
         const soma::LO n = m.num_vertices(d, e);
         for (soma::LO k = 0; k < n; ++k) {
-          for (int q = 0; q < 3; ++q) c[q] += x(m.vertex(d, e, k), q) / n;
+          for (int q = 0; q < 3; ++q) c[q] += x(m.vertex(d, e, k), q) / static_cast<double>(n);
         }
         const double r2 =
             (c[0] - bx) * (c[0] - bx) + (c[1] - by) * (c[1] - by) + (d == 3 ? (c[2] - bz) * (c[2] - bz) : 0);

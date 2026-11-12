@@ -78,7 +78,7 @@ std::array<Real, 3> centre(const soma::HostMesh& mesh, LO e) {
   for (LO k = 0; k < view.num_vertices(d, e); ++k) {
     for (int q = 0; q < 3; ++q) c[static_cast<std::size_t>(q)] += x(view.vertex(d, e, k), q);
   }
-  for (auto& v : c) v /= view.num_vertices(d, e);
+  for (auto& v : c) v /= static_cast<Real>(view.num_vertices(d, e));
   return c;
 }
 
