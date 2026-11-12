@@ -12,6 +12,8 @@ add_executable(advect advect.cpp)
 target_link_libraries(advect PRIVATE soma soma_warnings)
 add_executable(remap remap.cpp)
 target_link_libraries(remap PRIVATE soma soma_warnings)
+add_executable(refine refine.cpp)
+target_link_libraries(refine PRIVATE soma soma_warnings)
 
 if(SOMA_ENABLE_TESTS)
   set(in "${PROJECT_SOURCE_DIR}/data/64bricks_1khex.h5m")
@@ -61,4 +63,17 @@ if(SOMA_ENABLE_TESTS)
   add_test(NAME example_remap3d COMMAND remap --n 12 ${in} ${CMAKE_CURRENT_BINARY_DIR}/remap3d.vtk)
   set_tests_properties(example_remap3d PROPERTIES
     PASS_REGULAR_EXPRESSION "total 1[.]2894214008e[+]02 on the source, 1[.]2894214008e[+]02 on the grid")
+  # Refinement: 12^3 bricks into 24^3, the same on two ranks; the plane mesh twice.
+  set(refined "cells 1728 -> 13824, vertices 2197 -> 15625; linear field error ([0-9][.][0-9]e-1[4-9]|0[.]0e[+]00)")
+  add_test(NAME example_refine COMMAND refine ${in} ${CMAKE_CURRENT_BINARY_DIR}/refined.vtk)
+  set_tests_properties(example_refine PROPERTIES PASS_REGULAR_EXPRESSION "${refined}")
+  if(SOMA_ENABLE_MPI)
+    add_test(NAME example_refine.np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:refine> ${MPIEXEC_POSTFLAGS} ${in} ${CMAKE_CURRENT_BINARY_DIR}/refined_np2.soma)
+    set_tests_properties(example_refine.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2 PASS_REGULAR_EXPRESSION "${refined}")
+  endif()
+  add_test(NAME example_refine_plane COMMAND refine --levels 2 ${plane} ${CMAKE_CURRENT_BINARY_DIR}/refined2.vtk)
+  set_tests_properties(example_refine_plane PROPERTIES
+    PASS_REGULAR_EXPRESSION "cells 64 -> 1024, vertices 75 -> 969; linear field error ([0-9][.][0-9]e-1[4-9]|0[.]0e[+]00)")
 endif()
