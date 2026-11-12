@@ -57,4 +57,8 @@ if(SOMA_ENABLE_TESTS)
               $<TARGET_FILE:remap> ${MPIEXEC_POSTFLAGS} ${plane} ${CMAKE_CURRENT_BINARY_DIR}/remap_np2.soma)
     set_tests_properties(example_remap.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2 PASS_REGULAR_EXPRESSION "${remapped}")
   endif()
+  # And bricks onto tets.
+  add_test(NAME example_remap3d COMMAND remap --n 12 ${in} ${CMAKE_CURRENT_BINARY_DIR}/remap3d.vtk)
+  set_tests_properties(example_remap3d PROPERTIES
+    PASS_REGULAR_EXPRESSION "total 1[.]2894214008e[+]02 on the source, 1[.]2894214008e[+]02 on the grid")
 endif()
