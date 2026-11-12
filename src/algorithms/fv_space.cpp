@@ -80,9 +80,9 @@ FvPlan fv_plan(const Mesh<Kokkos::HostSpace>& mesh) {
   const auto vgid = mesh.gid(0);
   const auto cgid = mesh.gid(dim);
   const auto gid = [&](LO v) { return vgid(v); };
-  const int k = dim - 1;
-  const auto side = [&](LO e, int s) { return topology::side_of(m, dim, e, k, s); };
-  const auto sides_of = [&](LO e) { return topology::side_count(m, dim, e, k); };
+  const int facet = dim - 1;  // the sides' dimension
+  const auto side = [&](LO e, int s) { return topology::side_of(m, dim, e, facet, s); };
+  const auto sides_of = [&](LO e) { return topology::side_count(m, dim, e, facet); };
 
   // Every side here by its least corner.
   struct Entry {
