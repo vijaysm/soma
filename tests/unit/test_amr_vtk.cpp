@@ -53,9 +53,11 @@ std::vector<double> array(const std::string& vti, const std::string& name) {
   return out;
 }
 
-// A value per point and component no two points share.
+// A value per point and component no two points share. The fractional
+// factors are powers of two, so every product is exact and a kernel that
+// contracts a * b + c into an fma (nvcc's default) gets the host's bits.
 KOKKOS_INLINE_FUNCTION double value(int i, int j, int k, int c, int level) {
-  return 1000.0 * level + i + 0.01 * j + 0.0001 * k + 0.1 * c + 1.0 / 3.0;
+  return 1000.0 * level + i + 0.015625 * j + 0.000244140625 * k + 0.125 * c + 1.0 / 3.0;
 }
 
 // Kernels live in named functions: CUDA refuses device lambdas in a test

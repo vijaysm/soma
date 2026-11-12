@@ -626,6 +626,16 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   everywhere; the layout closed-form table is a constexpr function; the write-path assertion
   follows whether the host can reach the default memory space; the VTK extremes test uses
   2^24 itself rather than the tie literal 16777217.0f, which nvcc rounds to 16777218.
+- The distributed-mesh, FEM and AMR suites that came after it build and run with nvcc on a
+  device too. Two tests compared device results with the host's bit for bit, which holds only
+  where the compiler does not contract `a * b + c` into an fma (nvcc does by default): the
+  AMR VTK test's value function now has exact products, and
+  `FemSpace.DefaultMemorySpaceAssemblesTheHostMatrix` stays bitwise on a host default space and
+  bounds the difference by 8 epsilon of the largest entry on a device (1.25 epsilon measured
+  on a GTX 1050 Ti with nvcc 12.5, at 1 to 4 ranks). Source spellings nvcc 12.5 rejects are
+  gone: a namespace-scope constant named `all`, a string-literal default for a
+  `const std::string&` parameter (`ProgOptions`), and braced range-for lists whose later
+  elements are bare braces.
 - The exception-safety test exports its symbols (`ENABLE_EXPORTS`), so the backtrace rule
   that skips Kokkos's own deallocation sees Kokkos frames with a statically linked Kokkos on
   glibc too (they were invisible to `backtrace_symbols`, and the injected failure aborted).
@@ -785,6 +795,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   host and device backends (`space`, `git`, `host_backend`, `device_backend`).
   `bench/compare_bench.py` diffs two JSON-lines runs, flags changes inside the measurement
   spread, and keeps rows present on one side only; `bench/results/` holds committed baselines.
+  The MOAB comparisons (`bench_h5m_read`, `bench_h5m_write`, `bench_edit`, `bench_parallel`,
+  `bench_transport`) record `moab` as the space of MOAB's rows and the host execution space
+  for SOMA's.
 - `bench/scaling_table.py` summarizes one run: per workflow and mesh, the Serial time, the host
   backend's speedup and parallel efficiency at every thread count, the device time and its
   speedup over Serial and over the fastest host row; then ns per op against the problem size

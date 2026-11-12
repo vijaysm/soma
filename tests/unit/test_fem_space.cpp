@@ -6,12 +6,14 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <set>
 #include <span>
 #include <sstream>
 #include <string>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -298,9 +300,12 @@ TEST(FemSpace, MovedCoordinatesAssembleAsSerialOnes) {
 }
 
 // A space in the default execution space's memory assembles what the host
-// one does.
+// one does: bit for bit where that space is a host one, to rounding on a
+// device, whose compiler contracts a * b + c into an fma where the host's
+// need not (nvcc's default).
 TEST(FemSpace, DefaultMemorySpaceAssemblesTheHostMatrix) {
   using Mem = Kokkos::DefaultExecutionSpace::memory_space;
+  constexpr bool on_host = std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>;
   const Comm c = Comm::world();
   for (const Topology t : {Topology::tri, Topology::hex}) {
     SCOPED_TRACE(soma::name(t));
@@ -312,7 +317,22 @@ TEST(FemSpace, DefaultMemorySpaceAssemblesTheHostMatrix) {
                       Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, a.columns),
                       Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, a.values)};
     const Space reference(c, host);
-    EXPECT_EQ(first_difference(by_gid(host, back), by_gid(host, reference.laplacian(c))), "");
+    const Entries got = by_gid(host, back), want = by_gid(host, reference.laplacian(c));
+    if (on_host) {
+      EXPECT_EQ(first_difference(got, want), "");
+      continue;
+    }
+    // The same pattern, and entries within a few rounding errors of the
+    // largest one: the difference measured on a GTX 1050 Ti with nvcc 12.5
+    // is at most 1.25 epsilon of it, at one to four ranks.
+    EXPECT_EQ(got.size(), want.size());
+    Real largest = 0, worst = 0;
+    for (const auto& [k, v] : want) {
+      largest = std::max(largest, std::abs(v));
+      const auto it = got.find(k);
+      worst = it == got.end() ? INFINITY : std::max(worst, std::abs(it->second - v));
+    }
+    EXPECT_LE(worst, 8 * std::numeric_limits<Real>::epsilon() * largest);
   }
 }
 
