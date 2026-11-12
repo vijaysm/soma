@@ -21,7 +21,11 @@ namespace soma::compat {
 
 class ProgOptions {
  public:
-  explicit ProgOptions(const std::string& help = "", const std::string& brief = "") : help_(help), brief_(brief) {}
+  // The defaults are std::string(), not "": nvcc 12.5 with libstdc++ 13 fails to instantiate
+  // std::string's constructor from a literal in a default argument here ("incomplete type
+  // std::iterator_traits<char *>") once <sstream> is included.
+  explicit ProgOptions(const std::string& help = std::string(), const std::string& brief = std::string())
+      : help_(help), brief_(brief) {}
 
   template <class T>
   void addOpt(const std::string& names, const std::string& help, T* value = nullptr, int /*flags*/ = 0) {
