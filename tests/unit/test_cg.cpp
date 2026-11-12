@@ -34,7 +34,7 @@ using CVector = soma::View1<const Real, Kokkos::HostSpace>;
 
 namespace {
 
-constexpr std::array<Topology, 4> all = {Topology::tri, Topology::quad, Topology::tet, Topology::hex};
+constexpr std::array<Topology, 4> every_topology = {Topology::tri, Topology::quad, Topology::tet, Topology::hex};
 constexpr Real pi = 3.14159265358979323846;
 
 // u = prod sin(pi x_q) over the box's d axes, zero on its faces; f = -lap u.
@@ -98,7 +98,7 @@ TEST(Cg, ManufacturedSolutionsConvergeAtSecondOrder) {
   const Comm c = Comm::world();
   soma::CgOptions o;
   o.rtol = 1e-12;
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     SCOPED_TRACE(soma::name(t));
     std::vector<Real> errors;
     // Past the coarsest meshes, where P1 on triangles and tets is not yet
@@ -126,7 +126,7 @@ TEST(Cg, DistributedSolvesAreTheSerialOne) {
   const Comm c = Comm::world();
   soma::CgOptions o;
   o.rtol = 1e-12;
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     const soma::testing::BoxSpec spec = fem_test::spec_of(t, 6);
     const soma::HostMesh whole = box_part(Comm::self(), spec);
     const Solution serial = solve(Comm::self(), whole, o);
@@ -167,7 +167,7 @@ TEST(Cg, ReproducibleSolvesAreTheSerialOneBitForBit) {
     soma::set_reproducible(mode == 0);
     soma::CgOptions m = o;
     if (mode == 1) m.reproducible = true;
-    for (const Topology t : all) {
+    for (const Topology t : every_topology) {
       const soma::testing::BoxSpec spec = fem_test::spec_of(t, 6);
       const soma::HostMesh whole = box_part(Comm::self(), spec);
       const Solution serial = solve(Comm::self(), whole, m);

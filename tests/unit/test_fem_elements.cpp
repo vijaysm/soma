@@ -27,7 +27,7 @@ namespace fem = soma::fem;
 
 namespace {
 
-constexpr std::array<Topology, 4> all = {Topology::tri, Topology::quad, Topology::tet, Topology::hex};
+constexpr std::array<Topology, 4> every_topology = {Topology::tri, Topology::quad, Topology::tet, Topology::hex};
 
 int dim_of(Topology t) { return t == Topology::tri || t == Topology::quad ? 2 : 3; }
 bool simplex(Topology t) { return t == Topology::tri || t == Topology::tet; }
@@ -222,7 +222,7 @@ std::uint64_t bits(Real x) { return std::bit_cast<std::uint64_t>(x); }
 std::vector<fem::Cell> assorted_cells(std::mt19937& rng) {
   std::vector<fem::Cell> out;
   std::uniform_real_distribution<Real> big(-0.7, 0.7);
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     for (int i = 0; i < 200; ++i) {
       out.push_back(cell(t, random_affine(dim_of(t), rng)));
       if (dim_of(t) == 2) {
@@ -250,7 +250,7 @@ std::vector<fem::Cell> assorted_cells(std::mt19937& rng) {
 }  // namespace
 
 TEST(FemElements, QuadratureIntegratesEveryMonomialOfItsDegree) {
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     const int top = simplex(t) ? 4 : 5;
     for (int degree = 0; degree <= top; ++degree) {
       const fem::Quadrature q = fem::quadrature(t, degree);
@@ -275,7 +275,7 @@ TEST(FemElements, QuadratureIntegratesEveryMonomialOfItsDegree) {
 TEST(FemElements, ShapeFunctionsInterpolateCornersAndSumToOne) {
   std::mt19937 rng(7);
   std::uniform_real_distribution<Real> u(0.05, 0.3);
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     const auto ref = reference_corners(t);
     Real n[fem::max_nodes], dn[fem::max_nodes][3];
     for (std::size_t k = 0; k < ref.size(); ++k) {
@@ -300,7 +300,7 @@ TEST(FemElements, ShapeFunctionsInterpolateCornersAndSumToOne) {
 TEST(FemElements, GradientsOfALinearFunctionAreExactOnAffineCells) {
   std::mt19937 rng(11);
   const Real grad[3] = {0.7, -1.3, 2.1};
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     for (int trial = 0; trial < 5; ++trial) {
       const Affine m = random_affine(dim_of(t), rng);
       const fem::Cell c = cell(t, m);
@@ -326,7 +326,7 @@ TEST(FemElements, GradientsOfALinearFunctionAreExactOnAffineCells) {
 
 TEST(FemElements, StiffnessIsSymmetricWithConstantsItsOnlyNullSpace) {
   std::mt19937 rng(13);
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     for (int trial = 0; trial < 6; ++trial) {
       const bool bent = !simplex(t) && trial % 2 == 1;
       const fem::Cell c = bent ? distorted(t, rng) : cell(t, random_affine(dim_of(t), rng));
@@ -355,7 +355,7 @@ TEST(FemElements, StiffnessIsSymmetricWithConstantsItsOnlyNullSpace) {
 TEST(FemElements, EnergyOfALinearFunctionIsExactOnAffineCells) {
   std::mt19937 rng(17);
   const Real grad[3] = {-0.4, 1.1, 0.6};
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     for (int trial = 0; trial < 5; ++trial) {
       const Affine m = random_affine(dim_of(t), rng);
       const fem::Cell c = cell(t, m);
@@ -377,7 +377,7 @@ TEST(FemElements, EnergyOfALinearFunctionIsExactOnAffineCells) {
 
 TEST(FemElements, MassIsExactForLinearFunctionsAndSumsToTheMeasure) {
   std::mt19937 rng(19);
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     for (int trial = 0; trial < 5; ++trial) {
       const Affine m = random_affine(dim_of(t), rng);
       const fem::Cell c = cell(t, m);
@@ -417,7 +417,7 @@ TEST(FemElements, MassIsExactForLinearFunctionsAndSumsToTheMeasure) {
 
 TEST(FemElements, SquaredErrorIntegratesTheDifference) {
   std::mt19937 rng(23);
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     const Affine m = random_affine(dim_of(t), rng);
     const fem::Cell c = cell(t, m);
     auto exact = [](Real x, Real y, Real z) { return 0.5 + x - 2 * y + 0.25 * z; };
@@ -500,7 +500,7 @@ TEST(FemElements, KernelsAreThePlainReferenceBitForBit) {
 // cell the first bad determinant falls.
 TEST(FemElements, OverflowingAndInfiniteCellsAreNotUsable) {
   std::mt19937 rng(29);
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     for (int i = 0; i < 50; ++i) {
       fem::Cell c = simplex(t) ? cell(t, random_affine(dim_of(t), rng)) : distorted(t, rng);
       fem::Cell huge = c, inf = c;
@@ -561,7 +561,7 @@ TEST(FemElements, TheLeastDeterminantKeepsANaN) {
 }
 
 TEST(FemElements, InvertedAndFlatCellsAreReported) {
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     fem::Cell c = cell(t, Affine{});
     Matrix k;
     ASSERT_GT(fem::stiffness(c, k), 0);
@@ -649,7 +649,7 @@ TEST(FemElements, CellsTheseElementsCannotTakeAreNaN) {
 }
 
 TEST(FemElements, BoxCellsArePositiveAndFillTheBox) {
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     const bool solid = dim_of(t) == 3;
     const soma::HostMesh mesh = soma::testing::box_mesh({3, 2, solid ? 4 : 1, t, 1.5, 1.0, 2.0});
     const auto view = mesh.view();

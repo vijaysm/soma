@@ -47,7 +47,7 @@ using Vector = soma::View1<Real, Kokkos::HostSpace>;
 
 namespace {
 
-constexpr std::array<Topology, 4> all = {Topology::tri, Topology::quad, Topology::tet, Topology::hex};
+constexpr std::array<Topology, 4> every_topology = {Topology::tri, Topology::quad, Topology::tet, Topology::hex};
 
 using Entries = std::map<std::pair<GO, GO>, Real>;
 
@@ -114,7 +114,7 @@ bool on_box_boundary(const soma::HostMesh& m, LO v, bool three) {
 // The pattern's rows: each owned vertex with every vertex it shares a cell
 // with, itself included, ascending by gid.
 TEST(FemSpace, PatternIsEveryVertexSharingACell) {
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     SCOPED_TRACE(soma::name(t));
     const soma::HostMesh mesh = box_part(Comm::self(), spec_of(t, 3));
     const Space space(Comm::self(), mesh);
@@ -144,7 +144,7 @@ TEST(FemSpace, PatternIsEveryVertexSharingACell) {
 // Against a dense matrix scattered from fem::stiffness: equal to rounding,
 // symmetric bit for bit, rows summing to zero.
 TEST(FemSpace, LaplacianIsTheScatteredElementMatrices) {
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     SCOPED_TRACE(soma::name(t));
     const soma::HostMesh mesh = box_part(Comm::self(), spec_of(t, 3));
     const Space space(Comm::self(), mesh);
@@ -213,7 +213,7 @@ TEST(FemSpace, LaplacianIsTheScatteredElementMatrices) {
 // Against a vector scattered from fem::load; with f = 1 it sums to the
 // box's measure.
 TEST(FemSpace, LoadIsTheScatteredElementLoads) {
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     SCOPED_TRACE(soma::name(t));
     const soma::HostMesh mesh = box_part(Comm::self(), spec_of(t, 3));
     const Space space(Comm::self(), mesh);
@@ -242,7 +242,7 @@ TEST(FemSpace, LoadIsTheScatteredElementLoads) {
 // boundary verdict of the box.
 TEST(FemSpace, DistributedAssemblyIsTheSerialOne) {
   const Comm c = Comm::world();
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     for (const soma::testing::BoxSpec& spec : boxes(t)) {
       const soma::HostMesh whole = box_part(Comm::self(), spec);
       const Space serial(Comm::self(), whole);
@@ -331,7 +331,7 @@ TEST(FemSpace, DirichletKeepsLinearFunctionsExact) {
     soma::apply_dirichlet(a, b, space.boundary(), soma::View1<const Real, Kokkos::HostSpace>(g));
     return std::make_pair(a, b);
   };
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     const soma::HostMesh whole = box_part(Comm::self(), spec_of(t, 4));
     const Space serial(Comm::self(), whole);
     Vector su = serial.vector();
@@ -519,7 +519,7 @@ TEST(FemSpace, ShortVectorsAreRefused) {
 // quads or hexes exactly 2^d. The small box leaves some ranks no cells.
 TEST(FemSpace, CellColorsAreValidAndFew) {
   const Comm c = Comm::world();
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     for (const soma::testing::BoxSpec& spec : {spec_of(t, 6), soma::testing::BoxSpec{2, 1, 1, t, 1.0, 1.0, 1.0}}) {
       for (const int deal : {0, 1}) {
         SCOPED_TRACE(testing::Message() << soma::name(t) << " " << spec.nx << " deal " << deal);
@@ -576,7 +576,7 @@ TEST(FemSpace, CellColorsAreValidAndFew) {
 // colored assembly the same bits every time.
 TEST(FemSpace, AssemblyMethodsAgree) {
   const Comm c = Comm::world();
-  for (const Topology t : all) {
+  for (const Topology t : every_topology) {
     for (const int deal : {0, 1}) {
       SCOPED_TRACE(testing::Message() << soma::name(t) << " deal " << deal);
       const soma::HostMesh mesh = box_part(c, spec_of(t, 4), Part{.deal = deal});
