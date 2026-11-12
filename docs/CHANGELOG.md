@@ -567,6 +567,20 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   rank.
 - `examples/advect.cpp` carries a bump around a `.h5m` or SOMA mesh by a rigid rotation on any
   number of ranks and writes u as a cell field.
+- `soma::GridIndex<MemSpace>` (`soma/algorithms/grid_index.hpp`) bins axis-aligned boxes in a
+  uniform grid (Kokkos only) and returns, for each query box, the boxes it meets within a
+  tolerance, each once and in order, the same at any thread count.
+- `soma::RemapOperator<MemSpace>(comm, source, target, RemapOptions)`
+  (`soma/algorithms/remap.hpp`) is a first-order conservative remap between plane meshes of
+  triangles, quads and polygons: weights |T n S| / |T| from clipped overlaps, rows ordered by
+  source gid, `apply` in one exchange. Non-convex cells are split into triangles. The meshes
+  may be partitioned differently and need no ghosts; the operator is the same bit for bit on
+  any partition and number of threads. `RemapOptions::merge_tolerance` (default 1e-12, a
+  length) merges clipped corners and drops degenerate pieces; a cell thinner than it,
+  crossing itself or off a plane z = const throws on every rank. Overlaps agree with MOAB's
+  `Intx2MeshInPlane` to rounding.
+- `examples/remap.cpp` remaps a cell field from a plane `.h5m` or SOMA mesh onto a triangle
+  grid over its bounding box and prints both totals.
 
 ### Testing
 
@@ -729,7 +743,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   against `exchange_tags`, and `write_soma` / `read_soma` against `WRITE_PART` and a
   `READ_PART` load, checking owned counts and updated values. Its `smooth` and `poisson`
   sections time Laplacian smoothing against MOAB's, and `FemSpace`, the three assemblies and
-  CG alone; its `advect` section, `FvSpace` and upwind steps alone. `bench/run_parallel.sh` runs it
+  CG alone; its `advect` section, `FvSpace` and upwind steps alone; its `remap` section, a
+  `RemapOperator` between plane grids built and applied, against MOAB's in-plane intersection
+  at one rank. `bench/run_parallel.sh` runs it
   over rank counts and sizes into JSON files; its header lists what a run at scale needs.
 
 ### Packaging
