@@ -4,27 +4,40 @@
 #ifndef SOMA_ALGORITHMS_REMAP_HPP_
 #define SOMA_ALGORITHMS_REMAP_HPP_
 
-// First-order conservative remap between two plane meshes: a cell value on a
-// target mesh from the cell values of a source mesh,
+// First-order conservative remap between two plane meshes or two volume
+// meshes: a cell value on a target mesh from the cell values of a source
+// mesh,
 //
 //   u_T = sum_S w_TS u_S,   w_TS = |T n S| / |T|,
 //
-// where |T n S| is the area the cells share. Where the source covers a
+// where |T n S| is the area (in 3D the volume) the cells share. Where the source covers a
 // target cell its weights sum to one (constants are kept); where each mesh
 // covers the other, sum_T |T| u_T = sum_S |S| u_S (mass is conserved).
 //
 //   const soma::RemapOperator<Mem> remap(comm, source, target, {.merge_tolerance = 1e-12});
 //   remap.apply(comm, u_source, u_target);  // owned source cells -> owned target cells
 //
-// The meshes are of dimension 2, each cell's corners in one plane z = const
+// Plane meshes (dimension 2): each cell's corners in one plane z = const
 // (each cell is taken in the xy plane); cells are triangles, quads or
 // polygons of at most 64 corners. A cell is turned counter-clockwise and
 // started at its least-gid corner, so every rank sees the same polygon; a
 // non-convex cell is split into triangles by ear clipping (polygon.hpp) and
-// its overlaps are summed over them. The merge tolerance (a length, the same
-// on every rank) merges clipped corners closer than it and drops pieces of
-// area below its square; a cell thinner than it (twice its area over its
-// longest side), crossing itself, or off a plane throws on every rank.
+// its overlaps are summed over them. A cell thinner than the tolerance
+// (twice its area over its longest side), crossing itself, or off a plane
+// throws on every rank.
+//
+// Volume meshes (dimension 3): tets, hexes, prisms and pyramids, each split
+// into tets: a tet is itself; another cell has one tet per triangle of its
+// faces, apex its centroid, a quad face cut along the diagonal from its
+// least-gid corner, so that cells sharing a face cut it alike and their tets
+// fill space without gaps (non-planar and non-convex faces included). Tets
+// are clipped by one another's face planes (tet_clip.hpp). A cell with a tet
+// thinner than the tolerance, or not star-shaped about its centroid (its
+// tets turned unlike), throws on every rank.
+//
+// The merge tolerance (a length, the same on every rank) decides when a
+// corner is on a clipping line or plane, merges clipped corners closer than
+// it, and drops overlaps thinner than it.
 //
 // The meshes may be partitioned differently and need no ghosts. Each rank
 // shares the bounding box of its owned target cells (an allgather of P
@@ -35,7 +48,8 @@
 // the same bit for bit on any partition and thread count. apply() replays
 // the routing for the source values: one exchange with the ranks found.
 //
-// The overlaps are clipped by Kokkos on the host; the operator's arrays
+// A cell's pieces are made by its owner and sent as they are. The overlaps
+// are clipped by Kokkos on the host; the operator's arrays
 // then live in MemSpace, where apply() runs (values cross ranks through host
 // memory).
 
@@ -92,11 +106,11 @@ class RemapOperator {
   using Exec = typename MemSpace::execution_space;
 
   // Collective. Throws std::invalid_argument on every rank if any rank's
-  // mesh is not of dimension 2, has edits or high-order nodes, or holds a
-  // cell other than a triangle, quad or polygon (of at most 64 corners); if
-  // a cell is thinner than the tolerance, crosses itself or has corners
-  // off one plane z = const; or if the tolerance is not finite and positive
-  // or differs between ranks.
+  // meshes are not both of dimension 2 or both of 3, have edits or
+  // high-order nodes, or hold a cell other than a triangle, quad or polygon
+  // (of at most 64 corners) in 2D, a tet, hex, prism or pyramid in 3D; if a
+  // cell is bad as above; or if the tolerance is not finite and positive or
+  // differs between ranks.
   RemapOperator(const Comm& comm, const Mesh<MemSpace>& source, const Mesh<MemSpace>& target,
                 const RemapOptions& options = {}) {
     const Real tol = options.merge_tolerance;
@@ -130,13 +144,14 @@ class RemapOperator {
       flags[2] = static_cast<Real>(p.bad_target);
       comm.allreduce(std::span<Real>(flags), Op::max);
       if (flags[0] != 0) {
-        throw std::invalid_argument("RemapOperator: a rank's mesh is not of dimension 2, has high-order nodes, or holds "
-                                    "a cell other than a triangle, quad or polygon of at most 64 corners");
+        throw std::invalid_argument("RemapOperator: a rank's meshes are not both of dimension 2 or both of 3, have "
+                                    "high-order nodes, or hold a cell other than a triangle, quad or polygon of at "
+                                    "most 64 corners (2D) or a tet, hex, prism or pyramid (3D)");
       }
       if (flags[1] != 0 || flags[2] != 0) {
         throw std::invalid_argument(std::string("RemapOperator: a rank's ") + (flags[1] != 0 ? "source" : "target") +
-                                    " mesh holds a cell thinner than the tolerance, crossing itself, or off a plane "
-                                    "z = const");
+                                    " mesh holds a cell thinner than the tolerance, crossing itself, off a plane "
+                                    "z = const (2D), or not star-shaped about its centroid (3D)");
       }
     }
     rows_ = static_cast<LO>(p.target_area.size());
@@ -157,7 +172,7 @@ class RemapOperator {
     source_gid_ = detail::to_space<GO, MemSpace>(p.source_gid, "soma::RemapOperator::source_gid");
     sent_cell_ = detail::to_space<LO, MemSpace>(p.sent_cell, "soma::RemapOperator::sent_cell");
     plan_ = std::move(p.plan);
-    source_rows_ = source.segment_table(2).owned_end;
+    source_rows_ = source.segment_table(source.dim()).owned_end;
   }
 
   // Owned target cells (the rows), and the source cells that arrived here
