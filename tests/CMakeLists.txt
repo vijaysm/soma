@@ -98,6 +98,7 @@ if(SOMA_ENABLE_HDF5)
   soma_add_test(test_h5m_writer SOURCES unit/test_h5m_writer.cpp LIBS HDF5::HDF5)
   soma_add_test(test_h5m_parallel SOURCES unit/test_h5m_parallel.cpp RANKS 1 2 3 4 5 7 8 LIBS HDF5::HDF5)
   soma_add_test(test_soma_file SOURCES unit/test_soma_file.cpp RANKS 1 2 3 4 5 7 8 LIBS HDF5::HDF5)
+  soma_add_test(test_mesh_file SOURCES unit/test_mesh_file.cpp RANKS 1 2 3 4 5 7 8)
   soma_add_test(test_soma_amr SOURCES unit/test_soma_amr.cpp RANKS 1 2 3 4 5 7 8 LIBS HDF5::HDF5)
   # soma-convert both ways on a bundled file, at one rank and, with MPI, at three.
   set(convert_runs 1)
