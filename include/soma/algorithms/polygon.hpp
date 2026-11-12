@@ -129,8 +129,19 @@ KOKKOS_INLINE_FUNCTION bool simple(const Polygon& p) {
 // area (0 where none, negative where the overlap overflows polygon_storage,
 // which two polygons of at most polygon_capacity corners never do). out
 // starts where s's clipping leaves it.
-KOKKOS_INLINE_FUNCTION Real clip(const Polygon& s, const Polygon& c, Real eps, Polygon& out) {
-  Polygon a = s, b;
+KOKKOS_INLINE_FUNCTION Real clip(const Polygon& s, const Polygon& c_in, Real eps, Polygon& out) {
+  // About c's first corner, so that rounding is relative to the polygons'
+  // size, not to their distance from the origin; out is moved back.
+  const Real ox = c_in.n > 0 ? c_in.x[0] : 0, oy = c_in.n > 0 ? c_in.y[0] : 0;
+  Polygon a = s, b, c = c_in;
+  for (int i = 0; i < a.n && i < polygon_storage; ++i) {
+    a.x[i] -= ox;
+    a.y[i] -= oy;
+  }
+  for (int i = 0; i < c.n && i < polygon_storage; ++i) {
+    c.x[i] -= ox;
+    c.y[i] -= oy;
+  }
   for (int e = 0; e < c.n && a.n > 0; ++e) {
     const int f = e + 1 == c.n ? 0 : e + 1;
     const Real ex = c.x[f] - c.x[e], ey = c.y[f] - c.y[e];
@@ -169,6 +180,10 @@ KOKKOS_INLINE_FUNCTION Real clip(const Polygon& s, const Polygon& c, Real eps, P
   if (!(area >= eps * eps)) {
     out.n = 0;
     return 0;
+  }
+  for (int i = 0; i < out.n; ++i) {
+    out.x[i] += ox;
+    out.y[i] += oy;
   }
   return area;
 }

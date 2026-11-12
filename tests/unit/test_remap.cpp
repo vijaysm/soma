@@ -204,6 +204,30 @@ TEST(Remap, OverlapsCoverTheTargetCells) {
   }
 }
 
+// The same far from the origin: overlaps are taken about a corner of the
+// target cell, so they cover it as well as near the origin.
+TEST(Remap, OverlapsFarFromTheOriginCoverTheTargetCells) {
+  const Comm c = Comm::world();
+  int k = 0;
+  for (auto [s, t] : cases()) {
+    SCOPED_TRACE(testing::Message() << "case " << k++);
+    for (auto* g : {&s, &t}) {
+      for (std::size_t v = 0; v < g->vg.size(); ++v) {
+        g->xyz[3 * v] += 1e7;
+        g->xyz[3 * v + 1] -= 1e7;
+      }
+    }
+    const Remap remap(c, build(c, s, 0), build(c, t, 1));
+    Real worst = 0;
+    for (LO r = 0; r < remap.rows(); ++r) {
+      Real area = 0;
+      for (Offset e = remap.offsets()(r); e < remap.offsets()(r + 1); ++e) area += remap.overlap()(e);
+      worst = std::max(worst, std::abs(area - remap.target_area()(r)) / remap.target_area()(r));
+    }
+    EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-13);
+  }
+}
+
 // Small cells: areas are summed about a cell's first corner, so their
 // rounding is relative to the cell, and the weights still sum to one.
 TEST(Remap, SmallCellsKeepTheirWeights) {

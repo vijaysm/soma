@@ -219,3 +219,35 @@ TEST(Polygon, EarClippingDoesNotDependOnTheTolerance) {
   }
   EXPECT_EQ(failed, 0);
 }
+
+// Far from the origin: overlaps are taken about the clipping polygon's
+// corner, so they keep the accuracy they have near it, and the overlap comes
+// back where it lies.
+TEST(Polygon, OverlapsFarFromTheOriginKeepTheirAccuracy) {
+  std::mt19937 gen(17);
+  const auto moved = [](Polygon p, Real by) {
+    for (int i = 0; i < p.n; ++i) {
+      p.x[i] += by;
+      p.y[i] -= by;
+    }
+    return p;
+  };
+  // Corners on a 2^-24 grid, so that the moved ones are exact.
+  const auto snapped = [](Polygon p) {
+    for (int i = 0; i < p.n; ++i) {
+      p.x[i] = std::ldexp(std::round(std::ldexp(p.x[i], 24)), -24);
+      p.y[i] = std::ldexp(std::round(std::ldexp(p.y[i], 24)), -24);
+    }
+    return p;
+  };
+  Real worst = 0;
+  for (int trial = 0; trial < 1000; ++trial) {
+    const Polygon a = snapped(random_convex(gen, 3 + trial % 9)), b = snapped(random_convex(gen, 3 + trial % 7));
+    worst = std::max(worst, std::abs(overlap(moved(a, 1e7), moved(b, 1e7)) - overlap(a, b)));
+  }
+  EXPECT_LE(worst, 1e-14);
+  Polygon out;
+  EXPECT_NEAR(clip(square(1e7, 1e7, 1), square(1e7 + 0.5, 1e7 + 0.5, 1), eps, out), 0.25, 1e-15);
+  ASSERT_EQ(out.n, 4);
+  for (int i = 0; i < out.n; ++i) EXPECT_GE(out.x[i], 1e7 + 0.5);
+}

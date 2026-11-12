@@ -25,8 +25,9 @@
 // The pieces are only a way to sum the overlap's volume (a split prism or
 // wedge may hold thin tets of real volume), so the whole overlap, not a
 // piece, is dropped when it is thinner than eps: below eps L^2, L the
-// longest edge of its pieces (its extent). Volumes are taken about each
-// tet's first corner, so their rounding is relative to the tet's size.
+// longest edge of its pieces (its extent). Both tets are first moved so
+// that the clipping tet's first corner is the origin, so that rounding is
+// relative to the tets' size, not to their distance from the origin.
 
 #include <Kokkos_Core.hpp>
 
@@ -144,7 +145,13 @@ KOKKOS_INLINE_FUNCTION bool cut(const Tet& t, const Plane& h, Real eps, Tet* out
 // The volume tets s and c share: s cut by c's four face planes. Negative
 // where the pieces overflow tet_capacity (never for two tets: each cut of a
 // convex piece list keeps the count within 3^4).
-KOKKOS_INLINE_FUNCTION Real overlap(const Tet& s, const Tet& c, Real eps) {
+KOKKOS_INLINE_FUNCTION Real overlap(const Tet& s_in, const Tet& c_in, Real eps) {
+  // About c's first corner.
+  Tet s, c;
+  for (int i = 0; i < 4; ++i) {
+    s.p[i] = minus(s_in.p[i], c_in.p[0]);
+    c.p[i] = minus(c_in.p[i], c_in.p[0]);
+  }
   Tet a[tet_capacity], b[tet_capacity];
   int na = 1, nb = 0;
   a[0] = s;

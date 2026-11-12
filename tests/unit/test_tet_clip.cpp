@@ -136,3 +136,25 @@ TEST(TetClip, TheMergeToleranceRemovesSlivers) {
   }
   EXPECT_EQ(moved, 0);
 }
+
+// Far from the origin: overlaps are taken about the clipping tet's corner,
+// so they keep the accuracy they have near it.
+TEST(TetClip, OverlapsFarFromTheOriginKeepTheirAccuracy) {
+  std::mt19937 gen(9);
+  const auto moved = [](Tet t, Real by) {
+    for (auto& p : t.p) p = {p.x + by, p.y - by, p.z + by};
+    return t;
+  };
+  // Corners on a 2^-24 grid, so that the moved ones are exact.
+  const auto snapped = [](Tet t) {
+    const auto snap = [](Real x) { return std::ldexp(std::round(std::ldexp(x, 24)), -24); };
+    for (auto& p : t.p) p = {snap(p.x), snap(p.y), snap(p.z)};
+    return t;
+  };
+  Real worst = 0;
+  for (int trial = 0; trial < 1000; ++trial) {
+    const Tet a = snapped(random_tet(gen, 0.6)), b = snapped(random_tet(gen, 0.6));
+    worst = std::max(worst, std::abs(overlap(moved(a, 1e7), moved(b, 1e7), eps) - overlap(a, b, eps)));
+  }
+  EXPECT_LE(worst, 1e-14);
+}

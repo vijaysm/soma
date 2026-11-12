@@ -258,6 +258,23 @@ TEST(Remap3d, ARefinementIsRecoveredExactly) {
   EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-14);
 }
 
+// The same, far from the origin.
+TEST(Remap3d, ARefinementFarFromTheOriginIsRecoveredExactly) {
+  const Comm c = Comm::world();
+  Cells a = grid(2, 2, 2, Topology::hex, 0), b = grid(4, 4, 4, Topology::hex, 0);
+  for (auto* g : {&a, &b}) {
+    for (auto& x : g->xyz) x += 1e7;
+  }
+  const Remap remap(c, build(c, a, 0), build(c, b, 1));
+  Real worst = 0, entries = 0;
+  for (LO r = 0; r < remap.rows(); ++r) {
+    entries += static_cast<Real>(remap.offsets()(r + 1) - remap.offsets()(r));
+    worst = std::max(worst, std::abs(remap.weights()(remap.offsets()(r)) - 1));
+  }
+  EXPECT_EQ(c.allreduce(entries, soma::Op::sum), 64);
+  EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-14);
+}
+
 TEST(Remap3d, TheErrorFallsAtFirstOrder) {
   const Comm c = Comm::world();
   std::vector<Real> errors;
