@@ -76,6 +76,7 @@ if(SOMA_ENABLE_PETSC)
 endif()
 soma_add_test(test_grid_index SOURCES unit/test_grid_index.cpp)
 soma_add_test(test_polygon SOURCES unit/test_polygon.cpp)
+soma_add_test(test_remap SOURCES unit/test_remap.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_fv SOURCES unit/test_fv.cpp RANKS 1 2 3 4 5 7 8)
 # Upwind steps are the same bit for bit at any number of threads.
 add_test(NAME test_fv.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_fv> -DFILTER=Fv.SolutionDigests
