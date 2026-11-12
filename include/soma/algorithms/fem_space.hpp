@@ -49,6 +49,7 @@
 
 #include "soma/algorithms/csr.hpp"
 #include "soma/algorithms/fem.hpp"
+#include "soma/algorithms/to_space.hpp"
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_view.hpp"
 #include "soma/core/types.hpp"
@@ -105,14 +106,6 @@ bool fem_supported(const Mesh<Kokkos::HostSpace>& mesh);
 
 // Host only; the mesh supported.
 FemPlan fem_plan(const Mesh<Kokkos::HostSpace>& mesh, Assembly assembly);
-
-template <class T, class MemSpace>
-View1<T, MemSpace> to_space(const std::vector<T>& v, const char* label) {
-  View1<T, MemSpace> out(Kokkos::view_alloc(Kokkos::WithoutInitializing, std::string(label)), v.size());
-  Kokkos::deep_copy(out, Kokkos::View<const T*, Kokkos::LayoutLeft, Kokkos::HostSpace,
-                                      Kokkos::MemoryTraits<Kokkos::Unmanaged>>(v.data(), v.size()));
-  return out;
-}
 
 // The number of cells of the mesh whose Jacobian is not positive throughout.
 template <class MemSpace>
