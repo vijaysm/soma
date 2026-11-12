@@ -572,15 +572,19 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   tolerance, each once and in order, the same at any thread count.
 - `soma::RemapOperator<MemSpace>(comm, source, target, RemapOptions)`
   (`soma/algorithms/remap.hpp`) is a first-order conservative remap between plane meshes of
-  triangles, quads and polygons: weights |T n S| / |T| from clipped overlaps, rows ordered by
-  source gid, `apply` in one exchange. Non-convex cells are split into triangles. The meshes
-  may be partitioned differently and need no ghosts; the operator is the same bit for bit on
-  any partition and number of threads. `RemapOptions::merge_tolerance` (default 1e-12, a
-  length) merges clipped corners and drops degenerate pieces; a cell thinner than it,
-  crossing itself or off a plane z = const throws on every rank. Overlaps agree with MOAB's
+  triangles, quads and polygons, or volume meshes of tets, hexes, prisms and pyramids:
+  weights |T n S| / |T| from clipped overlaps, rows ordered by source gid, `apply` in one
+  exchange. Non-convex plane cells are split into triangles; volume cells into tets about
+  their centroids, quad faces cut from their least-gid corner so that neighbours' tets fill
+  space. The meshes may be partitioned differently and need no ghosts; the operator is the
+  same bit for bit on any partition and number of threads. `RemapOptions::merge_tolerance`
+  (default 1e-12, a length) moves corners within it onto clipping lines and planes, merges
+  clipped corners and drops degenerate overlaps; a cell thinner than it, crossing itself, off
+  a plane z = const (2D) or not star-shaped about its centroid (3D) throws on every rank, as
+  does a tolerance that is bad or differs between ranks. Plane overlaps agree with MOAB's
   `Intx2MeshInPlane` to rounding.
-- `examples/remap.cpp` remaps a cell field from a plane `.h5m` or SOMA mesh onto a triangle
-  grid over its bounding box and prints both totals.
+- `examples/remap.cpp` remaps a cell field from a `.h5m` or SOMA mesh onto a grid of triangles
+  or tets over its bounding box and prints both totals.
 
 ### Testing
 
@@ -745,7 +749,7 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   sections time Laplacian smoothing against MOAB's, and `FemSpace`, the three assemblies and
   CG alone; its `advect` section, `FvSpace` and upwind steps alone; its `remap` section, a
   `RemapOperator` between plane grids built and applied, against MOAB's in-plane intersection
-  at one rank. `bench/run_parallel.sh` runs it
+  at one rank, and between volume grids. `bench/run_parallel.sh` runs it
   over rank counts and sizes into JSON files; its header lists what a run at scale needs.
 
 ### Packaging
