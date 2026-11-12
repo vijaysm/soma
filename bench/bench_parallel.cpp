@@ -31,13 +31,16 @@
 //     ranks: RemapOperator built and applied; at one rank also MOAB's
 //     in-plane intersection of the two whole meshes; and n^3 hexes onto a
 //     grid of tets, SOMA alone;
+//   * refine: n^3 hexes, and the same cubes as tets, refined once
+//     (refine_uniform); at one rank also MOAB's NestedRefine of the hexes;
 //   * write and restart: write_soma and read_soma at the same P against
 //     write_file PARALLEL=WRITE_PART and load_file READ_PART.
 //
 // Every result is checked: the owned hexes and vertices add up to the box's,
 // ghost vertices hold their owners' values after each update, the three
 // assemblies agree, CG converges, a constant state stays constant under
-// advection and the remap keeps the total; a mismatch exits with status 2.
+// advection, the remap keeps the total and refinement makes eight cells of
+// each; a mismatch exits with status 2.
 //
 //   mpiexec -n P bench_parallel [--json] [--repeats N] [--n edge] [--parts K] [--dir path]
 
@@ -60,6 +63,7 @@
 #include "harness.hpp"
 #include "moab/Core.hpp"
 #include "moab/IntxMesh/Intx2MeshInPlane.hpp"
+#include "moab/NestedRefine.hpp"
 #include "moab/ParallelComm.hpp"
 #include "MBParallelConventions.h"
 #include "moab_box.hpp"
@@ -69,6 +73,7 @@
 #include "soma/algorithms/fem_space.hpp"
 #include "soma/algorithms/fv.hpp"
 #include "soma/algorithms/remap.hpp"
+#include "soma/algorithms/refine.hpp"
 #include "soma/algorithms/laplacian.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/io/h5m.hpp"
@@ -609,6 +614,45 @@ int main(int argc, char** argv) {
                    check(mb->create_meshset(moab::MESHSET_SET, out), "create_meshset");
                    check(intx.intersect_meshes(ms, mt, out), "intersect_meshes");
                  });
+    }
+  }
+
+  // ---- refine ----
+  {
+    const HostMesh hexes = volume_grid(comm, n, false), tets = volume_grid(comm, n, true);
+    std::optional<soma::RefineResult> fine;
+    const auto t2 = runner.run("refine", "soma_refine", cells, [&] { fine.reset(); },
+                               [&] { fine.emplace(soma::refine_uniform(comm, hexes)); });
+    ok = agree(comm, comm.allreduce(owned(fine->mesh, 3), soma::Op::sum) == 8 * cells) && ok;
+    runner.run("refine", "soma_refine_tets", 6 * cells, [&] { fine.reset(); },
+               [&] { fine.emplace(soma::refine_uniform(comm, tets)); });
+    ok = agree(comm, comm.allreduce(owned(fine->mesh, 3), soma::Op::sum) == 48 * cells) && ok;
+    if (comm.size() == 1) {
+      std::optional<moab::Core> mb;
+      const auto t1 = runner.run(
+          "refine", "moab_nested_refine", cells,
+          [&] {
+            mb.emplace();
+            const auto x = hexes.coords();
+            const auto view = hexes.view();
+            std::vector<moab::EntityHandle> vh(static_cast<std::size_t>(view.count(0)));
+            for (LO i = 0; i < view.count(0); ++i) {
+              const double p[3] = {x(i, 0), x(i, 1), x(i, 2)};
+              check(mb->create_vertex(p, vh[static_cast<std::size_t>(i)]), "create_vertex");
+            }
+            for (LO e = 0; e < view.count(3); ++e) {
+              moab::EntityHandle conn[8], h;
+              for (LO c = 0; c < 8; ++c) conn[c] = vh[static_cast<std::size_t>(view.vertex(3, e, c))];
+              check(mb->create_element(moab::MBHEX, conn, 8, h), "create_element");
+            }
+          },
+          [&] {
+            moab::NestedRefine nr(&*mb);
+            int degree = 2;
+            std::vector<moab::EntityHandle> levels;
+            check(nr.generate_mesh_hierarchy(1, &degree, levels), "generate_mesh_hierarchy");
+          });
+      runner.compare(t1, t2);
     }
   }
 
