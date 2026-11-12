@@ -30,17 +30,22 @@
 // into tets: a tet is itself; another cell has one tet per triangle of its
 // faces, apex its centroid, a quad face cut along the diagonal from its
 // least-gid corner, so that cells sharing a face cut it alike and their tets
-// fill space without gaps (non-planar and non-convex faces included). Tets
-// are clipped by one another's face planes (tet_clip.hpp). A cell with a tet
-// thinner than the tolerance, or not star-shaped about its centroid (its
-// tets turned unlike), throws on every rank.
+// fill space without gaps (non-planar and non-convex faces included); faces
+// are taken in the order of their corner gids, so the tets do not depend on
+// how a cell lists its corners. Tets are clipped by one another's face planes
+// (tet_clip.hpp). A cell with a tet thinner than the tolerance, or not
+// star-shaped about its centroid (its tets turned unlike), throws on every
+// rank; an inverted cell (all its tets turned the other way) is taken at its
+// volume's magnitude.
 //
 // The merge tolerance (a length, the same on every rank) decides when a
 // corner is on a clipping line or plane (one outside by at most it goes onto
 // it), merges clipped corners closer than it, and drops overlaps thinner
 // than it. Merging moves areas by up to about the tolerance times a cell's
 // perimeter, so weights sum to one to that: keep it far below the cells'
-// size (the default 1e-12 suits cells of any size above about 1e-6).
+// size (the default 1e-12 suits cells of any size above about 1e-6). Cells
+// are clipped about a corner of the clipping cell, so accuracy does not
+// depend on the distance from the origin.
 //
 // The meshes may be partitioned differently and need no ghosts. Each rank
 // shares the bounding box of its owned target cells (an allgather of P
@@ -76,8 +81,8 @@
 namespace soma {
 
 struct RemapOptions {
-  // Corners closer than this merge; pieces of area below its square are
-  // none. A length in the meshes' units; the same on every rank.
+  // The merge tolerance (above): a length in the meshes' units, the same on
+  // every rank.
   Real merge_tolerance = 1e-12;
 };
 

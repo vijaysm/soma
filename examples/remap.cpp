@@ -15,6 +15,7 @@
 // 1 failed, 2 bad arguments.
 
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <exception>
 #include <stdexcept>
@@ -42,12 +43,12 @@ using View = soma::View1<double, Kokkos::HostSpace>;
 soma::HostMesh grid(const soma::Comm& comm, int dim, int n, const double* lo, const double* hi) {
   const int nz = dim == 3 ? n : 0;
   const auto id = [&](int i, int j, int k) {
-    return static_cast<soma::GO>((static_cast<long>(k) * (n + 1) + j) * (n + 1) + i + 1);
+    return static_cast<soma::GO>((static_cast<std::int64_t>(k) * (n + 1) + j) * (n + 1) + i + 1);
   };
   std::vector<soma::GO> cells, conn, verts;
   std::vector<double> xyz;
-  const int first = static_cast<int>(static_cast<long>(n) * comm.rank() / comm.size());
-  const int last = static_cast<int>(static_cast<long>(n) * (comm.rank() + 1) / comm.size());
+  const int first = static_cast<int>(static_cast<std::int64_t>(n) * comm.rank() / comm.size());
+  const int last = static_cast<int>(static_cast<std::int64_t>(n) * (comm.rank() + 1) / comm.size());
   soma::GO e = 0;
   for (int k = 0; k < (dim == 3 ? n : 1); ++k) {
     for (int j = 0; j < n; ++j) {
