@@ -48,13 +48,14 @@ struct Polygon {
   }
 };
 
-// Twice the signed area (positive counter-clockwise): the shoelace formula,
-// summed from the first corner.
+// Twice the signed area (positive counter-clockwise): the shoelace formula
+// about the first corner, summed from it, so that its rounding is relative
+// to the polygon's size, not to its distance from the origin.
 KOKKOS_INLINE_FUNCTION Real twice_area(const Polygon& p) {
   Real s = 0;
-  for (int i = 0; i < p.n; ++i) {
-    const int j = i + 1 == p.n ? 0 : i + 1;
-    s += p.x[i] * p.y[j] - p.x[j] * p.y[i];
+  for (int i = 1; i + 1 < p.n; ++i) {
+    const Real ax = p.x[i] - p.x[0], ay = p.y[i] - p.y[0], bx = p.x[i + 1] - p.x[0], by = p.y[i + 1] - p.y[0];
+    s += ax * by - bx * ay;
   }
   return s;
 }

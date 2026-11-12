@@ -204,6 +204,21 @@ TEST(Remap, OverlapsCoverTheTargetCells) {
   }
 }
 
+// Small cells: areas are summed about a cell's first corner, so their
+// rounding is relative to the cell, and the weights still sum to one.
+TEST(Remap, SmallCellsKeepTheirWeights) {
+  const Comm c = Comm::world();
+  const soma::HostMesh source = build(c, grid(200, 190, false, 1), 0), target = build(c, grid(203, 197, true, 2), 1);
+  const Remap remap(c, source, target);
+  Real worst = 0;
+  for (LO r = 0; r < remap.rows(); ++r) {
+    Real weight = 0;
+    for (Offset e = remap.offsets()(r); e < remap.offsets()(r + 1); ++e) weight += remap.weights()(e);
+    worst = std::max(worst, std::abs(weight - 1));
+  }
+  EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-13);
+}
+
 // sum_T |T| u_T = sum_S |S| u_S.
 TEST(Remap, MassIsConserved) {
   const Comm c = Comm::world();
