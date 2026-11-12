@@ -577,7 +577,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   exchange. Non-convex plane cells are split into triangles; volume cells into tets about
   their centroids, quad faces cut from their least-gid corner so that neighbours' tets fill
   space. The meshes may be partitioned differently and need no ghosts; the operator is the
-  same bit for bit on any partition and number of threads. `RemapOptions::merge_tolerance`
+  same bit for bit on any partition, number of threads and listing of a cell's corners, and
+  cells are clipped about a corner, so accuracy does not depend on the distance from the
+  origin. `RemapOptions::merge_tolerance`
   (default 1e-12, a length) moves corners within it onto clipping lines and planes, merges
   clipped corners and drops degenerate overlaps; a cell thinner than it, crossing itself, off
   a plane z = const (2D) or not star-shaped about its centroid (3D) throws on every rank, as
