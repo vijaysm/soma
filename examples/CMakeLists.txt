@@ -10,6 +10,8 @@ add_executable(poisson poisson.cpp)
 target_link_libraries(poisson PRIVATE soma soma_warnings)
 add_executable(advect advect.cpp)
 target_link_libraries(advect PRIVATE soma soma_warnings)
+add_executable(remap remap.cpp)
+target_link_libraries(remap PRIVATE soma soma_warnings)
 
 if(SOMA_ENABLE_TESTS)
   set(in "${PROJECT_SOURCE_DIR}/data/64bricks_1khex.h5m")
@@ -43,5 +45,16 @@ if(SOMA_ENABLE_TESTS)
               $<TARGET_FILE:advect> ${MPIEXEC_POSTFLAGS} --soma-reproducible ${in}
               ${CMAKE_CURRENT_BINARY_DIR}/advect_np2.soma)
     set_tests_properties(example_advect.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2 PASS_REGULAR_EXPRESSION "${advected}")
+  endif()
+  # The grid covers the source mesh: the total comes through, on any ranks.
+  set(plane "${PROJECT_SOURCE_DIR}/data/hybrid_3quad_1tri.h5m")
+  set(remapped "total 2[.]7464101622e[+]01 on the source, 2[.]7464101622e[+]01 on the grid")
+  add_test(NAME example_remap COMMAND remap ${plane} ${CMAKE_CURRENT_BINARY_DIR}/remap.vtk)
+  set_tests_properties(example_remap PROPERTIES PASS_REGULAR_EXPRESSION "${remapped}")
+  if(SOMA_ENABLE_MPI)
+    add_test(NAME example_remap.np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:remap> ${MPIEXEC_POSTFLAGS} ${plane} ${CMAKE_CURRENT_BINARY_DIR}/remap_np2.soma)
+    set_tests_properties(example_remap.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2 PASS_REGULAR_EXPRESSION "${remapped}")
   endif()
 endif()

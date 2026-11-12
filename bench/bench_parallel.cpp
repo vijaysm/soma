@@ -26,13 +26,17 @@
 //   * advect: first-order upwind finite volumes on the smoothed ghosted
 //     mesh, SOMA alone: the space (FvSpace) and 10 forward Euler steps of a
 //     uniform flow, plain and with exact (reproducible) totals;
+//   * remap: a conservative remap between two plane grids of about n^3
+//     cells (quads, and triangles of an offset grid), their rows dealt to the
+//     ranks: RemapOperator built and applied; at one rank also MOAB's
+//     in-plane intersection of the two whole meshes;
 //   * write and restart: write_soma and read_soma at the same P against
 //     write_file PARALLEL=WRITE_PART and load_file READ_PART.
 //
 // Every result is checked: the owned hexes and vertices add up to the box's,
 // ghost vertices hold their owners' values after each update, the three
-// assemblies agree, CG converges and a constant state stays constant under
-// advection; a mismatch exits with status 2.
+// assemblies agree, CG converges, a constant state stays constant under
+// advection and the remap keeps the total; a mismatch exits with status 2.
 //
 //   mpiexec -n P bench_parallel [--json] [--repeats N] [--n edge] [--parts K] [--dir path]
 
@@ -54,6 +58,7 @@
 
 #include "harness.hpp"
 #include "moab/Core.hpp"
+#include "moab/IntxMesh/Intx2MeshInPlane.hpp"
 #include "moab/ParallelComm.hpp"
 #include "MBParallelConventions.h"
 #include "moab_box.hpp"
@@ -62,6 +67,7 @@
 #include "soma/algorithms/csr.hpp"
 #include "soma/algorithms/fem_space.hpp"
 #include "soma/algorithms/fv.hpp"
+#include "soma/algorithms/remap.hpp"
 #include "soma/algorithms/laplacian.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/io/h5m.hpp"
@@ -86,6 +92,41 @@ using soma::bench::check;
 struct One {
   KOKKOS_INLINE_FUNCTION double operator()(double, double, double) const { return 1; }
 };
+
+// An m by m grid of the unit square, quads or triangles, its rows dealt to
+// the ranks in blocks; a triangle grid's interior corners moved off the
+// quads'.
+HostMesh plane_grid(const soma::Comm& comm, int m, bool tri) {
+  const auto id = [&](int i, int j) { return static_cast<GO>(j * (m + 1) + i + 1); };
+  const int first = static_cast<int>(std::int64_t{m} * comm.rank() / comm.size());
+  const int last = static_cast<int>(std::int64_t{m} * (comm.rank() + 1) / comm.size());
+  std::vector<GO> cells, conn, verts;
+  std::vector<double> xyz;
+  for (int j = first; j < last; ++j) {
+    for (int i = 0; i < m; ++i) {
+      const GO a = id(i, j), b = id(i + 1, j), c = id(i + 1, j + 1), d = id(i, j + 1);
+      const GO e = static_cast<GO>(j) * m + i + 1;
+      if (tri) {
+        cells.insert(cells.end(), {2 * e - 1, 2 * e});
+        conn.insert(conn.end(), {a, b, c, a, c, d});
+      } else {
+        cells.push_back(e);
+        conn.insert(conn.end(), {a, b, c, d});
+      }
+    }
+  }
+  for (int j = first; j <= last && first < last; ++j) {
+    for (int i = 0; i <= m; ++i) {
+      verts.push_back(id(i, j));
+      const bool inner = tri && i > 0 && i < m && j > 0 && j < m;
+      xyz.insert(xyz.end(), {(i + (inner ? 0.3 : 0.0)) / m, (j + (inner ? 0.2 : 0.0)) / m, 0.0});
+    }
+  }
+  soma::MeshBuilder builder(2);
+  builder.add_vertices(verts, xyz);
+  builder.add_elements(tri ? soma::Topology::tri : soma::Topology::quad, cells, conn);
+  return soma::build_local_part(comm, std::move(builder));
+}
 
 // A uniform flow, oblique to the box.
 struct Uniform {
@@ -447,6 +488,69 @@ int main(int argc, char** argv) {
     }
     soma::set_reproducible(saved);
     ok = agree(comm, std::abs(plain - rounded) <= 1e-12 * std::abs(rounded)) && ok;
+  }
+
+  // ---- remap ----
+  {
+    const int m = static_cast<int>(std::lround(std::sqrt(static_cast<double>(cells))));
+    const std::int64_t quads = std::int64_t{m} * m;
+    const HostMesh source = plane_grid(comm, m, false), target = plane_grid(comm, m, true);
+    std::optional<soma::RemapOperator<Host>> remap;
+    runner.run("remap", "soma_remap_operator", quads, [&] { remap.reset(); },
+               [&] { remap.emplace(comm, source, target); });
+    soma::View1<double, Host> u("u", static_cast<std::size_t>(source.segment_table(2).owned_end));
+    soma::View1<double, Host> v("v", static_cast<std::size_t>(remap->rows()));
+    Kokkos::deep_copy(u, 1.0);
+    runner.run("remap", "soma_remap_apply", quads, [] {},
+               [&] { remap->apply(comm, soma::View1<const double, Host>(u), v); });
+    // A constant comes through, and the overlaps fill the square.
+    double worst = 0, area = 0;
+    for (LO t = 0; t < remap->rows(); ++t) {
+      worst = std::max(worst, std::abs(v(t) - 1));
+      area += remap->target_area()(t);
+    }
+    worst = comm.allreduce(worst, soma::Op::max);
+    area = comm.allreduce(area, soma::Op::sum);
+    if (comm.rank() == 0 && !json) std::cout << "  remap: constant off by " << std::scientific << worst << ", area by " << area - 1 << std::defaultfloat << "\n";
+    ok = agree(comm, worst <= 1e-12 && std::abs(area - 1) <= 1e-12) && ok;
+    if (comm.size() == 1) {
+      // MOAB: both meshes in sets of one Core, intersected.
+      const auto into_moab = [&](moab::Core& mb, const HostMesh& mesh) {
+        moab::EntityHandle set;
+        check(mb.create_meshset(moab::MESHSET_SET, set), "create_meshset");
+        const auto x = mesh.coords();
+        const auto view = mesh.view();
+        std::vector<moab::EntityHandle> vh(static_cast<std::size_t>(view.count(0)));
+        for (LO i = 0; i < view.count(0); ++i) {
+          const double p[3] = {x(i, 0), x(i, 1), x(i, 2)};
+          check(mb.create_vertex(p, vh[static_cast<std::size_t>(i)]), "create_vertex");
+        }
+        for (LO e = 0; e < view.count(2); ++e) {
+          moab::EntityHandle conn[4], h;
+          const LO k = view.num_vertices(2, e);
+          for (LO c = 0; c < k; ++c) conn[c] = vh[static_cast<std::size_t>(view.vertex(2, e, c))];
+          check(mb.create_element(k == 3 ? moab::MBTRI : moab::MBQUAD, conn, static_cast<int>(k), h), "create_element");
+          check(mb.add_entities(set, &h, 1), "add_entities");
+        }
+        return set;
+      };
+      std::optional<moab::Core> mb;
+      moab::EntityHandle ms = 0, mt = 0;
+      runner.run("remap", "moab_intx_in_plane", quads,
+                 [&] {
+                   mb.emplace();
+                   ms = into_moab(*mb, source);
+                   mt = into_moab(*mb, target);
+                 },
+                 [&] {
+                   moab::Intx2MeshInPlane intx(&*mb);
+                   intx.set_error_tolerance(1e-12);
+                   check(intx.FindMaxEdges(ms, mt), "FindMaxEdges");
+                   moab::EntityHandle out;
+                   check(mb->create_meshset(moab::MESHSET_SET, out), "create_meshset");
+                   check(intx.intersect_meshes(ms, mt, out), "intersect_meshes");
+                 });
+    }
   }
 
   // ---- write and restart ----
