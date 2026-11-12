@@ -23,12 +23,16 @@
 //     (FemSpace) for each assembly, the stiffness matrix gathered, by atomics
 //     and colored, and Jacobi CG to a relative residual of 1e-10, with
 //     plain and with exact (reproducible) sums;
+//   * advect: first-order upwind finite volumes on the smoothed ghosted
+//     mesh, SOMA alone: the space (FvSpace) and 10 forward Euler steps of a
+//     uniform flow, plain and with exact (reproducible) totals;
 //   * write and restart: write_soma and read_soma at the same P against
 //     write_file PARALLEL=WRITE_PART and load_file READ_PART.
 //
 // Every result is checked: the owned hexes and vertices add up to the box's,
 // ghost vertices hold their owners' values after each update, the three
-// assemblies agree and CG converges; a mismatch exits with status 2.
+// assemblies agree, CG converges and a constant state stays constant under
+// advection; a mismatch exits with status 2.
 //
 //   mpiexec -n P bench_parallel [--json] [--repeats N] [--n edge] [--parts K] [--dir path]
 
@@ -57,6 +61,7 @@
 #include "soma/algorithms/cg.hpp"
 #include "soma/algorithms/csr.hpp"
 #include "soma/algorithms/fem_space.hpp"
+#include "soma/algorithms/fv.hpp"
 #include "soma/algorithms/laplacian.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/io/h5m.hpp"
@@ -80,6 +85,11 @@ using soma::bench::check;
 // The Poisson load.
 struct One {
   KOKKOS_INLINE_FUNCTION double operator()(double, double, double) const { return 1; }
+};
+
+// A uniform flow, oblique to the box.
+struct Uniform {
+  KOKKOS_INLINE_FUNCTION Kokkos::Array<double, 3> operator()(double, double, double) const { return {0.3, 0.2, 0.1}; }
 };
 
 const char* const read_part = "PARALLEL=READ_PART;PARTITION=PARALLEL_PARTITION;PARTITION_DISTRIBUTE";
@@ -408,6 +418,35 @@ int main(int argc, char** argv) {
     worst = comm.allreduce(worst, soma::Op::max);
     largest = comm.allreduce(largest, soma::Op::max);
     ok = agree(comm, worst <= 1e-13 * largest) && ok;
+  }
+
+  // ---- advect ----
+  {
+    constexpr int steps = 10;
+    std::optional<soma::FvSpace<Host>> space;
+    runner.run("fv_space", "soma_fv_space", cells, [&] { space.reset(); }, [&] { space.emplace(comm, *ghosted); });
+    const auto phi = space->normal_flux(Uniform{});
+    const soma::View1<const double, Host> fluxes(phi);
+    const double dt = 0.9 * space->max_dt(comm, fluxes);
+    const auto u = space->vector();
+    // A constant state, the same value flowing in: it stays, to rounding.
+    runner.run("advect", "soma_upwind", cells, [&] { Kokkos::deep_copy(u, 1.0); },
+               [&] {
+                 for (int n = 0; n < steps; ++n) space->step(comm, fluxes, u, dt, 1.0);
+               });
+    double worst = 0;
+    for (LO e = 0; e < space->cols(); ++e) worst = std::max(worst, std::abs(u(e) - 1));
+    ok = agree(comm, worst <= 1e-12) && ok;
+    double plain = 0, rounded = 0;
+    runner.run("advect", "soma_total", cells, [] {}, [&] { plain = space->total(comm, u); });
+    const bool saved = soma::reproducible();
+    soma::set_reproducible(true);
+    {
+      const soma::FvSpace<Host> exact(comm, *ghosted);
+      runner.run("advect", "soma_total_reproducible", cells, [] {}, [&] { rounded = exact.total(comm, u); });
+    }
+    soma::set_reproducible(saved);
+    ok = agree(comm, std::abs(plain - rounded) <= 1e-12 * std::abs(rounded)) && ok;
   }
 
   // ---- write and restart ----

@@ -555,6 +555,18 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   1.14 at eight threads on one rank.
 - `examples/poisson.cpp` solves -lap u = 1, u = 0 on the boundary, on a `.h5m` or SOMA mesh on
   any number of ranks, by any assembly, and writes u as a vertex field.
+- `soma::FvSpace<MemSpace>(comm, mesh)` (`soma/algorithms/fv.hpp`) advects a cell field by
+  first-order upwind finite volumes and forward Euler on tris, quads, tets and hexes with one
+  ghost layer: `normal_flux(a)` evaluates a velocity functor at the face centroids, `max_dt`
+  gives the largest stable step, `step` takes one (with a value flowing in at the boundary)
+  and updates the ghosts once, and `total` sums V u, exactly when reproducible. Face geometry
+  follows the corners' gids and each cell sums its faces in a fixed order, so the steps are
+  the serial ones bit for bit on any number of ranks and threads. Cells may be ordered either
+  way round; a cell folded over its neighbour, of no positive volume, or (in 2D) off a plane
+  z = const, a side of three cells, or no ghost layer on more than one rank, throws on every
+  rank.
+- `examples/advect.cpp` carries a bump around a `.h5m` or SOMA mesh by a rigid rotation on any
+  number of ranks and writes u as a cell field.
 
 ### Testing
 
@@ -717,7 +729,7 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   against `exchange_tags`, and `write_soma` / `read_soma` against `WRITE_PART` and a
   `READ_PART` load, checking owned counts and updated values. Its `smooth` and `poisson`
   sections time Laplacian smoothing against MOAB's, and `FemSpace`, the three assemblies and
-  CG alone. `bench/run_parallel.sh` runs it
+  CG alone; its `advect` section, `FvSpace` and upwind steps alone. `bench/run_parallel.sh` runs it
   over rank counts and sizes into JSON files; its header lists what a run at scale needs.
 
 ### Packaging
