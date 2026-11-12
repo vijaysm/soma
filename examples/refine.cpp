@@ -4,28 +4,27 @@
 // refine [--levels L] <in> <out>
 //
 // Reads a plane mesh of triangles, quads or polygons, or a volume mesh of
-// tets, hexes, prisms or pyramids, from a MOAB .h5m or SOMA file (on as many
-// ranks as it runs on), gives each vertex w = x + 2y + 3z and each cell its
-// gid as "part", and refines it uniformly L times (default 1;
-// soma::refine_uniform). Prints the cell and vertex counts before and after,
-// and the largest |w - (x + 2y + 3z)| over the refined vertices (w is linear,
-// so its averages are exact). Writes the refined mesh with "w" and "part" to
-// a SOMA file, or on one rank to a legacy VTK file when <out> ends in .vtk.
-// Exit status: 0 done, 1 failed, 2 bad arguments.
+// tets, hexes, prisms or pyramids, from a MOAB .h5m, SOMA or legacy VTK file
+// (soma::read_file, on as many ranks as it runs on), gives each vertex
+// w = x + 2y + 3z and each cell its gid as "part", and refines it uniformly
+// L times (default 1; soma::refine_uniform). Prints the cell and vertex
+// counts before and after, and the largest |w - (x + 2y + 3z)| over the
+// refined vertices (w is linear, so its averages are exact). Writes the
+// refined mesh with "w" and "part" to <out> as a SOMA, MOAB .h5m or legacy
+// VTK file by its extension (soma::write_file). Exit status: 0 done,
+// 1 failed, 2 bad arguments.
 
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <exception>
-#include <stdexcept>
 #include <string>
+#include <vector>
 
 #include <Kokkos_Core.hpp>
 
 #include "soma/algorithms/refine.hpp"
-#include "soma/io/h5m.hpp"
-#include "soma/io/soma_file.hpp"
-#include "soma/io/vtk_writer.hpp"
+#include "soma/io/mesh_file.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/runtime/scope_guard.hpp"
 
@@ -69,8 +68,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   try {
-    const soma::MeshFormat format = soma::detect_format(in);
-    soma::HostMesh mesh = format == soma::MeshFormat::soma ? soma::read_soma(comm, in) : soma::read_h5m(comm, in);
+    soma::HostMesh mesh = soma::read_file(comm, in);
     const int dim = mesh.dim();
     auto w = mesh.fields().add_tag<double>("w", 0, 1).view();
     for (soma::LO v = 0; v < mesh.count(0); ++v) w(v, 0) = linear(mesh, v);
@@ -87,14 +85,7 @@ int main(int argc, char** argv) {
     const double cells[2] = {owned(comm, mesh, dim), owned(comm, fine.mesh, dim)};
     const double vertices[2] = {owned(comm, mesh, 0), owned(comm, fine.mesh, 0)};
 
-    const bool vtk = out.size() > 4 && out.compare(out.size() - 4, 4, ".vtk") == 0;
-    if (vtk && comm.size() > 1) throw std::invalid_argument("a .vtk output needs one rank");
-    if (vtk) {
-      const std::string fields[] = {"w", "part"};
-      soma::write_vtk(fine.mesh, out, fields);
-    } else {
-      soma::write_soma(comm, fine.mesh, out);
-    }
+    soma::write_file(comm, fine.mesh, out, {.vtk_fields = std::vector<std::string>{"w", "part"}});
     if (comm.rank() == 0) {
       std::printf("%s: %d level(s); cells %.0f -> %.0f, vertices %.0f -> %.0f; linear field error %.1e; wrote %s\n",
                   argv[0], options.levels, cells[0], cells[1], vertices[0], vertices[1], worst, out.c_str());
