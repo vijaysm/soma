@@ -80,7 +80,9 @@ int main(int argc, char** argv) {
     const soma::RefineResult fine = soma::refine_uniform(comm, mesh, options);
     const auto fw = fine.mesh.fields().get<double>("w", 0).view();
     double worst = 0;
-    for (soma::LO v = 0; v < fine.mesh.count(0); ++v) worst = std::fmax(worst, std::fabs(fw(v, 0) - linear(fine.mesh, v)));
+    for (soma::LO v = 0; v < fine.mesh.count(0); ++v) {
+      worst = std::fmax(worst, std::fabs(fw(v, 0) - linear(fine.mesh, v)));
+    }
     worst = comm.allreduce(worst, soma::Op::max);
     const double cells[2] = {owned(comm, mesh, dim), owned(comm, fine.mesh, dim)};
     const double vertices[2] = {owned(comm, mesh, 0), owned(comm, fine.mesh, 0)};
