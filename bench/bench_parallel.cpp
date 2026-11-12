@@ -29,7 +29,8 @@
 //   * remap: a conservative remap between two plane grids of about n^3
 //     cells (quads, and triangles of an offset grid), their rows dealt to the
 //     ranks: RemapOperator built and applied; at one rank also MOAB's
-//     in-plane intersection of the two whole meshes;
+//     in-plane intersection of the two whole meshes; and n^3 hexes onto a
+//     grid of tets, SOMA alone;
 //   * write and restart: write_soma and read_soma at the same P against
 //     write_file PARALLEL=WRITE_PART and load_file READ_PART.
 //
@@ -125,6 +126,52 @@ HostMesh plane_grid(const soma::Comm& comm, int m, bool tri) {
   soma::MeshBuilder builder(2);
   builder.add_vertices(verts, xyz);
   builder.add_elements(tri ? soma::Topology::tri : soma::Topology::quad, cells, conn);
+  return soma::build_local_part(comm, std::move(builder));
+}
+
+// An m^3 grid of the unit cube, hexes or six tets per cube about its main
+// diagonal, its slabs along z dealt to the ranks in blocks.
+HostMesh volume_grid(const soma::Comm& comm, int m, bool tet) {
+  const auto id = [&](int i, int j, int k) {
+    return static_cast<GO>((std::int64_t{k} * (m + 1) + j) * (m + 1) + i + 1);
+  };
+  const int first = static_cast<int>(std::int64_t{m} * comm.rank() / comm.size());
+  const int last = static_cast<int>(std::int64_t{m} * (comm.rank() + 1) / comm.size());
+  std::vector<GO> cells, conn, verts;
+  std::vector<double> xyz;
+  const int perm[6][3] = {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}};
+  for (int k = first; k < last; ++k) {
+    for (int j = 0; j < m; ++j) {
+      for (int i = 0; i < m; ++i) {
+        const GO e = (std::int64_t{k} * m + j) * m + i;
+        if (!tet) {
+          cells.push_back(e + 1);
+          for (int q = 0; q < 8; ++q) conn.push_back(id(i + (q + 1) / 2 % 2, j + q / 2 % 2, k + q / 4));
+          continue;
+        }
+        for (int t = 0; t < 6; ++t) {
+          int step[3] = {0, 0, 0};
+          cells.push_back(6 * e + t + 1);
+          conn.push_back(id(i, j, k));
+          for (int q = 0; q < 3; ++q) {
+            step[perm[t][q]] = 1;
+            conn.push_back(id(i + step[0], j + step[1], k + step[2]));
+          }
+        }
+      }
+    }
+  }
+  for (int k = first; k <= last && first < last; ++k) {
+    for (int j = 0; j <= m; ++j) {
+      for (int i = 0; i <= m; ++i) {
+        verts.push_back(id(i, j, k));
+        xyz.insert(xyz.end(), {static_cast<double>(i) / m, static_cast<double>(j) / m, static_cast<double>(k) / m});
+      }
+    }
+  }
+  soma::MeshBuilder builder(3);
+  builder.add_vertices(verts, xyz);
+  builder.add_elements(tet ? soma::Topology::tet : soma::Topology::hex, cells, conn);
   return soma::build_local_part(comm, std::move(builder));
 }
 
@@ -513,6 +560,18 @@ int main(int argc, char** argv) {
     area = comm.allreduce(area, soma::Op::sum);
     if (comm.rank() == 0 && !json) std::cout << "  remap: constant off by " << std::scientific << worst << ", area by " << area - 1 << std::defaultfloat << "\n";
     ok = agree(comm, worst <= 1e-12 && std::abs(area - 1) <= 1e-12) && ok;
+    {
+      // Volumes: n^3 hexes onto (n - 1)^3 cubes of tets (MOAB has no 3D intersection).
+      const HostMesh hexes = volume_grid(comm, n, false), tets = volume_grid(comm, std::max(1, n - 1), true);
+      std::optional<soma::RemapOperator<Host>> volume;
+      runner.run("remap", "soma_remap_operator_3d", cells, [&] { volume.reset(); },
+                 [&] { volume.emplace(comm, hexes, tets); });
+      double filled = 0;
+      for (LO t = 0; t < volume->rows(); ++t) {
+        for (soma::Offset e = volume->offsets()(t); e < volume->offsets()(t + 1); ++e) filled += volume->overlap()(e);
+      }
+      ok = agree(comm, std::abs(comm.allreduce(filled, soma::Op::sum) - 1) <= 1e-12) && ok;
+    }
     if (comm.size() == 1) {
       // MOAB: both meshes in sets of one Core, intersected.
       const auto into_moab = [&](moab::Core& mb, const HostMesh& mesh) {
