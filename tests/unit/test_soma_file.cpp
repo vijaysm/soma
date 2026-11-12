@@ -356,7 +356,8 @@ TEST(SomaFile, BundledMeshesReadBackAsWritten) {
       }
     }
     EXPECT_EQ(soma::detect_format(data("hex_2048.h5m")), soma::MeshFormat::legacy_h5m);
-    EXPECT_EQ(soma::detect_format(data("hexes_mixed.vtk")), soma::MeshFormat::unknown);
+    EXPECT_EQ(soma::detect_format(data("hexes_mixed.vtk")), soma::MeshFormat::legacy_vtk);
+    EXPECT_EQ(soma::detect_format(data("no_such_file.h5m")), soma::MeshFormat::unknown);
   }
 }
 
