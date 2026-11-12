@@ -242,6 +242,36 @@ TEST(Remap3d, DistributedRemapsAreTheSerialOneBitForBit) {
   }
 }
 
+// Cells whose corners are listed from another corner (the same cell, turned
+// the same way) give the same operator bit for bit.
+TEST(Remap3d, TheCornerOrderOfACellDoesNotMatter) {
+  const Comm c = Comm::world();
+  const auto turned = [](Cells g) {
+    std::vector<int> by;
+    if (g.type == Topology::hex) by = {1, 2, 3, 0, 5, 6, 7, 4};  // about the vertical axis
+    if (g.type == Topology::prism) by = {1, 2, 0, 4, 5, 3};
+    if (g.type == Topology::pyramid) by = {1, 2, 3, 0, 4};
+    if (g.type == Topology::tet) by = {1, 2, 0, 3};
+    for (std::size_t e = 0; e < g.cells.size(); e += 2) {
+      const std::vector<GO> was = g.cells[e];
+      for (std::size_t q = 0; q < was.size(); ++q) g.cells[e][q] = was[static_cast<std::size_t>(by[q])];
+    }
+    return g;
+  };
+  int k = 0;
+  for (const auto& [s, t] : cases()) {
+    SCOPED_TRACE(testing::Message() << "case " << k++);
+    const Remap a(c, build(c, s, 0), build(c, t, 1)), b(c, build(c, turned(s), 0), build(c, turned(t), 1));
+    ASSERT_EQ(a.offsets().extent(0), b.offsets().extent(0));
+    ASSERT_EQ(a.overlap().extent(0), b.overlap().extent(0));
+    LO differ = 0;
+    for (std::size_t e = 0; e < a.overlap().extent(0); ++e) {
+      differ += bits(a.overlap()(e)) == bits(b.overlap()(e)) && a.columns()(e) == b.columns()(e) ? 0 : 1;
+    }
+    EXPECT_EQ(c.allreduce(static_cast<Real>(differ), soma::Op::sum), 0);
+  }
+}
+
 // Each hex of a refined grid lies in one hex of the coarse one: one entry,
 // weight one; the faces they share leave no slivers.
 TEST(Remap3d, ARefinementIsRecoveredExactly) {

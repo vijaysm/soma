@@ -4,6 +4,7 @@
 #include "soma/algorithms/remap.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -117,7 +118,11 @@ bool plane_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& mea
 // A volume cell's tets: a tet itself, its corners in gid order; another cell
 // one tet per triangle of its faces, apex its centroid (its corners summed
 // in gid order), a quad face cut along the diagonal from its least-gid
-// corner, so that two cells cut a face they share alike. Its volume. False
+// corner, so that two cells cut a face they share alike. Faces start at
+// their least-gid corner and go in the order of their corner gids, so that
+// the tets do not depend on how the cell's corners are listed. Its volume
+// (an inverted cell's, all tets turned the other way, counts as its
+// magnitude). False
 // where a tet is thinner than eps (below eps times its longest edge squared)
 // or turned unlike the others (the cell is not star-shaped about its
 // centroid).
@@ -140,19 +145,33 @@ bool volume_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& me
       c = {c.x + p.x, c.y + p.y, c.z + p.z};
     }
     c = {c.x / n, c.y / n, c.z / n};
+    // Faces from their least-gid corner, turned as given, in the order of
+    // their sorted corner gids.
+    struct Face {
+      std::array<GO, 4> key{};
+      int n = 0;
+      std::array<LO, 4> v{};
+    };
+    std::vector<Face> faces;
     for (int s = 0; s < topology::side_count(m, 3, e, 2); ++s) {
       const topology::Side f = topology::side_of(m, 3, e, 2, s);
-      if (f.n == 3) {
-        tets.push_back({{c, at(f.v[0]), at(f.v[1]), at(f.v[2])}});
-        continue;
-      }
+      Face face;
+      face.n = f.n;
       int k = 0;
-      for (int i = 1; i < 4; ++i) {
+      for (int i = 1; i < f.n; ++i) {
         if (gid(f.v[i]) < gid(f.v[k])) k = i;
       }
-      const LO a = f.v[k], b = f.v[(k + 1) % 4], d = f.v[(k + 2) % 4], g = f.v[(k + 3) % 4];
-      tets.push_back({{c, at(a), at(b), at(d)}});
-      tets.push_back({{c, at(a), at(d), at(g)}});
+      for (int i = 0; i < f.n; ++i) {
+        face.v[static_cast<std::size_t>(i)] = f.v[(k + i) % f.n];
+        face.key[static_cast<std::size_t>(i)] = gid(f.v[i]);
+      }
+      std::sort(face.key.begin(), face.key.begin() + f.n);
+      faces.push_back(face);
+    }
+    std::sort(faces.begin(), faces.end(), [](const Face& p, const Face& q) { return p.key < q.key; });
+    for (const Face& f : faces) {
+      tets.push_back({{c, at(f.v[0]), at(f.v[1]), at(f.v[2])}});
+      if (f.n == 4) tets.push_back({{c, at(f.v[0]), at(f.v[2]), at(f.v[3])}});
     }
   }
   measure = 0;
