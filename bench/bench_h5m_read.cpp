@@ -74,14 +74,14 @@ bool run_mesh(const soma::Comm& comm, const std::string& path, const fs::path& s
       "read_h5m", "moab", "moab", elements, [&] { mb = std::make_unique<moab::Core>(); },
       [&] { check(mb->load_file(path.c_str()), "load_file " + path); });
 
-  const std::string host = Kokkos::DefaultHostExecutionSpace::name();
+  const std::string host_name = Kokkos::DefaultHostExecutionSpace::name();
   soma::HostMesh mesh;
-  const auto ts = runner.run("read_h5m", "soma", host, elements, [&] { mesh = soma::HostMesh(); },
+  const auto ts = runner.run("read_h5m", "soma", host_name, elements, [&] { mesh = soma::HostMesh(); },
                              [&] { mesh = soma::read_h5m(path); });
   runner.compare(tm, ts, "speedup(moab/soma)");
   soma::H5mReadOptions sfc;
   sfc.ordering = soma::Ordering::type_major_sfc;
-  runner.run("read_h5m", "soma_sfc", host, elements, [&] { mesh = soma::HostMesh(); },
+  runner.run("read_h5m", "soma_sfc", host_name, elements, [&] { mesh = soma::HostMesh(); },
              [&] { mesh = soma::read_h5m(path, sfc); });
   bool ok = mesh.dim() == moab_dim;
   for (int d = 0; d <= mesh.dim(); ++d) ok = ok && mesh.count(d) == moab_counts[d];
@@ -92,14 +92,14 @@ bool run_mesh(const soma::Comm& comm, const std::string& path, const fs::path& s
   soma::H5mReadOptions no_tags;
   no_tags.tags = false;
   const auto host = Kokkos::DefaultHostExecutionSpace{};
-  const auto tb = runner.run("read_h5m", "soma_build", elements, [&] { mesh = soma::HostMesh(); }, [&] {
+  const auto tb = runner.run("read_h5m", "soma_build", host_name, elements, [&] { mesh = soma::HostMesh(); }, [&] {
     mesh = soma::read_h5m(path, no_tags);
     soma::build_adjacencies(mesh, request, host);
   });
   const soma::HostMesh built = std::move(mesh);
   const fs::path cached = scratch / ("cached_" + name);
   soma::write_h5m(built, cached, {.adjacencies = request});
-  const auto tc = runner.run("read_h5m", "soma_cached", elements, [&] { mesh = soma::HostMesh(); },
+  const auto tc = runner.run("read_h5m", "soma_cached", host_name, elements, [&] { mesh = soma::HostMesh(); },
                              [&] { mesh = soma::read_h5m(cached, no_tags); });
   if (!json) std::cout << "[bench] " << name << " cached/built read time " << tc.local.median_sec / tb.local.median_sec << "\n";
   bool same = mesh.adjacencies().bits() == request.bits();

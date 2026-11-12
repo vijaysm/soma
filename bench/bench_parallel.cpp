@@ -180,7 +180,11 @@ int main(int argc, char** argv) {
   const std::int64_t cells = std::int64_t{n} * n * n, points = std::int64_t{n + 1} * (n + 1) * (n + 1);
   const auto env = soma::bench::make_environment(
       comm, "box " + std::to_string(n) + "^3 hexes, " + std::to_string(parts) + " parts", repeats);
-  if (!json) soma::bench::print_environment(comm, env);
+  if (!json) {
+    soma::bench::print_environment(comm, env);
+    soma::bench::print_moab_note(comm, env);
+  }
+  const std::string host_name = Kokkos::DefaultHostExecutionSpace::name();
   soma::bench::Runner runner(comm, env, json);
   bool ok = true;
 
@@ -190,7 +194,7 @@ int main(int argc, char** argv) {
     m.reset();
     m = std::make_unique<Moab>(comm);
   };
-  const auto tm = runner.run("read", "moab_read_part_resolve", cells, [&] { fresh(mo); }, [&] { mo->load(box, true); });
+  const auto tm = runner.run("read", "moab_read_part_resolve", "moab", cells, [&] { fresh(mo); }, [&] { mo->load(box, true); });
   ok = agree(comm, comm.allreduce(mo->owned(3), soma::Op::sum) == cells &&
                        comm.allreduce(mo->owned(0), soma::Op::sum) == points) &&
        ok;
@@ -202,9 +206,9 @@ int main(int argc, char** argv) {
   for (const bool collective : {false, true}) {
     ro.collective = collective;
     try {
-      const auto ts = runner.run("read", collective ? "soma_read_collective" : "soma_read_independent", cells, [] {},
+      const auto ts = runner.run("read", collective ? "soma_read_collective" : "soma_read_independent", host_name, cells, [] {},
                                  [&] { base.emplace(soma::read_h5m(comm, box, ro)); });
-      runner.compare(tm, ts);
+      runner.compare(tm, ts, "speedup(moab/soma)");
     } catch (const std::invalid_argument&) {
       // A serial HDF5 has no collective reads.
     }
@@ -218,7 +222,7 @@ int main(int argc, char** argv) {
     std::unique_ptr<Moab> m;
     moab::Range hexes;
     const auto t1 = runner.run(
-        "sharing", "moab_resolve_shared_ents", cells,
+        "sharing", "moab_resolve_shared_ents", "moab", cells,
         [&] {
           fresh(m);
           m->load(box, false);
@@ -230,9 +234,9 @@ int main(int argc, char** argv) {
     m.reset();
     std::optional<soma::MeshBuilder> b;
     std::optional<HostMesh> built;
-    const auto t2 = runner.run("sharing", "soma_build_local_part", cells, [&] { b.emplace(builder_of(*base)); },
+    const auto t2 = runner.run("sharing", "soma_build_local_part", host_name, cells, [&] { b.emplace(builder_of(*base)); },
                                [&] { built.emplace(soma::build_local_part(comm, std::move(*b))); });
-    runner.compare(t1, t2);
+    runner.compare(t1, t2, "speedup(moab/soma)");
     ok = agree(comm, comm.allreduce(owned(*built, 0), soma::Op::sum) == points) && ok;
   }
 
@@ -240,16 +244,16 @@ int main(int argc, char** argv) {
   std::unique_ptr<Moab> mg;
   const std::string ghosts = layers == 1 ? "ghosts" : "ghosts_" + std::to_string(layers) + "_layers";
   const auto g1 = runner.run(
-      ghosts, "moab_exchange_ghost_cells", cells,
+      ghosts, "moab_exchange_ghost_cells", "moab", cells,
       [&] {
         fresh(mg);
         mg->load(box, true);
       },
       [&] { check(mg->pc->exchange_ghost_cells(3, 0, layers, 0, true), "exchange_ghost_cells"); });
   std::optional<HostMesh> ghosted;
-  const auto g2 = runner.run(ghosts, "soma_add_ghosts", cells, [&] { ghosted.emplace(base->clone()); },
+  const auto g2 = runner.run(ghosts, "soma_add_ghosts", host_name, cells, [&] { ghosted.emplace(base->clone()); },
                              [&] { ghosted->add_ghosts(comm, soma::GhostOptions{layers, 0, false}); });
-  runner.compare(g1, g2);
+  runner.compare(g1, g2, "speedup(moab/soma)");
 
   // ---- halo ----
   moab::Range verts;
@@ -280,7 +284,7 @@ int main(int argc, char** argv) {
       }
       if (!verts.empty()) check(mg->core.tag_set_data(tag, verts, mv.data()), "tag_set_data");
     };
-    const auto t1 = runner.run(bench, "moab_exchange_tags", points, mset, [&] { check(mg->pc->exchange_tags(tag, verts), "exchange_tags"); });
+    const auto t1 = runner.run(bench, "moab_exchange_tags", "moab", points, mset, [&] { check(mg->pc->exchange_tags(tag, verts), "exchange_tags"); });
     if (!verts.empty()) check(mg->core.tag_get_data(tag, verts, mv.data()), "tag_get_data");
     bool good = true;
     for (std::size_t i = 0; i < verts.size(); ++i) {
@@ -300,11 +304,11 @@ int main(int argc, char** argv) {
         for (int k = 0; k < ncomp; ++k) good = good && v(e, k) == value_of(sx(e, 0), sx(e, 1), sx(e, 2), k);
       }
     };
-    const auto t2 = runner.run(bench, "soma_update", points, sset, [&] { x.update(comm, v); });
-    runner.compare(t1, t2);
+    const auto t2 = runner.run(bench, "soma_update", host_name, points, sset, [&] { x.update(comm, v); });
+    runner.compare(t1, t2, "speedup(moab/soma)");
     check_soma();
-    const auto t3 = runner.run(bench, "soma_begin_end", points, sset, [&] { x.begin_update(comm, v).end(); });
-    runner.compare(t1, t3);
+    const auto t3 = runner.run(bench, "soma_begin_end", host_name, points, sset, [&] { x.begin_update(comm, v).end(); });
+    runner.compare(t1, t3, "speedup(moab/soma)");
     check_soma();
     ok = agree(comm, good) && ok;
   }
@@ -328,7 +332,7 @@ int main(int argc, char** argv) {
       }
     }
     const auto t1 = runner.run(
-        "smooth", "moab_laplacian", points,
+        "smooth", "moab_laplacian", "moab", points,
         [&] {
           if (!all.empty()) check(mg->core.set_coords(all, start.data()), "set_coords");
         },
@@ -349,14 +353,14 @@ int main(int argc, char** argv) {
     soma::SmoothOptions o;
     o.iterations = sweeps;
     const auto t2 = runner.run(
-        "smooth", "soma_laplacian", points,
+        "smooth", "soma_laplacian", host_name, points,
         [&] {
           for (LO e = 0; e < nv; ++e) {
             for (int q = 0; q < 3; ++q) sx(e, q) = sstart[at(e, q)];
           }
         },
         [&] { (void)soma::laplacian_smooth(comm, *ghosted, o); });
-    runner.compare(t1, t2);
+    runner.compare(t1, t2, "speedup(moab/soma)");
     double ssum = 0;
     for (LO e = 0; e < owned_end; ++e) ssum += sx(e, 0) + 2 * sx(e, 1) + 3 * sx(e, 2);
     ssum = comm.allreduce(ssum, soma::Op::sum);
@@ -373,10 +377,10 @@ int main(int argc, char** argv) {
     double largest = 0, worst = 0;
     for (const auto& [method, name] : methods) {
       std::optional<soma::FemSpace<Host>> space;
-      runner.run("fem_space", std::string("soma_fem_space_") + name, cells, [&] { space.reset(); },
+      runner.run("fem_space", std::string("soma_fem_space_") + name, host_name, cells, [&] { space.reset(); },
                  [&] { space.emplace(comm, *ghosted, method); });
       std::optional<soma::CsrMatrix<Host>> a;
-      runner.run("assemble", std::string("soma_assemble_") + name, cells, [&] { a.reset(); },
+      runner.run("assemble", std::string("soma_assemble_") + name, host_name, cells, [&] { a.reset(); },
                  [&] { a.emplace(space->laplacian(comm)); });
       const std::size_t nnz = a->values.extent(0);
       if (!values) {
@@ -401,7 +405,7 @@ int main(int argc, char** argv) {
       soma::CgOptions co;
       co.rtol = 1e-10;
       soma::CgReport report;
-      runner.run("poisson", "soma_cg", points, [&] { Kokkos::deep_copy(u, 0.0); },
+      runner.run("poisson", "soma_cg", host_name, points, [&] { Kokkos::deep_copy(u, 0.0); },
                  [&] { report = soma::cg(comm, *space, *a, soma::View1<const double, Host>(b), u, co); });
       if (comm.rank() == 0 && !json) {
         std::cout << "  cg: " << report.iterations << " iterations, residual " << std::scientific << report.residual
@@ -411,7 +415,7 @@ int main(int argc, char** argv) {
       // The same solve with exact sums: the same bits on any P.
       co.reproducible = true;
       soma::CgReport exact;
-      runner.run("poisson", "soma_cg_reproducible", points, [&] { Kokkos::deep_copy(u, 0.0); },
+      runner.run("poisson", "soma_cg_reproducible", host_name, points, [&] { Kokkos::deep_copy(u, 0.0); },
                  [&] { exact = soma::cg(comm, *space, *a, soma::View1<const double, Host>(b), u, co); });
       ok = agree(comm, exact.converged) && ok;
     }
@@ -455,17 +459,17 @@ int main(int argc, char** argv) {
   mo->load(box, true);
   {
     const fs::path mfile = dir / "moab_out.h5m", sfile = dir / "soma_out.soma";
-    const auto w1 = runner.run("write", "moab_write_part", cells, [] {},
+    const auto w1 = runner.run("write", "moab_write_part", "moab", cells, [] {},
                                [&] { check(mo->core.write_file(mfile.c_str(), nullptr, "PARALLEL=WRITE_PART"), "write_file"); });
-    const auto w2 = runner.run("write", "soma_write", cells, [] {}, [&] { soma::write_soma(comm, *base, sfile); });
-    runner.compare(w1, w2);
+    const auto w2 = runner.run("write", "soma_write", host_name, cells, [] {}, [&] { soma::write_soma(comm, *base, sfile); });
+    runner.compare(w1, w2, "speedup(moab/soma)");
     mo.reset();
     std::unique_ptr<Moab> mr;
-    const auto r1 = runner.run("restart", "moab_read_part_resolve", cells, [&] { fresh(mr); }, [&] { mr->load(mfile, true); });
+    const auto r1 = runner.run("restart", "moab_read_part_resolve", "moab", cells, [&] { fresh(mr); }, [&] { mr->load(mfile, true); });
     std::optional<HostMesh> back;
-    const auto r2 = runner.run("restart", "soma_read", cells, [] {},
+    const auto r2 = runner.run("restart", "soma_read", host_name, cells, [] {},
                                [&] { back.emplace(soma::read_soma(comm, sfile, {.adjacencies = false})); });
-    runner.compare(r1, r2);
+    runner.compare(r1, r2, "speedup(moab/soma)");
     ok = agree(comm, comm.allreduce(owned(*back, 3), soma::Op::sum) == cells &&
                          comm.allreduce(mr->owned(3), soma::Op::sum) == cells) &&
          ok;

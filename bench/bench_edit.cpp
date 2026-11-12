@@ -141,6 +141,7 @@ bool run_native(soma::bench::Runner& runner, int n, const std::vector<double>& f
   const HostMesh base = base_box(n);
   const std::int64_t hexes = base.count(3);
   const std::int64_t verts = base.count(0);
+  const std::string host_name = Kokkos::DefaultHostExecutionSpace::name();
   const std::int64_t ref_conn = conn_sum(base), ref_graph = graph_sum(base);
   bool ok = true;
   const auto expect = [&](const std::string& what, double f, double got, double want) {
@@ -165,15 +166,15 @@ bool run_native(soma::bench::Runner& runner, int n, const std::vector<double>& f
     }
     std::int64_t cs = 0, gs = 0;
     double fr = 0;
-    runner.run(tag + "_connectivity", "soma", hexes, none, [&] { cs = conn_sum(m); });
-    runner.run(tag + "_vertex_to_hex", "soma", verts, none, [&] { gs = graph_sum(m); });
-    const double write = runner.run(tag + "_field_write", "soma", hexes, none, [&] { field_write(m); }).max_rank_sec;
+    runner.run(tag + "_connectivity", "soma", host_name, hexes, none, [&] { cs = conn_sum(m); });
+    runner.run(tag + "_vertex_to_hex", "soma", host_name, verts, none, [&] { gs = graph_sum(m); });
+    const double write = runner.run(tag + "_field_write", "soma", host_name, hexes, none, [&] { field_write(m); }).max_rank_sec;
     if (gone.empty()) {
       compact_write = write;
     } else if (compact_write > 0) {
       write_cost.emplace_back(soma::removed_fraction(m), write / compact_write);
     }
-    runner.run(tag + "_field_read", "soma", hexes, none, [&] { fr = field_read(m); });
+    runner.run(tag + "_field_read", "soma", host_name, hexes, none, [&] { fr = field_read(m); });
     expect("connectivity", f, static_cast<double>(cs), static_cast<double>(ref_conn));
     expect("vertex_to_hex", f, static_cast<double>(gs), static_cast<double>(ref_graph));
     expect("field", f, fr, 2.0 * static_cast<double>(hexes));
@@ -181,7 +182,7 @@ bool run_native(soma::bench::Runner& runner, int n, const std::vector<double>& f
 
     HostMesh e;
     std::optional<soma::MeshEdit> edit;
-    runner.run(tag + "_apply", "soma", static_cast<std::int64_t>(gone.size()),
+    runner.run(tag + "_apply", "soma", host_name, static_cast<std::int64_t>(gone.size()),
                [&] {
                  edit.reset();
                  e = base.clone();
@@ -191,11 +192,11 @@ bool run_native(soma::bench::Runner& runner, int n, const std::vector<double>& f
                },
                [&] { edit->apply(); });
     edit.reset();
-    runner.run(tag + "_compress", "soma", hexes, [&] { e = m.clone(); }, [&] { e.compress(); });
+    runner.run(tag + "_compress", "soma", host_name, hexes, [&] { e = m.clone(); }, [&] { e.compress(); });
     expect("compressed connectivity", f, static_cast<double>(conn_sum(e)), static_cast<double>(ref_conn));
   }
   HostMesh b;
-  runner.run("native_build", "soma", hexes, none, [&] { b = base_box(n); });
+  runner.run("native_build", "soma", host_name, hexes, none, [&] { b = base_box(n); });
   // A compress threshold for this machine: where the field write, the query
   // the edited state costs most, passes twice its compact cost.
   for (std::size_t i = 0; i < write_cost.size(); ++i) {
@@ -256,20 +257,22 @@ template <class Core, class Range, class Tag>
 void run_queries(soma::bench::Runner& runner, const std::string& tag_, const std::string& who, Core& mb,
                  Tag t, const Range& hexes, Sums& s, int hex_dim) {
   const auto none = [] {};
+  // The compat layer is SOMA on the host.
+  const std::string space = who == "moab" ? "moab" : Kokkos::DefaultHostExecutionSpace::name();
   const auto nh = static_cast<std::int64_t>(hexes.size());
   std::vector<double> vals(hexes.size());
   Range verts;
   mb.get_entities_by_dimension(0, 0, verts);
-  runner.run(tag_ + "_tag_set_bulk", who, nh, none, [&] {
+  runner.run(tag_ + "_tag_set_bulk", who, space, nh, none, [&] {
     std::fill(vals.begin(), vals.end(), 2.0);
     mb.tag_set_data(t, hexes, vals.data());
   });
-  runner.run(tag_ + "_tag_get_bulk", who, nh, none, [&] {
+  runner.run(tag_ + "_tag_get_bulk", who, space, nh, none, [&] {
     mb.tag_get_data(t, hexes, vals.data());
     s.tag = 0;
     for (const double x : vals) s.tag += x;
   });
-  runner.run(tag_ + "_tag_get_single", who, nh, none, [&] {
+  runner.run(tag_ + "_tag_get_single", who, space, nh, none, [&] {
     s.single = 0;
     for (const H h : hexes) {
       double x = 0;
@@ -277,7 +280,7 @@ void run_queries(soma::bench::Runner& runner, const std::string& tag_, const std
       s.single += x;
     }
   });
-  runner.run(tag_ + "_connectivity", who, nh, none, [&] {
+  runner.run(tag_ + "_connectivity", who, space, nh, none, [&] {
     s.conn = 0;
     std::vector<H> c;
     for (const H h : hexes) {
@@ -286,7 +289,7 @@ void run_queries(soma::bench::Runner& runner, const std::string& tag_, const std
       for (const H v : c) s.conn += static_cast<std::int64_t>(mb.id_from_handle(v));
     }
   });
-  runner.run(tag_ + "_vertex_to_hex", who, static_cast<std::int64_t>(verts.size()), none, [&] {
+  runner.run(tag_ + "_vertex_to_hex", who, space, static_cast<std::int64_t>(verts.size()), none, [&] {
     s.adj = 0;
     std::vector<H> adj;
     for (const H v : verts) {
@@ -375,7 +378,10 @@ int main(int argc, char** argv) {
   if (fractions.empty() || fractions.front() != 0.0) fractions.insert(fractions.begin(), 0.0);
   const std::string name = "box_" + std::to_string(n);
   const auto env = soma::bench::make_environment(comm, name, repeats);
-  if (!json) soma::bench::print_environment(comm, env);
+  if (!json) {
+    soma::bench::print_environment(comm, env);
+    soma::bench::print_moab_note(comm, env);
+  }
   soma::bench::Runner runner(comm, env, json);
 
   std::string pattern = (fs::temp_directory_path() / "soma_bench_edit_XXXXXX").string();

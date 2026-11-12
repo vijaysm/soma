@@ -56,7 +56,12 @@ bool run_mesh(const soma::Comm& comm, const std::string& path, const fs::path& s
               bool json) {
   const std::string name = fs::path(path).filename().string();
   soma::bench::Runner runner(comm, soma::bench::make_environment(comm, name, repeats), json);
-  if (!json) soma::bench::print_environment(comm, soma::bench::make_environment(comm, name, repeats));
+  if (!json) {
+    const auto env = soma::bench::make_environment(comm, name, repeats);
+    soma::bench::print_environment(comm, env);
+    soma::bench::print_moab_note(comm, env);
+  }
+  const std::string host_name = Kokkos::DefaultHostExecutionSpace::name();
   const std::vector<int> want = moab_counts(path);
   std::int64_t elements = 0;
   for (const int c : want) elements = c > 0 ? c : elements;
@@ -66,17 +71,17 @@ bool run_mesh(const soma::Comm& comm, const std::string& path, const fs::path& s
   const fs::path by_soma_z = scratch / ("soma_z_" + name);
   moab::Core mb;
   check(mb.load_file(path.c_str()), "load_file " + path);
-  const auto tm = runner.run("write_h5m", "moab", elements, [&] { fs::remove(by_moab); },
+  const auto tm = runner.run("write_h5m", "moab", "moab", elements, [&] { fs::remove(by_moab); },
                              [&] { check(mb.write_file(by_moab.c_str()), "write_file " + by_moab.string()); });
   const soma::HostMesh mesh = soma::read_h5m(path);
-  const auto ts = runner.run("write_h5m", "soma", elements, [&] { fs::remove(by_soma); },
+  const auto ts = runner.run("write_h5m", "soma", host_name, elements, [&] { fs::remove(by_soma); },
                              [&] { soma::write_h5m(mesh, by_soma); });
-  runner.compare(tm, ts);
+  runner.compare(tm, ts, "speedup(moab/soma)");
   if (level > 0) {
-    const auto tz = runner.run("write_h5m", "soma_deflate" + std::to_string(level), elements,
+    const auto tz = runner.run("write_h5m", "soma_deflate" + std::to_string(level), host_name, elements,
                                [&] { fs::remove(by_soma_z); },
                                [&] { soma::write_h5m(mesh, by_soma_z, {.compression = level}); });
-    runner.compare(tm, tz);
+    runner.compare(tm, tz, "speedup(moab/soma)");
   }
   if (!json) {
     std::cout << "[bench] " << name << " file bytes: moab " << fs::file_size(by_moab) << ", soma "

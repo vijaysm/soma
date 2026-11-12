@@ -58,12 +58,13 @@ bool run_pattern(const soma::Comm& comm, soma::bench::Runner& runner, const std:
                  bool json) {
   const std::vector<int> dest = destinations(pattern, comm.rank(), comm.size(), n);
   const auto ops = static_cast<std::int64_t>(n);
+  const std::string host_name = Kokkos::DefaultHostExecutionSpace::name();
 
   moab::ProcConfig pc(comm.native());
   moab::TupleList tl;
   Sum moab_sum;
   const auto tm = runner.run(
-      "route_" + pattern, "moab_crystal", ops,
+      "route_" + pattern, "moab_crystal", "moab", ops,
       [&] {
         tl.reset();
         tl.initialize(4, 0, 0, 0, static_cast<unsigned>(n));
@@ -91,9 +92,9 @@ bool run_pattern(const soma::Comm& comm, soma::bench::Runner& runner, const std:
   for (const auto& [name, strategy] : {std::pair{"crystal", tr::Strategy::crystal}, std::pair{"alltoallv", tr::Strategy::alltoallv},
                                        std::pair{"nbx", tr::Strategy::nbx}}) {
     Batch out;
-    const auto ts = runner.run("route_" + pattern, std::string("soma_") + name, ops, [] {},
+    const auto ts = runner.run("route_" + pattern, std::string("soma_") + name, host_name, ops, [] {},
                                [&] { out = tr::route(Host{}, comm, in, strategy); });
-    runner.compare(tm, ts);
+    runner.compare(tm, ts, "speedup(moab/soma)");
     Sum s;
     for (std::size_t i = 0; i < out.size(); ++i) {
       std::int32_t v[3];
@@ -127,7 +128,10 @@ int main(int argc, char** argv) {
     }
   }
   const auto env = soma::bench::make_environment(comm, std::to_string(records) + " records per rank", repeats);
-  if (!json) soma::bench::print_environment(comm, env);
+  if (!json) {
+    soma::bench::print_environment(comm, env);
+    soma::bench::print_moab_note(comm, env);
+  }
   soma::bench::Runner runner(comm, env, json);
   bool ok = true;
   for (const char* pattern : {"dense", "sparse"}) ok = run_pattern(comm, runner, pattern, records, json) && ok;
