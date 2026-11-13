@@ -4,7 +4,8 @@
 // Marked refinement: only the cells marked and those the balance needs are
 // split, children tile their parents, no cell meets one two levels apart at
 // a corner, hanging vertices are exactly their masters' average, vertices
-// born once are reused, and the result is the serial one on any partition.
+// born once are reused, and the result is the serial one on any partition;
+// conforming refinement leaves no hanging vertex.
 
 #include <algorithm>
 #include <array>
@@ -22,6 +23,7 @@
 
 #include "soma/algorithms/refine.hpp"
 #include "soma/fields/registry.hpp"
+#include "soma/parallel/distributed.hpp"
 #include "soma/parallel/halo_exchange.hpp"
 #include "refine_meshes.hpp"
 
@@ -73,8 +75,8 @@ std::vector<std::int8_t> near_origin(const soma::HostMesh& mesh, Real radius) {
 // Rounds of refinement towards the origin, ever closer.
 constexpr Real radii[3] = {0.6, 0.35, 0.2};
 
-soma::HostMesh rounds(const Comm& c, soma::HostMesh mesh, int n) {
-  for (int r = 0; r < n; ++r) mesh = soma::refine_marked(c, mesh, near_origin(mesh, radii[r])).mesh;
+soma::HostMesh rounds(const Comm& c, soma::HostMesh mesh, int n, soma::MarkedOptions options = {}) {
+  for (int r = 0; r < n; ++r) mesh = soma::refine_marked(c, mesh, near_origin(mesh, radii[r]), options).mesh;
   return mesh;
 }
 
@@ -84,6 +86,37 @@ std::int32_t level(const soma::HostMesh& mesh, LO e) {
 }
 
 Real linear(const std::array<Real, 3>& p) { return 1 + 2 * p[0] - 3 * p[1] + 0.5 * p[2]; }
+
+// Serially: the measure of the facets on one cell alone, and the number on
+// more than two. A coarse facet beside finer ones counts as boundary, so
+// only a conforming mesh keeps its boundary's measure.
+Real boundary(soma::HostMesh& m, LO& over) {
+  const int d = m.dim();
+  soma::build_distributed_adjacencies(Comm::self(), m, soma::AdjacencyRequest{}.add(d - 1, d));
+  const auto up = m.adjacency(d - 1, d);
+  const auto mv = m.view();
+  Real sum = 0;
+  over = 0;
+  for (LO f = 0; f < m.count(d - 1); ++f) {
+    const auto cells = up.offsets(static_cast<std::size_t>(f) + 1) - up.offsets(static_cast<std::size_t>(f));
+    over += cells > 2 ? 1 : 0;
+    if (cells != 1) continue;
+    const LO n = mv.num_vertices(d - 1, f);
+    std::array<Real, 3> area{0, 0, 0};
+    for (LO i = 0; i < n; ++i) {
+      const auto a = point(m, mv.vertex(d - 1, f, i)), b = point(m, mv.vertex(d - 1, f, (i + 1) % n));
+      if (n == 2) {
+        sum += i == 0 ? std::hypot(b[0] - a[0], b[1] - a[1], b[2] - a[2]) : 0;
+        continue;
+      }
+      area[0] += a[1] * b[2] - a[2] * b[1];
+      area[1] += a[2] * b[0] - a[0] * b[2];
+      area[2] += a[0] * b[1] - a[1] * b[0];
+    }
+    sum += std::hypot(area[0], area[1], area[2]) / 2;
+  }
+  return sum;
+}
 
 }  // namespace
 
@@ -280,53 +313,55 @@ TEST(RefineMarked, DistributedRefinementIsTheSerialOneBitForBit) {
   const Comm c = Comm::world();
   const Comm self = Comm::self();
   for (const Case& k : cases()) {
-    const int n = k.again ? 3 : 1;
-    const int d = k.cells.dim;
-    const soma::HostMesh serial_mesh = rounds(self, build(self, k.cells, 2), n - 1);
-    const auto serial = soma::refine_marked(self, serial_mesh, near_origin(serial_mesh, radii[n - 1]));
-    std::map<GO, std::array<std::uint64_t, 3>> where;
-    for (LO v = 0; v < serial.mesh.count(0); ++v) {
-      const auto p = point(serial.mesh, v);
-      where[serial.mesh.gid(0)(v)] = {bits(p[0]), bits(p[1]), bits(p[2])};
-    }
-    std::map<GO, std::pair<std::int32_t, std::vector<GO>>> cell;
-    const auto sm = serial.mesh.view();
-    for (LO e = 0; e < serial.mesh.count(d); ++e) {
-      std::vector<GO> corners{static_cast<GO>(sm.topology(d, e))};
-      for (LO i = 0; i < sm.num_vertices(d, e); ++i) corners.push_back(serial.mesh.gid(0)(sm.vertex(d, e, i)));
-      cell[serial.mesh.gid(d)(e)] = {level(serial.mesh, e), corners};
-    }
-    std::set<GO> hanging;
-    for (const LO v : serial.hanging) hanging.insert(serial.mesh.gid(0)(v));
-    for (const int deal : {0, 1}) {
-      SCOPED_TRACE(testing::Message() << k.name << " deal " << deal);
-      const soma::HostMesh mesh = rounds(c, build(c, k.cells, deal), n - 1);
-      const auto fine = soma::refine_marked(c, mesh, near_origin(mesh, radii[n - 1]));
-      const auto m = fine.mesh.view();
-      Real differ = 0;
-      for (LO v = 0; v < fine.mesh.count(0); ++v) {
-        const auto p = point(fine.mesh, v);
-        const auto it = where.find(fine.mesh.gid(0)(v));
-        const std::array<std::uint64_t, 3> got{bits(p[0]), bits(p[1]), bits(p[2])};
-        differ += it != where.end() && it->second == got ? 0 : 1;
+    for (const bool conforming : {false, true}) {
+      const int n = k.again ? 3 : 1;
+      const int d = k.cells.dim;
+      const soma::HostMesh serial_mesh = rounds(self, build(self, k.cells, 2), n - 1, {conforming});
+      const auto serial = soma::refine_marked(self, serial_mesh, near_origin(serial_mesh, radii[n - 1]), {conforming});
+      std::map<GO, std::array<std::uint64_t, 3>> where;
+      for (LO v = 0; v < serial.mesh.count(0); ++v) {
+        const auto p = point(serial.mesh, v);
+        where[serial.mesh.gid(0)(v)] = {bits(p[0]), bits(p[1]), bits(p[2])};
       }
-      for (LO e = 0; e < fine.mesh.count(d); ++e) {
-        std::vector<GO> corners{static_cast<GO>(m.topology(d, e))};
-        for (LO i = 0; i < m.num_vertices(d, e); ++i) corners.push_back(fine.mesh.gid(0)(m.vertex(d, e, i)));
-        const auto it = cell.find(fine.mesh.gid(d)(e));
-        differ += it != cell.end() && it->second == std::pair{level(fine.mesh, e), corners} ? 0 : 1;
+      std::map<GO, std::pair<std::int32_t, std::vector<GO>>> cell;
+      const auto sm = serial.mesh.view();
+      for (LO e = 0; e < serial.mesh.count(d); ++e) {
+        std::vector<GO> corners{static_cast<GO>(sm.topology(d, e))};
+        for (LO i = 0; i < sm.num_vertices(d, e); ++i) corners.push_back(serial.mesh.gid(0)(sm.vertex(d, e, i)));
+        cell[serial.mesh.gid(d)(e)] = {level(serial.mesh, e), corners};
       }
-      // Each hanging vertex the serial run has, and only those.
-      Real found = 0;
-      for (const LO v : fine.hanging) {
-        const bool known = hanging.contains(fine.mesh.gid(0)(v));
-        differ += known ? 0 : 1;
-        found += known && v < fine.mesh.segment_table(0).owned_end ? 1 : 0;
+      std::set<GO> hanging;
+      for (const LO v : serial.hanging) hanging.insert(serial.mesh.gid(0)(v));
+      for (const int deal : {0, 1}) {
+        SCOPED_TRACE(testing::Message() << k.name << " deal " << deal << " conforming " << conforming);
+        const soma::HostMesh mesh = rounds(c, build(c, k.cells, deal), n - 1, {conforming});
+        const auto fine = soma::refine_marked(c, mesh, near_origin(mesh, radii[n - 1]), {conforming});
+        const auto m = fine.mesh.view();
+        Real differ = 0;
+        for (LO v = 0; v < fine.mesh.count(0); ++v) {
+          const auto p = point(fine.mesh, v);
+          const auto it = where.find(fine.mesh.gid(0)(v));
+          const std::array<std::uint64_t, 3> got{bits(p[0]), bits(p[1]), bits(p[2])};
+          differ += it != where.end() && it->second == got ? 0 : 1;
+        }
+        for (LO e = 0; e < fine.mesh.count(d); ++e) {
+          std::vector<GO> corners{static_cast<GO>(m.topology(d, e))};
+          for (LO i = 0; i < m.num_vertices(d, e); ++i) corners.push_back(fine.mesh.gid(0)(m.vertex(d, e, i)));
+          const auto it = cell.find(fine.mesh.gid(d)(e));
+          differ += it != cell.end() && it->second == std::pair{level(fine.mesh, e), corners} ? 0 : 1;
+        }
+        // Each hanging vertex the serial run has, and only those.
+        Real found = 0;
+        for (const LO v : fine.hanging) {
+          const bool known = hanging.contains(fine.mesh.gid(0)(v));
+          differ += known ? 0 : 1;
+          found += known && v < fine.mesh.segment_table(0).owned_end ? 1 : 0;
+        }
+        EXPECT_EQ(c.allreduce(differ, soma::Op::sum), 0);
+        EXPECT_EQ(c.allreduce(found, soma::Op::sum), static_cast<Real>(hanging.size()));
+        EXPECT_EQ(owned_count(c, fine.mesh, d), static_cast<Real>(serial.mesh.count(d)));
+        EXPECT_EQ(owned_count(c, fine.mesh, 0), static_cast<Real>(serial.mesh.count(0)));
       }
-      EXPECT_EQ(c.allreduce(differ, soma::Op::sum), 0);
-      EXPECT_EQ(c.allreduce(found, soma::Op::sum), static_cast<Real>(hanging.size()));
-      EXPECT_EQ(owned_count(c, fine.mesh, d), static_cast<Real>(serial.mesh.count(d)));
-      EXPECT_EQ(owned_count(c, fine.mesh, 0), static_cast<Real>(serial.mesh.count(0)));
     }
   }
 }
@@ -351,6 +386,117 @@ TEST(RefineMarked, FieldsCarryOver) {
   EXPECT_TRUE(fine.mesh.fields().contains("refine:birth"));
 }
 
+// Conforming: no hanging vertex is left, the boundary keeps its measure and
+// no facet lies on three cells; triangles and tets are bisected, so stay
+// simplices. Without the option, the same marks leave hanging vertices.
+TEST(RefineMarked, ConformingRefinementLeavesNoHangingVertex) {
+  const Comm self = Comm::self();
+  for (const Case& k : cases()) {
+    SCOPED_TRACE(k.name);
+    soma::HostMesh mesh = build(self, k.cells, 2);
+    const int d = mesh.dim();
+    LO over = 0;
+    const Real coarse = boundary(mesh, over);
+    const bool simplices = std::string(k.name) == "tris" || std::string(k.name) == "tets";
+    for (int r = 0; r < (k.again ? 3 : 1); ++r) {
+      SCOPED_TRACE(testing::Message() << "round " << r);
+      auto fine = soma::refine_marked(self, mesh, near_origin(mesh, radii[r]), {.conforming = true});
+      EXPECT_TRUE(fine.hanging.empty());
+      EXPECT_NEAR(boundary(fine.mesh, over), coarse, 1e-12 * coarse);
+      EXPECT_EQ(over, 0);
+      const auto m = fine.mesh.view();
+      LO other = 0;
+      for (LO e = 0; e < fine.mesh.count(d); ++e) {
+        other += m.topology(d, e) == Topology::tri || m.topology(d, e) == Topology::tet ? 0 : 1;
+      }
+      if (simplices) EXPECT_EQ(other, 0);
+      mesh = std::move(fine.mesh);
+    }
+    soma::HostMesh plain = build(self, k.cells, 2);
+    auto fine = soma::refine_marked(self, plain, near_origin(plain, radii[0]));
+    EXPECT_FALSE(fine.hanging.empty());
+    EXPECT_GT(boundary(fine.mesh, over), coarse * (1 + 1e-9));
+  }
+}
+
+// Conforming bisection splits each marked triangle or tet at the midpoint of
+// its longest edge: a corner of one of its children.
+TEST(RefineMarked, BisectionSplitsTheLongestEdge) {
+  const Comm c = Comm::world();
+  for (const Case& k : cases()) {
+    if (std::string(k.name) != "tris" && std::string(k.name) != "tets") continue;
+    SCOPED_TRACE(k.name);
+    const soma::HostMesh mesh = build(c, k.cells, 1);
+    const int d = mesh.dim();
+    const auto marks = near_origin(mesh, radii[0]);
+    const auto fine = soma::refine_marked(c, mesh, marks, {.conforming = true});
+    const auto m = mesh.view(), fm = fine.mesh.view();
+    Real wrong = 0, bisected = 0;
+    for (LO p = 0; p < mesh.segment_table(d).owned_end; ++p) {
+      const auto pi = static_cast<std::size_t>(p);
+      if (marks[pi] == 0) continue;
+      // The longest edge's midpoint (the edges of the skewed grid differ).
+      Real longest = -1;
+      std::array<Real, 3> mid{};
+      for (int s = 0; s < soma::topology::side_count(m, d, p, 1); ++s) {
+        const auto side = soma::topology::side_of(m, d, p, 1, s);
+        const auto a = point(mesh, side.v[0]), b = point(mesh, side.v[1]);
+        const Real l = std::hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+        if (l > longest) longest = l, mid = {(a[0] + b[0]) / 2, (a[1] + b[1]) / 2, (a[2] + b[2]) / 2};
+      }
+      bool found = false;
+      for (Offset i = fine.child_offsets[pi]; i < fine.child_offsets[pi + 1]; ++i) {
+        const LO ch = fine.children[static_cast<std::size_t>(i)];
+        for (LO j = 0; j < fm.num_vertices(d, ch); ++j) {
+          const auto q = point(fine.mesh, fm.vertex(d, ch, j));
+          found = found || std::hypot(q[0] - mid[0], q[1] - mid[1], q[2] - mid[2]) < 1e-14;
+        }
+      }
+      wrong += found ? 0 : 1;
+      bisected += 1;
+    }
+    EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
+    EXPECT_GT(c.allreduce(bisected, soma::Op::sum), 0);
+  }
+}
+
+// Conforming, on any partition: children add up to their parents, positively
+// turned, and a linear field is exact at every vertex.
+TEST(RefineMarked, ConformingChildrenTileTheirParents) {
+  const Comm c = Comm::world();
+  for (const Case& k : cases()) {
+    SCOPED_TRACE(k.name);
+    soma::HostMesh mesh = build(c, k.cells, 1);
+    const int d = mesh.dim();
+    auto u = mesh.fields().add_tag<double>("u", 0, 1).view();
+    for (LO v = 0; v < mesh.count(0); ++v) u(static_cast<std::size_t>(v), 0) = linear(point(mesh, v));
+    for (int r = 0; r < (k.again ? 3 : 1); ++r) {
+      SCOPED_TRACE(testing::Message() << "round " << r);
+      auto fine = soma::refine_marked(c, mesh, near_origin(mesh, radii[r]), {.conforming = true});
+      Real worst = 0, inverted = 0;
+      for (LO p = 0; p < mesh.segment_table(d).owned_end; ++p) {
+        const auto pi = static_cast<std::size_t>(p);
+        Real sum = 0;
+        for (Offset i = fine.child_offsets[pi]; i < fine.child_offsets[pi + 1]; ++i) {
+          const Real v = measure(fine.mesh, fine.children[static_cast<std::size_t>(i)]);
+          inverted += v > 0 ? 0 : 1;
+          sum += v;
+        }
+        worst = std::max(worst, std::abs(sum - measure(mesh, p)) / measure(mesh, p));
+      }
+      EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-13);
+      EXPECT_EQ(c.allreduce(inverted, soma::Op::sum), 0);
+      mesh = std::move(fine.mesh);
+    }
+    const auto fu = mesh.fields().get<double>("u", 0).view();
+    Real worst = 0;
+    for (LO v = 0; v < mesh.count(0); ++v) {
+      worst = std::max(worst, std::abs(fu(static_cast<std::size_t>(v), 0) - linear(point(mesh, v))));
+    }
+    EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-13);
+  }
+}
+
 TEST(RefineMarked, BadInputThrowsOnEveryRank) {
   const Comm c = Comm::world();
   const soma::HostMesh mesh = build(c, plane(4, 4, 0), 0);
@@ -358,6 +504,5 @@ TEST(RefineMarked, BadInputThrowsOnEveryRank) {
   // One mark too many on the last rank alone.
   std::vector<std::int8_t> marks(static_cast<std::size_t>(owned) + (c.rank() == c.size() - 1 ? 1 : 0), 0);
   EXPECT_THROW((void)soma::refine_marked(c, mesh, marks), std::invalid_argument);
-  marks.assign(static_cast<std::size_t>(owned), 1);
   EXPECT_THROW((void)soma::refine_marked(c, mesh, marks, {.conforming = true}), std::invalid_argument);
 }

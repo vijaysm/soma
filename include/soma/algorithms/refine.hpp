@@ -101,7 +101,7 @@ struct RefineResult {
 };
 
 struct MarkedOptions {
-  // Conforming refinement (no hanging vertices). Not yet available.
+  // Conforming refinement: no hanging vertices (see refine_marked).
   bool conforming = false;
 };
 
@@ -124,10 +124,27 @@ struct MarkedOptions {
 //
 // Balance: a cell is split when a cell touching it at a corner, or at a
 // vertex born on its edges or faces (or on theirs, one level down), would be
-// two levels finer than it. Gids, coordinates and fields follow
-// refine_uniform; the result is the same on any number of ranks. Collective;
-// throws as refine_uniform does, and std::invalid_argument on every rank if
-// a rank's marks are not one per owned cell, or for options.conforming.
+// two levels finer than it.
+//
+// options.conforming leaves no hanging vertex. A mesh of triangles alone, or
+// of tets alone, is bisected instead: each cell marked is cut in two at the
+// midpoint of its longest edge (the one of least corner gids among equals),
+// and any cell with a vertex on one of its edges is cut so again, until none
+// is left (longest-edge, Rivara, bisection; each cut counts as a level). In
+// any other mesh the cells are split as above, then each cell left with
+// hanging vertices is replaced by transition cells: in 2D, triangles from
+// its centre to its sides, divided at their hanging vertices; in 3D, a cone
+// from its centre over each face: tets over triangles, pyramids over quads,
+// a face split as its neighbour split it, or else, with hanging vertices on
+// its edges, fanned into triangles from its centre (which both cells on it
+// share). Transition cells keep their parent's level and are cells like any
+// other afterwards.
+//
+// Gids, coordinates and fields follow refine_uniform (a vertex made at a
+// centre takes its corners' average); the result is the same on any number
+// of ranks. Collective; throws as refine_uniform does, and
+// std::invalid_argument on every rank if a rank's marks are not one per
+// owned cell.
 [[nodiscard]] RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
                                          MarkedOptions options = {});
 
