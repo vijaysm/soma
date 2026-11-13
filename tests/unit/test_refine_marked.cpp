@@ -490,6 +490,33 @@ TEST(RefineMarked, TransitionCellsGiveWayToTheCellsTheyReplaced) {
   }
 }
 
+// Longest-edge bisection keeps the triangles' angles: after rounds of it,
+// none is below half the smallest angle of the mesh it began with (Rivara).
+TEST(RefineMarked, BisectionKeepsTheAngles) {
+  const Comm c = Comm::world();
+  const auto smallest = [&](const soma::HostMesh& m) {
+    const auto v = m.view();
+    Real least = 4;
+    for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
+      for (LO i = 0; i < 3; ++i) {
+        const auto a = point(m, v.vertex(2, e, i)), b = point(m, v.vertex(2, e, (i + 1) % 3)),
+                   o = point(m, v.vertex(2, e, (i + 2) % 3));
+        const Real u[2] = {a[0] - o[0], a[1] - o[1]}, w[2] = {b[0] - o[0], b[1] - o[1]};
+        const Real cosine = (u[0] * w[0] + u[1] * w[1]) / std::hypot(u[0], u[1]) / std::hypot(w[0], w[1]);
+        least = std::min(least, std::acos(cosine));
+      }
+    }
+    return c.allreduce(least, soma::Op::min);
+  };
+  soma::HostMesh mesh = build(c, plane(6, 5, 1), 1);
+  const Real first = smallest(mesh);
+  for (int r = 0; r < 6; ++r) {
+    mesh = soma::refine_marked(c, mesh, near_origin(mesh, 0.5), {.conforming = true}).mesh;
+  }
+  EXPECT_GT(owned_count(c, mesh, 2), 4 * 60);
+  EXPECT_GE(smallest(mesh), first / 2);
+}
+
 // Conforming, on any partition: children add up to their parents, positively
 // turned, and a linear field is exact at every vertex. A group of transition
 // cells is put back first: its least cell (by gid) takes the children of
