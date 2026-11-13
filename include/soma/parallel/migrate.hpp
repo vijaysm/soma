@@ -69,6 +69,13 @@ struct Placement {
 [[nodiscard]] HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> dest,
                                Ordering ordering = default_ordering);
 
+// Moves the owned elements of the mesh's dimension to the ranks
+// partition_by_curve gives them by their centroids (their corners' average),
+// with migrate: parts along the curve whose element counts differ by at most
+// one, whatever the partition given. Collective; throws as migrate and
+// partition_by_curve do.
+[[nodiscard]] HostMesh rebalance(const Comm& comm, const HostMesh& mesh, Ordering ordering = default_ordering);
+
 }  // namespace soma
 
 #endif  // SOMA_PARALLEL_MIGRATE_HPP_

@@ -36,7 +36,6 @@
 #include "soma/io/vtk_reader.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/migrate.hpp"
-#include "soma/parallel/partition.hpp"
 #include "soma/topology/build.hpp"
 #include "soma_layout.hpp"
 
@@ -1576,22 +1575,9 @@ HostMesh read_soma(const Comm& comm, const fs::path& path, const SomaReadOptions
   });
   f.reset();
   if (options.rebalance && in.meta.parts < static_cast<std::uint64_t>(comm.size())) {
-    const int top = mesh.dim();
-    const auto view = mesh.view();
-    std::vector<Real> centroids;
-    std::vector<GO> gids;
-    for (LO e = 0; e < mesh.count(top); ++e) {
-      std::array<Real, 3> c{};
-      const LO k = view.num_vertices(top, e);
-      for (LO j = 0; j < k; ++j) {
-        for (int x = 0; x < 3; ++x) c[static_cast<std::size_t>(x)] += view.x(view.vertex(top, e, j), x);
-      }
-      for (const Real x : c) centroids.push_back(x / static_cast<Real>(std::max<LO>(k, 1)));
-      gids.push_back(view.gid(top, e));
-    }
-    const std::vector<int> dest = partition_by_curve(comm, centroids, gids);
-    mesh = migrate(comm, mesh, dest, options.ordering);
+    mesh = rebalance(comm, mesh, options.ordering);
   }
+
   return mesh;
 }
 

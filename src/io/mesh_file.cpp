@@ -20,7 +20,6 @@
 #include "soma/io/vtk_reader.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/migrate.hpp"
-#include "soma/parallel/partition.hpp"
 
 namespace soma {
 
@@ -199,23 +198,7 @@ HostMesh read_vtk_on(const Comm& comm, const fs::path& path) {
     }
   }
   share_failure(comm, failure);
-  const HostMesh part = as_part(comm, whole ? &*whole : nullptr);
-  const int dim = part.dim();
-  const MeshView<Host> m = part.view();
-  const auto x = part.coords();
-  std::vector<Real> centroids;
-  std::vector<GO> gids;
-  for (LO e = 0; e < m.count(dim); ++e) {
-    Real c[3] = {0, 0, 0};
-    const LO n = m.num_vertices(dim, e);
-    for (LO i = 0; i < n; ++i) {
-      for (int a = 0; a < 3; ++a) c[a] += x(m.vertex(dim, e, i), a) / static_cast<Real>(n);
-    }
-    centroids.insert(centroids.end(), {c[0], c[1], c[2]});
-    gids.push_back(part.gid(dim)(e));
-  }
-  const std::vector<int> dest = partition_by_curve(comm, centroids, gids);
-  return migrate(comm, part, dest);
+  return rebalance(comm, as_part(comm, whole ? &*whole : nullptr));
 }
 
 enum class Written { soma, h5m, vtk };

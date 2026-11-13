@@ -19,51 +19,11 @@
 #include "soma/topology/adjacency.hpp"
 #include "soma/topology/canonical.hpp"
 #include "soma/topology/sides.hpp"
+#include "refine_internal.hpp"
 
-namespace soma {
+namespace soma::detail::refine {
 
-namespace {
 
-using Host = Kokkos::HostSpace;
-
-struct P3 {
-  Real x = 0, y = 0, z = 0;
-  friend bool operator==(const P3&, const P3&) = default;
-};
-
-P3 operator+(const P3& a, const P3& b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
-P3 operator-(const P3& a, const P3& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
-P3 half(const P3& a, const P3& b) { return {(a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2}; }
-
-P3 average(std::span<const P3> p) {
-  P3 s;
-  for (const P3& q : p) s = s + q;
-  const auto n = static_cast<Real>(p.size());
-  return {s.x / n, s.y / n, s.z / n};
-}
-
-Real det(const P3& a, const P3& b, const P3& c) {
-  return a.x * (b.y * c.z - b.z * c.y) - a.y * (b.x * c.z - b.z * c.x) + a.z * (b.x * c.y - b.y * c.x);
-}
-
-// A child: its type and its parent's local nodes.
-struct Child {
-  Topology type = Topology::tri;
-  std::vector<int> nodes;
-};
-
-// A fixed cell type's nodes, in reference coordinates, and its children:
-// nodes are the corners, the edges' midpoints in edge order, the quad faces'
-// centres in face order (3D) and the centre (quads, hexes). A tet has its
-// four corner children and then four about one diagonal of the octahedron,
-// per diagonal.
-struct Pattern {
-  std::vector<P3> ref;
-  std::vector<int> face_node;  // per face, its centre's node or -1 (3D)
-  int centre = -1;
-  std::vector<Child> children;          // all children (tets: the corners' only)
-  std::array<std::vector<Child>, 3> octahedron;  // tets: per diagonal
-};
 
 std::vector<P3> reference_corners(Topology t) {
   switch (t) {
@@ -200,44 +160,13 @@ const Pattern& pattern(Topology t) {
   }
 }
 
-bool supported_cell(Topology t, int dim) {
-  if (dim == 2) return t == Topology::tri || t == Topology::quad || t == Topology::polygon;
-  return t == Topology::tet || t == Topology::hex || t == Topology::prism || t == Topology::pyramid;
-}
-
-// A vertex the refinement adds: its gid and its corners' gids, ascending.
-struct NewVertex {
-  GO gid = 0;
-  std::vector<GO> corners;
-};
-
-// gid -> local id, from a sorted table.
-LO find_lid(const std::vector<std::pair<GO, LO>>& table, GO gid) {
-  const auto it = std::lower_bound(table.begin(), table.end(), std::pair<GO, LO>{gid, std::numeric_limits<LO>::min()});
-  if (it == table.end() || it->first != gid) throw std::logic_error("refine_uniform: a gid is missing");
-  return it->second;
-}
-
-std::vector<std::pair<GO, LO>> lid_table(const HostMesh& m, int d, LO count) {
-  std::vector<std::pair<GO, LO>> t;
-  const auto gid = m.gid(d);
-  for (LO e = 0; e < count; ++e) t.emplace_back(gid(e), e);
-  std::sort(t.begin(), t.end());
-  return t;
-}
-
-struct Level {
-  HostMesh mesh;
-  std::vector<LO> parent;
-  std::vector<std::string> dropped;
-};
 
 // Carries a dense field of dimension d from `in` to `out`: a cell's children
 // take its value; a vertex keeps its value, a new one takes its corners'
 // average.
 template <class T>
 void carry(const HostMesh& in, HostMesh& out, const FieldInfo& info, int d, const std::vector<LO>& parent,
-           const std::vector<std::pair<GO, LO>>& in_vertex, GO vmax, const std::vector<NewVertex>& added) {
+           const std::vector<std::pair<GO, LO>>& in_vertex, const std::vector<NewVertex>& added) {
   const auto source = in.fields().template get<T>(info.id);
   const auto from = source.view();
   FieldOptions<T> options;
@@ -255,13 +184,17 @@ void carry(const HostMesh& in, HostMesh& out, const FieldInfo& info, int d, cons
   for (LO v = 0; v < out.count(0); ++v) {
     const GO g = gid(v);
     const auto vi = static_cast<std::size_t>(v);
-    if (g <= vmax) {
+    // A vertex of the input keeps its value; one added (or reused from
+    // another rank) takes its corners' average.
+    const auto it = std::lower_bound(added.begin(), added.end(), g,
+                                     [](const NewVertex& a, GO b) { return a.gid < b; });
+    const auto held =
+        std::lower_bound(in_vertex.begin(), in_vertex.end(), std::pair<GO, LO>{g, std::numeric_limits<LO>::min()});
+    if (it == added.end() || it->gid != g || (held != in_vertex.end() && held->first == g)) {
       const auto lid = static_cast<std::size_t>(find_lid(in_vertex, g));
       for (std::size_t k = 0; k < ncomp; ++k) to(vi, k) = from(lid, k);
       continue;
     }
-    const auto it = std::lower_bound(added.begin(), added.end(), g,
-                                     [](const NewVertex& a, GO b) { return a.gid < b; });
     for (std::size_t k = 0; k < ncomp; ++k) {
       Real s = 0;
       for (const GO cg : it->corners) {
@@ -272,15 +205,16 @@ void carry(const HostMesh& in, HostMesh& out, const FieldInfo& info, int d, cons
   }
 }
 
-Level refine_once(const Comm& comm, const HostMesh& mesh) {
+// The owned cells of `mesh` alone, as a part of their own, with their edges
+// (and, in 3D, faces) derived: gids that do not depend on the ranks.
+HostMesh work_part(const Comm& comm, const HostMesh& mesh, std::span<const GO> extra_gids,
+                   std::span<const Real> extra_xyz) {
   const int dim = mesh.dim();
   const MeshView<Host> m = mesh.view();
   const LO owned = mesh.segment_table(dim).owned_end;
   const auto vgid = mesh.gid(0);
   const auto cgid = mesh.gid(dim);
   const auto x = mesh.coords();
-
-  // The owned cells alone, with their edges (and faces) derived.
   HostMesh work;
   {
     MeshBuilder b(dim);
@@ -296,6 +230,8 @@ Level refine_once(const Comm& comm, const HostMesh& mesh) {
       gids.push_back(vgid(v));
       xyz.insert(xyz.end(), {x(v, 0), x(v, 1), x(v, 2)});
     }
+    gids.insert(gids.end(), extra_gids.begin(), extra_gids.end());
+    xyz.insert(xyz.end(), extra_xyz.begin(), extra_xyz.end());
     b.add_vertices(gids, xyz);
     for (const Topology t : {Topology::tri, Topology::quad, Topology::tet, Topology::prism, Topology::pyramid,
                              Topology::hex}) {
@@ -322,161 +258,46 @@ Level refine_once(const Comm& comm, const HostMesh& mesh) {
   request.add(dim, 1);
   if (dim == 3) request.add(dim, 2);
   build_distributed_adjacencies(comm, work, request);
+  return work;
+}
 
-  const MeshView<Host> w = work.view();
-  const LO cells = work.count(dim);
+
+// The refined part from the children (by pattern slot: tri, quad, tet,
+// prism, pyramid, hex) and the vertices added; parents and fields from
+// `mesh`, whose owned cells `work` holds.
+Level assemble(const Comm& comm, const HostMesh& mesh, const HostMesh& work, std::array<std::vector<GO>, 6>& kid_gids,
+               std::array<std::vector<GO>, 6>& kid_conn, std::vector<NewVertex>& added, const Numbers& nums,
+               const Polygons& polygons) {
+  const int dim = mesh.dim();
+  const LO owned = mesh.segment_table(dim).owned_end;
   const auto wv = work.gid(0);
-  const auto we = work.gid(1);
-  const auto wc = work.gid(dim);
   const auto wx = work.coords();
-  // Largest vertex, edge, face and cell gids, most children; then the gid
-  // ranges they make, checked against overflow.
-  std::array<GO, 5> top{0, 0, 0, std::numeric_limits<GO>::min(), 0};
-  GO least = std::numeric_limits<GO>::max();
-  for (LO v = 0; v < work.count(0); ++v) top[0] = std::max(top[0], wv(v));
-  for (LO e = 0; e < work.count(1); ++e) top[1] = std::max(top[1], we(e));
-  if (dim == 3) {
-    for (LO f = 0; f < work.count(2); ++f) top[2] = std::max(top[2], work.gid(2)(f));
-  }
-  for (LO e = 0; e < cells; ++e) {
-    top[3] = std::max(top[3], wc(e));
-    least = std::min(least, wc(e));
-    const Topology t = w.topology(dim, e);
-    top[4] = std::max<GO>(top[4], t == Topology::polygon ? static_cast<GO>(w.num_vertices(dim, e))
-                                  : t == Topology::tri || t == Topology::quad ? 4
-                                  : t == Topology::pyramid ? 10
-                                                           : 8);
-  }
-  comm.allreduce(std::span<GO>(top), Op::max);
-  least = comm.allreduce(least, Op::min);
-  // Cells are numbered from the least cell gid, cmin, as 1.
-  const GO vmax = top[0], emax = top[1], fmax = top[2], kmax = top[4];
-  const bool cells_here = top[3] != std::numeric_limits<GO>::min();  // on some rank
-  const GO cmin = cells_here ? least : 1;
-  constexpr GO most = std::numeric_limits<GO>::max();
-  // span = top[3] - cmin + 1 cell numbers, without overflow.
-  const bool wide = cells_here && (cmin < 0 ? top[3] >= most + cmin : top[3] - cmin >= most);
-  const GO span = cells_here && !wide ? top[3] - cmin + 1 : 0;
-  if (wide || vmax > most - emax || vmax + emax > most - fmax || vmax + emax + fmax > most - span ||
-      (span > 0 && kmax > most / span)) {
-    throw std::invalid_argument("refine_uniform: the refined mesh's gids would not fit a GO");
-  }
-  const GO face_base = vmax + emax, centre_base = vmax + emax + fmax;
-  const auto number = [&](GO cell) { return cell - cmin + 1; };
-
-  // Children, as (type, gid, corner gids); new vertices.
-  const auto by_gid = [&](LO a, LO b) { return wv(a) < wv(b); };
-  const auto midpoint = [&](std::vector<LO> corners) {
-    std::sort(corners.begin(), corners.end(), by_gid);
-    std::vector<P3> p;
-    for (const LO v : corners) p.push_back({wx(v, 0), wx(v, 1), wx(v, 2)});
-    return average(p);
-  };
-  std::vector<NewVertex> added;
-  const auto add = [&](GO gid, std::vector<LO> corners) {
-    std::sort(corners.begin(), corners.end(), by_gid);
-    NewVertex nv{gid, {}};
-    for (const LO v : corners) nv.corners.push_back(wv(v));
-    added.push_back(std::move(nv));
-  };
-  std::array<std::vector<GO>, 6> kid_gids, kid_conn;  // by pattern slot
-  const auto slot = [](Topology t) {
-    switch (t) {
-      case Topology::tri: return 0;
-      case Topology::quad: return 1;
-      case Topology::tet: return 2;
-      case Topology::prism: return 3;
-      case Topology::pyramid: return 4;
-      default: return 5;
-    }
-  };
-  const auto edges = work.adjacency(dim, 1);
-  for (LO e = 0; e < cells; ++e) {
-    const Topology t = w.topology(dim, e);
-    const LO n = w.num_vertices(dim, e);
-    const GO base = kmax * (number(wc(e)) - 1);
-    // The cell's nodes: gids, and corners for the new ones.
-    std::vector<GO> node;
-    std::vector<std::vector<LO>> corners;
-    for (LO i = 0; i < n; ++i) node.push_back(wv(w.vertex(dim, e, i)));
-    const Offset e0 = edges.offsets(static_cast<std::size_t>(e));
-    for (int s = 0; s < topology::side_count(w, dim, e, 1); ++s) {
-      const topology::Side side = topology::side_of(w, dim, e, 1, s);
-      node.push_back(vmax + we(edges.targets(static_cast<std::size_t>(e0 + s))));
-      corners.push_back({side.v[0], side.v[1]});
-      add(node.back(), corners.back());
-    }
-    if (t == Topology::polygon) {
-      std::vector<LO> all;
-      for (LO i = 0; i < n; ++i) all.push_back(w.vertex(dim, e, i));
-      const GO centre = centre_base + number(wc(e));
-      add(centre, all);
-      for (LO i = 0; i < n; ++i) {
-        const LO prev = (i + n - 1) % n;
-        kid_gids[1].push_back(base + i + 1);
-        kid_conn[1].insert(kid_conn[1].end(), {node[static_cast<std::size_t>(i)], node[static_cast<std::size_t>(n + i)],
-                                               centre, node[static_cast<std::size_t>(n + prev)]});
-      }
-      continue;
-    }
-    const Pattern& pat = pattern(t);
-    if (dim == 3) {
-      const auto faces = work.adjacency(dim, 2);
-      const Offset f0 = faces.offsets(static_cast<std::size_t>(e));
-      for (int s = 0; s < static_cast<int>(pat.face_node.size()); ++s) {
-        if (pat.face_node[static_cast<std::size_t>(s)] < 0) continue;
-        const topology::Side side = topology::side_of(w, dim, e, 2, s);
-        node.push_back(face_base + work.gid(2)(faces.targets(static_cast<std::size_t>(f0 + s))));
-        add(node.back(), {side.v[0], side.v[1], side.v[2], side.v[3]});
-      }
-    }
-    if (pat.centre >= 0) {
-      std::vector<LO> all;
-      for (LO i = 0; i < n; ++i) all.push_back(w.vertex(dim, e, i));
-      node.push_back(centre_base + number(wc(e)));
-      add(node.back(), all);
-    }
-    std::vector<const Child*> kids;
-    for (const Child& c : pat.children) kids.push_back(&c);
-    if (t == Topology::tet) {
-      // The octahedron's shortest diagonal: between the midpoints of edges
-      // k and its opposite (5, 3, 4).
-      const int opposite[3] = {5, 3, 4};
-      int best = 0;
-      Real shortest = std::numeric_limits<Real>::infinity();
-      for (int k = 0; k < 3; ++k) {
-        const P3 d = midpoint(corners[static_cast<std::size_t>(k)]) -
-                     midpoint(corners[static_cast<std::size_t>(opposite[k])]);
-        const Real l = d.x * d.x + d.y * d.y + d.z * d.z;
-        if (l < shortest) {
-          shortest = l;
-          best = k;
-        }
-      }
-      for (const Child& c : pat.octahedron[static_cast<std::size_t>(best)]) kids.push_back(&c);
-    }
-    for (std::size_t k = 0; k < kids.size(); ++k) {
-      const int s = slot(kids[k]->type);
-      kid_gids[static_cast<std::size_t>(s)].push_back(base + static_cast<GO>(k) + 1);
-      auto& conn = kid_conn[static_cast<std::size_t>(s)];
-      for (const int i : kids[k]->nodes) conn.push_back(node[static_cast<std::size_t>(i)]);
-    }
-  }
   std::sort(added.begin(), added.end(), [](const NewVertex& a, const NewVertex& b) { return a.gid < b.gid; });
   const auto same = [](const NewVertex& a, const NewVertex& b) { return a.gid == b.gid; };
   added.erase(std::unique(added.begin(), added.end(), same), added.end());
 
-  // The refined part.
+  // The refined part: the vertices the children use.
+  std::vector<GO> used;
+  for (const auto& conn : kid_conn) used.insert(used.end(), conn.begin(), conn.end());
+  used.insert(used.end(), polygons.conn.begin(), polygons.conn.end());
+  std::sort(used.begin(), used.end());
+  used.erase(std::unique(used.begin(), used.end()), used.end());
+  const auto in_use = [&](GO g) { return std::binary_search(used.begin(), used.end(), g); };
   MeshBuilder b(dim);
   {
     std::vector<GO> gids;
     std::vector<Real> xyz;
     for (LO v = 0; v < work.count(0); ++v) {
+      if (!in_use(wv(v))) continue;
       gids.push_back(wv(v));
       xyz.insert(xyz.end(), {wx(v, 0), wx(v, 1), wx(v, 2)});
     }
     const auto work_vertex = lid_table(work, 0, work.count(0));
     for (const NewVertex& nv : added) {
+      // Reused vertices the work part holds already.
+      const auto held = std::lower_bound(work_vertex.begin(), work_vertex.end(),
+                                         std::pair<GO, LO>{nv.gid, std::numeric_limits<LO>::min()});
+      if ((held != work_vertex.end() && held->first == nv.gid) || !in_use(nv.gid)) continue;
       std::vector<P3> p;
       for (const GO g : nv.corners) {
         const LO v = find_lid(work_vertex, g);
@@ -493,18 +314,19 @@ Level refine_once(const Comm& comm, const HostMesh& mesh) {
   for (std::size_t s = 0; s < 6; ++s) {
     if (!kid_gids[s].empty()) b.add_elements(types[s], kid_gids[s], kid_conn[s]);
   }
+  if (!polygons.gids.empty()) b.add_polygons(polygons.gids, polygons.offsets, polygons.conn);
   Level out;
   out.mesh = build_local_part(comm, std::move(b));
 
   // Parents: by gid, among the input's owned cells.
   const auto in_cell = lid_table(mesh, dim, owned);
   const auto fg = out.mesh.gid(dim);
-  for (LO c = 0; c < out.mesh.count(dim); ++c) out.parent.push_back(find_lid(in_cell, (fg(c) - 1) / kmax + cmin));
+  for (LO c = 0; c < out.mesh.count(dim); ++c) out.parent.push_back(find_lid(in_cell, nums.parent(fg(c))));
 
   // Fields.
   const auto in_vertex = lid_table(mesh, 0, mesh.count(0));
   for (const FieldInfo& info : mesh.fields().list()) {
-    if (info.name.rfind("soma:", 0) == 0) continue;
+    if (info.name.rfind("soma:", 0) == 0 || info.name.rfind("refine:", 0) == 0) continue;
     const bool dense = !info.variable && !info.handle && info.layout == Layout::per_entity() && info.dims.size() == 1 &&
                        (info.dims[0] == 0 || info.dims[0] == dim) && info.rows == mesh.count(info.dims[0]);
     const bool real = info.type == DataType::f32 || info.type == DataType::f64;
@@ -514,17 +336,148 @@ Level refine_once(const Comm& comm, const HostMesh& mesh) {
     }
     const int d = info.dims[0];
     switch (info.type) {
-      case DataType::i8: carry<std::int8_t>(mesh, out.mesh, info, d, out.parent, in_vertex, vmax, added); break;
-      case DataType::u8: carry<std::uint8_t>(mesh, out.mesh, info, d, out.parent, in_vertex, vmax, added); break;
-      case DataType::i32: carry<std::int32_t>(mesh, out.mesh, info, d, out.parent, in_vertex, vmax, added); break;
-      case DataType::u32: carry<std::uint32_t>(mesh, out.mesh, info, d, out.parent, in_vertex, vmax, added); break;
-      case DataType::i64: carry<std::int64_t>(mesh, out.mesh, info, d, out.parent, in_vertex, vmax, added); break;
-      case DataType::u64: carry<std::uint64_t>(mesh, out.mesh, info, d, out.parent, in_vertex, vmax, added); break;
-      case DataType::f32: carry<float>(mesh, out.mesh, info, d, out.parent, in_vertex, vmax, added); break;
-      case DataType::f64: carry<double>(mesh, out.mesh, info, d, out.parent, in_vertex, vmax, added); break;
+      case DataType::i8: carry<std::int8_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
+      case DataType::u8: carry<std::uint8_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
+      case DataType::i32: carry<std::int32_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
+      case DataType::u32: carry<std::uint32_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
+      case DataType::i64: carry<std::int64_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
+      case DataType::u64: carry<std::uint64_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
+      case DataType::f32: carry<float>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
+      case DataType::f64: carry<double>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
     }
   }
   return out;
+}
+
+void split_cell(const HostMesh& work, LO e, GO base, const NodeGids& ids, std::array<std::vector<GO>, 6>& kid_gids,
+                std::array<std::vector<GO>, 6>& kid_conn, std::vector<NewVertex>& added) {
+  const int dim = work.dim();
+  const MeshView<Host> w = work.view();
+  const auto wv = work.gid(0);
+  const auto wx = work.coords();
+  const auto by_gid = [&](LO a, LO b) { return wv(a) < wv(b); };
+  const auto midpoint = [&](std::vector<LO> corners) {
+    std::sort(corners.begin(), corners.end(), by_gid);
+    std::vector<P3> p;
+    for (const LO v : corners) p.push_back({wx(v, 0), wx(v, 1), wx(v, 2)});
+    return average(p);
+  };
+  const auto add = [&](GO gid, std::vector<LO> corners) {
+    std::sort(corners.begin(), corners.end(), by_gid);
+    NewVertex nv{gid, {}};
+    for (const LO v : corners) nv.corners.push_back(wv(v));
+    added.push_back(std::move(nv));
+  };
+  const Topology t = w.topology(dim, e);
+  const LO n = w.num_vertices(dim, e);
+  // The cell's nodes: gids, and corners for the new ones.
+  std::vector<GO> node;
+  std::vector<std::vector<LO>> corners;
+  for (LO i = 0; i < n; ++i) node.push_back(wv(w.vertex(dim, e, i)));
+  for (int s = 0; s < topology::side_count(w, dim, e, 1); ++s) {
+    const topology::Side side = topology::side_of(w, dim, e, 1, s);
+    node.push_back(ids.edge(s));
+    corners.push_back({side.v[0], side.v[1]});
+    add(node.back(), corners.back());
+  }
+  if (t == Topology::polygon) {
+    std::vector<LO> all;
+    for (LO i = 0; i < n; ++i) all.push_back(w.vertex(dim, e, i));
+    add(ids.centre, all);
+    for (LO i = 0; i < n; ++i) {
+      const LO prev = (i + n - 1) % n;
+      kid_gids[1].push_back(base + i + 1);
+      kid_conn[1].insert(kid_conn[1].end(), {node[static_cast<std::size_t>(i)], node[static_cast<std::size_t>(n + i)],
+                                             ids.centre, node[static_cast<std::size_t>(n + prev)]});
+    }
+    return;
+  }
+  const Pattern& pat = pattern(t);
+  for (int s = 0; s < static_cast<int>(pat.face_node.size()); ++s) {
+    if (pat.face_node[static_cast<std::size_t>(s)] < 0) continue;
+    const topology::Side side = topology::side_of(w, dim, e, 2, s);
+    node.push_back(ids.face(s));
+    add(node.back(), {side.v[0], side.v[1], side.v[2], side.v[3]});
+  }
+  if (pat.centre >= 0) {
+    std::vector<LO> all;
+    for (LO i = 0; i < n; ++i) all.push_back(w.vertex(dim, e, i));
+    node.push_back(ids.centre);
+    add(node.back(), all);
+  }
+  std::vector<const Child*> kids;
+  for (const Child& c : pat.children) kids.push_back(&c);
+  if (t == Topology::tet) {
+    // The octahedron's shortest diagonal: between the midpoints of edges
+    // k and its opposite (5, 3, 4).
+    const int opposite[3] = {5, 3, 4};
+    int best = 0;
+    Real shortest = std::numeric_limits<Real>::infinity();
+    for (int k = 0; k < 3; ++k) {
+      const P3 d =
+          midpoint(corners[static_cast<std::size_t>(k)]) - midpoint(corners[static_cast<std::size_t>(opposite[k])]);
+      const Real l = d.x * d.x + d.y * d.y + d.z * d.z;
+      if (l < shortest) {
+        shortest = l;
+        best = k;
+      }
+    }
+    for (const Child& c : pat.octahedron[static_cast<std::size_t>(best)]) kids.push_back(&c);
+  }
+  for (std::size_t k = 0; k < kids.size(); ++k) {
+    const auto s = static_cast<std::size_t>(slot(kids[k]->type));
+    kid_gids[s].push_back(base + static_cast<GO>(k) + 1);
+    for (const int i : kids[k]->nodes) kid_conn[s].push_back(node[static_cast<std::size_t>(i)]);
+  }
+}
+
+int slot(Topology t) {
+  switch (t) {
+    case Topology::tri: return 0;
+    case Topology::quad: return 1;
+    case Topology::tet: return 2;
+    case Topology::prism: return 3;
+    case Topology::pyramid: return 4;
+    default: return 5;
+  }
+}
+
+int children_of(Topology t, LO corners) {
+  return t == Topology::polygon                     ? static_cast<int>(corners)
+         : t == Topology::tri || t == Topology::quad ? 4
+         : t == Topology::pyramid                    ? 10
+                                                     : 8;
+}
+
+Level refine_once(const Comm& comm, const HostMesh& mesh) {
+  const int dim = mesh.dim();
+  const HostMesh work = work_part(comm, mesh);
+  const LO cells = work.count(dim);
+  const auto we = work.gid(1);
+  const auto wc = work.gid(dim);
+  const Numbers nums = numbers(
+      comm, work,
+      [&](const MeshView<Host>& v, LO e) -> GO { return children_of(v.topology(dim, e), v.num_vertices(dim, e)); },
+      "refine_uniform");
+  const GO face_base = nums.vmax + nums.emax, centre_base = nums.vmax + nums.emax + nums.fmax;
+  std::vector<NewVertex> added;
+  std::array<std::vector<GO>, 6> kid_gids, kid_conn;
+  const auto edges = work.adjacency(dim, 1);
+  for (LO e = 0; e < cells; ++e) {
+    const Offset e0 = edges.offsets(static_cast<std::size_t>(e));
+    NodeGids ids;
+    ids.edge = [&](int s) { return nums.vmax + we(edges.targets(static_cast<std::size_t>(e0 + s))); };
+    if (dim == 3) {
+      const auto faces = work.adjacency(dim, 2);
+      const Offset f0 = faces.offsets(static_cast<std::size_t>(e));
+      ids.face = [&, faces, f0](int s) {
+        return face_base + work.gid(2)(faces.targets(static_cast<std::size_t>(f0 + s)));
+      };
+    }
+    ids.centre = centre_base + nums.number(wc(e));
+    split_cell(work, e, nums.child(wc(e), 0) - 1, ids, kid_gids, kid_conn, added);
+  }
+  return assemble(comm, mesh, work, kid_gids, kid_conn, added, nums, {});
 }
 
 // Whether a plane cell lies on one side of the lines from its corners'
@@ -557,7 +510,7 @@ bool star_shaped(const HostMesh& mesh, LO e) {
 
 // Collective: throws std::invalid_argument on every rank if any rank's mesh
 // cannot be refined or the ranks disagree on the levels or the dimension.
-void check(const Comm& comm, const HostMesh& mesh, int levels) {
+void check(const Comm& comm, const HostMesh& mesh, int levels, const char* who) {
   const int dim = mesh.dim();
   int bad = 0;
   if (dim != 2 && dim != 3) {
@@ -577,33 +530,38 @@ void check(const Comm& comm, const HostMesh& mesh, int levels) {
   if (levels < 1) bad = std::max(bad, 4);
   std::array<int, 5> agree{bad, levels, -levels, dim, -dim};
   comm.allreduce(std::span<int>(agree), Op::max);
-  if (agree[1] != -agree[2]) throw std::invalid_argument("refine_uniform: the ranks differ in levels");
-  if (agree[3] != -agree[4]) throw std::invalid_argument("refine_uniform: the ranks' meshes differ in dimension");
+  if (agree[1] != -agree[2]) throw std::invalid_argument(std::string(who) + ": the ranks differ in levels");
+  if (agree[3] != -agree[4]) throw std::invalid_argument(std::string(who) + ": the ranks' meshes differ in dimension");
   switch (agree[0]) {
-    case 1: throw std::invalid_argument("refine_uniform: the mesh is not of dimension 2 or 3");
-    case 2: throw std::invalid_argument("refine_uniform: a rank's mesh has edits or high-order nodes");
+    case 1: throw std::invalid_argument(std::string(who) + ": the mesh is not of dimension 2 or 3");
+    case 2: throw std::invalid_argument(std::string(who) + ": a rank's mesh has edits or high-order nodes");
     case 3:
-      throw std::invalid_argument("refine_uniform: a rank's mesh holds a cell other than a tri, quad or polygon (2D) "
-                                  "or a tet, hex, prism or pyramid (3D)");
-    case 4: throw std::invalid_argument("refine_uniform: levels must be at least 1");
+      throw std::invalid_argument(std::string(who) +
+                                  ": a rank's mesh holds a cell other than a tri, quad or polygon (2D) or a tet, hex, "
+                                  "prism or pyramid (3D)");
+    case 4: throw std::invalid_argument(std::string(who) + ": levels must be at least 1");
     case 5:
-      throw std::invalid_argument("refine_uniform: a rank's mesh holds a quad or polygon that is not star-shaped "
+      throw std::invalid_argument(std::string(who) + ": a rank's mesh holds a quad or polygon that is not star-shaped "
                                   "about its corners' average (its children would turn against it)");
     default: break;
   }
 }
 
-}  // namespace
+}  // namespace soma::detail::refine
+
+namespace soma {
+
+using namespace detail::refine;
 
 RefineResult refine_uniform(const Comm& comm, const HostMesh& mesh, RefineOptions options) {
-  check(comm, mesh, options.levels);
+  check(comm, mesh, options.levels, "refine_uniform");
   const int dim = mesh.dim();
   RefineResult out;
   Level level = refine_once(comm, mesh);
   out.parent = std::move(level.parent);
   out.dropped = std::move(level.dropped);
   for (int l = 1; l < options.levels; ++l) {
-    check(comm, level.mesh, options.levels);
+    check(comm, level.mesh, options.levels, "refine_uniform");
     Level next = refine_once(comm, level.mesh);
     for (LO& p : next.parent) p = out.parent[static_cast<std::size_t>(p)];
     out.parent = std::move(next.parent);

@@ -18,6 +18,7 @@
 #include "soma/core/set_builder.hpp"
 #include "soma/fields/domain_mesh.hpp"
 #include "soma/parallel/distributed.hpp"
+#include "soma/parallel/partition.hpp"
 #include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/route.hpp"
 
@@ -996,6 +997,26 @@ void detail::move_entity_data(const Comm& comm, const HostMesh& mesh, HostMesh& 
   move_sets(comm, mesh, part, ghost_members, push);
   move_fields(comm, mesh, part, push);
   part.values() = mesh.values();
+}
+
+HostMesh rebalance(const Comm& comm, const HostMesh& mesh, Ordering ordering) {
+  const int top = mesh.dim();
+  const LO owned = mesh.segment_table(top).owned_end;
+  const auto view = mesh.view();
+  std::vector<Real> centroids;
+  std::vector<GO> gids;
+  for (LO e = 0; e < owned; ++e) {
+    std::array<Real, 3> c{};
+    const LO k = view.num_vertices(top, e);
+    for (LO j = 0; j < k; ++j) {
+      for (int x = 0; x < 3; ++x) c[static_cast<std::size_t>(x)] += view.x(view.vertex(top, e, j), x);
+    }
+    for (const Real x : c) centroids.push_back(x / static_cast<Real>(std::max<LO>(k, 1)));
+    gids.push_back(view.gid(top, e));
+  }
+  std::vector<int> dest = partition_by_curve(comm, centroids, gids);
+  dest.resize(static_cast<std::size_t>(mesh.count(top)), 0);  // copies follow their owners
+  return migrate(comm, mesh, dest, ordering);
 }
 
 }  // namespace soma
