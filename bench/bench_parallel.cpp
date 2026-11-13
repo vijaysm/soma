@@ -33,14 +33,17 @@
 //     grid of tets, SOMA alone;
 //   * refine: n^3 hexes, and the same cubes as tets, refined once
 //     (refine_uniform); at one rank also MOAB's NestedRefine of the hexes;
+//     and the cells of odd gid alone (refine_marked): hexes with hanging
+//     vertices and conforming (transition cells), tets bisected;
 //   * write and restart: write_soma and read_soma at the same P against
 //     write_file PARALLEL=WRITE_PART and load_file READ_PART.
 //
 // Every result is checked: the owned hexes and vertices add up to the box's,
 // ghost vertices hold their owners' values after each update, the three
 // assemblies agree, CG converges, a constant state stays constant under
-// advection, the remap keeps the total and refinement makes eight cells of
-// each; a mismatch exits with status 2.
+// advection, the remap keeps the total, refinement makes eight cells of
+// each (of each marked hex, with hanging vertices) and conforming refinement
+// leaves no hanging vertex; a mismatch exits with status 2.
 //
 //   mpiexec -n P bench_parallel [--json] [--repeats N] [--n edge] [--parts K] [--dir path]
 
@@ -627,6 +630,24 @@ int main(int argc, char** argv) {
     runner.run("refine", "soma_refine_tets", 6 * cells, [&] { fine.reset(); },
                [&] { fine.emplace(soma::refine_uniform(comm, tets)); });
     ok = agree(comm, comm.allreduce(owned(fine->mesh, 3), soma::Op::sum) == 48 * cells) && ok;
+    const auto odd = [](const HostMesh& m) {
+      std::vector<std::int8_t> marks;
+      for (LO e = 0; e < m.segment_table(3).owned_end; ++e) marks.push_back(m.gid(3)(e) % 2 == 1 ? 1 : 0);
+      return marks;
+    };
+    const auto hex_marks = odd(hexes), tet_marks = odd(tets);
+    const auto marked = [&](const std::vector<std::int8_t>& marks) {
+      return comm.allreduce(static_cast<double>(std::count(marks.begin(), marks.end(), 1)), soma::Op::sum);
+    };
+    runner.run("refine", "soma_refine_marked", cells, [&] { fine.reset(); },
+               [&] { fine.emplace(soma::refine_marked(comm, hexes, hex_marks)); });
+    ok = agree(comm, comm.allreduce(owned(fine->mesh, 3), soma::Op::sum) == cells + 7 * marked(hex_marks)) && ok;
+    runner.run("refine", "soma_refine_marked_conforming", cells, [&] { fine.reset(); },
+               [&] { fine.emplace(soma::refine_marked(comm, hexes, hex_marks, {.conforming = true})); });
+    ok = agree(comm, comm.allreduce(static_cast<double>(fine->hanging.size()), soma::Op::sum) == 0) && ok;
+    runner.run("refine", "soma_refine_bisect_tets", 6 * cells, [&] { fine.reset(); },
+               [&] { fine.emplace(soma::refine_marked(comm, tets, tet_marks, {.conforming = true})); });
+    ok = agree(comm, comm.allreduce(owned(fine->mesh, 3), soma::Op::sum) >= 6 * cells + marked(tet_marks)) && ok;
     if (comm.size() == 1) {
       std::optional<moab::Core> mb;
       const auto t1 = runner.run(
