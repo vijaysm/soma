@@ -7,6 +7,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <limits>
 #include <numeric>
@@ -128,6 +129,155 @@ std::vector<GO> MeshBuilder::element_gids(int dim) const {
   if (dim < 1 || dim > 3) return out;
   for (const Block& blk : blocks_[static_cast<std::size_t>(dim)]) out.insert(out.end(), blk.gids.begin(), blk.gids.end());
   return out;
+}
+
+void MeshBuilder::element_corners(int dim, std::vector<Offset>& offsets, std::vector<GO>& corners) const {
+  offsets.assign(1, 0);
+  corners.clear();
+  if (dim < 1 || dim > 3) return;
+  for (const Block& blk : blocks_[static_cast<std::size_t>(dim)]) {
+    for (std::size_t i = 0; i < blk.gids.size(); ++i) {
+      corners.insert(corners.end(), blk.vertex_gids.begin() + blk.offsets[i], blk.vertex_gids.begin() + blk.offsets[i + 1]);
+      offsets.push_back(static_cast<Offset>(corners.size()));
+    }
+  }
+}
+
+namespace {
+
+// The nodes of element i of a block: corners, then the others.
+std::vector<GO> nodes_of(std::span<const GO> corners, std::span<const GO> others) {
+  std::vector<GO> out(corners.begin(), corners.end());
+  out.insert(out.end(), others.begin(), others.end());
+  return out;
+}
+
+}  // namespace
+
+void MeshBuilder::rename_vertices(std::span<const GO> gids, std::span<const Real> xyz) {
+  const std::size_t n = vertex_gids_.size();
+  if (gids.size() != n || xyz.size() != 3 * n) {
+    throw std::invalid_argument("rename_vertices: one gid and one point per vertex are needed");
+  }
+  if (!owned_[0].empty()) throw std::invalid_argument("rename_vertices: ownership is set on vertices");
+  std::vector<std::pair<GO, GO>> to(n);  // old gid -> new gid
+  for (std::size_t i = 0; i < n; ++i) to[i] = {vertex_gids_[i], gids[i]};
+  std::sort(to.begin(), to.end());
+  const auto dup = std::adjacent_find(to.begin(), to.end(), [](const auto& a, const auto& b) { return a.first == b.first; });
+  if (dup != to.end()) throw std::invalid_argument("rename_vertices: vertex gid " + std::to_string(dup->first) + " is named twice");
+  const auto rename = [&](GO g) {
+    const auto it = std::lower_bound(to.begin(), to.end(), std::pair<GO, GO>{g, std::numeric_limits<GO>::min()});
+    return it != to.end() && it->first == g ? it->second : g;
+  };
+  // The vertices that stay, the first given each gid, whose points the
+  // others must repeat bit for bit.
+  std::vector<std::size_t> order(n);
+  std::iota(order.begin(), order.end(), std::size_t{0});
+  std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return gids[a] < gids[b]; });
+  std::vector<std::uint8_t> keep(n, 0);
+  for (std::size_t s = 0; s < n; ++s) {
+    const std::size_t i = order[s];
+    if (s == 0 || gids[order[s - 1]] != gids[i]) {
+      keep[i] = 1;
+    } else if (std::memcmp(&xyz[3 * i], &xyz[3 * order[s - 1]], 3 * sizeof(Real)) != 0) {
+      throw std::invalid_argument("rename_vertices: vertices given gid " + std::to_string(gids[i]) +
+                                  " are given different points");
+    }
+  }
+  std::vector<GO> next_gids;
+  std::vector<Real> next_xyz;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (keep[i] == 0) continue;
+    next_gids.push_back(gids[i]);
+    next_xyz.insert(next_xyz.end(), xyz.begin() + static_cast<std::ptrdiff_t>(3 * i),
+                    xyz.begin() + static_cast<std::ptrdiff_t>(3 * i + 3));
+  }
+  for (std::size_t q = 0; q < next_xyz.size(); ++q) {
+    if (!std::isfinite(next_xyz[q])) {
+      throw std::invalid_argument("rename_vertices: vertex gid " + std::to_string(next_gids[q / 3]) +
+                                  " has a non-finite coordinate");
+    }
+  }
+  std::array<std::vector<Block>, 4> next_blocks = blocks_;
+  for (auto& blocks : next_blocks) {
+    for (Block& blk : blocks) {
+      for (GO& g : blk.vertex_gids) g = rename(g);
+      for (GO& g : blk.node_gids) g = rename(g);
+      const std::size_t extra = blk.nodes;
+      for (std::size_t i = 0; i < blk.gids.size(); ++i) {
+        std::vector<GO> nodes = nodes_of(
+            std::span<const GO>(blk.vertex_gids).subspan(static_cast<std::size_t>(blk.offsets[i]),
+                                                         static_cast<std::size_t>(blk.offsets[i + 1] - blk.offsets[i])),
+            std::span<const GO>(blk.node_gids).subspan(i * extra, extra));
+        std::sort(nodes.begin(), nodes.end());
+        const auto twice = std::adjacent_find(nodes.begin(), nodes.end());
+        if (twice != nodes.end()) {
+          throw std::invalid_argument("rename_vertices: element gid " + std::to_string(blk.gids[i]) + " of dimension " +
+                                      std::to_string(dimension(blk.topology)) + " would name vertex gid " +
+                                      std::to_string(*twice) + " twice");
+        }
+      }
+    }
+  }
+  vertex_gids_.swap(next_gids);
+  xyz_.swap(next_xyz);
+  blocks_.swap(next_blocks);
+}
+
+void MeshBuilder::rename_elements(int dim, std::span<const GO> gids) {
+  if (dim < 1 || dim > 3) throw std::invalid_argument("rename_elements: dimension outside [1, 3]");
+  const auto d = static_cast<std::size_t>(dim);
+  if (!owned_[d].empty()) throw std::invalid_argument("rename_elements: ownership is set on dimension " + std::to_string(dim));
+  // Element e of the dimension: (block, index in it).
+  std::vector<std::pair<std::size_t, std::size_t>> at;
+  for (std::size_t b = 0; b < blocks_[d].size(); ++b) {
+    for (std::size_t i = 0; i < blocks_[d][b].gids.size(); ++i) at.emplace_back(b, i);
+  }
+  if (gids.size() != at.size()) throw std::invalid_argument("rename_elements: one gid per element is needed");
+  const auto nodes = [&](std::size_t e) {
+    const Block& blk = blocks_[d][at[e].first];
+    const std::size_t i = at[e].second, extra = blk.nodes;
+    std::vector<GO> out = nodes_of(
+        std::span<const GO>(blk.vertex_gids).subspan(static_cast<std::size_t>(blk.offsets[i]),
+                                                     static_cast<std::size_t>(blk.offsets[i + 1] - blk.offsets[i])),
+        std::span<const GO>(blk.node_gids).subspan(i * extra, extra));
+    std::sort(out.begin(), out.end());
+    return out;
+  };
+  std::vector<std::size_t> order(at.size());
+  std::iota(order.begin(), order.end(), std::size_t{0});
+  std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return gids[a] < gids[b]; });
+  std::vector<std::uint8_t> keep(at.size(), 0);
+  for (std::size_t s = 0; s < order.size(); ++s) {
+    const std::size_t e = order[s];
+    if (s == 0 || gids[order[s - 1]] != gids[e]) {
+      keep[e] = 1;
+      continue;
+    }
+    const std::size_t f = order[s - 1];
+    const Block& x = blocks_[d][at[e].first];
+    const Block& y = blocks_[d][at[f].first];
+    if (x.topology != y.topology || x.nodes != y.nodes || nodes(e) != nodes(f)) {
+      throw std::invalid_argument("rename_elements: elements given gid " + std::to_string(gids[e]) + " differ");
+    }
+  }
+  std::vector<Block> next;
+  for (std::size_t b = 0, e = 0; b < blocks_[d].size(); ++b) {
+    const Block& blk = blocks_[d][b];
+    Block out{blk.topology, {}, {0}, {}, blk.nodes, {}};
+    const std::size_t extra = blk.nodes;
+    for (std::size_t i = 0; i < blk.gids.size(); ++i, ++e) {
+      if (keep[e] == 0) continue;
+      out.gids.push_back(gids[e]);
+      out.vertex_gids.insert(out.vertex_gids.end(), blk.vertex_gids.begin() + blk.offsets[i],
+                             blk.vertex_gids.begin() + blk.offsets[i + 1]);
+      out.offsets.push_back(static_cast<Offset>(out.vertex_gids.size()));
+      out.node_gids.insert(out.node_gids.end(), blk.node_gids.begin() + static_cast<std::ptrdiff_t>(i * extra),
+                           blk.node_gids.begin() + static_cast<std::ptrdiff_t>((i + 1) * extra));
+    }
+    if (!out.gids.empty()) next.push_back(std::move(out));
+  }
+  blocks_[d].swap(next);
 }
 
 void MeshBuilder::set_ownership(int dim, std::span<const GO> gids, std::span<const Ownership> kinds,

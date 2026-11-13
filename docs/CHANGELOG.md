@@ -409,6 +409,20 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   bad slice throws on every rank after the reads that must stay in step.
 - `build_local_part(comm, builder, sharing, ordering)` takes the sharing of each dimension
   instead of resolving it through a gid directory.
+- `match_points(comm, xyz, tol)` numbers points by their coordinates over all ranks: exactly
+  (bit-identical coordinates, `-0.0` equal to `+0.0`) by one sort of their 192-bit keys, or
+  within a tolerance (`PointNorm::linf`, `l1`, `l2`; single linkage) by grid cells with halos
+  and a distributed union-find. Ids, and each cluster's representative point, equal the
+  single-node `hash3d_exact` numbering of all points together, whatever the rank count or
+  order. NaN coordinates, partial points, ranks giving different tolerances and, with a
+  tolerance, unsafe floating point (`-ffast-math`) throw on every rank.
+- `merge_vertices(comm, builder, tol)` makes the matching vertices of every rank's builder one
+  (MOAB's MergeMesh on `Comm::self()`, ParallelMergeMesh over a communicator), and
+  `number_elements(comm, builder)` gives elements gids from their corner sets, so parts with
+  gids of their own, or new vertices added on both sides of a part boundary, build with
+  `build_local_part` and share by gid. An element left naming a vertex twice throws on every
+  rank, and no builder changes. `MeshBuilder::rename_vertices`, `rename_elements` and
+  `element_corners` are the steps underneath.
 
 ### SOMA files
 

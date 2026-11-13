@@ -37,6 +37,25 @@ class MeshBuilder {
   // The gids of the elements of dimension `dim` added so far, in the order
   // added; empty for a dimension outside [1, 3].
   [[nodiscard]] std::vector<GO> element_gids(int dim) const;
+  // The corner gids of those elements, in the same order: element i's are
+  // corners[offsets[i]] .. corners[offsets[i + 1] - 1], as added.
+  void element_corners(int dim, std::vector<Offset>& offsets, std::vector<GO>& corners) const;
+
+  // Merging (soma/parallel/merge.hpp). Vertex i, in the order added, takes
+  // gid gids[i] and the point xyz[3i .. 3i + 2]; vertices given one gid
+  // become one, and elements name it by that gid. Throws
+  // std::invalid_argument, changing nothing, without one gid and one point
+  // per vertex, if two vertices had one gid, if vertices given one gid are
+  // given different points, if an element would name a vertex twice (naming
+  // its gid), or once set_ownership named vertices.
+  void rename_vertices(std::span<const GO> gids, std::span<const Real> xyz);
+  // The elements of dimension `dim`, in element_gids(dim) order, take gids
+  // `gids`; elements given one gid become one, the first, when they have one
+  // topology and one set of nodes. Throws std::invalid_argument, changing
+  // nothing, for a dimension outside [1, 3], without one gid per element, if
+  // elements given one gid differ (naming it), or once set_ownership named
+  // entities of `dim`.
+  void rename_elements(int dim, std::span<const GO> gids);
 
   // Distributed meshes: the ownership of the entities of dimension `dim`
   // named by gid (unnamed ones are interior) and a neighbour-set group, equal

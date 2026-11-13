@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -125,18 +126,23 @@ void expect_matches_serial(Maker make, PointTolerance tol) {
       tol.tol == 0 ? sx::assign_ids_exact<3>(every) : sx::assign_ids_tol<3>(every, tol.tol, norm_of(tol.norm));
   const auto mine = make(c.rank(), c.size());
   const soma::PointIds got = match_points(c, mine, tol);
+  // (Counted, not asserted, so every rank reaches the next collective.)
   EXPECT_EQ(got.count, static_cast<GO>(want.unique_points.size()));
-  ASSERT_EQ(got.ids.size(), mine.size() / 3);
-  ASSERT_EQ(got.xyz.size(), mine.size());
+  EXPECT_EQ(got.ids.size(), mine.size() / 3);
+  EXPECT_EQ(got.xyz.size(), mine.size());
+  if (got.ids.size() != mine.size() / 3 || got.xyz.size() != mine.size()) return;
   const std::size_t at = first_of(make, c.rank(), c.size());
+  std::size_t wrong = 0;
   for (std::size_t i = 0; i < got.ids.size(); ++i) {
     const auto id = want.ids[at + i];
-    ASSERT_EQ(got.ids[i], id) << "point " << i << " of rank " << c.rank();
-    for (std::size_t j = 0; j < 3; ++j) {
-      EXPECT_EQ(std::bit_cast<std::uint64_t>(got.xyz[3 * i + j]),
-                std::bit_cast<std::uint64_t>(want.unique_points[static_cast<std::size_t>(id)][j]));
+    bool same = got.ids[i] == id;
+    for (std::size_t j = 0; same && j < 3; ++j) {
+      same = std::bit_cast<std::uint64_t>(got.xyz[3 * i + j]) ==
+             std::bit_cast<std::uint64_t>(want.unique_points[static_cast<std::size_t>(id)][j]);
     }
+    wrong += same ? 0 : 1;
   }
+  EXPECT_EQ(wrong, 0U) << "points of rank " << c.rank() << " whose id or point differ from the single-node hasher's";
 }
 
 }  // namespace
