@@ -81,7 +81,8 @@ struct RefineOptions {
 struct RefineResult {
   HostMesh mesh;
   // For each cell of `mesh`, the owned cell of the input it lies in (a local
-  // id of the input).
+  // id of the input; refine_marked: for a cell in a group of transition
+  // cells the input put back, the group's least cell by gid).
   std::vector<LO> parent;
   // The children of the input's owned cells: cell p's are
   // children[child_offsets[p], child_offsets[p + 1]), local ids of `mesh`.
@@ -138,7 +139,13 @@ struct MarkedOptions {
 // a face split as its neighbour split it, or else, with hanging vertices on
 // its edges, fanned into triangles from its centre (which both cells on it
 // share). Transition cells keep their parent's level and are cells like any
-// other afterwards.
+// other in the result. Each records the cell it replaced in the cell field
+// "refine:green" (its gid, topology, corner count and corners' gids; zeros
+// on other cells), and the next call to refine_marked puts each group back
+// as that cell before it refines (red-green refinement): a group split
+// between ranks is gathered first on the rank of its least cell by gid,
+// whose gid, fields and level the cell put back takes, and it is marked
+// when any of its cells is.
 //
 // Gids, coordinates and fields follow refine_uniform (a vertex made at a
 // centre takes its corners' average); the result is the same on any number

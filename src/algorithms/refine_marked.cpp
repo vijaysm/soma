@@ -23,6 +23,7 @@
 #include "soma/fields/registry.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/halo_exchange.hpp"
+#include "soma/parallel/migrate.hpp"
 #include "soma/parallel/transport/route.hpp"
 #include "soma/topology/sides.hpp"
 
@@ -36,6 +37,9 @@ constexpr const char* level_field = "refine:level";
 constexpr const char* birth_field = "refine:birth";
 constexpr int birth_width = 5;  // count, then up to four gids
 constexpr int max_rounds = 1000;  // of conforming bisection
+// On transition cells: their group (the gid of the cell they replace), its
+// topology and corner count, then its corners' gids; zeros elsewhere.
+constexpr const char* green_field = "refine:green";
 
 // The corners a vertex lies between (an edge's two, a face's three or four),
 // as sorted gids padded with GO's largest value.
@@ -617,6 +621,29 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
       for (std::size_t k = 0; k < n; ++k) bv(vi, k + 1) = it->second[k];
     }
   }
+  // Transition cells: the cell they replace, so that the next call puts it
+  // back before it refines.
+  if (mode == Mode::transition) {
+    std::int64_t corners = dim == 2 ? 3 : 4;
+    for (LO e = 0; e < cells; ++e) {
+      if (act[static_cast<std::size_t>(e)] != Act::transition) continue;
+      corners = std::max<std::int64_t>(corners, w.num_vertices(dim, e));
+    }
+    corners = comm.allreduce(corners, Op::max);
+    auto gv = f.fields().add_tag<std::int64_t>(green_field, dim, static_cast<int>(3 + corners)).view();
+    const auto in_act = lid_table(work, dim, cells);
+    for (LO c = 0; c < f.count(dim); ++c) {
+      const LO p = r.parent[static_cast<std::size_t>(c)];
+      const LO e = find_lid(in_act, cgid(p));
+      if (act[static_cast<std::size_t>(e)] != Act::transition) continue;
+      const auto ci = static_cast<std::size_t>(c);
+      const LO n = m.num_vertices(dim, p);
+      gv(ci, 0) = cgid(p);
+      gv(ci, 1) = static_cast<std::int64_t>(m.topology(dim, p));
+      gv(ci, 2) = n;
+      for (LO i = 0; i < n; ++i) gv(ci, static_cast<std::size_t>(3 + i)) = vgid(m.vertex(dim, p, i));
+    }
+  }
   // Hanging vertices: born on an edge or face a cell still has whole.
   {
     const MeshView<Host> fm = f.view();
@@ -653,6 +680,172 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
   return out;
 }
 
+// The mesh with each group of transition cells put back as the cell it
+// replaced, the groups split between ranks gathered first on the rank of
+// their least cell (by gid; the cell put back takes its gid, fields and
+// level); per owned cell, its mark (a group's: its cells' largest) and the
+// owned cell of the input it comes from (a group's least). Nothing when no
+// rank holds transition cells.
+struct Ungreened {
+  HostMesh mesh;
+  std::vector<std::int8_t> marks;
+  std::vector<LO> from;
+};
+
+std::optional<Ungreened> ungreen(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks) {
+  using Exec = Kokkos::DefaultHostExecutionSpace;
+  if (comm.allreduce(static_cast<std::int32_t>(mesh.fields().contains(green_field) ? 1 : 0), Op::max) == 0) {
+    return std::nullopt;
+  }
+  const int dim = mesh.dim();
+  const LO owned = mesh.segment_table(dim).owned_end;
+  const auto cgid = mesh.gid(dim);
+  const auto in_cell = lid_table(mesh, dim, owned);
+  const auto group_key = [](GO group) {
+    const GO g[1] = {group};
+    return key_of(g);
+  };
+
+  // Each group's least cell and its rank, at the group's home; the marks of
+  // the cells that move, to that rank.
+  std::vector<LO> green;
+  std::map<GO, std::int8_t> group_mark;
+  std::vector<int> dest(static_cast<std::size_t>(mesh.count(dim)), comm.rank());
+  std::int32_t move = 0;
+  {
+    const auto gv = mesh.fields().get<std::int64_t>(green_field, dim).view();
+    for (LO e = 0; e < owned; ++e) {
+      if (gv(static_cast<std::size_t>(e), 2) > 0) green.push_back(e);
+    }
+    transport::RecordBatch<Host> out(green.size(), 2 * sizeof(GO), "soma::refine_marked.groups");
+    for (std::size_t i = 0; i < green.size(); ++i) {
+      const GO row[2] = {gv(static_cast<std::size_t>(green[i]), 0), cgid(green[i])};
+      out.dest(i) = home(group_key(row[0]), comm.size());
+      std::memcpy(&out.payload(i, 0), row, sizeof row);
+    }
+    const auto in = transport::route(Exec{}, comm, out);
+    std::map<GO, std::pair<GO, int>> least;  // group: least cell, its rank
+    for (std::size_t i = 0; i < in.size(); ++i) {
+      GO row[2];
+      std::memcpy(row, &in.payload(i, 0), sizeof row);
+      const std::pair<GO, int> cell{row[1], in.source(i)};
+      const auto [it, fresh] = least.emplace(row[0], cell);
+      if (!fresh) it->second = std::min(it->second, cell);
+    }
+    transport::RecordBatch<Host> back(in.size(), 2 * sizeof(GO), "soma::refine_marked.least");
+    for (std::size_t i = 0; i < in.size(); ++i) {
+      GO row[2];
+      std::memcpy(row, &in.payload(i, 0), sizeof row);
+      back.dest(i) = in.source(i);
+      const GO answer[2] = {row[1], least.at(row[0]).second};
+      std::memcpy(&back.payload(i, 0), answer, sizeof answer);
+    }
+    const auto got = transport::route(Exec{}, comm, back);
+    std::map<GO, int> goes;  // cell: rank
+    for (std::size_t i = 0; i < got.size(); ++i) {
+      GO row[2];
+      std::memcpy(row, &got.payload(i, 0), sizeof row);
+      goes[row[0]] = static_cast<int>(row[1]);
+    }
+    std::vector<std::pair<int, std::array<GO, 2>>> moving;  // rank: group, mark
+    for (const LO e : green) {
+      const auto ei = static_cast<std::size_t>(e);
+      dest[ei] = goes.at(cgid(e));
+      const GO group = gv(ei, 0);
+      if (dest[ei] == comm.rank()) {
+        auto& gm = group_mark[group];
+        gm = std::max(gm, marks[ei]);
+      } else {
+        moving.push_back({dest[ei], {group, marks[ei]}});
+      }
+    }
+    transport::RecordBatch<Host> sent(moving.size(), 2 * sizeof(GO), "soma::refine_marked.marks");
+    for (std::size_t i = 0; i < moving.size(); ++i) {
+      sent.dest(i) = moving[i].first;
+      std::memcpy(&sent.payload(i, 0), moving[i].second.data(), 2 * sizeof(GO));
+    }
+    const auto marked = transport::route(Exec{}, comm, sent);
+    for (std::size_t i = 0; i < marked.size(); ++i) {
+      GO row[2];
+      std::memcpy(row, &marked.payload(i, 0), sizeof row);
+      auto& gm = group_mark[row[0]];
+      gm = std::max(gm, static_cast<std::int8_t>(row[1]));
+    }
+    move = moving.empty() ? 0 : 1;
+  }
+  std::optional<HostMesh> gathered;
+  if (comm.allreduce(move, Op::max) != 0) gathered.emplace(migrate(comm, mesh, dest));
+  const HostMesh& at = gathered ? *gathered : mesh;
+
+  // Each group's cells are on one rank now: its least cell stands for it.
+  const LO cells = at.segment_table(dim).owned_end;
+  const MeshView<Host> m = at.view();
+  const auto ag = at.gid(dim);
+  const auto av = at.gid(0);
+  const auto gv = at.fields().get<std::int64_t>(green_field, dim).view();
+  std::map<GO, GO> least;  // group: least cell
+  for (LO e = 0; e < cells; ++e) {
+    const auto ei = static_cast<std::size_t>(e);
+    if (gv(ei, 2) == 0) continue;
+    const auto [it, fresh] = least.emplace(gv(ei, 0), ag(e));
+    if (!fresh) it->second = std::min(it->second, ag(e));
+  }
+  std::array<std::vector<GO>, 6> kid_gids, kid_conn;
+  Polygons polygons;
+  for (LO e = 0; e < cells; ++e) {
+    const auto ei = static_cast<std::size_t>(e);
+    Topology t = m.topology(dim, e);
+    std::vector<GO> corners;
+    if (gv(ei, 2) == 0) {
+      for (LO i = 0; i < m.num_vertices(dim, e); ++i) corners.push_back(av(m.vertex(dim, e, i)));
+    } else {
+      if (least.at(gv(ei, 0)) != ag(e)) continue;
+      t = static_cast<Topology>(gv(ei, 1));
+      for (std::int64_t i = 0; i < gv(ei, 2); ++i) corners.push_back(gv(ei, static_cast<std::size_t>(3 + i)));
+    }
+    if (t == Topology::polygon) {
+      polygons.gids.push_back(ag(e));
+      polygons.conn.insert(polygons.conn.end(), corners.begin(), corners.end());
+      polygons.offsets.push_back(static_cast<Offset>(polygons.conn.size()));
+    } else {
+      const auto s = static_cast<std::size_t>(slot(t));
+      kid_gids[s].push_back(ag(e));
+      kid_conn[s].insert(kid_conn[s].end(), corners.begin(), corners.end());
+    }
+  }
+  std::vector<NewVertex> none;
+  const Numbers same;  // each cell its own parent
+  Level back = assemble(comm, at, at, kid_gids, kid_conn, none, same, polygons);
+
+  // Levels and births, which assemble leaves; marks, and where each cell
+  // comes from in the input.
+  Ungreened out;
+  out.mesh = std::move(back.mesh);
+  HostMesh& f = out.mesh;
+  if (at.fields().contains(level_field)) {
+    const auto from = at.fields().get<std::int32_t>(level_field, dim).view();
+    auto to = f.fields().add_tag<std::int32_t>(level_field, dim, 1).view();
+    for (std::size_t c = 0; c < back.parent.size(); ++c) to(c, 0) = from(static_cast<std::size_t>(back.parent[c]), 0);
+  }
+  if (at.fields().contains(birth_field)) {
+    const auto from = at.fields().get<std::int64_t>(birth_field, 0).view();
+    auto to = f.fields().add_tag<std::int64_t>(birth_field, 0, birth_width).view();
+    const auto held = lid_table(at, 0, at.count(0));
+    for (LO v = 0; v < f.count(0); ++v) {
+      const auto u = static_cast<std::size_t>(find_lid(held, f.gid(0)(v)));
+      const auto vi = static_cast<std::size_t>(v);
+      for (std::size_t k = 0; k < static_cast<std::size_t>(birth_width); ++k) to(vi, k) = from(u, k);
+    }
+  }
+  for (const LO p : back.parent) {
+    const auto pi = static_cast<std::size_t>(p);
+    const LO in = find_lid(in_cell, ag(p));  // a cell that stayed, or a group's least
+    out.from.push_back(in);
+    out.marks.push_back(gv(pi, 2) == 0 ? marks[static_cast<std::size_t>(in)] : group_mark.at(gv(pi, 0)));
+  }
+  return out;
+}
+
 }  // namespace
 
 RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
@@ -672,7 +865,10 @@ RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<con
     if (flags[0] != 0) throw std::invalid_argument("refine_marked: a rank's marks are not one per owned cell");
   }
   const bool simplices = flags[1] == 0;
-  Pass first = pass(comm, mesh, options.conforming && simplices ? Mode::bisect : Mode::split, marks);
+  // Transition cells of an earlier call give way to the cells they replaced.
+  const std::optional<Ungreened> base = ungreen(comm, mesh, marks);
+  Pass first = pass(comm, base ? base->mesh : mesh, options.conforming && simplices ? Mode::bisect : Mode::split,
+                    base ? std::span<const std::int8_t>(base->marks) : marks);
   RefineResult out = std::move(first.result);
   if (options.conforming) {
     // Bisect the simplices with hanging vertices, or replace the cells with
@@ -694,6 +890,9 @@ RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<con
       hanging = next.hanging;
       if (!simplices && hanging > 0) throw std::logic_error("refine_marked: a transition left a hanging vertex");
     }
+  }
+  if (base) {
+    for (LO& p : out.parent) p = base->from[static_cast<std::size_t>(p)];
   }
   out.child_offsets.assign(static_cast<std::size_t>(owned) + 1, 0);
   for (const LO p : out.parent) ++out.child_offsets[static_cast<std::size_t>(p) + 1];

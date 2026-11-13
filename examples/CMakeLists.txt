@@ -64,7 +64,8 @@ if(SOMA_ENABLE_TESTS)
   set_tests_properties(example_remap3d PROPERTIES
     PASS_REGULAR_EXPRESSION "total 1[.]2894214008e[+]02 on the source, 1[.]2894214008e[+]02 on the grid")
   # Refinement: 12^3 bricks into 24^3, the same on two ranks; the plane mesh twice.
-  set(refined "cells 1728 -> 13824, vertices 2197 -> 15625; linear field error ([0-9][.][0-9]e-1[4-9]|0[.]0e[+]00)")
+  set(error "linear field error ([0-9][.][0-9]e-1[4-9]|0[.]0e[+]00)")
+  set(refined "cells 1728 -> 13824, vertices 2197 -> 15625, 0 hanging; ${error}")
   add_test(NAME example_refine COMMAND refine ${in} ${CMAKE_CURRENT_BINARY_DIR}/refined.vtk)
   set_tests_properties(example_refine PROPERTIES PASS_REGULAR_EXPRESSION "${refined}")
   if(SOMA_ENABLE_MPI)
@@ -75,5 +76,22 @@ if(SOMA_ENABLE_TESTS)
   endif()
   add_test(NAME example_refine_plane COMMAND refine --levels 2 ${plane} ${CMAKE_CURRENT_BINARY_DIR}/refined2.vtk)
   set_tests_properties(example_refine_plane PROPERTIES
-    PASS_REGULAR_EXPRESSION "cells 64 -> 1024, vertices 75 -> 969; linear field error ([0-9][.][0-9]e-1[4-9]|0[.]0e[+]00)")
+    PASS_REGULAR_EXPRESSION "cells 64 -> 1024, vertices 75 -> 969, 0 hanging; ${error}")
+  # Marked refinement towards a corner: with hanging vertices, and conforming, on one and two ranks alike.
+  add_test(NAME example_refine_marked
+    COMMAND refine --levels 3 --marked 0.5 ${plane} ${CMAKE_CURRENT_BINARY_DIR}/marked.vtk)
+  set_tests_properties(example_refine_marked PROPERTIES
+    PASS_REGULAR_EXPRESSION "cells 64 -> 730, vertices 75 -> 751, 35 hanging; ${error}")
+  set(conformed "cells 1728 -> 39998, vertices 2197 -> 29419, 0 hanging; ${error}")
+  add_test(NAME example_refine_conforming
+    COMMAND refine --levels 2 --marked 0.4 --conforming ${in} ${CMAKE_CURRENT_BINARY_DIR}/conforming.vtk)
+  set_tests_properties(example_refine_conforming PROPERTIES PASS_REGULAR_EXPRESSION "${conformed}")
+  if(SOMA_ENABLE_MPI)
+    add_test(NAME example_refine_conforming.np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:refine> ${MPIEXEC_POSTFLAGS} --levels 2 --marked 0.4 --conforming ${in}
+              ${CMAKE_CURRENT_BINARY_DIR}/conforming_np2.soma)
+    set_tests_properties(example_refine_conforming.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
+                         PASS_REGULAR_EXPRESSION "${conformed}")
+  endif()
 endif()

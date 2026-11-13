@@ -462,8 +462,38 @@ TEST(RefineMarked, BisectionSplitsTheLongestEdge) {
   }
 }
 
+// Transition cells give way to the cells they replaced: refined again with
+// no marks, a conforming result is the non-conforming one, cell for cell.
+TEST(RefineMarked, TransitionCellsGiveWayToTheCellsTheyReplaced) {
+  const Comm c = Comm::world();
+  for (const Case& k : cases()) {
+    // Bisected simplices stay; refined L-octagons leave darts behind.
+    if (std::string(k.name) == "tris" || std::string(k.name) == "tets" || !k.again) continue;
+    SCOPED_TRACE(k.name);
+    const soma::HostMesh mesh = build(c, k.cells, 1);
+    const int d = mesh.dim();
+    const auto marks = near_origin(mesh, radii[0]);
+    const auto plain = soma::refine_marked(c, mesh, marks);
+    const auto conforming = soma::refine_marked(c, mesh, marks, {.conforming = true});
+    EXPECT_GT(owned_count(c, conforming.mesh, d), owned_count(c, plain.mesh, d));
+    const std::vector<std::int8_t> none(static_cast<std::size_t>(conforming.mesh.segment_table(d).owned_end), 0);
+    const auto back = soma::refine_marked(c, conforming.mesh, none);
+    EXPECT_EQ(owned_count(c, back.mesh, d), owned_count(c, plain.mesh, d));
+    EXPECT_EQ(owned_count(c, back.mesh, 0), owned_count(c, plain.mesh, 0));
+    const auto hanging = [&](const soma::RefineResult& r) {
+      Real n = 0;
+      for (const LO v : r.hanging) n += v < r.mesh.segment_table(0).owned_end ? 1 : 0;
+      return c.allreduce(n, soma::Op::sum);
+    };
+    EXPECT_GT(hanging(plain), 0);
+    EXPECT_EQ(hanging(back), hanging(plain));
+  }
+}
+
 // Conforming, on any partition: children add up to their parents, positively
-// turned, and a linear field is exact at every vertex.
+// turned, and a linear field is exact at every vertex. A group of transition
+// cells is put back first: its least cell (by gid) takes the children of
+// the whole group, the others none.
 TEST(RefineMarked, ConformingChildrenTileTheirParents) {
   const Comm c = Comm::world();
   for (const Case& k : cases()) {
@@ -475,8 +505,22 @@ TEST(RefineMarked, ConformingChildrenTileTheirParents) {
     for (int r = 0; r < (k.again ? 3 : 1); ++r) {
       SCOPED_TRACE(testing::Message() << "round " << r);
       auto fine = soma::refine_marked(c, mesh, near_origin(mesh, radii[r]), {.conforming = true});
-      Real worst = 0, inverted = 0;
-      for (LO p = 0; p < mesh.segment_table(d).owned_end; ++p) {
+      const LO owned = mesh.segment_table(d).owned_end;
+      // Groups (here on the rank of the cell they replaced): least cell, measure.
+      std::map<GO, std::pair<GO, Real>> group;
+      const auto green = [&](LO p) -> GO {
+        if (!mesh.fields().contains("refine:green")) return 0;
+        const auto g = mesh.fields().get<std::int64_t>("refine:green", d).view();
+        return g(static_cast<std::size_t>(p), 2) > 0 ? g(static_cast<std::size_t>(p), 0) : 0;
+      };
+      for (LO p = 0; p < owned; ++p) {
+        if (green(p) == 0) continue;
+        auto& [least, whole] = group.try_emplace(green(p), mesh.gid(d)(p), 0).first->second;
+        least = std::min(least, mesh.gid(d)(p));
+        whole += measure(mesh, p);
+      }
+      Real worst = 0, inverted = 0, wrong = 0;
+      for (LO p = 0; p < owned; ++p) {
         const auto pi = static_cast<std::size_t>(p);
         Real sum = 0;
         for (Offset i = fine.child_offsets[pi]; i < fine.child_offsets[pi + 1]; ++i) {
@@ -484,7 +528,20 @@ TEST(RefineMarked, ConformingChildrenTileTheirParents) {
           inverted += v > 0 ? 0 : 1;
           sum += v;
         }
-        worst = std::max(worst, std::abs(sum - measure(mesh, p)) / measure(mesh, p));
+        Real whole = measure(mesh, p);
+        if (green(p) != 0) {
+          const auto& [least, all] = group.at(green(p));
+          if (least != mesh.gid(d)(p)) {
+            wrong += sum == 0 ? 0 : 1;
+            continue;
+          }
+          whole = all;
+        }
+        worst = std::max(worst, std::abs(sum - whole) / whole);
+      }
+      EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
+      if (r > 0 && std::string(k.name) != "tris" && std::string(k.name) != "tets") {
+        EXPECT_GT(c.allreduce(static_cast<Real>(group.size()), soma::Op::sum), 0);
       }
       EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-13);
       EXPECT_EQ(c.allreduce(inverted, soma::Op::sum), 0);
@@ -534,7 +591,8 @@ TEST(RefineMarked, MarkingByFractionAndThreshold) {
     EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
     if (fraction == 0) EXPECT_EQ(c.allreduce(marked, soma::Op::sum), 0);
     if (fraction == 1) {
-      EXPECT_EQ(c.allreduce(marked, soma::Op::sum), std::count_if(all.begin(), all.end(), [](Real v) { return v > 0; }));
+      const auto positive = std::count_if(all.begin(), all.end(), [](Real v) { return v > 0; });
+      EXPECT_EQ(c.allreduce(marked, soma::Op::sum), static_cast<Real>(positive));
     }
   }
   const auto marks = soma::mark_threshold(indicator, 10);
@@ -549,33 +607,52 @@ TEST(RefineMarked, MarkingByFractionAndThreshold) {
 
 // Refinement near the origin loads the ranks unevenly; rebalance evens the
 // parts, and refinement after it goes on as if it had not moved: reusing the
-// vertices born before, the same mesh as the serial one.
+// vertices born before and, conforming, putting back groups of transition
+// cells that the rebalance split between ranks; the same mesh as the serial
+// one.
 TEST(RefineMarked, RebalanceEvensThePartsAndRefinementGoesOn) {
   const Comm c = Comm::world();
   const Comm self = Comm::self();
-  const Case k = cases()[3];  // hexes
-  soma::HostMesh mesh = soma::rebalance(c, rounds(c, build(c, k.cells, 0), 2));
-  const Real cells = owned_count(c, mesh, 3);
-  const Real mine = static_cast<Real>(mesh.segment_table(3).owned_end);
-  EXPECT_LE(c.allreduce(mine, soma::Op::max) - c.allreduce(mine, soma::Op::min), 1);
-  const soma::HostMesh serial_mesh = rounds(self, build(self, k.cells, 2), 2);
-  EXPECT_EQ(cells, static_cast<Real>(serial_mesh.count(3)));
-  const auto fine = soma::refine_marked(c, mesh, near_origin(mesh, radii[2]));
-  const auto serial = soma::refine_marked(self, serial_mesh, near_origin(serial_mesh, radii[2]));
-  std::map<GO, std::array<std::uint64_t, 3>> where;
-  for (LO v = 0; v < serial.mesh.count(0); ++v) {
-    const auto p = point(serial.mesh, v);
-    where[serial.mesh.gid(0)(v)] = {bits(p[0]), bits(p[1]), bits(p[2])};
+  for (const Case& k : {cases()[3], cases()[0]}) {  // hexes, quads
+    for (const bool conforming : {false, true}) {
+      SCOPED_TRACE(testing::Message() << k.name << " conforming " << conforming);
+      soma::HostMesh mesh = build(c, k.cells, 0), serial = build(self, k.cells, 2);
+      const int d = mesh.dim();
+      for (int r = 0; r < 3; ++r) {
+        mesh = soma::rebalance(c, soma::refine_marked(c, mesh, near_origin(mesh, radii[r]), {conforming}).mesh);
+        serial = soma::refine_marked(self, serial, near_origin(serial, radii[r]), {conforming}).mesh;
+        const Real mine = static_cast<Real>(mesh.segment_table(d).owned_end);
+        EXPECT_LE(c.allreduce(mine, soma::Op::max) - c.allreduce(mine, soma::Op::min), 1);
+      }
+      std::map<GO, std::array<std::uint64_t, 3>> where;
+      for (LO v = 0; v < serial.count(0); ++v) {
+        const auto p = point(serial, v);
+        where[serial.gid(0)(v)] = {bits(p[0]), bits(p[1]), bits(p[2])};
+      }
+      std::map<GO, std::vector<GO>> cell;
+      const auto sm = serial.view();
+      for (LO e = 0; e < serial.count(d); ++e) {
+        auto& corners = cell[serial.gid(d)(e)];
+        for (LO i = 0; i < sm.num_vertices(d, e); ++i) corners.push_back(serial.gid(0)(sm.vertex(d, e, i)));
+      }
+      Real differ = 0;
+      for (LO v = 0; v < mesh.count(0); ++v) {
+        const auto p = point(mesh, v);
+        const auto it = where.find(mesh.gid(0)(v));
+        differ += it != where.end() && it->second == std::array{bits(p[0]), bits(p[1]), bits(p[2])} ? 0 : 1;
+      }
+      const auto m = mesh.view();
+      for (LO e = 0; e < mesh.count(d); ++e) {
+        std::vector<GO> corners;
+        for (LO i = 0; i < m.num_vertices(d, e); ++i) corners.push_back(mesh.gid(0)(m.vertex(d, e, i)));
+        const auto it = cell.find(mesh.gid(d)(e));
+        differ += it != cell.end() && it->second == corners ? 0 : 1;
+      }
+      EXPECT_EQ(c.allreduce(differ, soma::Op::sum), 0);
+      EXPECT_EQ(owned_count(c, mesh, 0), static_cast<Real>(serial.count(0)));
+      EXPECT_EQ(owned_count(c, mesh, d), static_cast<Real>(serial.count(d)));
+    }
   }
-  Real differ = 0;
-  for (LO v = 0; v < fine.mesh.count(0); ++v) {
-    const auto p = point(fine.mesh, v);
-    const auto it = where.find(fine.mesh.gid(0)(v));
-    differ += it != where.end() && it->second == std::array{bits(p[0]), bits(p[1]), bits(p[2])} ? 0 : 1;
-  }
-  EXPECT_EQ(c.allreduce(differ, soma::Op::sum), 0);
-  EXPECT_EQ(owned_count(c, fine.mesh, 0), static_cast<Real>(serial.mesh.count(0)));
-  EXPECT_EQ(owned_count(c, fine.mesh, 3), static_cast<Real>(serial.mesh.count(3)));
 }
 
 TEST(RefineMarked, BadInputThrowsOnEveryRank) {
