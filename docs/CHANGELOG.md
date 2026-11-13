@@ -642,8 +642,27 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   fields are averaged onto new vertices (exact for linear fields); other fields are named as
   dropped. Matches MOAB's `NestedRefine` on tri, quad, tet and hex meshes (tets up to ties
   between equally short diagonals).
-- `examples/refine.cpp` refines a `.h5m` or SOMA mesh `--levels` times and prints the counts
-  and the error of a linear vertex field.
+- `soma::refine_marked(comm, mesh, marks, MarkedOptions)` splits the marked cells as
+  `refine_uniform` does, and those a 2:1 balance needs (no cell two levels coarser than one
+  touching its corners, edges or faces), for every cell type; by default the other cells stay
+  whole and the result lists its hanging vertices, each its masters' average. Levels and the
+  corners each new vertex lies between live in the fields `refine:level` and `refine:birth`,
+  so later calls and other ranks reuse a vertex through a directory keyed by those corners.
+  `MarkedOptions::conforming` leaves no hanging vertex: meshes of triangles alone or tets alone
+  are bisected at their longest edges (Rivara) until closed; other meshes are split, then each
+  cell with hanging vertices becomes transition cells (triangles about its centre in 2D, cones
+  of tets and pyramids over its faces in 3D), recorded in `refine:green` and put back as the
+  cell they replaced before the next call refines (red-green). The result is the same, gid for
+  gid and bit for bit, on any number of ranks.
+- `soma::mark_fraction(comm, indicator, fraction)` marks the cells of largest indicator that
+  hold the fraction of its total (Doerfler marking), and `soma::mark_threshold` those above a
+  value.
+- `soma::rebalance(comm, mesh)` (`soma/parallel/migrate.hpp`) moves the owned cells to the
+  ranks `partition_by_curve` gives their centroids; `read_soma` and `read_file` use it.
+- `examples/refine.cpp` refines a `.h5m`, SOMA or VTK mesh `--levels` times, uniformly or, with
+  `--marked F [--conforming]`, the cells holding the fraction F of an indicator, rebalancing
+  after each round, and prints the counts, the hanging vertices and the error of a linear
+  vertex field.
 
 ### Testing
 
@@ -809,7 +828,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   CG alone; its `advect` section, `FvSpace` and upwind steps alone; its `remap` section, a
   `RemapOperator` between plane grids built and applied, against MOAB's in-plane intersection
   at one rank, and between volume grids; its `refine` section, `refine_uniform` of hexes and
-  tets, against MOAB's `NestedRefine` of the hexes at one rank. `bench/run_parallel.sh` runs it
+  tets, against MOAB's `NestedRefine` of the hexes at one rank, and `refine_marked` of half the
+  cells: hexes with hanging vertices and conforming, tets bisected. `bench/run_parallel.sh` runs it
   over rank counts and sizes into JSON files; its header lists what a run at scale needs.
 
 ### Packaging
