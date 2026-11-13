@@ -16,6 +16,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -727,6 +728,154 @@ TEST(RefineMarked, RefinedMeshesNeedNoMerging) {
       (void)soma::merge_mesh(c, fine);
       Real changed = gids(fine, 0) == vertices && gids(fine, d) == cells ? 0 : 1;
       EXPECT_EQ(c.allreduce(changed, soma::Op::sum), 0);
+    }
+  }
+}
+
+// Without "refine:birth" (a mesh read from a format that drops it, say),
+// matching by coordinates finds the vertices made before: the next round is
+// the one the records give, gid for gid and bit for bit, hanging vertices
+// included, exactly or within a tolerance; without it, they are made again
+// (unless nothing hangs, as after conforming bisection).
+// infer_births records the same births for every hanging vertex.
+TEST(RefineMarked, CoordinatesFindVerticesWithoutRecords) {
+  const Comm c = Comm::world();
+  const auto strip = [](soma::HostMesh& m) {
+    for (const soma::FieldInfo& f : m.fields().list()) {
+      if (f.name == "refine:birth") m.fields().remove(f.id);
+    }
+  };
+  const auto summary = [&](const soma::RefineResult& r) {
+    // Per vertex gid its coordinates' bits; per cell gid its corners; the hanging gids.
+    std::map<GO, std::array<std::uint64_t, 3>> where;
+    std::map<GO, std::vector<GO>> cells;
+    std::set<GO> hanging;
+    const int d = r.mesh.dim();
+    const auto m = r.mesh.view();
+    for (LO v = 0; v < r.mesh.count(0); ++v) {
+      const auto p = point(r.mesh, v);
+      where[r.mesh.gid(0)(v)] = {bits(p[0]), bits(p[1]), bits(p[2])};
+    }
+    for (LO e = 0; e < r.mesh.count(d); ++e) {
+      auto& corners = cells[r.mesh.gid(d)(e)];
+      for (LO i = 0; i < m.num_vertices(d, e); ++i) corners.push_back(r.mesh.gid(0)(m.vertex(d, e, i)));
+    }
+    for (const LO v : r.hanging) hanging.insert(r.mesh.gid(0)(v));
+    return std::tuple{where, cells, hanging};
+  };
+  for (const Case& k : cases()) {
+    if (!k.again) continue;
+    for (const bool conforming : {false, true}) {
+      SCOPED_TRACE(testing::Message() << k.name << " conforming " << conforming);
+      const soma::MarkedOptions recorded{.conforming = conforming};
+      soma::HostMesh a = rounds(c, build(c, k.cells, 1), 2, recorded);
+      const auto want = summary(soma::refine_marked(c, a, near_origin(a, radii[2]), recorded));
+      for (const Real tol : {0.0, 1e-10}) {
+        SCOPED_TRACE(testing::Message() << "tol " << tol);
+        soma::HostMesh b = rounds(c, build(c, k.cells, 1), 2, recorded);
+        strip(b);
+        soma::MarkedOptions matched = recorded;
+        matched.vertices = soma::VertexMatching::coordinates;
+        matched.tol = {tol, soma::PointNorm::linf};
+        const auto got = summary(soma::refine_marked(c, b, near_origin(b, radii[2]), matched));
+        const Real differ = got == want ? 0 : 1;
+        EXPECT_EQ(c.allreduce(differ, soma::Op::sum), 0);
+      }
+      // The control: the same mesh without records or matching (conforming
+      // bisection leaves no vertex hanging, so it needs none).
+      if (conforming && (std::string(k.name) == "tris" || std::string(k.name) == "tets")) continue;
+      soma::HostMesh b = rounds(c, build(c, k.cells, 1), 2, recorded);
+      strip(b);
+      const auto blind = soma::refine_marked(c, b, near_origin(b, radii[2]), recorded);
+      const Real same = summary(blind) == want ? 1 : 0;
+      EXPECT_LT(c.allreduce(same, soma::Op::sum), c.size());
+    }
+    // infer_births gives each hanging vertex the birth it was made with.
+    soma::HostMesh a = rounds(c, build(c, k.cells, 1), 3);
+    soma::HostMesh b = rounds(c, build(c, k.cells, 1), 3);
+    strip(b);
+    soma::infer_births(c, b);
+    const auto none = std::vector<std::int8_t>(static_cast<std::size_t>(a.segment_table(a.dim()).owned_end), 0);
+    const auto r = soma::refine_marked(c, a, none);  // its hanging vertices
+    const auto ba = a.fields().get<std::int64_t>("refine:birth", 0).view();
+    const auto bb = b.fields().get<std::int64_t>("refine:birth", 0).view();
+    std::map<GO, LO> in_b;
+    for (LO v = 0; v < b.count(0); ++v) in_b[b.gid(0)(v)] = v;
+    std::map<GO, LO> in_a;
+    for (LO v = 0; v < a.count(0); ++v) in_a[a.gid(0)(v)] = v;
+    Real wrong = 0, checked = 0;
+    for (const LO h : r.hanging) {
+      const GO g = r.mesh.gid(0)(h);
+      const auto va = static_cast<std::size_t>(in_a.at(g)), vb = static_cast<std::size_t>(in_b.at(g));
+      for (std::size_t q = 0; q < 5; ++q) wrong += ba(va, q) == bb(vb, q) ? 0 : 1;
+      checked += 1;
+    }
+    EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
+    EXPECT_GT(c.allreduce(checked, soma::Op::sum), 0);
+  }
+}
+
+// A mesh made elsewhere, unbalanced and without records: a unit square (or
+// cube) beside 4 x 4 (x 4) cells of a quarter its width, whose vertices on
+// the shared edge (face) lie one and two levels down. Matched by
+// coordinates, splitting the big cell reuses the vertices one level down and
+// leaves those two levels down hanging: 2 on the edge, 16 on the face (each
+// on an edge of a child, or at the centre of a child's face); without
+// matching those one level down are made again and nothing is seen to hang.
+TEST(RefineMarked, CoordinatesFindVerticesLevelsDown) {
+  const Comm c = Comm::world();
+  for (const int d : {2, 3}) {
+    Cells g;
+    g.dim = d;
+    const auto vertex = [&](Real x, Real y, Real z) {
+      for (std::size_t v = 0; v < g.vg.size(); ++v) {
+        if (g.xyz[3 * v] == x && g.xyz[3 * v + 1] == y && g.xyz[3 * v + 2] == z) return g.vg[v];
+      }
+      g.vg.push_back(static_cast<GO>(g.vg.size()) + 1);
+      g.xyz.insert(g.xyz.end(), {x, y, z});
+      return g.vg.back();
+    };
+    // A box at (x, y, z) of width w, corners in the order of a quad or hex.
+    const auto box = [&](Real x, Real y, Real z, Real w) {
+      std::vector<GO> corners;
+      for (int q = 0; q < (d == 2 ? 4 : 8); ++q) {
+        corners.push_back(vertex(x + w * ((q + 1) / 2 % 2), y + w * (q / 2 % 2), z + w * (q / 4)));
+      }
+      g.cells.push_back({d == 2 ? Topology::quad : Topology::hex, corners});
+    };
+    box(0, 0, 0, 1);
+    for (int k = 0; k < (d == 2 ? 1 : 4); ++k) {
+      for (int j = 0; j < 4; ++j) {
+        for (int i = 0; i < 4; ++i) box(1 + i / 4.0, j / 4.0, k / 4.0, 0.25);
+      }
+    }
+    // Held: 4 + 25 - 2 (8 + 125 - 4); made: 5 (19), less those one level
+    // down on the shared side, 1 (5), unless made again.
+    const Real held = d == 2 ? 27 : 129, made = d == 2 ? 5 : 19, again = d == 2 ? 1 : 5;
+    const auto two_down = [&](const std::array<Real, 3>& p) {
+      if (p[0] != 1) return false;
+      const auto quarter = [](Real t) { return t * 4 == std::floor(t * 4); };
+      const auto half = [](Real t) { return t * 2 == std::floor(t * 2); };
+      return quarter(p[1]) && quarter(p[2]) && !(half(p[1]) && half(p[2]));
+    };
+    for (const bool matched : {true, false}) {
+      SCOPED_TRACE(testing::Message() << "dim " << d << " matched " << matched);
+      const soma::HostMesh mesh = build(c, g, 1);
+      std::vector<std::int8_t> marks;
+      for (LO e = 0; e < mesh.segment_table(d).owned_end; ++e) marks.push_back(mesh.gid(d)(e) == 1 ? 1 : 0);
+      soma::MarkedOptions options;
+      if (matched) options.vertices = soma::VertexMatching::coordinates;
+      const auto fine = soma::refine_marked(c, mesh, marks, options);
+      EXPECT_EQ(owned_count(c, fine.mesh, 0), held + made - (matched ? again : 0));
+      std::set<LO> hanging(fine.hanging.begin(), fine.hanging.end());
+      Real wrong = 0, count = 0;
+      for (LO v = 0; v < fine.mesh.count(0); ++v) {
+        const bool hangs = hanging.contains(v);
+        wrong += hangs != (matched && two_down(point(fine.mesh, v))) ? 1 : 0;
+        count += hangs && v < fine.mesh.segment_table(0).owned_end ? 1 : 0;
+      }
+      EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
+      EXPECT_EQ(c.allreduce(count, soma::Op::sum), matched ? (d == 2 ? 2 : 16) : 0);
     }
   }
 }

@@ -654,6 +654,13 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   of tets and pyramids over its faces in 3D), recorded in `refine:green` and put back as the
   cell they replaced before the next call refines (red-green). The result is the same, gid for
   gid and bit for bit, on any number of ranks.
+- `soma::infer_births(comm, mesh, tol)` rebuilds `refine:birth` from coordinates
+  (`match_points`, exactly or within a tolerance) for meshes with hanging vertices but no
+  records (read from a format that drops the field, made by other tools, from an AMR
+  hierarchy), to any depth of refinement; `MarkedOptions::vertices =
+  VertexMatching::coordinates` (with `MarkedOptions::tol`) does the same inside
+  `refine_marked`. The recorded births stay the default: they need no coordinates, so vertices
+  may move between calls, and cost about what exact matching does.
 - `soma::mark_fraction(comm, indicator, fraction)` marks the cells of largest indicator that
   hold the fraction of its total (Doerfler marking), and `soma::mark_threshold` those above a
   value.

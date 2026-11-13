@@ -12,6 +12,7 @@
 #include <limits>
 #include <map>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -24,6 +25,7 @@
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/halo_exchange.hpp"
 #include "soma/parallel/migrate.hpp"
+#include "soma/parallel/point_match.hpp"
 #include "soma/parallel/transport/route.hpp"
 #include "soma/topology/sides.hpp"
 
@@ -137,6 +139,188 @@ void side_keys(const MeshView<Host>& m, int dim, LO e, const CornerGid& gid_of, 
 // What a pass does to a cell: keep it, split it as refine_uniform does,
 // bisect its longest edge (simplices), or replace it by transition cells
 // about its centre that take in its hanging vertices.
+// Collective: for each gid asked, the key published for it by any rank
+// (`entries`: gid, key), if any.
+std::vector<std::optional<Key>> lookup_keys(const Comm& comm, const std::vector<std::pair<GO, Key>>& entries,
+                                            const std::vector<GO>& queries) {
+  using Exec = Kokkos::DefaultHostExecutionSpace;
+  // Records: kind (0 entry, 1 query), gid, key or query index.
+  constexpr std::size_t width = 6 * sizeof(GO);
+  const std::size_t n = entries.size() + queries.size();
+  transport::RecordBatch<Host> out(n, width, "soma::refine_marked.births");
+  const auto put = [&](std::size_t i, GO kind, GO gid, const Key& k) {
+    const GO one[1] = {gid};
+    out.dest(i) = home(key_of(one), comm.size());
+    const GO row[6] = {kind, gid, k[0], k[1], k[2], k[3]};
+    std::memcpy(&out.payload(i, 0), row, width);
+  };
+  for (std::size_t i = 0; i < entries.size(); ++i) put(i, 0, entries[i].first, entries[i].second);
+  for (std::size_t q = 0; q < queries.size(); ++q) put(entries.size() + q, 1, queries[q], Key{static_cast<GO>(q)});
+  const auto in = transport::route(Exec{}, comm, out);
+  std::map<GO, Key> directory;
+  std::vector<std::pair<int, std::array<GO, 6>>> asked;
+  for (std::size_t i = 0; i < in.size(); ++i) {
+    std::array<GO, 6> row;
+    std::memcpy(row.data(), &in.payload(i, 0), width);
+    if (row[0] == 0) {
+      directory.emplace(row[1], Key{row[2], row[3], row[4], row[5]});
+    } else {
+      asked.push_back({in.source(i), row});
+    }
+  }
+  std::vector<std::pair<int, std::array<GO, 5>>> answers;  // rank: query index, key
+  for (const auto& [rank, row] : asked) {
+    const auto it = directory.find(row[1]);
+    if (it == directory.end()) continue;
+    answers.push_back({rank, {row[2], it->second[0], it->second[1], it->second[2], it->second[3]}});
+  }
+  transport::RecordBatch<Host> back(answers.size(), 5 * sizeof(GO), "soma::refine_marked.birth_answers");
+  for (std::size_t i = 0; i < answers.size(); ++i) {
+    back.dest(i) = answers[i].first;
+    std::memcpy(&back.payload(i, 0), answers[i].second.data(), 5 * sizeof(GO));
+  }
+  const auto got = transport::route(Exec{}, comm, back);
+  std::vector<std::optional<Key>> result(queries.size());
+  for (std::size_t i = 0; i < got.size(); ++i) {
+    GO row[5];
+    std::memcpy(row, &got.payload(i, 0), sizeof row);
+    result[static_cast<std::size_t>(row[0])] = Key{row[1], row[2], row[3], row[4]};
+  }
+  return result;
+}
+
+// Births found by coordinates (infer_births): a vertex at the midpoint of an
+// owned cell's edge, or the centre of its quad face (exactly, or within
+// tol), was born there; then, as refinement would have cut them, the
+// halves of such edges, a triangle's halves about each edge's midpoint and
+// its four children once all three are found, a quad's four children once
+// its centre and edge midpoints are, until nothing more is found. Per vertex
+// held, the corners it lies between.
+std::map<GO, Key> births_by_coordinates(const Comm& comm, const HostMesh& mesh, PointTolerance tol) {
+  const int dim = mesh.dim();
+  const LO owned = mesh.segment_table(dim).owned_end;
+  const LO owned_vertices = mesh.segment_table(0).owned_end;
+  const MeshView<Host> m = mesh.view();
+  const auto vgid = mesh.gid(0);
+  const auto x = mesh.coords();
+  std::map<GO, P3> where;
+  for (LO v = 0; v < mesh.count(0); ++v) where[vgid(v)] = {x(v, 0), x(v, 1), x(v, 2)};
+
+  // Sides (corner gids in order: 2 an edge, 3 or 4 a face), each asked once;
+  // faces wait for the vertices their children need.
+  std::map<Key, GO> at;  // corners: the vertex between them
+  std::map<GO, Key> found;
+  std::set<Key> seen;
+  std::vector<std::vector<GO>> fresh, faces;
+  const auto one = [&](std::vector<GO> side) {
+    if (!seen.insert(key_of(side)).second) return;
+    if (side.size() > 2) faces.push_back(side);
+    fresh.push_back(std::move(side));
+  };
+  const auto add = [&](const std::vector<GO>& side) {
+    for (std::size_t i = 0; side.size() > 2 && i < side.size(); ++i) one({side[i], side[(i + 1) % side.size()]});
+    one(side);
+  };
+  for (LO e = 0; e < owned; ++e) {
+    for (int d = 1; d < dim; ++d) {
+      for (int s = 0; s < topology::side_count(m, dim, e, d); ++s) {
+        const topology::Side side = topology::side_of(m, dim, e, d, s);
+        std::vector<GO> g;
+        for (int i = 0; i < side.n; ++i) g.push_back(vgid(side.v[i]));
+        add(g);
+      }
+    }
+  }
+  std::vector<std::uint8_t> expanded;  // per face: bisections done (bits), red children done (8)
+  const auto mid = [&](GO a, GO b) -> std::optional<GO> {
+    const GO g[2] = {a, b};
+    const auto it = at.find(key_of(g));
+    return it == at.end() ? std::nullopt : std::optional<GO>(it->second);
+  };
+  for (;;) {
+    // Ask about the sides added: points first the owned vertices, then theirs.
+    std::vector<std::vector<GO>> asking;
+    asking.swap(fresh);
+    std::vector<Real> xyz;
+    for (LO v = 0; v < owned_vertices; ++v) xyz.insert(xyz.end(), {x(v, 0), x(v, 1), x(v, 2)});
+    for (const auto& side : asking) {
+      std::vector<GO> sorted = side;
+      std::sort(sorted.begin(), sorted.end());
+      std::vector<P3> p;
+      for (const GO g : sorted) p.push_back(where.at(g));
+      const P3 c = average(p);
+      xyz.insert(xyz.end(), {c.x, c.y, c.z});
+    }
+    if (comm.allreduce(static_cast<std::int32_t>(asking.empty() ? 0 : 1), Op::max) == 0) break;
+    const PointIds ids = match_points(comm, xyz, tol);
+    std::vector<std::pair<Key, GO>> entries;
+    for (LO v = 0; v < owned_vertices; ++v) {
+      const GO id[1] = {ids.ids[static_cast<std::size_t>(v)]};
+      entries.emplace_back(key_of(id), vgid(v));
+    }
+    std::vector<Key> queries;
+    for (std::size_t i = 0; i < asking.size(); ++i) {
+      const GO id[1] = {ids.ids[static_cast<std::size_t>(owned_vertices) + i]};
+      queries.push_back(key_of(id));
+    }
+    const auto gids = lookup(comm, entries, queries);
+    for (std::size_t i = 0; i < asking.size(); ++i) {
+      const std::vector<GO>& side = asking[i];
+      if (!gids[i] || std::find(side.begin(), side.end(), *gids[i]) != side.end()) continue;
+      const GO g = *gids[i];
+      const Key k = key_of(side);
+      at[k] = g;
+      found.emplace(g, k);
+      const std::size_t row = 3 * (static_cast<std::size_t>(owned_vertices) + i);
+      where.emplace(g, P3{xyz[row], xyz[row + 1], xyz[row + 2]});
+      if (side.size() == 2) {
+        add({side[0], g});
+        add({g, side[1]});
+      }
+    }
+    // Faces whose children's vertices are known now (those added here wait
+    // for the next round).
+    const std::size_t count = faces.size();
+    expanded.resize(count, 0);
+    for (std::size_t f = 0; f < count; ++f) {
+      const std::vector<GO> c = faces[f];
+      const std::size_t n = c.size();
+      std::vector<std::optional<GO>> mids;
+      for (std::size_t i = 0; i < n; ++i) mids.push_back(mid(c[i], c[(i + 1) % n]));
+      const bool all = std::all_of(mids.begin(), mids.end(), [](const auto& g) { return g.has_value(); });
+      if (n == 3) {
+        for (std::size_t i = 0; i < 3; ++i) {
+          if (!mids[i] || (expanded[f] & (1u << i)) != 0) continue;
+          expanded[f] |= static_cast<std::uint8_t>(1u << i);
+          add({c[i], *mids[i], c[(i + 2) % 3]});
+          add({*mids[i], c[(i + 1) % 3], c[(i + 2) % 3]});
+        }
+        if (all && (expanded[f] & 8u) == 0) {
+          expanded[f] |= 8u;
+          for (std::size_t i = 0; i < 3; ++i) add({c[i], *mids[i], *mids[(i + 2) % 3]});
+          add({*mids[0], *mids[1], *mids[2]});
+        }
+      } else if (n == 4 && all && (expanded[f] & 8u) == 0) {
+        const auto centre = at.find(key_of(c));
+        if (centre == at.end()) continue;
+        expanded[f] |= 8u;
+        for (std::size_t i = 0; i < 4; ++i) add({c[i], *mids[i], centre->second, *mids[(i + 3) % 4]});
+      }
+    }
+  }
+
+  // Every rank holding a vertex learns its birth.
+  std::vector<std::pair<GO, Key>> entries(found.begin(), found.end());
+  std::vector<GO> held;
+  for (LO v = 0; v < mesh.count(0); ++v) held.push_back(vgid(v));
+  const auto keys = lookup_keys(comm, entries, held);
+  std::map<GO, Key> births;
+  for (std::size_t i = 0; i < held.size(); ++i) {
+    if (keys[i]) births.emplace(held[i], *keys[i]);
+  }
+  return births;
+}
+
 enum class Act : std::int8_t { keep, split, bisect, transition };
 enum class Mode { split, bisect, transition };
 
@@ -159,7 +343,8 @@ struct Pass {
 // those the balance needs; Mode::bisect the simplices marked (if any marks)
 // or with hanging vertices; Mode::transition replaces the cells with
 // hanging vertices.
-Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std::int8_t> marks) {
+Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std::int8_t> marks,
+          const std::map<GO, Key>& inferred = {}) {
   const int dim = mesh.dim();
   const LO owned = mesh.segment_table(dim).owned_end;
   const MeshView<Host> m = mesh.view();
@@ -188,6 +373,7 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
       birth_of[vgid(v)] = key_of(g);
     }
   }
+  for (const auto& [g, k] : inferred) birth_of.emplace(g, k);  // recorded births first
   std::vector<std::pair<Key, GO>> entries;
   for (const auto& [g, k] : birth_of) entries.emplace_back(k, g);
 
@@ -867,8 +1053,12 @@ RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<con
   const bool simplices = flags[1] == 0;
   // Transition cells of an earlier call give way to the cells they replaced.
   const std::optional<Ungreened> base = ungreen(comm, mesh, marks);
-  Pass first = pass(comm, base ? base->mesh : mesh, options.conforming && simplices ? Mode::bisect : Mode::split,
-                    base ? std::span<const std::int8_t>(base->marks) : marks);
+  const HostMesh& start = base ? base->mesh : mesh;
+  const std::map<GO, Key> inferred = options.vertices == VertexMatching::coordinates
+                                         ? births_by_coordinates(comm, start, options.tol)
+                                         : std::map<GO, Key>{};
+  Pass first = pass(comm, start, options.conforming && simplices ? Mode::bisect : Mode::split,
+                    base ? std::span<const std::int8_t>(base->marks) : marks, inferred);
   RefineResult out = std::move(first.result);
   if (options.conforming) {
     // Bisect the simplices with hanging vertices, or replace the cells with
@@ -903,6 +1093,22 @@ RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<con
     out.children[static_cast<std::size_t>(next[static_cast<std::size_t>(out.parent[c])]++)] = static_cast<LO>(c);
   }
   return out;
+}
+
+void infer_births(const Comm& comm, HostMesh& mesh, PointTolerance tol) {
+  check(comm, mesh, 1, "infer_births");
+  const std::map<GO, Key> births = births_by_coordinates(comm, mesh, tol);
+  if (!mesh.fields().contains(birth_field)) (void)mesh.fields().add_tag<std::int64_t>(birth_field, 0, birth_width);
+  auto bv = mesh.fields().get<std::int64_t>(birth_field, 0).view();
+  const auto vgid = mesh.gid(0);
+  for (LO v = 0; v < mesh.count(0); ++v) {
+    const auto vi = static_cast<std::size_t>(v);
+    const auto it = births.find(vgid(v));
+    if (bv(vi, 0) != 0 || it == births.end()) continue;  // recorded births stay
+    const auto n = static_cast<std::size_t>(key_size(it->second));
+    bv(vi, 0) = static_cast<std::int64_t>(n);
+    for (std::size_t k = 0; k < n; ++k) bv(vi, k + 1) = it->second[k];
+  }
 }
 
 std::vector<std::int8_t> mark_threshold(std::span<const Real> indicator, Real threshold) {
