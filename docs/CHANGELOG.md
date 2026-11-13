@@ -428,6 +428,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `merge_vertices` and `number_elements` as their entities', so `build_merged_part(comm,
   builder, tol)` builds the part without `resolve_sharing`'s gid directory. Tolerance clusters
   are joined across ranks by FastSV rounds, logarithmic in the longest chain.
+- `point_key`, `point_of_key` and `point_keys(exec, xyz, keys)` (`soma/core/point_key.hpp`)
+  compute the exact keys in device code, equal to `hash3d_exact`'s; `match_points` computes its
+  keys and NaN check with them in one parallel pass.
 
 ### SOMA files
 

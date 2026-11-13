@@ -14,6 +14,7 @@
 
 #include "records.hpp"
 #include "soma/core/hash3d_exact.hpp"
+#include "soma/core/point_key.hpp"
 #include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/sort.hpp"
 
@@ -43,20 +44,12 @@ sx::Norm norm_of(PointNorm n) {
   return sx::Norm::L2;
 }
 
-Point point_at(std::span<const Real> xyz, std::size_t i) { return {xyz[3 * i], xyz[3 * i + 1], xyz[3 * i + 2]}; }
-
 bool finite(const Point& p) {
   return sx::detail::is_finite_bits(p[0]) && sx::detail::is_finite_bits(p[1]) && sx::detail::is_finite_bits(p[2]);
 }
 
 // Throws on every rank if any rank's input is invalid.
-void check(const Comm& comm, std::span<const Real> xyz, const PointTolerance& tol) {
-  bool nan = false;
-  for (const Real v : xyz) {
-    bool is_nan = false;
-    (void)sx::detail::key_bits(v, is_nan);
-    nan = nan || is_nan;
-  }
+void check(const Comm& comm, std::span<const Real> xyz, bool nan, const PointTolerance& tol) {
   const bool bad_tol = !(tol.tol >= 0) || !sx::detail::is_finite_bits(tol.tol);
   std::array<std::int32_t, 3> f{xyz.size() % 3 != 0 ? 1 : 0, nan ? 1 : 0, bad_tol ? 1 : 0};
   comm.allreduce(std::span<std::int32_t>(f), Op::max);
@@ -402,14 +395,16 @@ void clusters(const Comm& comm, const std::vector<std::uint64_t>& ids, const std
 }  // namespace
 
 PointIds match_points(const Comm& comm, std::span<const Real> xyz, PointTolerance tol) {
-  check(comm, xyz, tol);
+  // Keys in parallel, a word per coordinate (x-major per point).
+  std::vector<std::uint64_t> keys(xyz.size());
+  const bool nan = point_keys(HostExec{},
+                              Kokkos::View<const Real*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>(xyz.data(), xyz.size()),
+                              Kokkos::View<std::uint64_t*, Kokkos::HostSpace, Kokkos::MemoryUnmanaged>(keys.data(), keys.size()));
+  check(comm, xyz, nan, tol);
   const std::size_t n = xyz.size() / 3;
-  std::vector<std::uint64_t> keys(3 * n);
   std::vector<Point> pts(n);
   for (std::size_t i = 0; i < n; ++i) {
-    const sx::Key<3> key = sx::exact_key<3>(point_at(xyz, i));
-    std::copy(key.begin(), key.end(), keys.begin() + static_cast<std::ptrdiff_t>(3 * i));
-    pts[i] = sx::point_of<3>(key);  // -0.0 as +0.0
+    for (std::size_t j = 0; j < 3; ++j) pts[i][j] = point_of_key(keys[3 * i + j]);  // -0.0 as +0.0
   }
   PointIds out;
   out.ids.resize(n);
