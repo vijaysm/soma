@@ -91,6 +91,19 @@ std::vector<Real> seam(int from, int size) {
   return out;
 }
 
+// Points round a circle, 0.01 apart and dealt to the ranks in turn: within
+// 0.015 they chain into one cluster whose ids rise along both halves from
+// the leftmost point, the slow case for joining clusters across ranks.
+std::vector<Real> ring(int from, int size) {
+  constexpr int n = 4000;
+  std::vector<Real> out;
+  for (int i = from; i < n; i += size) {
+    const Real a = 2 * 3.141592653589793 * i / n;
+    out.insert(out.end(), {6.4 * std::cos(a), 6.4 * std::sin(a), 0.0});
+  }
+  return out;
+}
+
 std::vector<Real> all_points(Maker make, int size) {
   std::vector<Real> out;
   for (int r = 0; r < size; ++r) {
@@ -162,6 +175,12 @@ TEST(PointMatch, ToleranceIdsEqualTheSerialHasher) {
       expect_matches_serial(seam, {tol, norm});
     }
   }
+}
+
+TEST(PointMatch, ALongChainIsOneCluster) {
+  expect_matches_serial(ring, {0.015, PointNorm::linf});
+  const Comm c = Comm::world();
+  EXPECT_EQ(match_points(c, ring(c.rank(), c.size()), {0.015, PointNorm::linf}).count, 1);
 }
 
 // A tolerance just under a power of two makes the cells barely wider than it.

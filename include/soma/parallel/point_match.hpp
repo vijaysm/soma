@@ -26,8 +26,9 @@
 // tolerance, each distinct point goes to the owner of its grid cell (width a
 // power of two in (tol, 2 tol]) and, as a halo, to the owners of the
 // neighbouring cells it comes within tol of; owners test the pairs of their
-// cells, and the components are joined across owners by a distributed
-// union-find whose parents point at smaller ids. Tolerance mode needs strict
+// cells, and the components are joined across owners by FastSV rounds
+// (hooking to the smaller parent, then shortcutting), whose number grows
+// with the log of the longest chain, not its length. Tolerance mode needs strict
 // IEEE arithmetic and throws, on every rank, under -ffast-math (see
 // hash3d_exact.hpp).
 

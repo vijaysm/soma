@@ -129,59 +129,81 @@ Bytes ask(const Comm& comm, const std::vector<std::uint64_t>& keys, std::size_t 
       });
 }
 
-// Join records (y, m), m < y: y and m are in one cluster. Applies them at
-// y's directory rank, hooking y to the smaller parent and passing the larger
-// one on, until no rank has any left.
-void hook(const Comm& comm, std::vector<Entry>& dir, std::vector<std::pair<std::uint64_t, std::uint64_t>> joins) {
-  const int size = comm.size();
-  while (comm.allreduce(static_cast<std::uint64_t>(joins.size()), Op::sum) > 0) {
-    std::vector<int> dest(joins.size());
-    for (std::size_t i = 0; i < joins.size(); ++i) dest[i] = transport::owner(joins[i].first, size);
-    const Batch in = detail::route(comm, dest, 2 * sizeof(std::uint64_t), [&](std::size_t i, std::byte* row) {
-      put(row, 0, joins[i].first);
-      put(row, sizeof(std::uint64_t), joins[i].second);
-    });
-    joins.clear();
-    for (std::size_t i = 0; i < in.size(); ++i) {
-      const auto y = take<std::uint64_t>(&in.payload(i, 0), 0);
-      const auto m = take<std::uint64_t>(&in.payload(i, 0), sizeof(std::uint64_t));
-      Entry* e = entry_of(dir, y);
-      if (e == nullptr) throw std::logic_error("match_points: a join names a point no directory holds");
-      const std::uint64_t cur = e->parent;
-      if (m < cur) {
-        e->parent = m;
-        if (cur != y) joins.emplace_back(cur, m);
-      } else if (cur < m) {
-        joins.emplace_back(m, cur);
-      }
-    }
-  }
+// The parent of each id, read at its directory rank.
+std::vector<std::uint64_t> parents(const Comm& comm, std::vector<Entry>& dir, const std::vector<std::uint64_t>& ids) {
+  const Bytes got = ask(comm, ids, sizeof(std::uint64_t), [&](std::uint64_t id, std::byte* row) {
+    const Entry* e = entry_of(dir, id);
+    if (e == nullptr) throw std::logic_error("match_points: a point no directory holds");
+    put(row, 0, e->parent);
+  });
+  std::vector<std::uint64_t> out(ids.size());
+  for (std::size_t i = 0; i < ids.size(); ++i) out[i] = take<std::uint64_t>(&got(i, 0), 0);
+  return out;
 }
 
-// Parents become roots by pointer jumping.
-void jump(const Comm& comm, std::vector<Entry>& dir) {
-  std::vector<std::size_t> open;
-  for (std::size_t i = 0; i < dir.size(); ++i) {
-    if (dir[i].parent != dir[i].id) open.push_back(i);
-  }
-  while (comm.allreduce(static_cast<std::uint64_t>(open.size()), Op::sum) > 0) {
-    std::vector<std::uint64_t> keys(open.size());
-    for (std::size_t i = 0; i < open.size(); ++i) keys[i] = dir[open[i]].parent;
-    // Answers are read from the parents as they were before this round.
-    const Bytes got = ask(comm, keys, sizeof(std::uint64_t), [&](std::uint64_t id, std::byte* row) {
-      const Entry* e = entry_of(dir, id);
-      put(row, 0, e != nullptr ? e->parent : id);
+// Components of the edges (each joining two ids held in the directory),
+// after FastSV (Zhang, Azad and Hu, SIAM PP 2020): each round hooks the
+// parent of each edge's larger end, and the end itself, to the smaller
+// end's parent, then shortcuts every parent to its grandparent. Parents
+// only decrease, so rounds end; when one changes nothing every tree is a
+// star whose root is its least id.
+void connect(const Comm& comm, std::vector<Entry>& dir, const std::vector<std::pair<std::uint64_t, std::uint64_t>>& edges) {
+  const int size = comm.size();
+  std::vector<std::uint64_t> ends;
+  for (const auto& [a, b] : edges) ends.insert(ends.end(), {a, b});
+  std::sort(ends.begin(), ends.end());
+  ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
+  const auto at = [&](std::uint64_t id) {
+    return static_cast<std::size_t>(std::lower_bound(ends.begin(), ends.end(), id) - ends.begin());
+  };
+  for (;;) {
+    std::uint64_t changed = 0;
+    // Hooks (target, smaller parent), the least per target, to the target's directory.
+    const std::vector<std::uint64_t> f = parents(comm, dir, ends);
+    std::vector<std::pair<std::uint64_t, std::uint64_t>> hooks;
+    for (const auto& [a, b] : edges) {
+      const std::uint64_t fa = f[at(a)], fb = f[at(b)];
+      if (fa == fb) continue;
+      const bool a_low = fa < fb;
+      const std::uint64_t low = a_low ? fa : fb;
+      hooks.emplace_back(a_low ? fb : fa, low);  // the larger parent
+      hooks.emplace_back(a_low ? b : a, low);    // the larger end
+    }
+    std::sort(hooks.begin(), hooks.end());
+    hooks.erase(std::unique(hooks.begin(), hooks.end(), [](const auto& x, const auto& y) { return x.first == y.first; }),
+                hooks.end());
+    std::vector<int> dest(hooks.size());
+    for (std::size_t i = 0; i < hooks.size(); ++i) dest[i] = transport::owner(hooks[i].first, size);
+    const Batch in = detail::route(comm, dest, 2 * sizeof(std::uint64_t), [&](std::size_t i, std::byte* row) {
+      put(row, 0, hooks[i].first);
+      put(row, sizeof(std::uint64_t), hooks[i].second);
     });
-    std::vector<std::size_t> still;
-    for (std::size_t i = 0; i < open.size(); ++i) {
-      const auto grand = take<std::uint64_t>(&got(i, 0), 0);
-      Entry& e = dir[open[i]];
-      if (grand != e.parent) {
-        e.parent = grand;
-        still.push_back(open[i]);
+    for (std::size_t i = 0; i < in.size(); ++i) {
+      Entry* e = entry_of(dir, take<std::uint64_t>(&in.payload(i, 0), 0));
+      if (e == nullptr) throw std::logic_error("match_points: a hook names a point no directory holds");
+      const auto low = take<std::uint64_t>(&in.payload(i, 0), sizeof(std::uint64_t));
+      if (low < e->parent) {
+        e->parent = low;
+        changed = 1;
       }
     }
-    open.swap(still);
+    // Shortcut: parents to grandparents, read as they were before.
+    std::vector<std::size_t> open;
+    std::vector<std::uint64_t> up;
+    for (std::size_t i = 0; i < dir.size(); ++i) {
+      if (dir[i].parent != dir[i].id) {
+        open.push_back(i);
+        up.push_back(dir[i].parent);
+      }
+    }
+    const std::vector<std::uint64_t> grand = parents(comm, dir, up);
+    for (std::size_t i = 0; i < open.size(); ++i) {
+      if (grand[i] != dir[open[i]].parent) {
+        dir[open[i]].parent = grand[i];
+        changed = 1;
+      }
+    }
+    if (comm.allreduce(changed, Op::max) == 0) return;
   }
 }
 
@@ -326,18 +348,22 @@ void clusters(const Comm& comm, const std::vector<std::uint64_t>& ids, const std
     put(row, sizeof(std::uint64_t), held[forest.find(out[i])]);
     put(row, join_p, held_p[out[i]]);
   });
+  // Directory entries start at the least local member any owner reports.
   std::vector<Entry> dir;
-  std::vector<std::pair<std::uint64_t, std::uint64_t>> joins;
   for (std::size_t i = 0; i < reg.size(); ++i) {
     const std::byte* row = &reg.payload(i, 0);
-    const auto y = take<std::uint64_t>(row, 0), m = take<std::uint64_t>(row, sizeof(std::uint64_t));
-    dir.push_back(Entry{y, y, take<Point>(row, join_p)});
-    if (m != y) joins.emplace_back(y, m);
+    dir.push_back(Entry{take<std::uint64_t>(row, 0), take<std::uint64_t>(row, sizeof(std::uint64_t)),
+                        take<Point>(row, join_p)});
   }
-  std::sort(dir.begin(), dir.end(), [](const Entry& a, const Entry& b) { return a.id < b.id; });
+  std::sort(dir.begin(), dir.end(), [](const Entry& a, const Entry& b) { return std::tie(a.id, a.parent) < std::tie(b.id, b.parent); });
   dir.erase(std::unique(dir.begin(), dir.end(), [](const Entry& a, const Entry& b) { return a.id == b.id; }), dir.end());
-  hook(comm, dir, std::move(joins));
-  jump(comm, dir);
+  // The edges stay with the owners that found them: each member to its local least.
+  std::vector<std::pair<std::uint64_t, std::uint64_t>> edges;
+  for (const std::size_t i : out) {
+    const std::size_t r = forest.find(i);
+    if (r != i) edges.emplace_back(held[i], held[r]);
+  }
+  connect(comm, dir, edges);
 
   // Each point's root, then the root's coordinates.
   std::vector<std::uint64_t> mine(ids);
