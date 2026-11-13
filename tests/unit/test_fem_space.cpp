@@ -608,7 +608,7 @@ struct Reproducible {
 
 // Atomic and colored assembly give the gather's matrix to rounding, and
 // colored assembly the same bits every time. Not reproducible, whatever the
-// build starts as: a reproducible space gathers whichever method is asked for.
+// environment asks for: a reproducible space gathers whichever method is asked for.
 TEST(FemSpace, AssemblyMethodsAgree) {
   const Comm c = Comm::world();
   const Reproducible off(false);

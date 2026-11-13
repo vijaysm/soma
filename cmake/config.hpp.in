@@ -24,9 +24,8 @@
 
 // 1 for a build configured with SOMA_REPRODUCIBLE=ON: compiled with the flags
 // that keep floating-point arithmetic as written (no a * b + c becomes a
-// fused multiply-add, on the host or on the device), and soma::reproducible()
-// starts on. The environment variable SOMA_REPRODUCIBLE=0|1 and
-// --soma-reproducible[=0|1] still set the latter for a run.
+// fused multiply-add, on the host or on the device). The run-time switch
+// soma::reproducible() is separate and starts off in every build.
 #define SOMA_REPRODUCIBLE_BUILD @SOMA_REPRODUCIBLE_BUILD@
 
 #endif  // SOMA_CONFIG_HPP_

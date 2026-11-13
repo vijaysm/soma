@@ -11,14 +11,12 @@
 #include <stdexcept>
 #include <string>
 
-#include "soma/config.hpp"
-
 namespace soma {
 
 namespace {
 
 std::atomic<double> threshold{default_compress_threshold};
-std::atomic<bool> exact{SOMA_REPRODUCIBLE_BUILD != 0};  // the build's default
+std::atomic<bool> exact{false};
 
 double parse_threshold(const char* text, const char* source) {
   const std::string what = std::string(source) + ": '" + text + "' is not a fraction in [0, 1]";

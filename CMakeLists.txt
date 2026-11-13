@@ -47,16 +47,19 @@ set_property(CACHE SOMA_GPU_AWARE_MPI PROPERTY STRINGS AUTO ON OFF)
 # One MPI rank for each GPU in the example tests of a GPU build: a single GPU
 # keeps them to one rank on that device, N GPUs run them at N ranks (Kokkos
 # gives each rank of a node its own device). AUTO counts this node's GPUs; a
-# number says how many the launcher reaches, over every node it spans.
+# number says how many the launcher reaches, over every node it spans. The
+# unit tests are not held to it: they run every rank count of theirs, up to
+# eight, with the ranks sharing the GPUs there are (cmake/SomaTesting.cmake).
 set(SOMA_TEST_GPUS "AUTO" CACHE STRING "GPUs the example tests use, one MPI rank each: AUTO or a count")
-# Results the same bit for bit wherever SOMA can give them: on any number of
-# ranks and threads (soma::reproducible() starts on; SOMA_REPRODUCIBLE=0 in
-# the environment or --soma-reproducible=0 still turns it off for a run), and
-# between a host and a device space (the compile flags that keep arithmetic
-# as written, chosen for the compiler and Kokkos backend in
-# cmake/SomaReproducible.cmake, on the library and every target linking it).
-# OFF leaves each compiler's own floating-point defaults and the faster sums.
-option(SOMA_REPRODUCIBLE "Bit-for-bit reproducible results: value-safe compile flags, exact sums by default" OFF)
+# Kernels that round the same in a host and in a device space: the compile
+# flags that keep arithmetic as written, chosen for the compiler and Kokkos
+# backend in cmake/SomaReproducible.cmake, on the library and every target
+# linking it. OFF, the default, leaves each compiler's own floating-point
+# defaults. Either way the run-time switch soma::reproducible() (exact sums,
+# the same bits on any number of ranks and threads) starts off and is asked
+# for by itself: SOMA_REPRODUCIBLE=1 in the environment, --soma-reproducible
+# or soma::set_reproducible(true).
+option(SOMA_REPRODUCIBLE "Value-safe compile flags: host and device kernels round alike" OFF)
 # Installing is the default only for a top-level build; a parent project that
 # embeds SOMA does not get SOMA's install rules unless it asks for them.
 option(SOMA_INSTALL "Generate install and export rules (default: ON when SOMA is the top-level project)"

@@ -28,13 +28,15 @@
 // agree on it across ranks; an option of their own (CgOptions::reproducible)
 // overrides it.
 //
-// It starts off, or on in a build configured with SOMA_REPRODUCIBLE=ON
-// (SOMA_REPRODUCIBLE_BUILD in soma/config.hpp). "One build" is one compiler
-// and one set of flags: a host kernel and a device kernel are two, and differ
-// in the last bit where one contracts a * b + c into a fused multiply-add
-// (nvcc does by default). No run-time switch reaches that; the same
-// configure option does, with the compile flags that keep arithmetic as
-// written on the host and on the device.
+// It starts off in every build, and only a request turns it on:
+// set_reproducible(true), the environment or the command line below. "One
+// build" is one compiler and one set of flags: a host kernel and a device
+// kernel are two, and differ in the last bit where one contracts a * b + c
+// into a fused multiply-add (nvcc does by default). No run-time switch
+// reaches that; the configure option SOMA_REPRODUCIBLE=ON does, with the
+// compile flags that keep arithmetic as written on the host and on the
+// device (SOMA_REPRODUCIBLE_BUILD in soma/config.hpp). The two are separate:
+// that option does not turn this switch on.
 //
 //   SOMA_REPRODUCIBLE=1 ./app                    # 0 or 1
 //   ./app --soma-reproducible                    # on; or --soma-reproducible=0|1

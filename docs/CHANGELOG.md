@@ -27,14 +27,14 @@ All notable changes to SOMA are recorded here. The format follows
 - `SOMA_GPU_AWARE_MPI` (`AUTO`, `ON`, `OFF`) sets the compile-time default for passing device
   buffers to MPI. The generated `soma/config.hpp` also honors the environment variable
   `SOMA_GPU_AWARE_MPI=0|1` at run time.
-- `SOMA_REPRODUCIBLE=ON` asks for results the same bit for bit wherever SOMA can give them. It
-  adds the compile flags that keep floating-point arithmetic as written, chosen for the
-  compiler and the Kokkos backend (`cmake/SomaReproducible.cmake`), to the library and to
-  every target that links it, an installed SOMA's consumers included, so a kernel rounds the
-  same on the host and on a device; and it makes `soma::reproducible()` start on
-  (`SOMA_REPRODUCIBLE_BUILD` in `soma/config.hpp`), so sums are exact on any number of ranks
-  and threads. The environment and the command line still turn the run-time half off. The
-  flags: `-ffp-contract=off` for GCC, Clang and AppleClang; `-fp-model=precise` with it for
+- `SOMA_REPRODUCIBLE=ON` (off by default) makes a kernel round the same on the host and on a
+  device. It adds the compile flags that keep floating-point arithmetic as written, chosen
+  for the compiler and the Kokkos backend (`cmake/SomaReproducible.cmake`), to the library and
+  to every target that links it, an installed SOMA's consumers included, and records
+  `SOMA_REPRODUCIBLE_BUILD` in `soma/config.hpp`. It is flags only: the run-time switch
+  `soma::reproducible()` starts off in every build and is asked for by itself
+  (`SOMA_REPRODUCIBLE=1` in the environment, `--soma-reproducible`, `set_reproducible(true)`).
+  The flags: `-ffp-contract=off` for GCC, Clang and AppleClang; `-fp-model=precise` with it for
   IntelLLVM; `-Kieee -Mnofma` for NVHPC; `-fmad=false` and the host compiler's flags through
   `-Xcompiler` for nvcc, which contracts `a * b + c` into an fma in device kernels by default
   (`nvcc_wrapper` as the C++ compiler takes `-fmad=false` and the host flags); and
@@ -43,8 +43,7 @@ All notable changes to SOMA are recorded here. The format follows
   errors; a SYCL Kokkos gets a warning that its device kernels are unverified. The configure
   summary reports `reproducible=` with the flags. Verified with g++ 13 and nvcc 12.5 (the
   CMake CUDA language); the other compilers' flags are untested, and the cost in speed of the
-  flags and of exact sums by default is not measured. A space made while reproducible
-  assembles by `gather`, whatever assembly was asked for.
+  flags is not measured.
 - `SOMA_TEST_GPUS` (`AUTO` or a count) is the number of GPUs the example tests of a GPU build
   use, one MPI rank each: one GPU keeps them to a single rank on that device, N GPUs add runs
   at N ranks (`example_*.np<N>`), where Kokkos gives each rank of a node a device of its own
@@ -52,6 +51,15 @@ All notable changes to SOMA are recorded here. The format follows
   the configuring node (one, with a message, when it cannot); for GPUs across nodes, give the
   count. A host-only build keeps the two-rank runs. Only the single-GPU case has been run (and
   two ranks sharing that GPU, with `SOMA_TEST_GPUS=2`).
+- The MPI unit tests run every rank count of theirs, up to eight, on any node
+  (`cmake/SomaTesting.cmake`): the ranks of a GPU build share its GPUs (all of them the one
+  GPU of a single-GPU node), and a test of more ranks than the node has cores carries the
+  environment that lets Open MPI 4 and 5 oversubscribe and keeps each rank to one unbound
+  host thread, so a plain `ctest` passes them. Run with Open MPI 5.0.9 on four cores and one
+  GTX 1050 Ti: the 70 tests of 5 to 8 ranks pass `ctest -j 1` with no environment set by hand,
+  and the 24 eight-rank tests peak at 703 MiB of the card's 4096 (sampled every 100 ms). Open
+  MPI 4 and other launchers are untested, and a node whose launcher has fewer slots than
+  cores (a batch allocation) still needs its own oversubscription setting.
 - On AppleClang, SOMA seeds `FindOpenMP` from Homebrew libomp so that Kokkos with its OpenMP
   backend can be found.
 - The configure summary line reports the Kokkos source, host and GPU backends, MPI, tests,

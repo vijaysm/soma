@@ -2,6 +2,7 @@
 # Copyright (c) 2022-2026, Vijay Mahadevan.
 
 include(GoogleTest)
+include(SomaTesting)
 
 find_package(GTest QUIET)
 if(NOT GTest_FOUND)
@@ -26,7 +27,20 @@ soma_target_kokkos_sources(soma_test_main)
 
 # soma_add_test(<name> SOURCES ... [RANKS 1 2 4] [LIBS ...])
 # Without MPI (or without RANKS) tests are discovered individually. With MPI
-# and RANKS, the binary is registered once per rank count.
+# and RANKS, the binary is registered once per rank count, and runs every one
+# of them on any node: the ranks of a GPU build share its GPUs, and a count
+# above the node's cores is oversubscribed (cmake/SomaTesting.cmake).
+if(SOMA_ENABLE_MPI)
+  set(_soma_shared "")
+  if(SOMA_KOKKOS_HAS_GPU)
+    soma_test_gpus(_soma_gpus)
+    set(_soma_shared " sharing ${_soma_gpus} ${SOMA_KOKKOS_GPU_BACKEND} GPU(s)")
+  endif()
+  message(STATUS "SOMA: MPI unit tests at every rank count${_soma_shared}; "
+    "above ${SOMA_TEST_CORES} ranks they oversubscribe this node's cores, one host thread a rank")
+  unset(_soma_shared)
+endif()
+
 function(soma_add_test name)
   cmake_parse_arguments(T "" "" "SOURCES;RANKS;LIBS" ${ARGN})
   add_executable(${name} ${T_SOURCES})
@@ -40,7 +54,8 @@ function(soma_add_test name)
       add_test(NAME ${name}.np${np}
         COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
                 ${MPIEXEC_PREFLAGS} $<TARGET_FILE:${name}> ${MPIEXEC_POSTFLAGS})
-      set_tests_properties(${name}.np${np} PROPERTIES TIMEOUT 60 PROCESSORS ${np})
+      set_tests_properties(${name}.np${np} PROPERTIES TIMEOUT 60)
+      soma_mpi_test(${name}.np${np} ${np})
     endforeach()
   else()
     gtest_discover_tests(${name} DISCOVERY_MODE PRE_TEST)
@@ -111,11 +126,14 @@ if(SOMA_ENABLE_HDF5)
     add_test(NAME soma_convert.to_soma.np${np} COMMAND ${run} ${PROJECT_SOURCE_DIR}/data/hexes_mixed.h5m ${dir}/m.soma)
     add_test(NAME soma_convert.to_h5m.np${np} COMMAND ${run} --compression 4 ${dir}/m.soma ${dir}/m.h5m)
     add_test(NAME soma_convert.rejects.np${np} COMMAND ${run} ${PROJECT_SOURCE_DIR}/data/hexes_mixed.vtk ${dir}/x)
-    set_tests_properties(soma_convert.to_soma.np${np} PROPERTIES FIXTURES_SETUP soma_convert_np${np} PROCESSORS ${np}
+    set_tests_properties(soma_convert.to_soma.np${np} PROPERTIES FIXTURES_SETUP soma_convert_np${np}
                          PASS_REGULAR_EXPRESSION "as SOMA")
-    set_tests_properties(soma_convert.to_h5m.np${np} PROPERTIES FIXTURES_REQUIRED soma_convert_np${np} PROCESSORS ${np}
+    set_tests_properties(soma_convert.to_h5m.np${np} PROPERTIES FIXTURES_REQUIRED soma_convert_np${np}
                          PASS_REGULAR_EXPRESSION "as MOAB")
-    set_tests_properties(soma_convert.rejects.np${np} PROPERTIES WILL_FAIL TRUE PROCESSORS ${np})
+    set_tests_properties(soma_convert.rejects.np${np} PROPERTIES WILL_FAIL TRUE)
+    foreach(step IN ITEMS to_soma to_h5m rejects)
+      soma_mpi_test(soma_convert.${step}.np${np} ${np})
+    endforeach()
   endforeach()
 else()
   soma_add_test(test_h5m_unavailable SOURCES unit/test_h5m_unavailable.cpp)

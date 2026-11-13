@@ -270,7 +270,7 @@ TEST(Cg, DefaultMemorySpaceSolvesAsTheHost) {
 // Exact sums cannot make a matrix assembled atomically or by colors the same
 // on every partition: asked to be reproducible over such a space, every rank
 // throws. The spaces are made with soma::reproducible() off, whatever the
-// build starts as: made with it on, they would gather.
+// environment asks for: made with it on, they would gather.
 TEST(Cg, ReproducibleNeedsAGatheringSpace) {
   const Comm c = Comm::world();
   const bool saved = soma::reproducible();
