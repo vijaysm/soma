@@ -63,6 +63,8 @@
 // The refinement runs on the host (a HostMesh in, built with
 // build_local_part); a device mesh is mirrored to the host and back.
 
+#include <cstdint>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -87,6 +89,20 @@ struct RefineResult {
   std::vector<LO> children;
   // Fields not carried over, by name.
   std::vector<std::string> dropped;
+  // Marked refinement: the hanging vertices of `mesh` (local ids), each
+  // the midpoint of an edge or the centre of a quad face that a cell still
+  // has whole: its value is sum_k weights[k] value(masters[k]) over
+  // k in [hanging_offsets[i], hanging_offsets[i + 1]), masters by gid (they
+  // may be hanging themselves, one level up).
+  std::vector<LO> hanging;
+  std::vector<Offset> hanging_offsets{0};
+  std::vector<GO> hanging_masters;
+  std::vector<Real> hanging_weights;
+};
+
+struct MarkedOptions {
+  // Conforming refinement (no hanging vertices). Not yet available.
+  bool conforming = false;
 };
 
 // Collective. Throws std::invalid_argument on every rank if any rank's mesh
@@ -95,6 +111,25 @@ struct RefineResult {
 // star-shaped about its corners' average; if levels < 1 or the ranks differ
 // in levels or dimension; or if a gid of the refined mesh would not fit a GO.
 [[nodiscard]] RefineResult refine_uniform(const Comm& comm, const HostMesh& mesh, RefineOptions options = {});
+
+// Marked refinement: the owned cells with a non-zero mark (one per owned
+// cell, in local id order), and the cells the 2:1 balance needs, split once
+// as refine_uniform splits them; the others stay whole, so their edges and
+// faces can carry hanging vertices (non-conforming). Levels are kept in the
+// cell field "refine:level" (0 where it is missing) and each vertex the
+// refinement makes at an edge's midpoint or a quad face's centre records the
+// corners it lies between in the vertex field "refine:birth" (count, then
+// up to four gids), so that later calls and other ranks reuse it: through a
+// directory keyed by those corners, whatever the partition.
+//
+// Balance: a cell is split when a cell touching it at a corner, or at a
+// vertex born on its edges or faces (or on theirs, one level down), would be
+// two levels finer than it. Gids, coordinates and fields follow
+// refine_uniform; the result is the same on any number of ranks. Collective;
+// throws as refine_uniform does, and std::invalid_argument on every rank if
+// a rank's marks are not one per owned cell, or for options.conforming.
+[[nodiscard]] RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
+                                         MarkedOptions options = {});
 
 }  // namespace soma
 

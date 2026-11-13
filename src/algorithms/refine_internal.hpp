@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <limits>
 #include <span>
 #include <stdexcept>
@@ -155,12 +156,41 @@ Numbers numbers(const Comm& comm, const HostMesh& work, const Children& children
   return {vmax, emax, fmax, std::max<GO>(kmax, 1), cmin};
 }
 
+// Where the new nodes of a cell being split come from: the gid of edge s's
+// midpoint and of quad face s's centre (sides in canonical order), and of
+// the centre (quads, polygons, hexes).
+struct NodeGids {
+  std::function<GO(int)> edge;
+  std::function<GO(int)> face;
+  GO centre = 0;
+};
+
+// The number of children of a cell split as refine_uniform splits it.
+int children_of(Topology t, LO corners);
+
+// The pattern slot of a child type: tri, quad, tet, prism, pyramid, hex.
+int slot(Topology t);
+
+// Splits cell e of `work` as refine_uniform does, its children numbered
+// base + 1, base + 2, ..., appended to kid_gids and kid_conn by slot; each
+// node other than a corner goes to `added` with its corners.
+void split_cell(const HostMesh& work, LO e, GO base, const NodeGids& ids, std::array<std::vector<GO>, 6>& kid_gids,
+                std::array<std::vector<GO>, 6>& kid_conn, std::vector<NewVertex>& added);
+
+// Polygon cells of the refined part (cells left as they were).
+struct Polygons {
+  std::vector<GO> gids;
+  std::vector<Offset> offsets{0};
+  std::vector<GO> conn;
+};
+
 // The refined part from the children (by pattern slot: tri, quad, tet,
-// prism, pyramid, hex) and the vertices added, with the vertices the
-// children use; parents and fields (but refine: ones) from `mesh`, whose
-// owned cells `work` holds.
+// prism, pyramid, hex; and polygons) and the vertices added, with the
+// vertices the children use; parents and fields (but refine: ones) from
+// `mesh`, whose owned cells `work` holds.
 Level assemble(const Comm& comm, const HostMesh& mesh, const HostMesh& work, std::array<std::vector<GO>, 6>& kid_gids,
-               std::array<std::vector<GO>, 6>& kid_conn, std::vector<NewVertex>& added, const Numbers& nums);
+               std::array<std::vector<GO>, 6>& kid_conn, std::vector<NewVertex>& added, const Numbers& nums,
+               const Polygons& polygons);
 
 // Collective: throws std::invalid_argument on every rank if any rank's mesh
 // cannot be refined or the ranks disagree on the levels or the dimension;
