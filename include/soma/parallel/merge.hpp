@@ -51,6 +51,24 @@ Sharing merge_vertices(const Comm& comm, MeshBuilder& builder, PointTolerance to
 // sharing in element_gids(d) order. Throws as merge_vertices.
 std::array<std::optional<Sharing>, 4> number_elements(const Comm& comm, MeshBuilder& builder, GO base = 1);
 
+// Collective: merges a built mesh in place: its live vertices that match
+// (on any rank) become one, and it is built again as merge_vertices,
+// number_elements and build_local_part (or, on one rank without sharing,
+// MeshBuilder::build) make it, in its ordering, with the graphs it held
+// (on any rank) and its explicit sides. Vertex gids become 1 + match_points'
+// ids and element and explicit side gids number their corner sets, so gids
+// a rank gave alone (MeshEdit's, say, after a local refinement) agree after.
+// Sets, fields and mesh values follow each entity, a vertex by its merged
+// gid, an entity by its merged corners; where entities on a rank become one,
+// the one of least lid keeps its values and memberships, so a merged vertex
+// may hold different values on the ranks sharing it until an owner-to-copies
+// halo update. Derived sides that no longer exist lose their values.
+// Returns old lid -> new lid per dimension (invalid_lo: merged into another,
+// or removed). Throws std::invalid_argument on every rank if a rank holds
+// ghosts, and as merge_vertices; a throw before the swap leaves the mesh
+// unchanged.
+Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, PointTolerance tol = {});
+
 // Collective: merge_vertices, number_elements, then build_local_part given
 // their sharing, so no gid directory is consulted. Throws as those.
 [[nodiscard]] HostMesh build_merged_part(const Comm& comm, MeshBuilder&& builder, PointTolerance tol = {},

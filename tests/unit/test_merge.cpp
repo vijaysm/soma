@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
@@ -11,8 +13,13 @@
 
 #include "soma/core/hash3d_exact.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/core/mesh_edit.hpp"
+#include "soma/core/set_builder.hpp"
+#include "soma/fields/domain_mesh.hpp"
+#include "soma/topology/build.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
+#include "soma/parallel/ghosts.hpp"
 #include "soma/parallel/merge.hpp"
 
 using soma::Comm;
@@ -276,4 +283,153 @@ TEST(ParallelMergeMesh, ARefusalOnOneRankThrowsOnEvery) {
     EXPECT_THROW(soma::merge_vertices(c, b, {0.6, PointNorm::linf}), std::runtime_error);
   }
   EXPECT_EQ(b.vertex_gids().size(), refused ? 8U : 4U);
+}
+
+namespace {
+
+using Host = Kokkos::HostSpace;
+
+// A vertex field of x + 2 y + 1000 and an element field of the gid.
+void add_fields(soma::HostMesh& m) {
+  auto a = m.fields().add<double>(
+      "a", soma::make_space(m, soma::Domain<Host>::all(m, 0), soma::Layout::per_entity()), 1,
+      {.default_value = std::vector<double>{-1}});
+  for (LO v = 0; v < m.count(0); ++v) {
+    a.view()(static_cast<std::size_t>(v), 0) = m.coords()(v, 0) + 2 * m.coords()(v, 1) + 1000;
+  }
+  auto e = m.fields().add<double>(
+      "e", soma::make_space(m, soma::Domain<Host>::all(m, 2), soma::Layout::per_entity()), 1,
+      {.default_value = std::vector<double>{-1}});
+  for (LO c = 0; c < m.count(2); ++c) e.view()(static_cast<std::size_t>(c), 0) = static_cast<double>(m.gid(2)(c));
+}
+
+// Splits every live quad of a plane mesh into four, its edge midpoints and
+// centre added as new vertices of its own (with MeshEdit's gids), as a local
+// refinement does on each rank. The new points are off by `off` in every
+// other quad and by 2 off in the rest, as points computed apart would be.
+void refine_locally(soma::HostMesh& m, Real off) {
+  soma::MeshEdit edit(m);
+  const auto v = m.view();
+  std::vector<LO> parents;
+  for (LO e = 0; e < m.count(2); ++e) {
+    if (!v.alive(2, e)) continue;
+    parents.push_back(e);
+    std::array<LO, 4> c;
+    std::array<std::array<Real, 2>, 4> p;
+    for (std::size_t k = 0; k < 4; ++k) {
+      c[k] = v.vertex(2, e, static_cast<LO>(k));
+      p[k] = {v.x(c[k], 0), v.x(c[k], 1)};
+    }
+    const Real d = off * static_cast<Real>(1 + e % 2);
+    std::vector<Real> xyz;
+    for (std::size_t k = 0; k < 4; ++k) {
+      const auto& a = p[k];
+      const auto& b = p[(k + 1) % 4];
+      xyz.insert(xyz.end(), {a[0] + 0.5 * (b[0] - a[0]) + d, a[1] + 0.5 * (b[1] - a[1]) + d, 0});
+    }
+    xyz.insert(xyz.end(), {0.5 * (p[0][0] + p[2][0]) + d, 0.5 * (p[0][1] + p[2][1]) + d, 0});
+    const LO n = edit.add_vertices(xyz);  // midpoints n .. n + 3, centre n + 4
+    const std::vector<LO> kids{c[0], n,     n + 4, n + 3, n,     c[1],  n + 1, n + 4,
+                               n + 4, n + 1, c[2], n + 2, n + 3, n + 4, n + 2, c[3]};
+    edit.add_elements(Topology::quad, kids);
+  }
+  edit.remove(2, parents);
+  (void)edit.apply();
+}
+
+}  // namespace
+
+// Two patches built with their seam vertices twice: the merged mesh has the
+// seam once, its graphs again, and its fields and sets on the entities they
+// were on (a merged vertex: its least lid's).
+TEST(MergeMesh, ABuiltMeshMergesWithItsFieldsSetsAndGraphs) {
+  MeshBuilder b(2);
+  add_patch(b, 2, 2, 0, 0, 0);
+  add_patch(b, 2, 2, 2, 100, 100);
+  soma::HostMesh m = std::move(b).build();
+  soma::build_adjacencies(m, soma::AdjacencyRequest{}.add(2, 1));
+  add_fields(m);
+  std::vector<LO> seam, right;
+  for (LO v = 0; v < m.count(0); ++v) {
+    if (m.coords()(v, 0) == 2) seam.push_back(v);
+  }
+  for (LO c = 0; c < m.count(2); ++c) {
+    if (m.gid(2)(c) > 100) right.push_back(c);
+  }
+  ASSERT_EQ(seam.size(), 6U);
+  soma::SetBuilder sb;
+  std::vector<soma::SetItem> items;
+  for (const LO v : seam) items.push_back({0, v});
+  sb.add(soma::SetSpec{1, soma::set_unique, items, {}, {}});
+  items.clear();
+  for (const LO c : right) items.push_back({2, c});
+  sb.add(soma::SetSpec{2, soma::set_unique, items, {}, {}});
+  std::move(sb).install(m);
+  // Field "lid" holds each vertex's lid; a merged vertex must keep its least.
+  auto lid = m.fields().add<double>(
+      "lid", soma::make_space(m, soma::Domain<Host>::all(m, 0), soma::Layout::per_entity()), 1);
+  std::vector<std::pair<std::array<Real, 2>, LO>> least;
+  for (LO v = 0; v < m.count(0); ++v) {
+    lid.view()(static_cast<std::size_t>(v), 0) = static_cast<double>(v);
+    least.push_back({{m.coords()(v, 0), m.coords()(v, 1)}, v});
+  }
+  std::sort(least.begin(), least.end());
+
+  const soma::Renumbering r = soma::merge_mesh(Comm::self(), m);
+  const auto lid_after = m.fields().get<double>("lid", 0);
+  LO not_least = 0;
+  for (LO v = 0; v < m.count(0); ++v) {
+    const auto it = std::lower_bound(least.begin(), least.end(),
+                                     std::pair<std::array<Real, 2>, LO>{{m.coords()(v, 0), m.coords()(v, 1)}, -1});
+    not_least += lid_after.view()(static_cast<std::size_t>(v), 0) == static_cast<double>(it->second) ? 0 : 1;
+  }
+  EXPECT_EQ(not_least, 0);
+  EXPECT_EQ(m.count(0), 15);
+  EXPECT_EQ(m.count(1), 22);
+  EXPECT_EQ(m.count(2), 8);
+  EXPECT_TRUE(m.adjacencies().has(2, 1));
+  EXPECT_EQ(std::count(r.new_lid[0].begin(), r.new_lid[0].end(), soma::invalid_lo), 3);
+  const auto a = m.fields().get<double>("a", 0);
+  const auto e = m.fields().get<double>("e", 2);
+  LO wrong = 0;
+  for (LO v = 0; v < m.count(0); ++v) {
+    wrong += a.view()(static_cast<std::size_t>(v), 0) == m.coords()(v, 0) + 2 * m.coords()(v, 1) + 1000 ? 0 : 1;
+  }
+  for (LO c = 0; c < m.count(2); ++c) wrong += e.view()(static_cast<std::size_t>(c), 0) > 0 ? 0 : 1;
+  EXPECT_EQ(wrong, 0);
+  EXPECT_EQ(m.sets().members_of(0, 0).size, 3);
+  EXPECT_EQ(m.sets().members_of(1, 2).size, 4);
+}
+
+// Parts refined each on its own with MeshEdit, the new vertices on part
+// boundaries made on both sides with gids of their own: merged, the parts
+// share them, and the counts are the refined mesh's.
+TEST(ParallelMergeMesh, LocallyRefinedPartsAgreeAfterMerge) {
+  const Comm c = Comm::world();
+  soma::HostMesh m = soma::build_merged_part(c, strip(c.rank(), c.size(), false), {tol, PointNorm::l2});
+  add_fields(m);
+  refine_locally(m, (c.rank() + 1) * 1e-13);
+  (void)soma::merge_mesh(c, m, {tol, PointNorm::l2});
+  constexpr GO side = 2 * cells + 1;
+  EXPECT_EQ(owned(c, m, 0), side * side);
+  EXPECT_EQ(owned(c, m, 2), (side - 1) * (side - 1));
+  // Coarse vertices keep their values; new ones have the default.
+  const auto a = m.fields().get<double>("a", 0);
+  LO wrong = 0, coarse = 0;
+  for (LO v = 0; v < m.count(0); ++v) {
+    const double got = a.view()(static_cast<std::size_t>(v), 0);
+    if (got == -1) continue;
+    ++coarse;
+    wrong += std::abs(got - (m.coords()(v, 0) + 2 * m.coords()(v, 1) + 1000)) < 1e-8 ? 0 : 1;
+  }
+  EXPECT_EQ(wrong, 0);
+  EXPECT_GE(c.allreduce(static_cast<GO>(coarse), soma::Op::sum), (cells + 1) * (cells + 1));
+}
+
+TEST(ParallelMergeMesh, AMeshWithGhostsIsRefusedOnEveryRank) {
+  const Comm c = Comm::world();
+  if (c.size() == 1) return;
+  soma::HostMesh m = soma::build_merged_part(c, strip(c.rank(), c.size(), false), {tol, PointNorm::l2});
+  m.add_ghosts(c, {});
+  EXPECT_THROW((void)soma::merge_mesh(c, m), std::invalid_argument);
 }

@@ -428,6 +428,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `merge_vertices` and `number_elements` as their entities', so `build_merged_part(comm,
   builder, tol)` builds the part without `resolve_sharing`'s gid directory. Tolerance clusters
   are joined across ranks by FastSV rounds, logarithmic in the longest chain.
+- `merge_mesh(comm, mesh, tol)` merges a built mesh in place, serial or distributed: its live
+  vertices that match on any rank become one, elements and explicit sides are numbered by their
+  corner sets, and the mesh is built again with the graphs it held, so parts refined each on
+  its own with `MeshEdit` (gids of their own) share their new boundary vertices after. Sets,
+  fields and mesh values follow each entity; where entities on a rank become one, the least
+  lid's are kept. A mesh with ghosts is refused on every rank.
 - `point_key`, `point_of_key` and `point_keys(exec, xyz, keys)` (`soma/core/point_key.hpp`)
   compute the exact keys in device code, equal to `hash3d_exact`'s; `match_points` computes its
   keys and NaN check with them in one parallel pass.
