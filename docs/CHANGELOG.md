@@ -423,7 +423,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `build_local_part` and share by gid. Coordinates decide identity and sharing; gids are kept
   (`MergeGids::keep`, the default): an entity keeps its gid unless another entity has it,
   merged entities keep the least of theirs, and the others take new gids above every gid in
-  use, numbered the same on any number of ranks. `MergeGids::renumber` numbers every entity by
+  use, in the order of their points (or corners) and so the same on any number of ranks: a
+  scan over blocks of that order, with no further sort. `MergeGids::renumber` numbers every entity by
   its point or corner gids instead. An element left naming a vertex twice throws on every rank,
   and no builder changes. `MeshBuilder::rename_vertices`, `rename_elements` and
   `element_corners` are the steps underneath.

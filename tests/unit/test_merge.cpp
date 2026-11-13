@@ -540,6 +540,22 @@ TEST(ParallelMergeMesh, LocallyRefinedPartsAgreeAfterMerge) {
     }
     EXPECT_EQ(moved, 0);
     EXPECT_EQ(low, 0);
+    // New vertices are numbered first, first + 1, ... in the order of their
+    // points, whatever the number of ranks (first above every gid the mesh
+    // held, MeshEdit's included).
+    std::vector<double> fresh;
+    for (LO v = 0; v < m.count(0); ++v) {
+      if (m.gid(0)(v) > top) fresh.insert(fresh.end(), {m.coords()(v, 0), m.coords()(v, 1), static_cast<double>(m.gid(0)(v))});
+    }
+    const std::vector<double> all = c.allgatherv(std::span<const double>(fresh));
+    std::vector<std::array<double, 3>> rows;
+    for (std::size_t i = 0; i < all.size(); i += 3) rows.push_back({all[i], all[i + 1], all[i + 2]});
+    std::sort(rows.begin(), rows.end());
+    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    std::size_t out_of_order = 0;
+    ASSERT_FALSE(rows.empty());
+    for (std::size_t i = 0; i < rows.size(); ++i) out_of_order += rows[i][2] == rows[0][2] + static_cast<double>(i) ? 0 : 1;
+    EXPECT_EQ(out_of_order, 0U);
     // Coarse vertices keep their values; new ones have the default.
     const auto a = m.fields().get<double>("a", 0);
     LO wrong = 0, coarse = 0;
