@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
+#include <cmath>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -702,6 +704,49 @@ RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<con
     out.children[static_cast<std::size_t>(next[static_cast<std::size_t>(out.parent[c])]++)] = static_cast<LO>(c);
   }
   return out;
+}
+
+std::vector<std::int8_t> mark_threshold(std::span<const Real> indicator, Real threshold) {
+  std::vector<std::int8_t> marks;
+  marks.reserve(indicator.size());
+  for (const Real v : indicator) marks.push_back(v > threshold ? 1 : 0);
+  return marks;
+}
+
+std::vector<std::int8_t> mark_fraction(const Comm& comm, std::span<const Real> indicator, Real fraction) {
+  std::int32_t bad = fraction >= 0 && fraction <= 1 ? 0 : 1;
+  Real top = 0, total = 0;
+  for (const Real v : indicator) {
+    if (!std::isfinite(v) || v < 0) bad = 1;
+    top = std::max(top, v);
+    total += v;
+  }
+  if (comm.allreduce(bad, Op::max) != 0) {
+    throw std::invalid_argument("mark_fraction: a fraction outside [0, 1], or an indicator negative or not finite");
+  }
+  top = comm.allreduce(top, Op::max);
+  total = comm.allreduce(total, Op::sum);
+  std::vector<std::int8_t> marks(indicator.size(), 0);
+  if (fraction == 0 || total == 0) return marks;
+  // The largest cutoff whose cells reach the fraction: by bisection on the
+  // bits of non-negative values, which order as the values do.
+  const auto reached = [&](Real cutoff) {
+    Real sum = 0;
+    for (const Real v : indicator) sum += v >= cutoff ? v : 0;
+    return comm.allreduce(sum, Op::sum) >= fraction * total;
+  };
+  std::uint64_t lo = 0, hi = std::bit_cast<std::uint64_t>(top);  // reached(lo) holds
+  while (lo < hi) {
+    const std::uint64_t mid = lo + (hi - lo + 1) / 2;
+    if (reached(std::bit_cast<Real>(mid))) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  const Real cutoff = std::bit_cast<Real>(lo);
+  for (std::size_t i = 0; i < indicator.size(); ++i) marks[i] = indicator[i] >= cutoff ? 1 : 0;
+  return marks;
 }
 
 }  // namespace soma

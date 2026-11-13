@@ -148,6 +148,19 @@ struct MarkedOptions {
 [[nodiscard]] RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
                                          MarkedOptions options = {});
 
+// Marks for refine_marked from an indicator per owned cell (local id order).
+// mark_threshold marks the cells whose indicator exceeds `threshold`.
+// mark_fraction marks the cells of largest indicator whose indicators add up
+// to at least `fraction` of their sum over every rank (Doerfler marking; the
+// indicators should be non-negative, squared error estimates, say): those
+// whose indicator is at least the largest cutoff that reaches the fraction,
+// so cells of equal indicator are marked alike. A fraction of 0, or a sum of
+// 0, marks nothing; the sums are rounded as each partition adds them.
+// Collective; throws std::invalid_argument on every rank for a fraction
+// outside [0, 1] or an indicator negative or not finite on any rank.
+[[nodiscard]] std::vector<std::int8_t> mark_threshold(std::span<const Real> indicator, Real threshold);
+[[nodiscard]] std::vector<std::int8_t> mark_fraction(const Comm& comm, std::span<const Real> indicator, Real fraction);
+
 }  // namespace soma
 
 #endif  // SOMA_ALGORITHMS_REFINE_HPP_

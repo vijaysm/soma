@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -25,6 +26,7 @@
 #include "soma/fields/registry.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/halo_exchange.hpp"
+#include "soma/parallel/migrate.hpp"
 #include "refine_meshes.hpp"
 
 namespace {
@@ -495,6 +497,85 @@ TEST(RefineMarked, ConformingChildrenTileTheirParents) {
     }
     EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-13);
   }
+}
+
+// Doerfler marking: the cells of largest indicator that reach the fraction
+// of the sum, ties alike, the same on any partition; threshold marking.
+TEST(RefineMarked, MarkingByFractionAndThreshold) {
+  const Comm c = Comm::world();
+  const Cells cells = volume(4, 3, 3, Topology::hex);
+  const soma::HostMesh mesh = build(c, cells, 1);
+  const LO owned = mesh.segment_table(3).owned_end;
+  // Whole values (sums are exact): gid % 13, so ties abound, and zeros.
+  const auto eta = [](GO g) { return static_cast<Real>(g % 13); };
+  std::vector<Real> indicator;
+  for (LO e = 0; e < owned; ++e) indicator.push_back(eta(mesh.gid(3)(e)));
+  std::vector<Real> all;
+  for (std::size_t g = 1; g <= cells.cells.size(); ++g) all.push_back(eta(static_cast<GO>(g)));
+  std::sort(all.begin(), all.end(), std::greater<>());
+  Real total = 0;
+  for (const Real v : all) total += v;
+  for (const Real fraction : {0.0, 0.3, 0.5, 0.9, 1.0}) {
+    SCOPED_TRACE(fraction);
+    // Serially: the smallest indicator of the shortest prefix that reaches it.
+    Real cutoff = all.front() + 1, sum = 0;
+    for (const Real v : all) {
+      if (fraction == 0 || sum >= fraction * total) break;
+      sum += v;
+      cutoff = v;
+    }
+    const auto marks = soma::mark_fraction(c, indicator, fraction);
+    ASSERT_EQ(marks.size(), indicator.size());
+    Real wrong = 0, marked = 0;
+    for (std::size_t i = 0; i < marks.size(); ++i) {
+      wrong += (marks[i] != 0) == (indicator[i] >= cutoff) ? 0 : 1;
+      marked += marks[i];
+    }
+    EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
+    if (fraction == 0) EXPECT_EQ(c.allreduce(marked, soma::Op::sum), 0);
+    if (fraction == 1) {
+      EXPECT_EQ(c.allreduce(marked, soma::Op::sum), std::count_if(all.begin(), all.end(), [](Real v) { return v > 0; }));
+    }
+  }
+  const auto marks = soma::mark_threshold(indicator, 10);
+  Real wrong = 0;
+  for (std::size_t i = 0; i < marks.size(); ++i) wrong += (marks[i] != 0) == (indicator[i] > 10) ? 0 : 1;
+  EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
+  EXPECT_THROW((void)soma::mark_fraction(c, indicator, 1.5), std::invalid_argument);
+  std::vector<Real> negative = indicator;
+  if (c.rank() == c.size() - 1) negative.push_back(-1);
+  EXPECT_THROW((void)soma::mark_fraction(c, negative, 0.5), std::invalid_argument);
+}
+
+// Refinement near the origin loads the ranks unevenly; rebalance evens the
+// parts, and refinement after it goes on as if it had not moved: reusing the
+// vertices born before, the same mesh as the serial one.
+TEST(RefineMarked, RebalanceEvensThePartsAndRefinementGoesOn) {
+  const Comm c = Comm::world();
+  const Comm self = Comm::self();
+  const Case k = cases()[3];  // hexes
+  soma::HostMesh mesh = soma::rebalance(c, rounds(c, build(c, k.cells, 0), 2));
+  const Real cells = owned_count(c, mesh, 3);
+  const Real mine = static_cast<Real>(mesh.segment_table(3).owned_end);
+  EXPECT_LE(c.allreduce(mine, soma::Op::max) - c.allreduce(mine, soma::Op::min), 1);
+  const soma::HostMesh serial_mesh = rounds(self, build(self, k.cells, 2), 2);
+  EXPECT_EQ(cells, static_cast<Real>(serial_mesh.count(3)));
+  const auto fine = soma::refine_marked(c, mesh, near_origin(mesh, radii[2]));
+  const auto serial = soma::refine_marked(self, serial_mesh, near_origin(serial_mesh, radii[2]));
+  std::map<GO, std::array<std::uint64_t, 3>> where;
+  for (LO v = 0; v < serial.mesh.count(0); ++v) {
+    const auto p = point(serial.mesh, v);
+    where[serial.mesh.gid(0)(v)] = {bits(p[0]), bits(p[1]), bits(p[2])};
+  }
+  Real differ = 0;
+  for (LO v = 0; v < fine.mesh.count(0); ++v) {
+    const auto p = point(fine.mesh, v);
+    const auto it = where.find(fine.mesh.gid(0)(v));
+    differ += it != where.end() && it->second == std::array{bits(p[0]), bits(p[1]), bits(p[2])} ? 0 : 1;
+  }
+  EXPECT_EQ(c.allreduce(differ, soma::Op::sum), 0);
+  EXPECT_EQ(owned_count(c, fine.mesh, 0), static_cast<Real>(serial.mesh.count(0)));
+  EXPECT_EQ(owned_count(c, fine.mesh, 3), static_cast<Real>(serial.mesh.count(3)));
 }
 
 TEST(RefineMarked, BadInputThrowsOnEveryRank) {
