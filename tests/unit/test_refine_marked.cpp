@@ -26,7 +26,9 @@
 #include "soma/fields/registry.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/halo_exchange.hpp"
+#include "soma/parallel/merge.hpp"
 #include "soma/parallel/migrate.hpp"
+#include "soma/parallel/point_match.hpp"
 #include "refine_meshes.hpp"
 
 namespace {
@@ -678,6 +680,53 @@ TEST(RefineMarked, RebalanceEvensThePartsAndRefinementGoesOn) {
       EXPECT_EQ(c.allreduce(differ, soma::Op::sum), 0);
       EXPECT_EQ(owned_count(c, mesh, 0), static_cast<Real>(serial.count(0)));
       EXPECT_EQ(owned_count(c, mesh, d), static_cast<Real>(serial.count(d)));
+    }
+  }
+}
+
+// Refined meshes checked by their coordinates alone (match_points,
+// merge_mesh): each point held on any rank is one owned vertex, so no two
+// vertices share a point and copies sit at their owners'; merging, gids
+// kept, changes nothing. Uniformly, marked and conforming, after rebalances.
+TEST(RefineMarked, RefinedMeshesNeedNoMerging) {
+  const Comm c = Comm::world();
+  for (const Case& k : cases()) {
+    if (!k.again) continue;
+    for (int how = 0; how < 3; ++how) {
+      SCOPED_TRACE(testing::Message() << k.name << " how " << how);
+      soma::HostMesh fine = how == 0 ? soma::refine_uniform(c, build(c, k.cells, 1), {.levels = 2}).mesh
+                                     : build(c, k.cells, 1);
+      for (int r = 0; how > 0 && r < 2; ++r) {
+        auto next = soma::refine_marked(c, fine, near_origin(fine, radii[r]), {.conforming = how == 2});
+        fine = soma::rebalance(c, next.mesh);
+      }
+      const int d = fine.dim();
+      std::vector<Real> xyz;
+      for (LO v = 0; v < fine.count(0); ++v) {
+        const auto p = point(fine, v);
+        xyz.insert(xyz.end(), p.begin(), p.end());
+      }
+      const soma::PointIds ids = soma::match_points(c, xyz);
+      EXPECT_EQ(static_cast<Real>(ids.count), owned_count(c, fine, 0));
+      // Per rank, one point one gid.
+      std::map<GO, GO> gid_of;
+      Real clash = 0;
+      for (LO v = 0; v < fine.count(0); ++v) {
+        const auto [it, fresh] = gid_of.emplace(ids.ids[static_cast<std::size_t>(v)], fine.gid(0)(v));
+        clash += fresh || it->second == fine.gid(0)(v) ? 0 : 1;
+      }
+      EXPECT_EQ(c.allreduce(clash, soma::Op::sum), 0);
+
+      const auto gids = [&](const soma::HostMesh& m, int dim) {
+        std::vector<GO> g;
+        for (LO e = 0; e < m.count(dim); ++e) g.push_back(m.gid(dim)(e));
+        std::sort(g.begin(), g.end());
+        return g;
+      };
+      const auto vertices = gids(fine, 0), cells = gids(fine, d);
+      (void)soma::merge_mesh(c, fine);
+      Real changed = gids(fine, 0) == vertices && gids(fine, d) == cells ? 0 : 1;
+      EXPECT_EQ(c.allreduce(changed, soma::Op::sum), 0);
     }
   }
 }
