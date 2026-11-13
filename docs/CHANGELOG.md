@@ -423,6 +423,11 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   `build_local_part` and share by gid. An element left naming a vertex twice throws on every
   rank, and no builder changes. `MeshBuilder::rename_vertices`, `rename_elements` and
   `element_corners` are the steps underneath.
+- `transport::rank_keys_held` also returns, per key, the other ranks giving it: the rank of the
+  key's range sees every copy. `match_points` returns this as each point's `Sharing`, and
+  `merge_vertices` and `number_elements` as their entities', so `build_merged_part(comm,
+  builder, tol)` builds the part without `resolve_sharing`'s gid directory. Tolerance clusters
+  are joined across ranks by FastSV rounds, logarithmic in the longest chain.
 
 ### SOMA files
 

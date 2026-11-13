@@ -223,6 +223,33 @@ TEST(ParallelMergeMesh, StripsShareTheirSeamsWithinTolerance) {
   }
 }
 
+// The sharing the merge's sorts find is the sharing the gid directory
+// resolves: the parts are ordered, entity by entity, alike.
+TEST(ParallelMergeMesh, SharingFromTheSortEqualsTheDirectory) {
+  const Comm c = Comm::world();
+  for (const bool refined : {false, true}) {
+    SCOPED_TRACE(refined ? "refined" : "coarse");
+    MeshBuilder a = strip(c.rank(), c.size(), refined);
+    soma::merge_vertices(c, a, {tol, PointNorm::l2});
+    soma::number_elements(c, a);
+    const soma::HostMesh by_directory = soma::build_local_part(c, std::move(a));
+    const soma::HostMesh by_sort =
+        soma::build_merged_part(c, strip(c.rank(), c.size(), refined), {tol, PointNorm::l2});
+    for (const int d : {0, 2}) {
+      EXPECT_EQ(by_sort.count(d), by_directory.count(d));
+      if (by_sort.count(d) != by_directory.count(d)) continue;
+      const auto& s = by_sort.segment_table(d);
+      const auto& t = by_directory.segment_table(d);
+      EXPECT_EQ(s.interior_end, t.interior_end);
+      EXPECT_EQ(s.owned_end, t.owned_end);
+      EXPECT_EQ(s.shared_end, t.shared_end);
+      LO differ = 0;
+      for (LO e = 0; e < by_sort.count(d); ++e) differ += by_sort.gid(d)(e) == by_directory.gid(d)(e) ? 0 : 1;
+      EXPECT_EQ(differ, 0) << "dimension " << d;
+    }
+  }
+}
+
 // Exactly equal seams need no tolerance.
 TEST(ParallelMergeMesh, ExactSeamsMergeExactly) {
   const Comm c = Comm::world();

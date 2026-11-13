@@ -40,6 +40,19 @@ struct KeyRanks {
 [[nodiscard]] KeyRanks rank_keys(const Comm& comm, std::span<const std::uint64_t> keys, std::size_t words,
                                  bool distinct, Strategy strategy = Strategy::automatic);
 
+// Distinct ranks, and per key given, in order, the other ranks that gave an
+// equal key, ascending: ranks[offsets[i]] .. ranks[offsets[i + 1] - 1]. The
+// rank of a key's range sees every copy, so it tells their holders; this
+// costs one more exchange, of the keys held on several ranks only.
+struct HeldKeyRanks : KeyRanks {
+  std::vector<std::size_t> offsets;
+  std::vector<int> ranks;
+};
+
+// Collective. Throws as rank_keys.
+[[nodiscard]] HeldKeyRanks rank_keys_held(const Comm& comm, std::span<const std::uint64_t> keys, std::size_t words,
+                                          Strategy strategy = Strategy::automatic);
+
 }  // namespace soma::transport
 
 #endif  // SOMA_PARALLEL_TRANSPORT_SORT_HPP_

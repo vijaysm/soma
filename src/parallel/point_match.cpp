@@ -411,34 +411,35 @@ PointIds match_points(const Comm& comm, std::span<const Real> xyz, PointToleranc
     std::copy(key.begin(), key.end(), keys.begin() + static_cast<std::ptrdiff_t>(3 * i));
     pts[i] = sx::point_of<3>(key);  // -0.0 as +0.0
   }
-  const transport::KeyRanks exact = transport::rank_keys(comm, keys, 3, true);
   PointIds out;
   out.ids.resize(n);
   out.xyz.resize(3 * n);
-  if (tol.tol == 0) {
+  // Ids, and holders as the sharing, from the last sort.
+  const auto finish = [&](const transport::HeldKeyRanks& ranked, const std::vector<Point>& at) {
     for (std::size_t i = 0; i < n; ++i) {
-      out.ids[i] = static_cast<GO>(exact.index[i]);
-      for (std::size_t j = 0; j < 3; ++j) out.xyz[3 * i + j] = pts[i][j];
+      out.ids[i] = static_cast<GO>(ranked.index[i]);
+      for (std::size_t j = 0; j < 3; ++j) out.xyz[3 * i + j] = at[i][j];
     }
-    out.count = static_cast<GO>(exact.total);
+    out.count = static_cast<GO>(ranked.total);
+    if (ranked.ranks.size() > std::numeric_limits<std::uint32_t>::max()) {
+      throw std::length_error("match_points: more than 2^32 - 1 sharing entries on one rank");
+    }
+    out.sharing.offsets.assign(ranked.offsets.begin(), ranked.offsets.end());
+    out.sharing.ranks = ranked.ranks;
     return out;
-  }
+  };
+  if (tol.tol == 0) return finish(transport::rank_keys_held(comm, keys, 3), pts);
   if (comm.allreduce(static_cast<std::int32_t>(sx::fp_environment_ok() ? 0 : 1), Op::max) != 0) {
     throw std::runtime_error(
         "match_points: unsafe floating point for a tolerance (-ffast-math, flush to zero, or contracted "
         "multiply-adds) on some rank; see soma/core/hash3d_exact.hpp");
   }
+  const transport::KeyRanks exact = transport::rank_keys(comm, keys, 3, true);
   std::vector<std::uint64_t> root;
   std::vector<Point> at_root;
   clusters(comm, exact.index, pts, tol.tol, norm_of(tol.norm), root, at_root);
   // Clusters numbered by their least members, which every point names.
-  const transport::KeyRanks ranked = transport::rank_keys(comm, root, 1, true);
-  for (std::size_t i = 0; i < n; ++i) {
-    out.ids[i] = static_cast<GO>(ranked.index[i]);
-    for (std::size_t j = 0; j < 3; ++j) out.xyz[3 * i + j] = at_root[i][j];
-  }
-  out.count = static_cast<GO>(ranked.total);
-  return out;
+  return finish(transport::rank_keys_held(comm, root, 1), at_root);
 }
 
 }  // namespace soma

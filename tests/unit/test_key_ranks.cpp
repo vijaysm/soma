@@ -67,6 +67,41 @@ TEST(KeyRanks, DistinctIndicesNumberTheDistinctKeys) {
   }
 }
 
+// Held ranks are the distinct ranks, and each key's holders the other ranks
+// that give it, ascending.
+TEST(KeyRanks, HeldKeysNameTheirOtherHolders) {
+  const Comm c = Comm::world();
+  for (const std::uint64_t range : {std::uint64_t{3}, std::uint64_t{40}, std::uint64_t{1000000}}) {
+    std::vector<std::pair<Key, int>> all;
+    for (int r = 0; r < c.size(); ++r) {
+      for (const Key& k : keys_of(r, c.size(), 2, range)) all.emplace_back(k, r);
+    }
+    std::sort(all.begin(), all.end());
+    all.erase(std::unique(all.begin(), all.end()), all.end());
+    const auto mine = keys_of(c.rank(), c.size(), 2, range);
+    for (const Strategy s : {Strategy::crystal, Strategy::alltoallv, Strategy::nbx}) {
+      const auto got = soma::transport::rank_keys_held(c, flat(mine), 2, s);
+      const auto plain = rank_keys(c, flat(mine), 2, true, s);
+      EXPECT_EQ(got.index, plain.index);
+      EXPECT_EQ(got.total, plain.total);
+      EXPECT_EQ(got.offsets.size(), mine.size() + 1);
+      if (got.offsets.size() != mine.size() + 1) continue;
+      std::size_t wrong = 0;
+      for (std::size_t i = 0; i < mine.size(); ++i) {
+        std::vector<int> want;
+        for (auto it = std::lower_bound(all.begin(), all.end(), std::pair<Key, int>{mine[i], -1});
+             it != all.end() && it->first == mine[i]; ++it) {
+          if (it->second != c.rank()) want.push_back(it->second);
+        }
+        const std::vector<int> have(got.ranks.begin() + static_cast<std::ptrdiff_t>(got.offsets[i]),
+                                    got.ranks.begin() + static_cast<std::ptrdiff_t>(got.offsets[i + 1]));
+        wrong += have == want ? 0 : 1;
+      }
+      EXPECT_EQ(wrong, 0U) << "range " << range;
+    }
+  }
+}
+
 // Without `distinct` every key has its own index: by key, then sender rank,
 // then the sender's order.
 TEST(KeyRanks, PlainIndicesOrderTiesByRankThenPlace) {

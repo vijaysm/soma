@@ -7,6 +7,8 @@
 #include <array>
 #include <cstdint>
 #include <exception>
+#include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -37,16 +39,45 @@ void on_every_rank(const Comm& comm, MeshBuilder& builder, const char* who, Edit
   builder = std::move(trial);
 }
 
+// The rows of `s` for the entities a rename keeps: the first given each gid.
+Sharing kept_rows(const std::vector<GO>& gids, const Sharing& s) {
+  std::vector<std::size_t> order(gids.size());
+  std::iota(order.begin(), order.end(), std::size_t{0});
+  std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return gids[a] < gids[b]; });
+  std::vector<std::uint8_t> keep(gids.size(), 0);
+  for (std::size_t k = 0; k < order.size(); ++k) {
+    if (k == 0 || gids[order[k - 1]] != gids[order[k]]) keep[order[k]] = 1;
+  }
+  Sharing out;
+  out.offsets.assign(1, 0);
+  for (std::size_t i = 0; i < gids.size(); ++i) {
+    if (keep[i] == 0) continue;
+    out.ranks.insert(out.ranks.end(), s.ranks.begin() + s.offsets[i], s.ranks.begin() + s.offsets[i + 1]);
+    out.offsets.push_back(static_cast<std::uint32_t>(out.ranks.size()));
+  }
+  return out;
+}
+
 }  // namespace
 
-void merge_vertices(const Comm& comm, MeshBuilder& builder, PointTolerance tol, GO base) {
+Sharing merge_vertices(const Comm& comm, MeshBuilder& builder, PointTolerance tol, GO base) {
   const PointIds m = match_points(comm, builder.vertex_coordinates(), tol);
   std::vector<GO> gids(m.ids.size());
   for (std::size_t i = 0; i < gids.size(); ++i) gids[i] = base + m.ids[i];
   on_every_rank(comm, builder, "merge_vertices", [&](MeshBuilder& b) { b.rename_vertices(gids, m.xyz); });
+  return kept_rows(gids, m.sharing);
 }
 
-void number_elements(const Comm& comm, MeshBuilder& builder, GO base) {
+HostMesh build_merged_part(const Comm& comm, MeshBuilder&& builder, PointTolerance tol, Ordering ordering) {
+  // Vertices first: elements are named by their merged corners.
+  Sharing vertices = merge_vertices(comm, builder, tol);
+  std::array<std::optional<Sharing>, 4> sharing = number_elements(comm, builder);
+  sharing[0] = std::move(vertices);
+  return build_local_part(comm, std::move(builder), sharing, ordering);
+}
+
+std::array<std::optional<Sharing>, 4> number_elements(const Comm& comm, MeshBuilder& builder, GO base) {
+  std::array<std::optional<Sharing>, 4> sharing;
   std::array<std::vector<GO>, 4> gids;
   for (int d = 1; d <= 3; ++d) {
     std::vector<Offset> offsets;
@@ -65,16 +96,21 @@ void number_elements(const Comm& comm, MeshBuilder& builder, GO base) {
       }
       std::sort(key, key + static_cast<std::ptrdiff_t>(offsets[e + 1] - offsets[e]));
     }
-    const transport::KeyRanks ranks = transport::rank_keys(comm, keys, words, true);
+    const transport::HeldKeyRanks ranks = transport::rank_keys_held(comm, keys, words);
     auto& g = gids[static_cast<std::size_t>(d)];
     g.resize(ranks.index.size());
     for (std::size_t e = 0; e < g.size(); ++e) g[e] = base + static_cast<GO>(ranks.index[e]);
+    Sharing s;
+    s.offsets.assign(ranks.offsets.begin(), ranks.offsets.end());
+    s.ranks = ranks.ranks;
+    sharing[static_cast<std::size_t>(d)] = kept_rows(g, s);
   }
   on_every_rank(comm, builder, "number_elements", [&](MeshBuilder& b) {
     for (int d = 1; d <= 3; ++d) {
       if (!gids[static_cast<std::size_t>(d)].empty()) b.rename_elements(d, gids[static_cast<std::size_t>(d)]);
     }
   });
+  return sharing;
 }
 
 }  // namespace soma

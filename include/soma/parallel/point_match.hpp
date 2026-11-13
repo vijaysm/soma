@@ -38,6 +38,7 @@
 
 #include "soma/core/types.hpp"
 #include "soma/parallel/comm.hpp"
+#include "soma/parallel/sharing.hpp"
 
 namespace soma {
 
@@ -53,6 +54,9 @@ struct PointIds {
   std::vector<GO> ids;    // per point given, in [0, count)
   GO count = 0;           // clusters over all ranks
   std::vector<Real> xyz;  // per point, its cluster's least member (x, y, z)
+  // Per point, the other ranks holding a point of its cluster, from the same
+  // sort (no gid directory): the sharing of the vertex the cluster becomes.
+  Sharing sharing;
 };
 
 // Collective: the ids of the points `xyz` (x, y, z interleaved) this rank
