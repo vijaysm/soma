@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include "soma/config.hpp"
 #include "soma/runtime/options.hpp"
 #include "soma/runtime/scope_guard.hpp"
 
@@ -118,8 +119,15 @@ TEST(Options, ScopeGuardReadsThem) {
   EXPECT_THROW({ const soma::ScopeGuard bad(b.argc, b.argv); }, std::invalid_argument);
 }
 
-// The reproducible switch: off by default, the environment then the command
-// line (bare, =1 or =0), anything else refused with nothing changed.
+// The reproducible switch starts as the build was configured
+// (SOMA_REPRODUCIBLE): every test here restores what it found.
+TEST(Options, ReproducibleStartsAsTheBuildSays) {
+  if (std::getenv("SOMA_REPRODUCIBLE") != nullptr) GTEST_SKIP() << "SOMA_REPRODUCIBLE is set in the environment";
+  EXPECT_EQ(soma::reproducible(), SOMA_REPRODUCIBLE_BUILD != 0);
+}
+
+// The reproducible switch: the environment then the command line (bare, =1
+// or =0), anything else refused with nothing changed.
 TEST(Options, ReproducibleIsASwitch) {
   const Restore restore;
   soma::set_reproducible(false);

@@ -7,20 +7,28 @@
 // ghost layer through vertices, smooths the vertex coordinates by K Jacobi
 // Laplacian sweeps (soma::laplacian_smooth; the skin stays), removes the
 // ghosts and writes a SOMA file, or on one rank a legacy VTK file when <out>
-// ends in .vtk. Exit status: 0 done, 1 failed, 2 bad arguments.
+// ends in .vtk. The sweeps run in Kokkos's default execution space: on the
+// GPU where Kokkos has one, each rank on the device Kokkos gives it. Exit
+// status: 0 done, 1 failed, 2 bad arguments.
 
 #include <cstdio>
 #include <exception>
 #include <stdexcept>
 #include <string>
 
+#include <Kokkos_Core.hpp>
+
 #include "soma/algorithms/laplacian.hpp"
+#include "soma/core/transfer.hpp"
 #include "soma/io/h5m.hpp"
 #include "soma/io/soma_file.hpp"
 #include "soma/io/vtk_writer.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/ghosts.hpp"
 #include "soma/runtime/scope_guard.hpp"
+
+// Where the sweeps run: the host's memory in a host-only Kokkos.
+using Mem = Kokkos::DefaultExecutionSpace::memory_space;
 
 int main(int argc, char** argv) {
   const soma::ScopeGuard guard(argc, argv);
@@ -59,7 +67,14 @@ int main(int argc, char** argv) {
     const soma::MeshFormat format = soma::detect_format(in);
     soma::HostMesh mesh = format == soma::MeshFormat::soma ? soma::read_soma(comm, in) : soma::read_h5m(comm, in);
     mesh.add_ghosts(comm, soma::GhostOptions{1, 0, false});
-    const soma::SmoothReport report = soma::laplacian_smooth(comm, mesh, options);
+    soma::SmoothReport report;
+    {
+      // The mesh where the sweeps run: the host's own storage when that is
+      // the host, a copy on the device otherwise, whose coordinates come back.
+      soma::Mesh<Mem> device = mesh.mirror_view<Mem>(soma::TransferOptions::everything());
+      report = soma::laplacian_smooth(comm, device, options);
+      Kokkos::deep_copy(mesh.coords(), device.coords());
+    }
     mesh.remove_ghosts(comm);
     const bool vtk = out.size() > 4 && out.compare(out.size() - 4, 4, ".vtk") == 0;
     if (vtk && comm.size() > 1) throw std::invalid_argument("a .vtk output needs one rank");
@@ -69,7 +84,8 @@ int main(int argc, char** argv) {
       soma::write_soma(comm, mesh, out);
     }
     if (comm.rank() == 0) {
-      std::printf("%s: %d sweep%s", argv[0], report.iterations, report.iterations == 1 ? "" : "s");
+      std::printf("%s: %d sweep%s in %s", argv[0], report.iterations, report.iterations == 1 ? "" : "s",
+                  Kokkos::DefaultExecutionSpace::name());
       if (options.tolerance > 0) std::printf(", last largest move %.3e", report.largest_move);
       std::printf("; wrote %s\n", out.c_str());
     }

@@ -22,8 +22,11 @@
 // GPU-aware MPI can be turned off for debugging without rebuilding.
 #define SOMA_GPU_AWARE_MPI_DEFAULT @SOMA_GPU_AWARE_MPI_DEFAULT@
 
-// 1 where the build turned floating-point contraction off (SOMA_FP_CONTRACT=OFF):
-// no a * b + c becomes a fused multiply-add, on the host or on the device.
-#define SOMA_FP_CONTRACT_OFF @SOMA_FP_CONTRACT_OFF@
+// 1 for a build configured with SOMA_REPRODUCIBLE=ON: compiled with the flags
+// that keep floating-point arithmetic as written (no a * b + c becomes a
+// fused multiply-add, on the host or on the device), and soma::reproducible()
+// starts on. The environment variable SOMA_REPRODUCIBLE=0|1 and
+// --soma-reproducible[=0|1] still set the latter for a run.
+#define SOMA_REPRODUCIBLE_BUILD @SOMA_REPRODUCIBLE_BUILD@
 
 #endif  // SOMA_CONFIG_HPP_

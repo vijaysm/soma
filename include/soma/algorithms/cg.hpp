@@ -102,19 +102,24 @@ std::array<Real, 2> step(LO rows, Real alpha, const View1<const Real, MemSpace>&
 }
 
 // precondition and step with the sums exact; precondition adds (b, b)
-// as the third when with_b.
+// as the third when with_b, in a pass of its own: a kernel reduces at most
+// two exact sums on a GPU (exact::most_sums_on_device).
 template <class MemSpace>
 ExactSums<3> precondition_exact(LO rows, const View1<const Real, MemSpace>& inverse, bool jacobi,
                                 const View1<const Real, MemSpace>& r, const View1<Real, MemSpace>& z,
                                 const View1<const Real, MemSpace>& b, bool with_b) {
-  return reduce_exact<3, typename MemSpace::execution_space>(
-      "soma::cg::precondition_exact", 0, rows, KOKKOS_LAMBDA(const LO i, ExactSums<3>& acc) {
+  const ExactSums<2> two = reduce_exact<2, typename MemSpace::execution_space>(
+      "soma::cg::precondition_exact", 0, rows, KOKKOS_LAMBDA(const LO i, ExactSums<2>& acc) {
         const Real zi = jacobi ? r(i) * inverse(i) : r(i);
         z(i) = zi;
         acc.add(0, r(i) * zi);
         acc.add(1, r(i) * r(i));
-        if (with_b) acc.add(2, b(i) * b(i));
       });
+  ExactSums<3> out;
+  out.set(0, two, 0);
+  out.set(1, two, 1);
+  if (with_b) out.set(2, local_dot_exact(rows, b, b), 0);
+  return out;
 }
 
 template <class MemSpace>

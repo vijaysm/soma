@@ -3,14 +3,19 @@
 
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <map>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
+#include <Kokkos_Core.hpp>
 
 #include "distributed_fixture.hpp"
 #include "soma/algorithms/laplacian.hpp"
+#include "soma/config.hpp"
+#include "soma/core/transfer.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/ghosts.hpp"
 #include "soma/testing/box_mesh.hpp"
@@ -188,6 +193,45 @@ TEST(Laplacian, DistributedSweepsAreTheSerialOnes) {
     soma::SmoothOptions other = o;
     other.iterations = c.rank() == 0 ? 3 : 4;
     if (c.size() > 1) EXPECT_THROW((void)soma::laplacian_smooth(c, m, other), std::invalid_argument);
+  }
+}
+
+// A mesh in the default execution space's memory is smoothed as the host
+// one: the coordinates bit for bit in any build (a sweep adds and divides,
+// which no compiler contracts), in as many sweeps; the largest move bit for
+// bit where that space is a host one or the build keeps arithmetic as
+// written (SOMA_REPRODUCIBLE=ON), to rounding on a device otherwise (its sum
+// of squares is contracted there).
+TEST(Laplacian, DefaultMemorySpaceSweepsAsTheHost) {
+  using Mem = Kokkos::DefaultExecutionSpace::memory_space;
+  constexpr bool bitwise =
+      std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace> || SOMA_REPRODUCIBLE_BUILD;
+  const Comm c = Comm::world();
+  for (const Real tolerance : {0.0, 1e-3}) {
+    SCOPED_TRACE(testing::Message() << "tolerance " << tolerance);
+    soma::HostMesh host = soma::build_local_part(c, local_builder(partition(c, 1), c.rank()));
+    host.add_ghosts(c, soma::GhostOptions{1, 0, false});
+    perturb(host, 0.3);
+    soma::Mesh<Mem> mesh = host.mirror<Mem>(soma::TransferOptions::everything());
+    soma::SmoothOptions o;
+    o.iterations = 25;
+    o.tolerance = tolerance;
+    const soma::SmoothReport want = soma::laplacian_smooth(c, host, o);
+    const soma::SmoothReport got = soma::laplacian_smooth(c, mesh, o);
+    EXPECT_EQ(got.iterations, want.iterations);
+    if (bitwise) {
+      EXPECT_EQ(got.largest_move, want.largest_move);
+    } else {
+      EXPECT_NEAR(got.largest_move, want.largest_move, 4 * std::numeric_limits<Real>::epsilon() * want.largest_move);
+    }
+    const auto x = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, mesh.coords());
+    const auto y = host.coords();
+    ASSERT_EQ(x.extent(0), y.extent(0));
+    LO differ = 0;
+    for (LO v = 0; v < host.count(0); ++v) {
+      for (int q = 0; q < 3; ++q) differ += x(v, q) == y(v, q) ? 0 : 1;
+    }
+    EXPECT_EQ(differ, 0);
   }
 }
 

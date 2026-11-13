@@ -13,9 +13,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -23,7 +25,9 @@
 
 #include "fem_box.hpp"
 #include "soma/algorithms/fv.hpp"
+#include "soma/config.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/core/transfer.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/ghosts.hpp"
 #include "soma/testing/box_mesh.hpp"
@@ -215,6 +219,70 @@ TEST(Fv, DistributedStepsAreTheSerialOnesBitForBit) {
       }
     }
   }
+}
+
+// A space in the default execution space's memory steps as the host one
+// does: bit for bit where that space is a host one or the build keeps
+// arithmetic as written (SOMA_REPRODUCIBLE=ON), the exact total included; to
+// rounding on a device otherwise, whose compiler contracts a * b + c into an
+// fma where the host's need not (nvcc's default).
+TEST(Fv, DefaultMemorySpaceStepsAsTheHost) {
+  using Mem = Kokkos::DefaultExecutionSpace::memory_space;
+  constexpr bool bitwise =
+      std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace> || SOMA_REPRODUCIBLE_BUILD;
+  const Comm c = Comm::world();
+  const bool saved = soma::reproducible();
+  for (const bool exact : {false, true}) {
+    soma::set_reproducible(exact);
+    for (const Topology t : every_topology) {
+      SCOPED_TRACE(testing::Message() << soma::name(t) << " exact " << exact);
+      const soma::HostMesh host = box_part(c, spec_of(t, 6), Part{.deal = 1});
+      const Space reference(c, host);
+      const Vector start = bump_on(reference, host);
+      const auto host_phi = reference.normal_flux(Cellular{});
+      Vector want("want", start.extent(0));
+      Kokkos::deep_copy(want, start);
+      const Real host_dt = 0.5 * reference.max_dt(c, CVector(host_phi));
+      for (int n = 0; n < 30; ++n) reference.step(c, CVector(host_phi), want, host_dt);
+      const Real host_total = reference.total(c, CVector(want));
+
+      const soma::Mesh<Mem> mesh = host.mirror<Mem>(soma::TransferOptions::everything());
+      const soma::FvSpace<Mem> space(c, mesh);
+      const auto phi = space.normal_flux(Cellular{});
+      const soma::View1<const Real, Mem> fluxes(phi);
+      const auto u = space.vector();
+      ASSERT_EQ(u.extent(0), start.extent(0));
+      Kokkos::deep_copy(u, start);
+      const Real dt = 0.5 * space.max_dt(c, fluxes);
+      for (int n = 0; n < 30; ++n) space.step(c, fluxes, u, dt);
+      const Real total = space.total(c, soma::View1<const Real, Mem>(u));
+      const auto got = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, u);
+
+      LO differ = 0;
+      Real worst = 0;
+      for (LO e = 0; e < space.cols(); ++e) {
+        differ += bits(got(e)) == bits(want(e)) ? 0 : 1;
+        worst = std::max(worst, std::abs(got(e) - want(e)));
+      }
+      if (bitwise) {
+        EXPECT_EQ(bits(dt), bits(host_dt));
+        EXPECT_EQ(differ, 0);
+        // The plain total is a reduction, in each space's own order.
+        if (exact) {
+          EXPECT_EQ(bits(total), bits(host_total));
+        } else {
+          EXPECT_NEAR(total, host_total, 1e-13 * host_total);
+        }
+        continue;
+      }
+      // Measured on a GTX 1050 Ti with nvcc 12.5 at 1 to 4 ranks: the same
+      // step, values half an epsilon apart at most, totals 4 epsilon.
+      EXPECT_NEAR(dt, host_dt, 1e-14 * host_dt);
+      EXPECT_LE(worst, 256 * std::numeric_limits<Real>::epsilon());
+      EXPECT_NEAR(total, host_total, 1e-13 * host_total);
+    }
+  }
+  soma::set_reproducible(saved);
 }
 
 // The largest stable step of a uniform flow along x on a square grid is the

@@ -10,8 +10,10 @@
 // (soma::FvSpace), forward Euler, N steps (default 100) at C (default 0.5)
 // times the largest stable step, nothing flowing in. Writes u as the cell
 // field "u", with the ghosts removed, to a SOMA file, or on one rank to a
-// legacy VTK file when <out> ends in .vtk. Exit status: 0 done, 1 failed, 2
-// bad arguments.
+// legacy VTK file when <out> ends in .vtk. The fluxes and the steps run in
+// Kokkos's default execution space: on the GPU where Kokkos has one, each
+// rank on the device Kokkos gives it. Exit status: 0 done, 1 failed, 2 bad
+// arguments.
 
 #include <cmath>
 #include <cstdio>
@@ -22,6 +24,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "soma/algorithms/fv.hpp"
+#include "soma/core/transfer.hpp"
 #include "soma/io/h5m.hpp"
 #include "soma/io/soma_file.hpp"
 #include "soma/io/vtk_writer.hpp"
@@ -39,6 +42,9 @@ struct Rotation {
     return {-omega * (y - cy), omega * (x - cx), 0};
   }
 };
+
+// Where the steps run: the host's memory in a host-only Kokkos.
+using Mem = Kokkos::DefaultExecutionSpace::memory_space;
 
 }  // namespace
 
@@ -93,10 +99,15 @@ int main(int argc, char** argv) {
     const double width = (hi[0] - lo[0]) / 8;
     double before = 0, after = 0, dt = 0;
     {
-      const soma::FvSpace<Kokkos::HostSpace> space(comm, mesh);
+      // The mesh where the kernels run: the host's own storage when that is
+      // the host, a copy on the device otherwise.
+      const soma::Mesh<Mem> device = mesh.mirror_view<Mem>(soma::TransferOptions::everything());
+      const soma::FvSpace<Mem> space(comm, device);
       const auto phi = space.normal_flux(a);
-      const soma::View1<const double, Kokkos::HostSpace> fluxes(phi);
+      const soma::View1<const double, Mem> fluxes(phi);
       auto u = space.vector();
+      // The bump, set on the host (exp there, whatever the device's) and copied.
+      const auto start = Kokkos::create_mirror_view(Kokkos::HostSpace{}, u);
       const int d = mesh.dim();
       const auto m = mesh.view();
       for (soma::LO e = 0; e < space.cols(); ++e) {
@@ -107,15 +118,17 @@ int main(int argc, char** argv) {
         }
         const double r2 =
             (c[0] - bx) * (c[0] - bx) + (c[1] - by) * (c[1] - by) + (d == 3 ? (c[2] - bz) * (c[2] - bz) : 0);
-        u(e) = std::exp(-r2 / (width * width));
+        start(e) = std::exp(-r2 / (width * width));
       }
-      before = space.total(comm, soma::View1<const double, Kokkos::HostSpace>(u));
+      Kokkos::deep_copy(u, start);
+      before = space.total(comm, soma::View1<const double, Mem>(u));
       dt = cfl * space.max_dt(comm, fluxes);
       for (int n = 0; n < steps; ++n) space.step(comm, fluxes, u, dt);
-      after = space.total(comm, soma::View1<const double, Kokkos::HostSpace>(u));
+      after = space.total(comm, soma::View1<const double, Mem>(u));
+      const auto end = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, u);
       auto field = mesh.fields().add_tag<double>("u", d, 1);
       const auto values = field.view();
-      for (soma::LO e = 0; e < space.cols(); ++e) values(e, 0) = u(e);
+      for (soma::LO e = 0; e < space.cols(); ++e) values(e, 0) = end(e);
     }
     mesh.remove_ghosts(comm);
     const bool vtk = out.size() > 4 && out.compare(out.size() - 4, 4, ".vtk") == 0;
@@ -127,8 +140,8 @@ int main(int argc, char** argv) {
       soma::write_soma(comm, mesh, out);
     }
     if (comm.rank() == 0) {
-      std::printf("%s: %d steps of %.3e; total %.15e before, %.15e after; wrote %s\n", argv[0], steps, dt, before,
-                  after, out.c_str());
+      std::printf("%s: %d steps of %.3e in %s; total %.15e before, %.15e after; wrote %s\n", argv[0], steps, dt,
+                  Kokkos::DefaultExecutionSpace::name(), before, after, out.c_str());
     }
     return 0;
   } catch (const std::exception& e) {

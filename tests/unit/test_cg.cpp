@@ -8,6 +8,7 @@
 #include <limits>
 #include <map>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -18,6 +19,8 @@
 #include "soma/algorithms/csr.hpp"
 #include "soma/algorithms/fem.hpp"
 #include "soma/algorithms/fem_space.hpp"
+#include "soma/config.hpp"
+#include "soma/core/transfer.hpp"
 
 using fem_test::box_part;
 using fem_test::solid;
@@ -47,6 +50,11 @@ struct Exact {
 struct Source {
   int d = 2;
   KOKKOS_INLINE_FUNCTION Real operator()(Real x, Real y, Real z) const { return d * pi * pi * Exact{d}(x, y, z); }
+};
+
+// A polynomial right side: no library function a device may round otherwise.
+struct Polynomial {
+  KOKKOS_INLINE_FUNCTION Real operator()(Real x, Real y, Real z) const { return 1 + x * (2 - y) + 3 * z * z; }
 };
 
 soma::testing::BoxSpec cube(Topology t, int n) { return {n, n, solid(t) ? n : 1, t, 1.0, 1.0, 1.0}; }
@@ -199,11 +207,74 @@ TEST(Cg, ReproducibleSolvesAreTheSerialOneBitForBit) {
   if (c.size() > 1) EXPECT_GT(plain_differ, 0);
 }
 
+// A solve in the default execution space's memory is the host one: bit for
+// bit (as many iterations, the same residual, the same value at every vertex)
+// when reproducible, where that space is a host one or the build keeps
+// arithmetic as written (SOMA_REPRODUCIBLE=ON); to the tolerance otherwise,
+// where the dot products are reductions in each space's own order and a
+// device's compiler contracts a * b + c where the host's need not.
+TEST(Cg, DefaultMemorySpaceSolvesAsTheHost) {
+  using Mem = Kokkos::DefaultExecutionSpace::memory_space;
+  constexpr bool bitwise =
+      std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace> || SOMA_REPRODUCIBLE_BUILD;
+  const Comm c = Comm::world();
+  const bool saved = soma::reproducible();
+  soma::CgOptions o;
+  o.rtol = 1e-12;
+  for (const bool exact : {false, true}) {
+    soma::set_reproducible(exact);
+    for (const Topology t : every_topology) {
+      SCOPED_TRACE(testing::Message() << soma::name(t) << " exact " << exact);
+      const soma::HostMesh host = box_part(c, fem_test::spec_of(t, 6), fem_test::Part{.deal = 1});
+      const Space reference(c, host);
+      Matrix host_a = reference.laplacian(c);
+      Vector host_b = reference.load(c, Polynomial{});
+      soma::apply_dirichlet(host_a, host_b, reference.boundary(), CVector(reference.vector()));
+      Vector want = reference.vector();
+      const soma::CgReport host_report = soma::cg(c, reference, host_a, CVector(host_b), want, o);
+      ASSERT_TRUE(host_report.converged);
+
+      const soma::Mesh<Mem> mesh = host.mirror<Mem>(soma::TransferOptions::everything());
+      const soma::FemSpace<Mem> space(c, mesh);
+      soma::CsrMatrix<Mem> a = space.laplacian(c);
+      auto b = space.load(c, Polynomial{});
+      soma::apply_dirichlet(a, b, space.boundary(), soma::View1<const Real, Mem>(space.vector()));
+      auto u = space.vector();
+      const soma::CgReport report = soma::cg(c, space, a, soma::View1<const Real, Mem>(b), u, o);
+      EXPECT_TRUE(report.converged);
+      const auto got = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, u);
+      ASSERT_EQ(got.extent(0), want.extent(0));
+
+      int differ = 0;
+      Real worst = 0;
+      for (LO v = 0; v < space.cols(); ++v) {
+        differ += std::bit_cast<std::uint64_t>(got(v)) == std::bit_cast<std::uint64_t>(want(v)) ? 0 : 1;
+        worst = std::max(worst, std::abs(got(v) - want(v)));
+      }
+      if (bitwise && exact) {
+        EXPECT_EQ(differ, 0);
+        EXPECT_EQ(report.iterations, host_report.iterations);
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(report.residual), std::bit_cast<std::uint64_t>(host_report.residual));
+        continue;
+      }
+      // Both solves stop at a residual of 1e-12 of the right side's norm;
+      // measured on a GTX 1050 Ti with nvcc 12.5 at 1 to 4 ranks: as many
+      // iterations, values 2e-16 apart at most.
+      EXPECT_LE(std::abs(report.iterations - host_report.iterations), 1);
+      EXPECT_LE(worst, 1e-9);
+    }
+  }
+  soma::set_reproducible(saved);
+}
+
 // Exact sums cannot make a matrix assembled atomically or by colors the same
 // on every partition: asked to be reproducible over such a space, every rank
-// throws.
+// throws. The spaces are made with soma::reproducible() off, whatever the
+// build starts as: made with it on, they would gather.
 TEST(Cg, ReproducibleNeedsAGatheringSpace) {
   const Comm c = Comm::world();
+  const bool saved = soma::reproducible();
+  soma::set_reproducible(false);
   const soma::HostMesh mesh = box_part(c, fem_test::spec_of(Topology::quad, 4));
   for (const soma::Assembly m : {soma::Assembly::atomic, soma::Assembly::colored}) {
     const Space space(c, mesh, m);
@@ -216,6 +287,7 @@ TEST(Cg, ReproducibleNeedsAGatheringSpace) {
     o.reproducible = false;
     EXPECT_TRUE(soma::cg(c, space, a, CVector(b), u, o).converged);
   }
+  soma::set_reproducible(saved);
 }
 
 // Digests of a solve, reproducible and not, for compare_threads.cmake, which

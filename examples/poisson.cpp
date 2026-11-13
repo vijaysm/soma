@@ -8,8 +8,10 @@
 // -lap u = 1 with u = 0 on the boundary by linear finite elements
 // (soma::FemSpace) and Jacobi-preconditioned conjugate gradients (soma::cg).
 // Writes u as the vertex field "u", with the ghosts removed, to a SOMA file,
-// or on one rank to a legacy VTK file when <out> ends in .vtk. Exit status:
-// 0 converged, 1 failed or did not converge, 2 bad arguments.
+// or on one rank to a legacy VTK file when <out> ends in .vtk. Assembly and
+// the solve run in Kokkos's default execution space: on the GPU where Kokkos
+// has one, each rank on the device Kokkos gives it. Exit status: 0
+// converged, 1 failed or did not converge, 2 bad arguments.
 
 #include <cstdio>
 #include <exception>
@@ -21,6 +23,7 @@
 #include "soma/algorithms/cg.hpp"
 #include "soma/algorithms/csr.hpp"
 #include "soma/algorithms/fem_space.hpp"
+#include "soma/core/transfer.hpp"
 #include "soma/io/h5m.hpp"
 #include "soma/io/soma_file.hpp"
 #include "soma/io/vtk_writer.hpp"
@@ -33,6 +36,10 @@ namespace {
 struct One {
   KOKKOS_INLINE_FUNCTION double operator()(double, double, double) const { return 1; }
 };
+
+// Where the system is assembled and solved: the host's memory in a host-only
+// Kokkos.
+using Mem = Kokkos::DefaultExecutionSpace::memory_space;
 
 }  // namespace
 
@@ -84,18 +91,22 @@ int main(int argc, char** argv) {
     soma::CgReport report;
     double largest = 0;
     {
-      const soma::FemSpace<Kokkos::HostSpace> space(comm, mesh, assembly);
-      soma::CsrMatrix<Kokkos::HostSpace> a = space.laplacian(comm);
+      // The mesh where the kernels run: the host's own storage when that is
+      // the host, a copy on the device otherwise.
+      const soma::Mesh<Mem> device = mesh.mirror_view<Mem>(soma::TransferOptions::everything());
+      const soma::FemSpace<Mem> space(comm, device, assembly);
+      soma::CsrMatrix<Mem> a = space.laplacian(comm);
       auto b = space.load(comm, One{});
       const auto zero = space.vector();
-      soma::apply_dirichlet(a, b, space.boundary(), soma::View1<const double, Kokkos::HostSpace>(zero));
+      soma::apply_dirichlet(a, b, space.boundary(), soma::View1<const double, Mem>(zero));
       auto u = space.vector();
-      report = soma::cg(comm, space, a, soma::View1<const double, Kokkos::HostSpace>(b), u, options);
+      report = soma::cg(comm, space, a, soma::View1<const double, Mem>(b), u, options);
+      const auto solution = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, u);
       auto field = mesh.fields().add_tag<double>("u", 0, 1);
       const auto values = field.view();
       for (soma::LO v = 0; v < space.cols(); ++v) {
-        values(v, 0) = u(v);
-        if (v < space.rows()) largest = u(v) > largest ? u(v) : largest;
+        values(v, 0) = solution(v);
+        if (v < space.rows()) largest = solution(v) > largest ? solution(v) : largest;
       }
     }
     largest = comm.allreduce(largest, soma::Op::max);
@@ -109,9 +120,9 @@ int main(int argc, char** argv) {
       soma::write_soma(comm, mesh, out);
     }
     if (comm.rank() == 0) {
-      std::printf("%s: CG %s in %d iterations, residual %.3e; max u %.6e; wrote %s\n", argv[0],
-                  report.converged ? "converged" : "did not converge", report.iterations, report.residual, largest,
-                  out.c_str());
+      std::printf("%s: CG %s in %d iterations in %s, residual %.3e; max u %.6e; wrote %s\n", argv[0],
+                  report.converged ? "converged" : "did not converge", report.iterations,
+                  Kokkos::DefaultExecutionSpace::name(), report.residual, largest, out.c_str());
     }
     return report.converged ? 0 : 1;
   } catch (const std::exception& e) {

@@ -60,8 +60,8 @@ soma_add_test(test_ghosts SOURCES unit/test_ghosts.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_fem_elements SOURCES unit/test_fem_elements.cpp)
 # Its bit-for-bit checks compare kernels inlined in different places: they
 # hold where each expression is contracted alike, not under -ffp-contract=fast
-# (the CUDA and HIP default). SOMA_FP_CONTRACT=OFF contracts none.
-if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU" AND NOT SOMA_FP_CONTRACT_OFF)
+# (the CUDA and HIP default). A SOMA_REPRODUCIBLE build contracts none.
+if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU" AND NOT SOMA_REPRODUCIBLE_BUILD)
   target_compile_options(test_fem_elements PRIVATE -ffp-contract=on)
 endif()
 soma_add_test(test_fem_space SOURCES unit/test_fem_space.cpp RANKS 1 2 3 4 5 7 8)

@@ -27,15 +27,31 @@ All notable changes to SOMA are recorded here. The format follows
 - `SOMA_GPU_AWARE_MPI` (`AUTO`, `ON`, `OFF`) sets the compile-time default for passing device
   buffers to MPI. The generated `soma/config.hpp` also honors the environment variable
   `SOMA_GPU_AWARE_MPI=0|1` at run time.
-- `SOMA_FP_CONTRACT` (`DEFAULT`, `OFF`) turns floating-point contraction off for the library
-  and for every target that links it: `-ffp-contract=off` for GCC, Clang and IntelLLVM, and
-  `-fmad=false` with the host flag passed through for nvcc, which contracts `a * b + c` into an
-  fma in device kernels by default. A kernel then rounds the same on the host and on the
-  device; `reproducible` alone promises that only within one build of one compiler. `DEFAULT`
-  keeps each compiler's own setting. `OFF` is a configure error with a compiler outside that
-  list, with a CUDA Kokkos not built as the CMake CUDA language, and with SYCL.
-  `soma/config.hpp` records it as `SOMA_FP_CONTRACT_OFF`, the configure summary as
-  `fp-contract=`. Verified with g++ 13 and nvcc 12.5; its cost in speed is not measured.
+- `SOMA_REPRODUCIBLE=ON` asks for results the same bit for bit wherever SOMA can give them. It
+  adds the compile flags that keep floating-point arithmetic as written, chosen for the
+  compiler and the Kokkos backend (`cmake/SomaReproducible.cmake`), to the library and to
+  every target that links it, an installed SOMA's consumers included, so a kernel rounds the
+  same on the host and on a device; and it makes `soma::reproducible()` start on
+  (`SOMA_REPRODUCIBLE_BUILD` in `soma/config.hpp`), so sums are exact on any number of ranks
+  and threads. The environment and the command line still turn the run-time half off. The
+  flags: `-ffp-contract=off` for GCC, Clang and AppleClang; `-fp-model=precise` with it for
+  IntelLLVM; `-Kieee -Mnofma` for NVHPC; `-fmad=false` and the host compiler's flags through
+  `-Xcompiler` for nvcc, which contracts `a * b + c` into an fma in device kernels by default
+  (`nvcc_wrapper` as the C++ compiler takes `-fmad=false` and the host flags); and
+  `-ffp-contract=off` for Clang compiling CUDA or HIP. A compiler without flags here, a flag
+  the compiler does not take, and fast-math flags in `CMAKE_<LANG>_FLAGS` are configure
+  errors; a SYCL Kokkos gets a warning that its device kernels are unverified. The configure
+  summary reports `reproducible=` with the flags. Verified with g++ 13 and nvcc 12.5 (the
+  CMake CUDA language); the other compilers' flags are untested, and the cost in speed of the
+  flags and of exact sums by default is not measured. A space made while reproducible
+  assembles by `gather`, whatever assembly was asked for.
+- `SOMA_TEST_GPUS` (`AUTO` or a count) is the number of GPUs the example tests of a GPU build
+  use, one MPI rank each: one GPU keeps them to a single rank on that device, N GPUs add runs
+  at N ranks (`example_*.np<N>`), where Kokkos gives each rank of a node a device of its own
+  and `MPIEXEC_PREFLAGS` place the ranks on nodes. `AUTO` counts the GPUs `nvidia-smi` lists on
+  the configuring node (one, with a message, when it cannot); for GPUs across nodes, give the
+  count. A host-only build keeps the two-rank runs. Only the single-GPU case has been run (and
+  two ranks sharing that GPU, with `SOMA_TEST_GPUS=2`).
 - On AppleClang, SOMA seeds `FindOpenMP` from Homebrew libomp so that Kokkos with its OpenMP
   backend can be found.
 - The configure summary line reports the Kokkos source, host and GPU backends, MPI, tests,
@@ -596,6 +612,15 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   rank.
 - `examples/advect.cpp` carries a bump around a `.h5m` or SOMA mesh by a rigid rotation on any
   number of ranks and writes u as a cell field.
+- The three examples compute in `Kokkos::DefaultExecutionSpace`, on the GPU of a GPU build:
+  the mesh is mirrored to that space's memory (aliased on the host), smoothed, solved on or
+  advected there, and the result copied back for the file. Each names the space in its
+  message.
+- A reproducible CG solve no longer throws on a CUDA device ("requested too much L0 scratch
+  memory"): its first kernel reduced three exact sums, 1656 bytes a value, and Kokkos's Cuda
+  reduction holds 34 values in a block's 48 KiB of shared memory. (b, b) is now a pass of its
+  own, once a solve, with the same bits; `reduce_exact` refuses more than two sums in a
+  device kernel when compiled.
 
 ### Testing
 
@@ -641,11 +666,19 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   AMR VTK test's value function now has exact products, and
   `FemSpace.DefaultMemorySpaceAssemblesTheHostMatrix` stays bitwise on a host default space and
   bounds the difference by 8 epsilon of the largest entry on a device (1.25 epsilon measured
-  on a GTX 1050 Ti with nvcc 12.5, at 1 to 4 ranks). In a `SOMA_FP_CONTRACT=OFF` build it is
+  on a GTX 1050 Ti with nvcc 12.5, at 1 to 4 ranks). In a `SOMA_REPRODUCIBLE=ON` build it is
   bitwise on the device too (the same card, 1 to 4 ranks). Source spellings nvcc 12.5 rejects
   are gone: a namespace-scope constant named `all` (the FEM and FV tests), a string-literal
   default for a `const std::string&` parameter (`ProgOptions`), and braced range-for lists
   whose later elements are bare braces.
+- `Fv.DefaultMemorySpaceStepsAsTheHost`, `Cg.DefaultMemorySpaceSolvesAsTheHost` and
+  `Laplacian.DefaultMemorySpaceSweepsAsTheHost` run the steps, the solve and the sweeps in the
+  default execution space's memory against the host's. Smoothing is bit for bit in any build
+  (a sweep adds and divides). Steps and reproducible solves are bit for bit on a host default
+  space and in a `SOMA_REPRODUCIBLE=ON` build; on a device otherwise they are bounded: values
+  within 256 epsilon after 30 steps (half an epsilon measured), as many CG iterations give or
+  take one and values within 1e-9 at a relative tolerance of 1e-12 (the same count and 2e-16
+  measured), on a GTX 1050 Ti with nvcc 12.5 at 1 to 4 ranks.
 - The exception-safety test exports its symbols (`ENABLE_EXPORTS`), so the backtrace rule
   that skips Kokkos's own deallocation sees Kokkos frames with a statically linked Kokkos on
   glibc too (they were invisible to `backtrace_symbols`, and the injected failure aborted).

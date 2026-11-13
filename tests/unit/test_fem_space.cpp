@@ -302,13 +302,13 @@ TEST(FemSpace, MovedCoordinatesAssembleAsSerialOnes) {
 
 // A space in the default execution space's memory assembles what the host
 // one does: bit for bit where that space is a host one or the build
-// contracts nowhere (SOMA_FP_CONTRACT=OFF), to rounding on a device
+// contracts nowhere (SOMA_REPRODUCIBLE=ON), to rounding on a device
 // otherwise, whose compiler contracts a * b + c into an fma where the
 // host's need not (nvcc's default).
 TEST(FemSpace, DefaultMemorySpaceAssemblesTheHostMatrix) {
   using Mem = Kokkos::DefaultExecutionSpace::memory_space;
   constexpr bool bitwise =
-      std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace> || SOMA_FP_CONTRACT_OFF;
+      std::is_same_v<Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace> || SOMA_REPRODUCIBLE_BUILD;
   const Comm c = Comm::world();
   for (const Topology t : {Topology::tri, Topology::hex}) {
     SCOPED_TRACE(soma::name(t));
@@ -595,10 +595,23 @@ TEST(FemSpace, CellColorsAreValidAndFew) {
   }
 }
 
+namespace {
+
+// soma::reproducible() set for a scope.
+struct Reproducible {
+  bool saved = soma::reproducible();
+  explicit Reproducible(bool on) { soma::set_reproducible(on); }
+  ~Reproducible() { soma::set_reproducible(saved); }
+};
+
+}  // namespace
+
 // Atomic and colored assembly give the gather's matrix to rounding, and
-// colored assembly the same bits every time.
+// colored assembly the same bits every time. Not reproducible, whatever the
+// build starts as: a reproducible space gathers whichever method is asked for.
 TEST(FemSpace, AssemblyMethodsAgree) {
   const Comm c = Comm::world();
+  const Reproducible off(false);
   for (const Topology t : every_topology) {
     for (const int deal : {0, 1}) {
       SCOPED_TRACE(testing::Message() << soma::name(t) << " deal " << deal);
@@ -641,13 +654,6 @@ TEST(FemSpace, AssemblyMethodsAgree) {
 }
 
 namespace {
-
-// soma::reproducible() set for a scope.
-struct Reproducible {
-  bool saved = soma::reproducible();
-  explicit Reproducible(bool on) { soma::set_reproducible(on); }
-  ~Reproducible() { soma::set_reproducible(saved); }
-};
 
 std::uint64_t bits(Real x) { return std::bit_cast<std::uint64_t>(x); }
 

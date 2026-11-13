@@ -44,14 +44,19 @@ option(SOMA_DEBUG "Device-side bounds and contract checks" OFF)
 # find_package(Kokkos) below, because it depends on whether Kokkos has a GPU backend.
 set(SOMA_GPU_AWARE_MPI "AUTO" CACHE STRING "Pass device buffers to MPI: AUTO, ON, OFF")
 set_property(CACHE SOMA_GPU_AWARE_MPI PROPERTY STRINGS AUTO ON OFF)
-# Contracting a * b + c into one fused multiply-add changes the last bit of a
-# result, and compilers differ on when they do it: nvcc and HIP's Clang always
-# do in device kernels, a host compiler only where the target has the
-# instruction. OFF turns contraction off in the library and in every target
-# that links it, so a kernel rounds the same on the host and on the device.
-# DEFAULT leaves each compiler's own setting.
-set(SOMA_FP_CONTRACT "DEFAULT" CACHE STRING "Floating-point contraction (fused multiply-add): DEFAULT, OFF")
-set_property(CACHE SOMA_FP_CONTRACT PROPERTY STRINGS DEFAULT OFF)
+# One MPI rank for each GPU in the example tests of a GPU build: a single GPU
+# keeps them to one rank on that device, N GPUs run them at N ranks (Kokkos
+# gives each rank of a node its own device). AUTO counts this node's GPUs; a
+# number says how many the launcher reaches, over every node it spans.
+set(SOMA_TEST_GPUS "AUTO" CACHE STRING "GPUs the example tests use, one MPI rank each: AUTO or a count")
+# Results the same bit for bit wherever SOMA can give them: on any number of
+# ranks and threads (soma::reproducible() starts on; SOMA_REPRODUCIBLE=0 in
+# the environment or --soma-reproducible=0 still turns it off for a run), and
+# between a host and a device space (the compile flags that keep arithmetic
+# as written, chosen for the compiler and Kokkos backend in
+# cmake/SomaReproducible.cmake, on the library and every target linking it).
+# OFF leaves each compiler's own floating-point defaults and the faster sums.
+option(SOMA_REPRODUCIBLE "Bit-for-bit reproducible results: value-safe compile flags, exact sums by default" OFF)
 # Installing is the default only for a top-level build; a parent project that
 # embeds SOMA does not get SOMA's install rules unless it asks for them.
 option(SOMA_INSTALL "Generate install and export rules (default: ON when SOMA is the top-level project)"
@@ -113,26 +118,8 @@ else()
   set(SOMA_GPU_AWARE_MPI_DEFAULT 0)
 endif()
 
-string(TOUPPER "${SOMA_FP_CONTRACT}" SOMA_FP_CONTRACT_MODE)
-if(NOT SOMA_FP_CONTRACT_MODE MATCHES "^(DEFAULT|OFF)$")
-  message(FATAL_ERROR "SOMA_FP_CONTRACT must be DEFAULT or OFF (got '${SOMA_FP_CONTRACT}')")
-endif()
-set(SOMA_FP_CONTRACT_OFF 0)
-if(SOMA_FP_CONTRACT_MODE STREQUAL "OFF")
-  # Only the compilers whose flag is known to reach both the host and the
-  # device code generator; anything else is an error, not a silent default.
-  if(NOT CMAKE_CXX_COMPILER_ID MATCHES "^(GNU|Clang|AppleClang|IntelLLVM)$")
-    message(FATAL_ERROR "SOMA_FP_CONTRACT=OFF is not supported with the ${CMAKE_CXX_COMPILER_ID} C++ compiler")
-  endif()
-  if(SOMA_KOKKOS_GPU_BACKEND STREQUAL "CUDA" AND NOT SOMA_KOKKOS_COMPILE_LANGUAGE STREQUAL "CUDA")
-    message(FATAL_ERROR "SOMA_FP_CONTRACT=OFF with a CUDA Kokkos needs one built as the CMake CUDA language "
-      "(Kokkos_ENABLE_COMPILE_AS_CMAKE_LANGUAGE): nvcc takes -fmad=false there")
-  endif()
-  if(SOMA_KOKKOS_GPU_BACKEND STREQUAL "SYCL")
-    message(FATAL_ERROR "SOMA_FP_CONTRACT=OFF is not supported with a SYCL Kokkos")
-  endif()
-  set(SOMA_FP_CONTRACT_OFF 1)
-endif()
+include(SomaReproducible)
+soma_reproducible_setup()
 
 configure_file(cmake/config.hpp.in
   "${PROJECT_BINARY_DIR}/generated/soma/config.hpp" @ONLY)
@@ -163,15 +150,7 @@ add_library(soma ${SOMA_SOURCES})
 add_library(soma::soma ALIAS soma)
 soma_target_kokkos_sources(soma)
 target_compile_features(soma PUBLIC cxx_std_20)
-if(SOMA_FP_CONTRACT_OFF)
-  # PUBLIC: SOMA's kernels are templates in its headers, compiled in the
-  # targets that use them. nvcc takes -fmad for the device and passes the
-  # other flag to its host compiler.
-  target_compile_options(soma PUBLIC
-    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang,IntelLLVM>:-ffp-contract=off>"
-    "$<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:-fmad=false;-Xcompiler=-ffp-contract=off>"
-    "$<$<COMPILE_LANG_AND_ID:HIP,Clang>:-ffp-contract=off>")
-endif()
+soma_target_reproducible(soma)
 target_include_directories(soma PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
   $<BUILD_INTERFACE:${PROJECT_BINARY_DIR}/generated>
@@ -258,7 +237,7 @@ message(STATUS "SOMA ${PROJECT_VERSION}: Kokkos ${SOMA_KOKKOS_VERSION_FOUND}"
   " lang=${SOMA_KOKKOS_COMPILE_LANGUAGE}"
   " MPI=${SOMA_ENABLE_MPI} HDF5=${SOMA_ENABLE_HDF5} tests=${SOMA_ENABLE_TESTS}"
   " GPU-aware-MPI=${SOMA_GPU_AWARE_MPI_RESOLVED}"
-  " fp-contract=${SOMA_FP_CONTRACT_MODE}"
+  " reproducible=${SOMA_REPRODUCIBLE_SUMMARY}"
   " MOAB-reference=${SOMA_ENABLE_MOAB_REFERENCE} MOAB-compat=${SOMA_ENABLE_MOAB_COMPAT}"
   " KokkosKernels=${SOMA_ENABLE_KOKKOSKERNELS} PETSc=${SOMA_ENABLE_PETSC}"
   " bench=${SOMA_ENABLE_BENCHMARKS} LO64=${SOMA_LO_64}"

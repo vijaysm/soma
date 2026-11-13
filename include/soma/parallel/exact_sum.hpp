@@ -25,8 +25,11 @@
 // The terms themselves must be the same bits wherever they are computed:
 // that holds for one build (each expression contracted alike, as compilers
 // do by default), not under -ffast-math, which also drops the NaN checks.
-// Tested on host execution spaces; on a GPU the 552-byte accumulator per sum
-// is a large reduction value.
+// On a GPU the 552-byte accumulator per sum is a large reduction value:
+// Kokkos's Cuda reduction keeps a warp of them and two more, 34, in a
+// block's shared memory (48 KiB), and throws past that, so a kernel there
+// reduces at most two sums (exact::most_sums_on_device; reduce_exact checks
+// when compiled). More sums take more passes.
 
 #include <algorithm>
 #include <array>
@@ -46,6 +49,7 @@ namespace exact {
 inline constexpr int digits = 68;      // 32 bits each, from 2^-1074 up
 inline constexpr int radix_bits = 32;  // a word holds 2^31 digits' worth of carries
 inline constexpr std::int64_t terms_per_pass = std::int64_t{1} << 28;
+inline constexpr int most_sums_on_device = 2;  // in one kernel, off the host
 
 // Adds the finite double x to the digits d, exactly.
 KOKKOS_INLINE_FUNCTION void add(std::int64_t* d, Real x) {
@@ -134,6 +138,12 @@ struct ExactSums {
   KOKKOS_INLINE_FUNCTION Real value(int k) const {
     return nonfinite[k] != 0 ? Kokkos::Experimental::quiet_NaN_v<Real> : exact::to_real(d[k]);
   }
+  // Sum k becomes sum j of o.
+  template <int J>
+  void set(int k, const ExactSums<J>& o, int j) {
+    for (int i = 0; i < exact::digits; ++i) d[k][i] = o.d[j][i];
+    nonfinite[k] = o.nonfinite[j];
+  }
   KOKKOS_INLINE_FUNCTION void join(const ExactSums& o) {
     for (int k = 0; k < K; ++k) {
       for (int i = 0; i < exact::digits; ++i) d[k][i] += o.d[k][i];
@@ -166,6 +176,8 @@ struct ExactSumReducer {
 // index); normalized.
 template <int K, class Exec, class Body>
 ExactSums<K> reduce_exact(const char* label, LO first, LO last, const Body& body) {
+  static_assert(K <= exact::most_sums_on_device || Kokkos::SpaceAccessibility<Exec, Kokkos::HostSpace>::accessible,
+                "a kernel reduces at most exact::most_sums_on_device exact sums off the host");
   ExactSums<K> total;
   for (std::int64_t at = first; at < last; at += exact::terms_per_pass) {
     const auto end = static_cast<LO>(std::min<std::int64_t>(last, at + exact::terms_per_pass));

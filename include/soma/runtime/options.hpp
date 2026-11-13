@@ -21,19 +21,20 @@
 //
 // reproducible: results the same bit for bit on any number of ranks and
 // threads, for one build, where an algorithm can give that at some cost;
-// off (the default), they may differ there in the last bits, faster. On, a
-// FemSpace gathers whatever assembly it is asked for and its dot() and cg
-// sum exactly (soma/parallel/exact_sum.hpp); laplacian_smooth is
-// reproducible either way. Algorithms read it when they start (FemSpace when
-// it is made) and agree on it across ranks; an option of their own
-// (CgOptions::reproducible) overrides it.
+// off, they may differ there in the last bits, faster. On, a FemSpace
+// gathers whatever assembly it is asked for and its dot() and cg sum exactly
+// (soma/parallel/exact_sum.hpp); laplacian_smooth is reproducible either
+// way. Algorithms read it when they start (FemSpace when it is made) and
+// agree on it across ranks; an option of their own (CgOptions::reproducible)
+// overrides it.
 //
-// "One build" is one compiler and one set of flags: a host kernel and a
-// device kernel are two, and differ in the last bit where one contracts
-// a * b + c into a fused multiply-add (nvcc does by default). That is a
-// compile-time choice no run-time switch reaches: configure with
-// SOMA_FP_CONTRACT=OFF (SOMA_FP_CONTRACT_OFF in soma/config.hpp) for a build
-// that contracts nowhere.
+// It starts off, or on in a build configured with SOMA_REPRODUCIBLE=ON
+// (SOMA_REPRODUCIBLE_BUILD in soma/config.hpp). "One build" is one compiler
+// and one set of flags: a host kernel and a device kernel are two, and differ
+// in the last bit where one contracts a * b + c into a fused multiply-add
+// (nvcc does by default). No run-time switch reaches that; the same
+// configure option does, with the compile flags that keep arithmetic as
+// written on the host and on the device.
 //
 //   SOMA_REPRODUCIBLE=1 ./app                    # 0 or 1
 //   ./app --soma-reproducible                    # on; or --soma-reproducible=0|1
