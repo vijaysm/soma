@@ -19,6 +19,10 @@ commit `c4a45fd`), authored by the same team:
 | `bench/harness.hpp` | staged as `porting/moabx-c4a45fd/harness.hpp` | ported onto `soma::Comm`, untimed setup added |
 | `porting/moabx-c4a45fd/*` | various | staging copies, deleted once ported (the sub-entity topology, derivation, MOAB reference and harness files are gone) |
 
+`include/soma/core/hash3d_exact.hpp` is hash3d_exact 2.0.0 (exact and tolerance numbering of
+points; same author), verbatim. Its distributed part is not carried over: `match_points` runs the
+same numbering over `transport::rank_keys`.
+
 `porting/` holds reference copies only: they are never compiled or installed, and each file is
 deleted in the commit that finishes its port. Text from MOAB-derived (LGPL) files must not be
 copied into SOMA sources.
