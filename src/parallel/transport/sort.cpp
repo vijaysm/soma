@@ -50,10 +50,9 @@ std::vector<Word> words_of(const RecordBatch<Kokkos::HostSpace>& b, std::size_t 
   return out;
 }
 
-}  // namespace
-
-KeyRanks rank_keys(const Comm& comm, std::span<const std::uint64_t> keys, std::size_t words, bool distinct,
-                   Strategy strategy) {
+// rank_keys; with `held`, distinct, also the holders of each key there.
+KeyRanks rank(const Comm& comm, std::span<const std::uint64_t> keys, std::size_t words, bool distinct,
+              Strategy strategy, HeldKeyRanks* held) {
   using Host = Kokkos::DefaultHostExecutionSpace;
   const auto w = static_cast<std::int64_t>(words), d = static_cast<std::int64_t>(distinct);
   std::array<std::int64_t, 5> v{words == 0 || keys.size() % std::max<std::size_t>(words, 1) != 0, w, -w, d, -d};
@@ -130,6 +129,61 @@ KeyRanks rank_keys(const Comm& comm, std::span<const std::uint64_t> keys, std::s
   out.total = comm.allreduce(count, Op::sum);
   out.index.resize(n);
   plan.reverse(comm, std::span<const std::uint64_t>(local_index), std::span<std::uint64_t>(out.index));
+  if (held == nullptr) return out;
+
+  // To each holder of a key given by several ranks, (index, other holder)
+  // per other holder.
+  std::vector<std::uint64_t> note_index;
+  std::vector<int> note_to, note_other;
+  std::vector<int> from;
+  for (std::size_t a = 0, b = 0; a < o.size(); a = b) {
+    from.clear();
+    for (b = a; b < o.size() && local_index[o[b]] == local_index[o[a]]; ++b) from.push_back(arrived.source(o[b]));
+    std::sort(from.begin(), from.end());
+    from.erase(std::unique(from.begin(), from.end()), from.end());
+    for (const int s : from) {
+      for (const int t : from) {
+        if (s == t) continue;
+        note_index.push_back(local_index[o[a]]);
+        note_to.push_back(s);
+        note_other.push_back(t);
+      }
+    }
+  }
+  RecordBatch<Kokkos::HostSpace> notes(note_to.size(), sizeof(Word) + sizeof(int), "transport::rank_keys.holders");
+  for (std::size_t i = 0; i < note_to.size(); ++i) {
+    notes.dest(i) = note_to[i];
+    std::memcpy(&notes.payload(i, 0), &note_index[i], sizeof(Word));
+    std::memcpy(&notes.payload(i, sizeof(Word)), &note_other[i], sizeof(int));
+  }
+  const auto told = route(Host{}, comm, notes, strategy);
+  std::vector<std::pair<std::uint64_t, int>> others(told.size());
+  for (std::size_t i = 0; i < told.size(); ++i) {
+    std::memcpy(&others[i].first, &told.payload(i, 0), sizeof(Word));
+    std::memcpy(&others[i].second, &told.payload(i, sizeof(Word)), sizeof(int));
+  }
+  std::sort(others.begin(), others.end());
+  held->offsets.assign(1, 0);
+  held->ranks.clear();
+  for (std::size_t i = 0; i < n; ++i) {
+    auto it = std::lower_bound(others.begin(), others.end(), std::pair<std::uint64_t, int>{out.index[i], -1});
+    for (; it != others.end() && it->first == out.index[i]; ++it) held->ranks.push_back(it->second);
+    held->offsets.push_back(held->ranks.size());
+  }
+  return out;
+}
+
+}  // namespace
+
+KeyRanks rank_keys(const Comm& comm, std::span<const std::uint64_t> keys, std::size_t words, bool distinct,
+                   Strategy strategy) {
+  return rank(comm, keys, words, distinct, strategy, nullptr);
+}
+
+HeldKeyRanks rank_keys_held(const Comm& comm, std::span<const std::uint64_t> keys, std::size_t words,
+                            Strategy strategy) {
+  HeldKeyRanks out;
+  static_cast<KeyRanks&>(out) = rank(comm, keys, words, true, strategy, &out);
   return out;
 }
 

@@ -49,4 +49,9 @@ if(SOMA_ENABLE_MPI)
   target_compile_definitions(bench_transport PRIVATE
     SOMA_BENCH_BUILD_TYPE="$<IF:$<CONFIG:>,unset,$<CONFIG>>"
     SOMA_BENCH_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+  add_executable(bench_merge bench_merge.cpp)
+  target_link_libraries(bench_merge PRIVATE soma soma_warnings ${SOMA_MOAB_TARGET})
+  target_compile_definitions(bench_merge PRIVATE
+    SOMA_BENCH_BUILD_TYPE="$<IF:$<CONFIG:>,unset,$<CONFIG>>"
+    SOMA_BENCH_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
 endif()

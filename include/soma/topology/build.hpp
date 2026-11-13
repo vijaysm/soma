@@ -68,6 +68,10 @@ struct TopologyAccess {
     return m.coords_;
   }
   template <class M>
+  static std::uint64_t& epoch(Mesh<M>& m) {
+    return m.epoch_;
+  }
+  template <class M>
   static std::array<LO, 4>& corner_ends(Mesh<M>& m) {
     return m.corner_ends_;
   }
