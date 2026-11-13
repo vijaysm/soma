@@ -203,8 +203,8 @@ TEST(ParallelMergeMesh, StripsShareTheirSeamsWithinTolerance) {
   for (const bool refined : {false, true}) {
     SCOPED_TRACE(refined ? "refined" : "coarse");
     MeshBuilder b = strip(c.rank(), c.size(), refined);
-    soma::merge_vertices(c, b, {tol, PointNorm::l2});
-    soma::number_elements(c, b);
+    soma::merge_vertices(c, b, {tol, PointNorm::l2}, soma::MergeGids::renumber);
+    soma::number_elements(c, b, soma::MergeGids::renumber);
     const soma::HostMesh m = soma::build_local_part(c, std::move(b));
     const GO side = refined ? 2 * cells + 1 : cells + 1;
     EXPECT_EQ(owned(c, m, 0), side * side);
@@ -222,7 +222,8 @@ TEST(ParallelMergeMesh, StripsShareTheirSeamsWithinTolerance) {
       const auto at = static_cast<std::size_t>(gid(v) - 1);
       bool same = gid(v) >= 1 && at < want.unique_points.size();
       for (int q = 0; same && q < 3; ++q) {
-        same = std::bit_cast<std::uint64_t>(x(v, q)) == std::bit_cast<std::uint64_t>(want.unique_points[at][static_cast<std::size_t>(q)]);
+        const Real p = want.unique_points[at][static_cast<std::size_t>(q)];
+        same = std::bit_cast<std::uint64_t>(x(v, q)) == std::bit_cast<std::uint64_t>(p);
       }
       wrong += same ? 0 : 1;
     }
@@ -270,6 +271,67 @@ TEST(ParallelMergeMesh, ExactSeamsMergeExactly) {
   EXPECT_EQ(owned(c, m, 2), cells * cells);
 }
 
+// Parts whose gids already agree (global numbering, seams repeated on both
+// sides) keep every gid: matching only finds the sharing.
+TEST(ParallelMergeMesh, GlobalGidsAreKept) {
+  const Comm c = Comm::world();
+  const auto [first, last] = columns(c.rank(), c.size());
+  const auto vid = [](int i, int j) { return static_cast<GO>(i * (cells + 1) + j + 1); };
+  MeshBuilder b(2);
+  std::vector<GO> vg, qg, conn;
+  std::vector<Real> xyz;
+  for (int i = first; i <= last; ++i) {
+    for (int j = 0; j <= cells; ++j) {
+      vg.push_back(vid(i, j));
+      xyz.insert(xyz.end(), {static_cast<Real>(i), static_cast<Real>(j), 0});
+    }
+  }
+  for (int i = first; i < last; ++i) {
+    for (int j = 0; j < cells; ++j) {
+      qg.push_back(1000 + i * cells + j);
+      conn.insert(conn.end(), {vid(i, j), vid(i + 1, j), vid(i + 1, j + 1), vid(i, j + 1)});
+    }
+  }
+  b.add_vertices(vg, xyz);
+  b.add_elements(Topology::quad, qg, conn);
+  const soma::HostMesh m = soma::build_merged_part(c, std::move(b), {tol, PointNorm::l2});
+  EXPECT_EQ(owned(c, m, 0), (cells + 1) * (cells + 1));
+  LO changed = 0;
+  for (LO v = 0; v < m.count(0); ++v) {
+    const auto i = static_cast<int>(m.coords()(v, 0)), j = static_cast<int>(m.coords()(v, 1));
+    changed += m.gid(0)(v) == vid(i, j) ? 0 : 1;
+  }
+  std::vector<GO> got(m.count(2));
+  for (LO e = 0; e < m.count(2); ++e) got[static_cast<std::size_t>(e)] = m.gid(2)(e);
+  std::sort(got.begin(), got.end());
+  std::sort(qg.begin(), qg.end());
+  EXPECT_EQ(changed, 0);
+  EXPECT_EQ(got, qg);
+}
+
+// Gids each part numbered alone (1, 2, ... on every rank) name different
+// points on different ranks: those collide and take new gids, so every gid
+// names one point on every rank.
+TEST(ParallelMergeMesh, CollidingGidsAreReplaced) {
+  const Comm c = Comm::world();
+  const soma::HostMesh m = soma::build_merged_part(c, strip(c.rank(), c.size(), false), {tol, PointNorm::l2});
+  // Each vertex's (gid, point) to rank 0, which checks a gid names one point.
+  std::vector<double> mine;
+  for (LO v = 0; v < m.count(0); ++v) {
+    mine.insert(mine.end(), {static_cast<double>(m.gid(0)(v)), m.coords()(v, 0), m.coords()(v, 1)});
+  }
+  const std::vector<double> all = c.allgatherv(std::span<const double>(mine));
+  std::vector<std::array<double, 3>> rows;
+  for (std::size_t i = 0; i < all.size(); i += 3) rows.push_back({all[i], all[i + 1], all[i + 2]});
+  std::sort(rows.begin(), rows.end());
+  std::size_t clash = 0;
+  for (std::size_t i = 1; i < rows.size(); ++i) {
+    if (rows[i][0] == rows[i - 1][0] && std::abs(rows[i][1] - rows[i - 1][1]) + std::abs(rows[i][2] - rows[i - 1][2]) > tol) ++clash;
+  }
+  EXPECT_EQ(clash, 0U);
+  EXPECT_EQ(owned(c, m, 0), (cells + 1) * (cells + 1));
+}
+
 // One rank's refused merge stops every rank, and no builder changes.
 TEST(ParallelMergeMesh, ARefusalOnOneRankThrowsOnEvery) {
   const Comm c = Comm::world();
@@ -307,8 +369,13 @@ void add_fields(soma::HostMesh& m) {
 // centre added as new vertices of its own (with MeshEdit's gids), as a local
 // refinement does on each rank. The new points are off by `off` in every
 // other quad and by 2 off in the rest, as points computed apart would be.
-void refine_locally(soma::HostMesh& m, Real off) {
+// With `compress`, MeshEdit::apply compresses the mesh (as it does by default
+// past the threshold) and the tail is lost. Returns the lids of the added
+// vertices and quads.
+std::array<std::vector<LO>, 4> refine_locally(soma::HostMesh& m, Real off, bool compress) {
   soma::MeshEdit edit(m);
+  edit.set_compress_threshold(compress ? 0.01 : 0);
+  const LO first_vertex = m.count(0), first_quad = m.count(2);
   const auto v = m.view();
   std::vector<LO> parents;
   for (LO e = 0; e < m.count(2); ++e) {
@@ -334,7 +401,16 @@ void refine_locally(soma::HostMesh& m, Real off) {
     edit.add_elements(Topology::quad, kids);
   }
   edit.remove(2, parents);
-  (void)edit.apply();
+  const soma::EditReport report = edit.apply();
+  std::array<std::vector<LO>, 4> added;
+  for (const auto& [d, first] : {std::pair{0, first_vertex}, std::pair{2, first_quad}}) {
+    const auto k = static_cast<std::size_t>(d);
+    for (LO l = first; l < first + report.added[k]; ++l) {
+      added[k].push_back(report.compressed ? report.compressed->new_lid[k][static_cast<std::size_t>(l)] : l);
+    }
+  }
+  EXPECT_EQ(report.compressed.has_value(), compress);
+  return added;
 }
 
 }  // namespace
@@ -399,31 +475,105 @@ TEST(MergeMesh, ABuiltMeshMergesWithItsFieldsSetsAndGraphs) {
   EXPECT_EQ(wrong, 0);
   EXPECT_EQ(m.sets().members_of(0, 0).size, 3);
   EXPECT_EQ(m.sets().members_of(1, 2).size, 4);
+  // Gids stay: the seam keeps the left patch's (the less of each pair).
+  std::vector<GO> vg, eg;
+  for (LO v = 0; v < m.count(0); ++v) vg.push_back(m.gid(0)(v));
+  for (LO c = 0; c < m.count(2); ++c) eg.push_back(m.gid(2)(c));
+  std::sort(vg.begin(), vg.end());
+  std::sort(eg.begin(), eg.end());
+  EXPECT_EQ(vg, (std::vector<GO>{1, 2, 3, 4, 5, 6, 7, 8, 9, 104, 105, 106, 107, 108, 109}));
+  EXPECT_EQ(eg, (std::vector<GO>{1, 2, 3, 4, 101, 102, 103, 104}));
+}
+
+// MergeGids::renumber numbers the vertices by their points instead.
+TEST(MergeMesh, RenumberingNumbersByPoints) {
+  MeshBuilder b(2);
+  add_patch(b, 2, 2, 0, 100, 100);
+  add_patch(b, 2, 2, 2, 200, 200);
+  soma::HostMesh m = std::move(b).build();
+  (void)soma::merge_mesh(Comm::self(), m, {.gids = soma::MergeGids::renumber});
+  // x-major: gid 1 + 3 x + y on the 5 by 3 lattice.
+  LO wrong = 0;
+  for (LO v = 0; v < m.count(0); ++v) {
+    wrong += m.gid(0)(v) == 1 + 3 * static_cast<GO>(m.coords()(v, 0)) + static_cast<GO>(m.coords()(v, 1)) ? 0 : 1;
+  }
+  EXPECT_EQ(wrong, 0);
 }
 
 // Parts refined each on its own with MeshEdit, the new vertices on part
 // boundaries made on both sides with gids of their own: merged, the parts
-// share them, and the counts are the refined mesh's.
+// share them, and the counts are the refined mesh's. The added entities are
+// the mesh's tail, or, once apply() compressed the mesh, named.
 TEST(ParallelMergeMesh, LocallyRefinedPartsAgreeAfterMerge) {
   const Comm c = Comm::world();
-  soma::HostMesh m = soma::build_merged_part(c, strip(c.rank(), c.size(), false), {tol, PointNorm::l2});
-  add_fields(m);
-  refine_locally(m, (c.rank() + 1) * 1e-13);
-  (void)soma::merge_mesh(c, m, {tol, PointNorm::l2});
-  constexpr GO side = 2 * cells + 1;
-  EXPECT_EQ(owned(c, m, 0), side * side);
-  EXPECT_EQ(owned(c, m, 2), (side - 1) * (side - 1));
-  // Coarse vertices keep their values; new ones have the default.
-  const auto a = m.fields().get<double>("a", 0);
-  LO wrong = 0, coarse = 0;
-  for (LO v = 0; v < m.count(0); ++v) {
-    const double got = a.view()(static_cast<std::size_t>(v), 0);
-    if (got == -1) continue;
-    ++coarse;
-    wrong += std::abs(got - (m.coords()(v, 0) + 2 * m.coords()(v, 1) + 1000)) < 1e-8 ? 0 : 1;
+  for (const bool compress : {false, true}) {
+    SCOPED_TRACE(compress ? "compressed, added named" : "tail");
+    soma::HostMesh m = soma::build_merged_part(c, strip(c.rank(), c.size(), false), {tol, PointNorm::l2});
+    add_fields(m);
+    // The coarse vertices' gids by point, and the largest.
+    std::vector<std::pair<std::array<Real, 2>, GO>> coarse_gid;
+    GO top = 0;
+    for (LO v = 0; v < m.count(0); ++v) {
+      coarse_gid.push_back({{m.coords()(v, 0), m.coords()(v, 1)}, m.gid(0)(v)});
+      top = std::max(top, m.gid(0)(v));
+    }
+    std::sort(coarse_gid.begin(), coarse_gid.end());
+    top = c.allreduce(top, soma::Op::max);
+    const auto added = refine_locally(m, (c.rank() + 1) * 1e-13, compress);
+    soma::MergeOptions how{.tol = {tol, PointNorm::l2}};
+    if (compress) how.added = added;
+    (void)soma::merge_mesh(c, m, how);
+    constexpr GO side = 2 * cells + 1;
+    EXPECT_EQ(owned(c, m, 0), side * side);
+    EXPECT_EQ(owned(c, m, 2), (side - 1) * (side - 1));
+    // Coarse vertices keep their gids (MeshEdit's gids, each rank's own, may
+    // repeat theirs on other ranks); new vertices are numbered above them.
+    LO moved = 0, low = 0;
+    for (LO v = 0; v < m.count(0); ++v) {
+      const auto it = std::lower_bound(coarse_gid.begin(), coarse_gid.end(),
+                                       std::pair<std::array<Real, 2>, GO>{{m.coords()(v, 0), m.coords()(v, 1)}, 0});
+      if (it != coarse_gid.end() && it->first[0] == m.coords()(v, 0) && it->first[1] == m.coords()(v, 1)) {
+        moved += it->second == m.gid(0)(v) ? 0 : 1;
+      } else {
+        low += m.gid(0)(v) > top ? 0 : 1;
+      }
+    }
+    EXPECT_EQ(moved, 0);
+    EXPECT_EQ(low, 0);
+    // Coarse vertices keep their values; new ones have the default.
+    const auto a = m.fields().get<double>("a", 0);
+    LO wrong = 0, coarse = 0;
+    for (LO v = 0; v < m.count(0); ++v) {
+      const double got = a.view()(static_cast<std::size_t>(v), 0);
+      if (got == -1) continue;
+      ++coarse;
+      wrong += std::abs(got - (m.coords()(v, 0) + 2 * m.coords()(v, 1) + 1000)) < 1e-8 ? 0 : 1;
+    }
+    EXPECT_EQ(wrong, 0);
+    EXPECT_GE(c.allreduce(static_cast<GO>(coarse), soma::Op::sum), (cells + 1) * (cells + 1));
   }
-  EXPECT_EQ(wrong, 0);
-  EXPECT_GE(c.allreduce(static_cast<GO>(coarse), soma::Op::sum), (cells + 1) * (cells + 1));
+}
+
+// A distributed mesh whose kept gid names different points on two ranks (a
+// vertex added with another rank's gid, the tail lost to compress) is
+// refused on every rank, not renumbered.
+TEST(ParallelMergeMesh, AnUnnamedAddedGidClashIsRefusedOnEveryRank) {
+  const Comm c = Comm::world();
+  if (c.size() == 1) return;
+  soma::HostMesh m = soma::build_merged_part(c, strip(c.rank(), c.size(), false), {tol, PointNorm::l2});
+  // Rank 0 adds a free vertex far away under a gid only the last rank holds.
+  GO theirs = 0;
+  if (c.rank() == c.size() - 1) theirs = m.gid(0)(0);
+  theirs = c.allreduce(theirs, soma::Op::max);
+  if (c.rank() == 0) {
+    soma::MeshEdit edit(m);
+    const std::vector<GO> g{theirs};
+    const std::vector<Real> p{50, 50, 0};
+    (void)edit.add_vertices(g, p);
+    (void)edit.apply();
+    (void)m.compress();
+  }
+  EXPECT_THROW((void)soma::merge_mesh(c, m, {.tol = {tol, PointNorm::l2}}), std::invalid_argument);
 }
 
 TEST(ParallelMergeMesh, AMeshWithGhostsIsRefusedOnEveryRank) {

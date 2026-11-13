@@ -418,22 +418,30 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   tolerance, unsafe floating point (`-ffast-math`) throw on every rank.
 - `merge_vertices(comm, builder, tol)` makes the matching vertices of every rank's builder one
   (MOAB's MergeMesh on `Comm::self()`, ParallelMergeMesh over a communicator), and
-  `number_elements(comm, builder)` gives elements gids from their corner sets, so parts with
-  gids of their own, or new vertices added on both sides of a part boundary, build with
-  `build_local_part` and share by gid. An element left naming a vertex twice throws on every
-  rank, and no builder changes. `MeshBuilder::rename_vertices`, `rename_elements` and
+  `number_elements(comm, builder)` makes elements with one corner set one, so parts with gids
+  of their own, or new vertices added on both sides of a part boundary, build with
+  `build_local_part` and share by gid. Coordinates decide identity and sharing; gids are kept
+  (`MergeGids::keep`, the default): an entity keeps its gid unless another entity has it,
+  merged entities keep the least of theirs, and the others take new gids above every gid in
+  use, numbered the same on any number of ranks. `MergeGids::renumber` numbers every entity by
+  its point or corner gids instead. An element left naming a vertex twice throws on every rank,
+  and no builder changes. `MeshBuilder::rename_vertices`, `rename_elements` and
   `element_corners` are the steps underneath.
 - `transport::rank_keys_held` also returns, per key, the other ranks giving it: the rank of the
   key's range sees every copy. `match_points` returns this as each point's `Sharing`, and
   `merge_vertices` and `number_elements` as their entities', so `build_merged_part(comm,
   builder, tol)` builds the part without `resolve_sharing`'s gid directory. Tolerance clusters
   are joined across ranks by FastSV rounds, logarithmic in the longest chain.
-- `merge_mesh(comm, mesh, tol)` merges a built mesh in place, serial or distributed: its live
-  vertices that match on any rank become one, elements and explicit sides are numbered by their
-  corner sets, and the mesh is built again with the graphs it held, so parts refined each on
-  its own with `MeshEdit` (gids of their own) share their new boundary vertices after. Sets,
-  fields and mesh values follow each entity; where entities on a rank become one, the least
-  lid's are kept. A mesh with ghosts is refused on every rank.
+- `merge_mesh(comm, mesh, MergeOptions{tol, gids, added})` merges a built mesh in place, serial
+  or distributed: its live vertices that match on any rank become one, elements and explicit
+  sides with one corner set become one, and the mesh is built again with the graphs it held, so
+  parts refined each on its own with `MeshEdit` share their new boundary vertices after. The
+  gids the mesh was built with are kept; entities added since (`added`, or the mesh's tail,
+  which a compressing `MeshEdit::apply` loses) take the gid of an entity they coincide with or
+  new ones above every gid. On a distributed mesh, a kept gid naming different points on two
+  ranks throws on every rank instead of renumbering. Sets, fields and mesh values follow each
+  entity; where entities on a rank become one, the least lid's are kept. A mesh with ghosts is
+  refused on every rank.
 - `point_key`, `point_of_key` and `point_keys(exec, xyz, keys)` (`soma/core/point_key.hpp`)
   compute the exact keys in device code, equal to `hash3d_exact`'s; `match_points` computes its
   keys and NaN check with them in one parallel pass.

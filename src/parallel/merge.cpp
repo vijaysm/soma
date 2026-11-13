@@ -7,9 +7,11 @@
 #include <array>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <map>
 #include <numeric>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -18,6 +20,8 @@
 #include "closure.hpp"
 #include "soma/core/mesh_view.hpp"
 #include "soma/fields/domain_mesh.hpp"
+#include "records.hpp"
+#include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/sort.hpp"
 #include "soma/topology/build.hpp"
 
@@ -63,19 +67,166 @@ Sharing kept_rows(const std::vector<GO>& gids, const Sharing& s) {
   return out;
 }
 
-// merge_vertices, with each vertex's new gid, in the order added, in `gids`.
-Sharing merge_into(const Comm& comm, MeshBuilder& builder, PointTolerance tol, GO base, std::vector<GO>& gids) {
+using Bytes = Kokkos::View<std::byte**, Kokkos::LayoutRight, Kokkos::HostSpace>;
+using Arrived = transport::RecordBatch<Kokkos::HostSpace>;
+
+// transport::rendezvous over host vectors: row i of `width` bytes, filled by
+// fill(i, row), goes with keys[i]; answer(keys, arrived) answers each arrival
+// in `answer_width` bytes.
+template <class Fill, class Answer>
+Bytes rendezvous(const Comm& comm, const std::vector<std::uint64_t>& keys, std::size_t width, Fill&& fill,
+                 std::size_t answer_width, Answer&& answer) {
+  Kokkos::View<std::uint64_t*, Kokkos::HostSpace> k("soma::merge.keys", keys.size());
+  Bytes p("soma::merge.payload", keys.size(), width);
+  for (std::size_t i = 0; i < keys.size(); ++i) {
+    k(i) = keys[i];
+    fill(i, &p(i, 0));
+  }
+  return transport::rendezvous(Kokkos::DefaultHostExecutionSpace{}, comm,
+                               Kokkos::View<const std::uint64_t*, Kokkos::HostSpace>(k),
+                               Kokkos::View<const std::byte**, Kokkos::LayoutRight, Kokkos::HostSpace>(p), answer_width,
+                               std::forward<Answer>(answer));
+}
+
+// Arrivals by key: positions in key order.
+template <class KeyView>
+std::vector<std::size_t> by_key(const KeyView& keys) {
+  std::vector<std::size_t> o(keys.extent(0));
+  std::iota(o.begin(), o.end(), std::size_t{0});
+  std::stable_sort(o.begin(), o.end(), [&](std::size_t a, std::size_t b) { return keys(a) < keys(b); });
+  return o;
+}
+
+// The gid of each entity, entities grouped by `group` (one value for every
+// copy, on any rank, of one merged entity), `old` their gids and trusted[i]
+// != 0 where old[i] may stay. keep: a group takes the least trusted gid of
+// its members that no other group's trusted member has; a group without one
+// takes top + 1 + its rank among such groups, top the largest of `top_here`
+// over the ranks. renumber: 1 + group. With `strict`, a trusted gid that
+// several groups have throws std::invalid_argument on every rank, naming the
+// least such gid, instead of being given up. Collective.
+std::vector<GO> choose_gids(const Comm& comm, const std::vector<std::uint64_t>& group, std::span<const GO> old,
+                            const std::vector<std::uint8_t>& trusted, GO top_here, MergeGids how,
+                            bool strict = false) {
+  const std::size_t n = group.size();
+  std::vector<GO> out(n);
+  if (how == MergeGids::renumber) {
+    for (std::size_t i = 0; i < n; ++i) out[i] = 1 + static_cast<GO>(group[i]);
+    return out;
+  }
+  // At each trusted gid's directory: whether one group alone has it.
+  std::vector<std::size_t> held;
+  std::vector<std::uint64_t> keys;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (trusted[i] == 0) continue;
+    held.push_back(i);
+    keys.push_back(static_cast<std::uint64_t>(old[i]));
+  }
+  GO clash = std::numeric_limits<GO>::max();  // the least gid several groups have, seen here
+  const Bytes alone = rendezvous(
+      comm, keys, sizeof(std::uint64_t), [&](std::size_t i, std::byte* row) { detail::put(row, 0, group[held[i]]); },
+      1, [&](const auto& arrived_keys, const Arrived& arrived) {
+        Bytes rows("soma::merge.alone", arrived.size(), 1);
+        const std::vector<std::size_t> o = by_key(arrived_keys);
+        for (std::size_t a = 0, b = 0; a < o.size(); a = b) {
+          bool one = true;
+          const auto g0 = detail::take<std::uint64_t>(&arrived.payload(o[a], 0), 0);
+          for (b = a; b < o.size() && arrived_keys(o[b]) == arrived_keys(o[a]); ++b) {
+            one = one && detail::take<std::uint64_t>(&arrived.payload(o[b], 0), 0) == g0;
+          }
+          if (!one) clash = std::min(clash, static_cast<GO>(arrived_keys(o[a])));
+          for (std::size_t k = a; k < b; ++k) rows(o[k], 0) = std::byte{one ? std::uint8_t{1} : std::uint8_t{0}};
+        }
+        return rows;
+      });
+  if (strict) {
+    clash = comm.allreduce(clash, Op::min);
+    if (clash != std::numeric_limits<GO>::max()) {
+      throw std::invalid_argument("merge_mesh: gid " + std::to_string(clash) +
+                                  " names different points on different ranks; pass the entities added since the "
+                                  "mesh was built (MergeOptions::added) or renumber");
+    }
+  }
+  std::vector<std::uint8_t> candidate(n, 0);
+  for (std::size_t k = 0; k < held.size(); ++k) candidate[held[k]] = alone(k, 0) == std::byte{1} ? 1 : 0;
+  // At each group's directory: the least candidate gid of its members.
+  constexpr std::size_t flag_at = sizeof(GO);
+  const Bytes chosen = rendezvous(
+      comm, group, sizeof(GO) + 1,
+      [&](std::size_t i, std::byte* row) {
+        detail::put(row, 0, old[i]);
+        detail::put(row, flag_at, candidate[i]);
+      },
+      sizeof(GO) + 1, [](const auto& arrived_keys, const Arrived& arrived) {
+        Bytes rows("soma::merge.chosen", arrived.size(), sizeof(GO) + 1);
+        const std::vector<std::size_t> o = by_key(arrived_keys);
+        for (std::size_t a = 0, b = 0; a < o.size(); a = b) {
+          bool any = false;
+          GO least = 0;
+          for (b = a; b < o.size() && arrived_keys(o[b]) == arrived_keys(o[a]); ++b) {
+            if (detail::take<std::uint8_t>(&arrived.payload(o[b], 0), flag_at) == 0) continue;
+            const auto g = detail::take<GO>(&arrived.payload(o[b], 0), 0);
+            least = any ? std::min(least, g) : g;
+            any = true;
+          }
+          for (std::size_t k = a; k < b; ++k) {
+            detail::put(&rows(o[k], 0), 0, least);
+            detail::put(&rows(o[k], 0), flag_at, static_cast<std::uint8_t>(any ? 1 : 0));
+          }
+        }
+        return rows;
+      });
+  // New gids for the groups without one, above every gid given.
+  std::vector<std::uint64_t> fresh;
+  for (std::size_t i = 0; i < n; ++i) {
+    if (detail::take<std::uint8_t>(&chosen(i, 0), flag_at) != 0) {
+      out[i] = detail::take<GO>(&chosen(i, 0), 0);
+    } else {
+      fresh.push_back(group[i]);
+    }
+  }
+  const GO top = std::max<GO>(comm.allreduce(top_here, Op::max), 0);
+  const transport::KeyRanks ranked = transport::rank_keys(comm, fresh, 1, true);
+  if (ranked.total > static_cast<std::uint64_t>(std::numeric_limits<GO>::max() - top)) {
+    throw std::overflow_error("merge: new gids would not fit a GO");
+  }
+  for (std::size_t i = 0, f = 0; i < n; ++i) {
+    if (detail::take<std::uint8_t>(&chosen(i, 0), flag_at) == 0) out[i] = top + 1 + static_cast<GO>(ranked.index[f++]);
+  }
+  return out;
+}
+
+// All trusted, and the largest gid given: what a builder's gids are.
+std::vector<std::uint8_t> all_trusted(std::size_t n) { return std::vector<std::uint8_t>(n, 1); }
+GO largest(std::span<const GO> gids) {
+  GO top = 0;
+  for (const GO g : gids) top = std::max(top, g);
+  return top;
+}
+
+// merge_vertices with the vertices whose gids may stay and the largest gid
+// in use here; each vertex's new gid, in the order added, in `gids`.
+Sharing merge_into(const Comm& comm, MeshBuilder& builder, PointTolerance tol, MergeGids how,
+                   const std::vector<std::uint8_t>& trusted, GO top_here, std::vector<GO>& gids, bool strict = false) {
   const PointIds m = match_points(comm, builder.vertex_coordinates(), tol);
-  gids.resize(m.ids.size());
-  for (std::size_t i = 0; i < gids.size(); ++i) gids[i] = base + m.ids[i];
+  const std::vector<std::uint64_t> group(m.ids.begin(), m.ids.end());
+  gids = choose_gids(comm, group, builder.vertex_gids(), trusted, top_here, how, strict);
   on_every_rank(comm, builder, "merge_vertices", [&](MeshBuilder& b) { b.rename_vertices(gids, m.xyz); });
   return kept_rows(gids, m.sharing);
 }
 
+// number_elements with, per dimension, the elements whose gids may stay and
+// the largest gid in use here.
+std::array<std::optional<Sharing>, 4> number_into(const Comm& comm, MeshBuilder& builder, MergeGids how,
+                                                  const std::array<std::vector<std::uint8_t>, 4>& trusted,
+                                                  const std::array<GO, 4>& top_here, bool strict = false);
+
 // The sorted corner gids of entity e of dimension d.
 std::vector<GO> corner_key(const MeshView<Kokkos::HostSpace>& v, int d, LO e, const std::vector<GO>& gid_of_vertex) {
   std::vector<GO> key(static_cast<std::size_t>(v.num_vertices(d, e)));
-  for (LO k = 0; k < v.num_vertices(d, e); ++k) key[static_cast<std::size_t>(k)] = gid_of_vertex[static_cast<std::size_t>(v.vertex(d, e, k))];
+  for (LO k = 0; k < v.num_vertices(d, e); ++k) {
+    key[static_cast<std::size_t>(k)] = gid_of_vertex[static_cast<std::size_t>(v.vertex(d, e, k))];
+  }
   std::sort(key.begin(), key.end());
   return key;
 }
@@ -105,13 +256,25 @@ std::optional<SharingFields> sharing_fields(const HostMesh& mesh, int d) {
 
 }  // namespace
 
-Sharing merge_vertices(const Comm& comm, MeshBuilder& builder, PointTolerance tol, GO base) {
+Sharing merge_vertices(const Comm& comm, MeshBuilder& builder, PointTolerance tol, MergeGids how) {
   std::vector<GO> gids;
-  return merge_into(comm, builder, tol, base, gids);
+  return merge_into(comm, builder, tol, how, all_trusted(builder.vertex_gids().size()), largest(builder.vertex_gids()),
+                    gids);
 }
 
-Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, PointTolerance tol) {
+Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, const MergeOptions& options) {
   using Access = detail::TopologyAccess;
+  const PointTolerance tol = options.tol;
+  const MergeGids how = options.gids;
+  if (options.added) {
+    bool bad = false;
+    for (int d = 0; d <= 3; ++d) {
+      for (const LO e : (*options.added)[static_cast<std::size_t>(d)]) bad = bad || e < 0 || e >= mesh.count(d);
+    }
+    if (comm.allreduce(static_cast<std::int32_t>(bad), Op::max) != 0) {
+      throw std::invalid_argument("merge_mesh: an added entity is not a lid of the mesh");
+    }
+  }
   using Host = Kokkos::HostSpace;
   bool ghosts = false;
   for (int d = 0; d <= mesh.dim(); ++d) ghosts = ghosts || mesh.segment_table(d).shared_end < mesh.count(d);
@@ -123,7 +286,29 @@ Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, PointTolerance tol) {
                                     Op::max) != 0;
   const auto v = mesh.view();
 
-  // The live vertices, and the live elements and explicit sides, as a builder.
+  // The live vertices, and the live elements and explicit sides, as a
+  // builder. Gids of entities added since the mesh was built (given, or its
+  // tail: MeshEdit's, chosen by each rank alone) may not stay; the largest
+  // gid of each dimension, removed entities included, bounds the new ones.
+  std::array<std::vector<std::uint8_t>, 4> is_added;
+  for (int d = 0; d <= 3; ++d) {
+    auto& f = is_added[static_cast<std::size_t>(d)];
+    f.assign(static_cast<std::size_t>(mesh.count(d)), 0);
+    if (options.added) {
+      for (const LO e : (*options.added)[static_cast<std::size_t>(d)]) f[static_cast<std::size_t>(e)] = 1;
+    } else {
+      for (LO e = mesh.count(d) - mesh.tail(d); e < mesh.count(d); ++e) f[static_cast<std::size_t>(e)] = 1;
+    }
+  }
+  const auto added = [&](int d, LO e) { return is_added[static_cast<std::size_t>(d)][static_cast<std::size_t>(e)] != 0; };
+  // On a distributed mesh the gids kept must already agree: one naming
+  // different points on two ranks is an added entity not named as one.
+  const bool strict = comm.allreduce(static_cast<std::int32_t>(mesh.fields().contains(sharing_field)), Op::max) != 0;
+  std::array<std::vector<std::uint8_t>, 4> trusted;
+  std::array<GO, 4> top{};
+  for (int d = 0; d <= mesh.dim(); ++d) {
+    for (LO e = 0; e < mesh.count(d); ++e) top[static_cast<std::size_t>(d)] = std::max(top[static_cast<std::size_t>(d)], v.gid(d, e));
+  }
   MeshBuilder b(std::max(dim, 1));
   std::vector<LO> vlid;
   {
@@ -133,6 +318,7 @@ Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, PointTolerance tol) {
       if (!v.alive(0, i)) continue;
       vlid.push_back(i);
       gids.push_back(v.gid(0, i));
+      trusted[0].push_back(added(0, i) ? 0 : 1);
       for (int q = 0; q < 3; ++q) xyz.push_back(v.x(i, q));
     }
     b.add_vertices(gids, xyz);
@@ -151,6 +337,7 @@ Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, PointTolerance tol) {
       std::vector<Offset> offsets{0};
       for (const LO e : ents) {
         gids.push_back(v.gid(d, e));
+        trusted[static_cast<std::size_t>(d)].push_back(added(d, e) ? 0 : 1);
         const LO n = t == Topology::polygon ? v.num_vertices(d, e) : v.num_nodes(d, e);
         for (LO k = 0; k < n; ++k) nodes.push_back(v.gid(0, v.node(d, e, k)));
         offsets.push_back(static_cast<Offset>(nodes.size()));
@@ -165,8 +352,8 @@ Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, PointTolerance tol) {
 
   // Merged and numbered as merge_vertices and number_elements, then built.
   std::vector<GO> merged;
-  Sharing vertices = merge_into(comm, b, tol, 1, merged);
-  std::array<std::optional<Sharing>, 4> sharing = number_elements(comm, b);
+  Sharing vertices = merge_into(comm, b, tol, how, trusted[0], top[0], merged, strict);
+  std::array<std::optional<Sharing>, 4> sharing = number_into(comm, b, how, trusted, top, strict);
   sharing[0] = std::move(vertices);
   const AdjacencyRequest graphs = detail::graphs_to_rebuild(comm, mesh);
   HostMesh next;
@@ -251,15 +438,31 @@ Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, PointTolerance tol) {
   return out;
 }
 
-HostMesh build_merged_part(const Comm& comm, MeshBuilder&& builder, PointTolerance tol, Ordering ordering) {
+HostMesh build_merged_part(const Comm& comm, MeshBuilder&& builder, PointTolerance tol, MergeGids how,
+                           Ordering ordering) {
   // Vertices first: elements are named by their merged corners.
-  Sharing vertices = merge_vertices(comm, builder, tol);
-  std::array<std::optional<Sharing>, 4> sharing = number_elements(comm, builder);
+  Sharing vertices = merge_vertices(comm, builder, tol, how);
+  std::array<std::optional<Sharing>, 4> sharing = number_elements(comm, builder, how);
   sharing[0] = std::move(vertices);
   return build_local_part(comm, std::move(builder), sharing, ordering);
 }
 
-std::array<std::optional<Sharing>, 4> number_elements(const Comm& comm, MeshBuilder& builder, GO base) {
+std::array<std::optional<Sharing>, 4> number_elements(const Comm& comm, MeshBuilder& builder, MergeGids how) {
+  std::array<std::vector<std::uint8_t>, 4> trusted;
+  std::array<GO, 4> top{};
+  for (int d = 1; d <= 3; ++d) {
+    const std::vector<GO> g = builder.element_gids(d);
+    trusted[static_cast<std::size_t>(d)] = all_trusted(g.size());
+    top[static_cast<std::size_t>(d)] = largest(g);
+  }
+  return number_into(comm, builder, how, trusted, top);
+}
+
+namespace {
+
+std::array<std::optional<Sharing>, 4> number_into(const Comm& comm, MeshBuilder& builder, MergeGids how,
+                                                  const std::array<std::vector<std::uint8_t>, 4>& trusted,
+                                                  const std::array<GO, 4>& top_here, bool strict) {
   std::array<std::optional<Sharing>, 4> sharing;
   std::array<std::vector<GO>, 4> gids;
   for (int d = 1; d <= 3; ++d) {
@@ -280,9 +483,10 @@ std::array<std::optional<Sharing>, 4> number_elements(const Comm& comm, MeshBuil
       std::sort(key, key + static_cast<std::ptrdiff_t>(offsets[e + 1] - offsets[e]));
     }
     const transport::HeldKeyRanks ranks = transport::rank_keys_held(comm, keys, words);
-    auto& g = gids[static_cast<std::size_t>(d)];
-    g.resize(ranks.index.size());
-    for (std::size_t e = 0; e < g.size(); ++e) g[e] = base + static_cast<GO>(ranks.index[e]);
+    const auto k = static_cast<std::size_t>(d);
+    const std::vector<GO> old = builder.element_gids(d);
+    auto& g = gids[k];
+    g = choose_gids(comm, ranks.index, old, trusted[k], top_here[k], how, strict);
     Sharing s;
     s.offsets.assign(ranks.offsets.begin(), ranks.offsets.end());
     s.ranks = ranks.ranks;
@@ -295,5 +499,7 @@ std::array<std::optional<Sharing>, 4> number_elements(const Comm& comm, MeshBuil
   });
   return sharing;
 }
+
+}  // namespace
 
 }  // namespace soma
