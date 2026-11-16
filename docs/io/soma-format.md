@@ -180,6 +180,16 @@ parts and builds one local part from them.
 so that every rank gets some. With `rebalance = false` they stay empty. A
 file written on one rank and read on many is spread this way.
 
+```{figure} ../figures/img/soma-read-parts.svg
+:alt: Five copies of the Y-shaped mesh coloured by part or rank: a file of four parts and its read on two ranks; a file of two parts, its read on four ranks leaving ranks 1 and 3 empty, and its read with rebalance, where every rank holds cells
+:width: 90%
+
+`data/hybrid_3quad_1tri.h5m` written by `write_soma` on 4 ranks (top) and on 2 (bottom), coloured by the part
+that wrote each cell, and read back: on 2 ranks, parts 0 and 1 go to rank 0 and parts 2 and 3 to rank 1; on 4
+ranks with `rebalance = false`, part $q$ goes to rank $2q$ and ranks 1 and 3 stay empty; with `rebalance` (the
+default), every rank gets cells.
+```
+
 **What comes back.** The result equals, by gid, the mesh written: entities,
 coordinates, connectivity, high-order nodes, sets with their order, fields
 with their domains, defaults, global values and formats, and mesh values.
@@ -211,6 +221,17 @@ parts and sends every rank of the group its slice.
 
 Everything lives under the group `/soma`. The datasets of all parts are
 concatenated in part order; the part table says where each part starts.
+
+```mermaid
+flowchart TB
+  root["/soma<br/>attribute meta: format_version, dimension,<br/>N parts, dimensions written, counts"]
+  root --> dim["dimD, each dimension written<br/>gid<br/>coords, for D = 0<br/>topology, counts, conn<br/>node_counts, nodes"]
+  root --> fields["fields/fI<br/>attributes name, meta,<br/>default, global;<br/>dimD/ full, domain,<br/>values, counts; sets/"]
+  root --> values["values/vI<br/>attributes name, meta,<br/>default, global"]
+  root --> sets["sets/<br/>gids, flags, children,<br/>parents, members;<br/>per part: entity members,<br/>ordered entries"]
+  root --> parts["parts/offsets<br/>N + 1 rows, one column<br/>per per-part dataset;<br/>attribute columns"]
+  dim --> shared["shared/<br/>index, counts, parts"]
+```
 
 | Object | Content |
 | --- | --- |

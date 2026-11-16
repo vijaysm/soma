@@ -225,6 +225,17 @@ throws `std::invalid_argument`.
 `soma/amr/interlevel.hpp` holds the operators between a level and the next coarser one, with
 refinement ratio $r$.
 
+```{figure} ../figures/img/coarse-fine.svg
+:alt: Two panels of a coarse grid under two fine boxes forming an L. Left: the two-cell ghost ring of one fine box, shaded where it is filled from the coarse level and hatched where it lies in the other fine box. Right: the outline of the L drawn in red along coarse faces, with the coarse cells just outside it shaded
+:width: 90%
+
+Two fine boxes in an L over a 16 by 16 coarse level (ratio 2), from `Hierarchy::coarse_fine_plan` and
+`Hierarchy::make_flux_register`. Left: the ghosts of one fine box for a cell field with two ghosts: the
+coarse-fine fill interpolates those no fine box covers; the rest come from the other box by the same-level
+halo exchange. Right: the register's 32 coarse faces on the outline of the fine level and the coarse cells
+outside that `reflux` corrects; the faces between the two fine boxes are not in it.
+```
+
 ### Prolongation: the coarse-fine fill
 
 A `CoarseFinePlan` fills the ghost points of a fine level that no fine box covers
@@ -430,6 +441,16 @@ h.regrid(ring(h, 0.5), Interp::linear, soma::amr::NoBoundary{}, u);
 
 where `tag_ring` sets `tags.view().patch(b)(i, j, k) = 1` in a `for_each_point` kernel on the
 cells to refine.
+
+```{figure} ../figures/img/amr-hierarchy.svg
+:alt: Three panels over a 32 by 32 grid: a ring of tagged cells under rectangles of level 1; the upper half of the ring tagged on level 1 under smaller rectangles of level 2; and the three levels drawn together
+:width: 90%
+
+`make_grids` on a 32 by 32 domain (ratio 2, blocking factor 4, boxes of at most 16 cells), applied to level 0
+alone and then to the two levels it gave, tagging the cells within 1.5 cells of a circle of radius 0.3 (on
+level 1, its upper half only). Left: level 0's tagged cells and the final level-1 boxes, which cover them and,
+grown by the nesting, level 2. Middle: level 1's tagged cells and the level-2 boxes. Right: the three levels.
+```
 
 ### Over many ranks
 

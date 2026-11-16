@@ -28,6 +28,14 @@ it alike: refining a conforming mesh gives a conforming mesh, mixed meshes inclu
 A new vertex is the average of its corners (an edge's two, a face's four, a cell's all),
 summed in gid order, so every rank holding it computes the same bits.
 
+```{figure} ../figures/img/refinement-children.svg
+:alt: A triangle and a square each split into four children, and a tetrahedron and a cube each split into eight, the children pulled apart
+:width: 90%
+
+The children `refine_uniform` makes of a tri, a quad, a tet and a hex, each pushed away from the cell's
+centre so that all show (the parent dashed in 2D).
+```
+
 ### Gids
 
 Gids do not depend on the number of ranks. With $V$, $E$ and $F$ the largest vertex, edge and
@@ -299,6 +307,16 @@ vertices average linear fields exactly:
 ```bash
 mpiexec -n 4 ./refine --levels 3 --marked 0.5 in.h5m out.soma
 mpiexec -n 4 ./refine --levels 3 --marked 0.5 --conforming in.h5m out.soma
+```
+
+```{figure} ../figures/img/marked-refinement.png
+:alt: Two copies of the Y-shaped mesh refined towards the lower left corner and coloured by refinement level 1 to 3: on the left with dots on the hanging vertices along the level boundaries, on the right with triangles closing the coarser cells next to finer ones
+:width: 90%
+
+The example's marked loop on `data/hybrid_3quad_1tri.h5m`: 3 levels, each marking the fraction 0.5 of the
+indicator towards the lower left corner, coloured by `refine:level`. Non-conforming (left, the default): 730
+cells, with the 35 hanging vertices of the last level as dots. Conforming (right): transition triangles
+close the cells next to finer ones.
 ```
 
 ## Memory spaces and limits

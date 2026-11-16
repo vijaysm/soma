@@ -164,6 +164,15 @@ The example then copies `u` into a vertex field, removes the ghosts and writes t
 mpiexec -n 4 ./poisson --assembly gather --rtol 1e-10 in.h5m out.soma
 ```
 
+```{figure} ../figures/img/poisson-solution.png
+:alt: The back half of a box of hexes coloured by the solution u: zero on the outer faces, rising to about 0.9 at the centre of the cut face
+:width: 75%
+
+The solution of `poisson` on `data/64bricks_1khex.h5m` (12 by 12 by 12 hexes on $[-0.5, 3.5]^3$), $u = 0$ on the
+boundary. The back half of the box, cut along the cell faces through the centre, shows the inside, where $u$
+peaks at 0.909.
+```
+
 `apply_dirichlet` and `cg` are described in [matrices and solvers](linear-algebra.md).
 
 ## Reproducible mode

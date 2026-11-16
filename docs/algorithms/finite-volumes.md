@@ -116,6 +116,16 @@ The example prints the totals before and after and writes `u` as a cell field:
 mpiexec -n 4 ./advect --steps 100 --cfl 0.5 in.h5m out.soma
 ```
 
+```{figure} ../figures/img/advected-bump.png
+:alt: Two 12 by 12 grids of cells coloured by u: on the left a compact bump right of the centre, on the right after 100 steps a wider, fainter bump below and left of the centre
+:width: 90%
+
+The middle layer of cells of `advect` on `data/64bricks_1khex.h5m`: the bump at the start (left) and after 100
+steps at CFL 0.5 (right), on one colour scale. The rotation carries it about the box's vertical axis and
+first-order upwinding spreads it; the total falls from 0.695 to 0.445 as the flow takes part of it out
+through the box's sides.
+```
+
 ## Requirements and errors
 
 The constructor is collective. It throws `std::invalid_argument` on every rank if any rank's

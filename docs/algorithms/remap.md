@@ -22,6 +22,16 @@ where $|T \cap S|$ is the area (in 3D the volume) the two cells share. Two prope
 
 The overlaps are found by clipping each pair of candidate cells against each other.
 
+```{figure} ../figures/img/remap-overlap.svg
+:alt: Left: a Y-shaped mesh of quads and triangles under a dashed grid of right triangles, one triangle outlined. Right: that triangle enlarged, split into six coloured pieces where it overlaps source cells, each labelled with its weight
+:width: 90%
+
+The `remap` example's source, `data/hybrid_3quad_1tri.h5m` (solid), under a coarser target than the example's,
+6 by 6 squares cut into triangles (dashed). Right: one target cell $T$ and its overlaps with the source cells it
+meets, each labelled with its weight $w_{TS} = |T \cap S| / |T|$, as the operator's plan holds them; they tile
+$T$, so the weights sum to one.
+```
+
 ## API
 
 Header: `soma/algorithms/remap.hpp`.
@@ -132,6 +142,16 @@ The overlaps agree with MOAB's `Intx2MeshInPlane` to $10^{-13}$ of the target ce
 (`tests/reference/test_remap_moab.cpp`, on perturbed triangle and quad grids, which MOAB
 needs to be convex).
 
+```{figure} ../figures/img/remap-field.png
+:alt: Left: the Y-shaped source mesh coloured by a smooth field between 1 and 3. Right: a rectangular grid of triangles covering it, coloured by the remapped field, zero outside the Y and lower along its edges
+:width: 90%
+
+The `remap` example on `data/hybrid_3quad_1tri.h5m`: the field $2 + \sin x \cos y$ on the source (left) and
+remapped onto 24 by 24 squares cut into triangles over its bounding box (right). Target cells outside the
+source get 0 and those it partly covers their covered share, so the total, $\sum |T|\, u_T = 27.464101622$,
+is the source's.
+```
+
 ## Volume meshes
 
 Meshes of dimension 3 of tets, hexes, prisms and pyramids, mixed as needed. Two methods are
@@ -191,6 +211,15 @@ icosahedral meshes). The changelog records that between cubed spheres of about 1
 the two take 0.60 s and 0.62 s, and MOAB 2.0 s, measured on one rank. Use `great_circle` for
 coarse meshes with wide cells; `tests/unit/test_remap_sphere.cpp` remaps from a cubed sphere
 of one cell per face, which `gnomonic` refuses.
+
+```{figure} ../figures/img/remap-sphere.png
+:alt: Two unit spheres seen from the side and coloured by the same smooth field: on the left an icosphere of triangles, on the right a cubed sphere of quads
+:width: 90%
+
+A field remapped on the unit sphere with the default `gnomonic` clipping: $2 + x^2 - y^2 + z/2$ at the centres
+(on the sphere) of an icosphere's 1280 triangles (left), and on the 2400 quads of the cubed sphere
+`data/sphere_quads_20.vtk` (right), seen from $+x$. The totals agree to $10^{-12}$.
+```
 
 ## The merge tolerance
 
