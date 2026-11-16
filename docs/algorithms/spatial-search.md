@@ -69,6 +69,15 @@ and there are at most twice as many bins as boxes. A box goes into every bin it 
 query visits the bins covered by its box widened by the tolerance, and reports a box only from
 the bin holding the low corner of the two boxes' overlap, so each pair is reported once.
 
+```{figure} ../figures/img/grid-index-search.svg
+:alt: The boxes around the cells of the Y-shaped mesh over a dotted 9 by 8 grid of bins; two bold query boxes, the boxes each meets outlined in its colour, and the bins each visits shaded
+:width: 70%
+
+A `GridIndex` over the boxes around the 64 cells of `data/hybrid_3quad_1tri.h5m`: its 9 by 8 bins, two
+queries, the boxes each meets (as `query` reports them, checked against every pair) and the bins each
+visits.
+```
+
 Since bins are about the mean extent wide, a box much larger than the mean goes into many
 bins; the grid suits boxes of similar size, as the cells of one mesh usually are.
 
