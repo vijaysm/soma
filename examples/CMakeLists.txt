@@ -37,8 +37,15 @@ if(SOMA_ENABLE_TESTS)
     set_tests_properties(example_poisson.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
       PASS_REGULAR_EXPRESSION "max u 9[.]090723e-01")
   endif()
-  # Reproducible, both runs give the same totals to the last digit.
-  set(advected "total 6[.]948772654115442e-01 before, 4[.]446464981696669e-01 after")
+  # Reproducible, both runs give the same totals to the last digit. Upwind in the rotation that crosses the
+  # walls keeps its results bit for bit.
+  set(advected_upwind "total 6[.]948772654115442e-01 before, 4[.]446464981696669e-01 after")
+  add_test(NAME example_advect.upwind
+    COMMAND advect --soma-reproducible --scheme upwind --flow rigid ${in} ${CMAKE_CURRENT_BINARY_DIR}/advect_upwind.vtk)
+  set_tests_properties(example_advect.upwind PROPERTIES PASS_REGULAR_EXPRESSION "${advected_upwind}")
+  # Bounded in the confined flow: nothing crosses the walls, so the total stays to rounding.
+  string(CONCAT advected "bounded, confined flow, 100 steps of 1[.]592e-02; total 2[.]061703740944819e-01 before, "
+               "2[.]061703740944818e-01 after; u in [[]-1[.]251949e-18, 1[.]199141e-01[]]")
   add_test(NAME example_advect COMMAND advect --soma-reproducible ${in} ${CMAKE_CURRENT_BINARY_DIR}/advect.vtk)
   set_tests_properties(example_advect PROPERTIES PASS_REGULAR_EXPRESSION "${advected}")
   if(SOMA_ENABLE_MPI)
