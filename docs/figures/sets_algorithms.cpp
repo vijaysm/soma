@@ -30,6 +30,12 @@
 #include "soma/algorithms/polygon.hpp"
 #include "soma/algorithms/refine.hpp"
 #include "soma/algorithms/remap.hpp"
+#include "soma/amr/box.hpp"
+#include "soma/amr/box_list.hpp"
+#include "soma/amr/flux_register.hpp"
+#include "soma/amr/hierarchy.hpp"
+#include "soma/amr/interlevel.hpp"
+#include "soma/amr/level_field.hpp"
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/fields/node_tables.hpp"
@@ -613,11 +619,119 @@ void set_search(const soma::Comm& comm, const fs::path& out) {
   write_json(comm, out / "search.json", js + "]}");
 }
 
+namespace amr = soma::amr;
+
+// A 2D box as [lo i, lo j, hi i, hi j].
+std::string box_json(const amr::Box& b) {
+  return "[" + std::to_string(b.lo(0)) + ", " + std::to_string(b.lo(1)) + ", " + std::to_string(b.hi(0)) + ", " +
+         std::to_string(b.hi(1)) + "]";
+}
+
+std::string boxes_json(const amr::BoxList& boxes) {
+  std::string s = "[";
+  for (std::size_t b = 0; b < boxes.size(); ++b) s += (b ? ", " : "") + box_json(boxes[b]);
+  return s + "]";
+}
+
+// The cells the hierarchy set tags on a level of cell width dx over [0, 1]^2:
+// those within 1.5 cells of the circle of radius 0.3 about the centre, and on
+// level 1 only its upper half.
+KOKKOS_INLINE_FUNCTION bool on_ring(int level, int i, int j, double dx) {
+  const double x = (i + 0.5) * dx, y = (j + 0.5) * dx;
+  const double r = Kokkos::sqrt((x - 0.5) * (x - 0.5) + (y - 0.5) * (y - 0.5));
+  return Kokkos::fabs(r - 0.3) < 1.5 * dx && (level == 0 || y > 0.5);
+}
+
+// hierarchy: a 32 x 32 domain refined twice by ratio 2 (blocking factor 4,
+// boxes of at most 16): make_grids on level 0 alone, then on the two levels
+// it gave; the tagged cells of levels 0 and 1 and the boxes of every level,
+// as hierarchy.json.
+void set_hierarchy(const soma::Comm& comm, const fs::path& out) {
+  const amr::Geometry geometry{amr::Box({{0, 0, 0}}, {{31, 31, 0}}, 2)};
+  const amr::HierarchyOptions options{.max_level = 2, .ratio = 2, .blocking_factor = 4, .max_box = 16};
+  const auto tagger = [](int level, const amr::TagField& tags) {
+    const auto v = tags.view();
+    const double dx = 1.0 / (32 << level);
+    amr::for_each_point(tags, amr::Region::valid, KOKKOS_LAMBDA(int b, int i, int j, int k) {
+      if (on_ring(level, i, j, dx)) v.patch(b)(i, j, k) = 1;
+    });
+  };
+  const amr::Hierarchy first(geometry, options);
+  const amr::Hierarchy second(geometry, options, first.make_grids(tagger));
+  const amr::Hierarchy h(geometry, options, second.make_grids(tagger));
+  require(h.num_levels() == 3, "hierarchy: three levels");
+  // The cells tagged: on level 0 of the first hierarchy, on level 1 of the second.
+  std::string js = "{\"domain\": " + box_json(h.domain(0)) + ", \"tags\": [";
+  for (int level = 0; level < 2; ++level) {
+    const amr::BoxArray& tagged = (level == 0 ? first : second).boxes(level);
+    amr::BoxList cells;
+    for (std::size_t b = 0; b < tagged.size(); ++b) {
+      for (int j = tagged[b].lo(1); j <= tagged[b].hi(1); ++j) {
+        for (int i = tagged[b].lo(0); i <= tagged[b].hi(0); ++i) {
+          if (on_ring(level, i, j, h.dx(level, 0))) cells.push_back(amr::Box({{i, j, 0}}, {{i, j, 0}}, 2));
+        }
+      }
+    }
+    // The tags of a level lie under the next level of the final hierarchy.
+    for (const amr::Box& c : cells) {
+      require(amr::covers(h.boxes(level + 1).boxes(), c.refine(2)), "hierarchy: the next level covers the tags");
+    }
+    require(!cells.empty(), "hierarchy: cells tagged");
+    js += std::string(level ? ",\n  " : "\n  ") + boxes_json(cells);
+  }
+  js += "],\n \"levels\": [";
+  for (int level = 0; level < h.num_levels(); ++level) {
+    require(amr::disjoint(h.boxes(level).boxes()), "hierarchy: a level's boxes are disjoint");
+    js += std::string(level ? ",\n  " : "\n  ") + boxes_json(h.boxes(level).boxes());
+  }
+  write_json(comm, out / "hierarchy.json", js + "]}");
+}
+
+// coarsefine: a 16 x 16 level 0 under two fine boxes in an L (ratio 2); for a
+// cell field with two ghosts, the ghost regions the coarse-fine plan fills
+// from level 0 (Hierarchy::coarse_fine_plan) and the coarse faces of the flux
+// register (Hierarchy::make_flux_register), as coarsefine.json.
+void set_coarsefine(const soma::Comm& comm, const fs::path& out) {
+  const amr::Geometry geometry{amr::Box({{0, 0, 0}}, {{15, 15, 0}}, 2)};
+  const amr::HierarchyOptions options{.max_level = 1, .ratio = 2, .blocking_factor = 4, .max_box = 16};
+  const amr::BoxList fine{amr::Box({{8, 8, 0}}, {{15, 23, 0}}, 2), amr::Box({{16, 8, 0}}, {{23, 15, 0}}, 2)};
+  const amr::Hierarchy h(geometry, options, {fine});
+  constexpr int ghosts = 2;
+  const amr::CoarseFinePlan& plan = h.coarse_fine_plan(1, amr::IndexType::cell(), ghosts, amr::Interp::linear);
+  const amr::BoxArray& level = h.boxes(1);
+  std::string js = "{\"domain\": " + box_json(h.domain(0)) + ", \"ratio\": 2, \"ghosts\": " +
+                   std::to_string(ghosts) + ",\n \"fine\": " + boxes_json(level.boxes()) + ",\n \"filled\": [";
+  for (std::size_t k = 0; k < plan.ops().size(); ++k) {
+    const amr::InterpOp& op = plan.ops()[k];
+    const amr::Box& own = level[static_cast<std::size_t>(op.fine)];
+    require(own.grow(ghosts).contains(op.region), "coarsefine: a filled region lies in its box's ghosts");
+    for (std::size_t b = 0; b < level.size(); ++b) {
+      require(!level[b].intersects(op.region), "coarsefine: no filled point is under the fine level");
+    }
+    js += std::string(k ? ", " : "") + "{\"fine\": " + std::to_string(op.fine) + ", \"region\": " +
+          box_json(op.region) + "}";
+  }
+  require(!plan.ops().empty(), "coarsefine: some ghosts are filled from level 0");
+  const amr::FluxRegister reg = h.make_flux_register(1, 1);
+  js += "],\n \"faces\": [";
+  for (std::size_t k = 0; k < reg.faces().size(); ++k) {
+    const amr::RegisterFaces& f = reg.faces()[k];
+    js += std::string(k ? ", " : "") + "{\"dir\": " + std::to_string(f.dir) + ", \"side\": " +
+          std::to_string(f.side) + ", \"fine\": " + std::to_string(f.fine) + ", \"faces\": " + box_json(f.faces) +
+          "}";
+  }
+  // The L under the fine level covers 48 coarse cells; its outline is 32 coarse faces long.
+  require(reg.num_faces() == 32, "coarsefine: 32 register faces around the L");
+  write_json(comm, out / "coarsefine.json", js + "]}");
+}
+
 }  // namespace
 
 void add_algorithm_sets(Sets& sets) {
   sets["advect"] = {1, set_advect};
   sets["children"] = {1, set_children};
+  sets["coarsefine"] = {1, set_coarsefine};
+  sets["hierarchy"] = {1, set_hierarchy};
   sets["marked"] = {1, set_marked};
   sets["overlap"] = {1, set_overlap};
   sets["poisson"] = {1, set_poisson};

@@ -3,7 +3,6 @@
 
 """The figures of the algorithms pages (docs/algorithms, docs/amr and docs/io)."""
 
-from matplotlib.patches import Rectangle
 from PIL import Image
 
 import style
@@ -325,5 +324,125 @@ def grid_index_search(data, path):
     ax.set_ylim(y0 - 0.1, y0 + ny * wy + 0.1)
     ax.set_title(f"boxes around 64 cells, the index's {nx} x {ny} bins (dotted), two queries (bold)\n"
                  "and the boxes each meets; shaded: the bins a query visits", fontsize=11, y=-0.1)
+    style.save_svg(fig, path)
+
+
+def cells_of(box, dx, origin=(0.0, 0.0)):
+    """The corners of a 2D box of cells [lo i, lo j, hi i, hi j] of width dx."""
+    i0, j0, i1, j1 = box
+    x0, y0 = origin[0] + i0 * dx, origin[1] + j0 * dx
+    x1, y1 = origin[0] + (i1 + 1) * dx, origin[1] + (j1 + 1) * dx
+    return [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+
+
+def grid_lines(ax, box, dx, **kwargs):
+    """The cell lines inside a box of cells of width dx, as one path (NaN between the lines)."""
+    i0, j0, i1, j1 = box
+    xs, ys = [], []
+    for i in range(i0, i1 + 2):
+        xs += [i * dx, i * dx, float("nan")]
+        ys += [j0 * dx, (j1 + 1) * dx, float("nan")]
+    for j in range(j0, j1 + 2):
+        xs += [i0 * dx, (i1 + 1) * dx, float("nan")]
+        ys += [j * dx, j * dx, float("nan")]
+    ax.plot(xs, ys, **kwargs)
+
+
+LEVEL_COLOURS = ["#000000", style.OKABE_ITO[5], style.OKABE_ITO[3]]
+
+
+@figure("amr-hierarchy", ["hierarchy"], "svg")
+def amr_hierarchy(data, path):
+    d = load_json(data / "hierarchy" / "hierarchy.json")
+    n0 = d["domain"][2] + 1
+    dx = [1.0 / (n0 << level) for level in range(3)]
+    fig, axes = style.svg_figure(13, 4.9, ncols=3)
+    titles = ["level 0: tagged cells, and the level-1 boxes", "level 1: tagged cells, and the level-2 boxes",
+              "the hierarchy: three levels, ratio 2"]
+    for k, ax in enumerate(axes):
+        grid_lines(ax, d["domain"], dx[0], color="#dddddd", lw=0.5, zorder=0)
+        if k < 2:
+            if k == 1:
+                for box in d["levels"][1]:
+                    ax.fill(*zip(*cells_of(box, dx[1])), fc="white", ec=LEVEL_COLOURS[1], lw=0.6, zorder=1)
+                    grid_lines(ax, box, dx[1], color="#cccccc", lw=0.4, zorder=1)
+            for c in d["tags"][k]:
+                ax.fill(*zip(*cells_of(c, dx[k])), fc=style.OKABE_ITO[1], ec="none", zorder=2)
+            for box in d["levels"][k + 1]:
+                ax.fill(*zip(*cells_of(box, dx[k + 1])), fc="none", ec=LEVEL_COLOURS[k + 1], lw=1.6, zorder=3)
+        else:
+            for level in (1, 2):
+                for box in d["levels"][level]:
+                    ax.fill(*zip(*cells_of(box, dx[level])), fc="white", ec="none", zorder=level)
+                    grid_lines(ax, box, dx[level], color="#bbbbbb", lw=0.35, zorder=level)
+                for box in d["levels"][level]:
+                    ax.fill(*zip(*cells_of(box, dx[level])), fc="none", ec=LEVEL_COLOURS[level], lw=1.6,
+                            zorder=3)
+        ax.fill(*zip(*cells_of(d["domain"], dx[0])), fc="none", ec="#000000", lw=1.2, zorder=4)
+        ax.set_title(titles[k], fontsize=11, y=-0.09)
+        ax.set_xlim(-0.01, 1.01)
+        ax.set_ylim(-0.01, 1.01)
+    style.save_svg(fig, path)
+
+
+def inside(cell, box):
+    return box[0] <= cell[0] <= box[2] and box[1] <= cell[1] <= box[3]
+
+
+@figure("coarse-fine", ["coarsefine"], "svg")
+def coarse_fine(data, path):
+    d = load_json(data / "coarsefine" / "coarsefine.json")
+    r, g = d["ratio"], d["ghosts"]
+    h = 1.0 / r  # fine cells, in coarse cell widths
+    fig, (fill, flux) = style.svg_figure(12, 5.6, ncols=2)
+    filled = {}
+    for op in d["filled"]:
+        i0, j0, i1, j1 = op["region"]
+        for i in range(i0, i1 + 1):
+            for j in range(j0, j1 + 1):
+                filled[(op["fine"], i, j)] = True
+    for ax in (fill, flux):
+        grid_lines(ax, d["domain"], 1.0, color="#bbbbbb", lw=0.7, zorder=0)
+        for box in d["fine"]:
+            ax.fill(*zip(*cells_of(box, h)), fc="white", ec="none", zorder=1)
+            grid_lines(ax, box, h, color="#999999", lw=0.5, zorder=1)
+    # The ghosts of the first fine box: from level 0 where the plan fills them, else from the other fine box.
+    b = 0
+    i0, j0, i1, j1 = d["fine"][b]
+    for i in range(i0 - g, i1 + g + 1):
+        for j in range(j0 - g, j1 + g + 1):
+            if inside((i, j), d["fine"][b]):
+                continue
+            corners = cells_of([i, j, i, j], h)
+            if (b, i, j) in filled:
+                fill.fill(*zip(*corners), fc=style.OKABE_ITO[2], ec="#555555", lw=0.4, alpha=0.8, zorder=2)
+            else:
+                fill.fill(*zip(*corners), fc="white", ec=style.OKABE_ITO[3], lw=0.4, hatch="////", zorder=2)
+    for k, box in enumerate(d["fine"]):
+        fill.fill(*zip(*cells_of(box, h)), fc="none", ec=style.OKABE_ITO[5] if k == b else "#333333", lw=2.2,
+                  zorder=3)
+        flux.fill(*zip(*cells_of(box, h)), fc="none", ec="#333333", lw=1.2, zorder=3)
+    fill.text(4.1, 12.7, "fine box", color=style.OKABE_ITO[5], fontsize=11, weight="bold")
+    # The register's coarse faces, and the coarse cells outside that reflux corrects.
+    for f in d["faces"]:
+        i0, j0, i1, j1 = f["faces"]
+        for i in range(i0, i1 + 1):
+            for j in range(j0, j1 + 1):
+                if f["dir"] == 0:
+                    seg = ([i, i], [j, j + 1])
+                    cell = (i - 1, j) if f["side"] == 0 else (i, j)
+                else:
+                    seg = ([i, i + 1], [j, j])
+                    cell = (i, j - 1) if f["side"] == 0 else (i, j)
+                flux.fill(*zip(*cells_of([cell[0], cell[1], cell[0], cell[1]], 1.0)), fc=style.OKABE_ITO[4],
+                          ec="none", alpha=0.6, zorder=1)
+                flux.plot(*seg, color=style.OKABE_ITO[6], lw=3.2, solid_capstyle="butt", zorder=4)
+    for ax in (fill, flux):
+        ax.set_xlim(2.0, 14.0)
+        ax.set_ylim(2.0, 14.0)
+    fill.set_title(f"the ghosts ({g} fine cells) of one fine box: filled from level 0 (blue),\n"
+                   "or by the other fine box (hatched)", fontsize=11, y=-0.13)
+    flux.set_title("the flux register's coarse faces (red) on the fine level's outline,\n"
+                   "and the coarse cells outside they correct (yellow)", fontsize=11, y=-0.13)
     style.save_svg(fig, path)
 
