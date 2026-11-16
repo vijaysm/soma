@@ -40,12 +40,15 @@ the wiki half converted:
 | ```` ```{toctree} ```` with `:caption:` | a list of links under the caption; those of `index.md` also make `_Sidebar.md` |
 | ```` ```{note} ```` and ```` ```{warning} ```` | a block quote starting **Note:** or **Warning:** |
 | ```` ```{include} ```` with `:start-line:` | the lines of the included file |
+| ```` ```{figure} ```` with `:alt:` and a caption | the image, by its raw URL on GitHub, then the caption in italics; the image must exist |
+| ```` ```mermaid ```` | left as it is; GitHub draws it, and Sphinx draws it on the site |
 | `$...$` and `$$ ... $$` | left as they are; GitHub renders them |
 | code blocks and inline code | left as they are |
 
-Any other directive (`figure`, `math`, `eval-rst`, ...) or role (``{ref}`...` ``, ``{doc}`...` ``)
-is an error. Before using one, teach the converter to write its GitHub form, and add a case to
-`tests/docs/test_build_wiki.py`.
+Figures are made from SOMA's output by the pipeline in `docs/figures/`; see
+[making figures](making-figures.md). Any other directive (`math`, `eval-rst`, ...) or role
+(``{ref}`...` ``, ``{doc}`...` ``) is an error. Before using one, teach the converter to write
+its GitHub form, and add a case to `tests/docs/test_build_wiki.py`.
 
 Anchors are the heading's text in lower case, with characters other than letters, digits,
 underscores, hyphens and spaces dropped and spaces made hyphens; MyST and GitHub agree on this,

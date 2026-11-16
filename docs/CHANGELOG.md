@@ -881,6 +881,13 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   includes and the table of contents are rewritten, and anything it cannot convert is an error.
   `docs.wiki` checks that every page converts; a workflow builds the site and the wiki on pull
   requests and pushes the wiki from `main`. Files under `docs/` that git ignores are not pages.
+- Figures drawn from SOMA's own output: the reference cells and their canonical sides (checked
+  against the node tables, the side tables and the FEM shape functions), segment tables of a
+  two-rank mesh, adjacency graphs, cell and vertex fields, a mesh edit and its compression, and a
+  box mesh; and Mermaid diagrams of a program's steps, the host and device model, the components
+  and the communication seam. `soma_figure_data` (option `SOMA_ENABLE_DOC_FIGURES`) writes each
+  figure's data, `docs/figures/make_figures.sh` draws them with ParaView's `pvpython`, and
+  `docs.figures` checks that every figure exists, has alt text and a caption, and is shown.
 
 ### Packaging
 
