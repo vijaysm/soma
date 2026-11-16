@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
-// Finite-volume upwind advection: each cell closed and the box filled; a
-// constant state kept; the total conserved where nothing crosses the
-// boundary; a step the serial one bit for bit on any partition; first-order
+// Finite-volume advection, upwind and bounded: each cell closed and the box
+// filled; linear gradients recovered; a constant state kept; the total
+// conserved where nothing crosses the boundary; no new extrema (bounded); a
+// step the serial one bit for bit on any partition; first- and second-order
 // convergence; bad meshes refused on every rank.
 
 #include <algorithm>
@@ -14,6 +15,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <map>
+#include <numbers>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -33,6 +35,7 @@ using fem_test::Part;
 using fem_test::solid;
 using fem_test::spec_of;
 using soma::Comm;
+using soma::FvScheme;
 using soma::GO;
 using soma::LO;
 using soma::Offset;
@@ -60,6 +63,14 @@ struct Cellular {
     return {x * (1 - x) * (1 - 2 * y), -(1 - 2 * x) * y * (1 - y), 0};
   }
 };
+
+// A rigid rotation about (0.5, 0.5): linear, so exactly divergence-free on
+// cells with planar sides.
+struct Rigid {
+  KOKKOS_INLINE_FUNCTION Velocity operator()(Real x, Real y, Real) const { return {-(y - 0.5), x - 0.5, 0}; }
+};
+
+constexpr std::array<FvScheme, 2> schemes = {FvScheme::upwind, FvScheme::bounded};
 
 std::uint64_t bits(Real x) { return std::bit_cast<std::uint64_t>(x); }
 
@@ -99,13 +110,75 @@ std::map<GO, Real> by_gid(const soma::HostMesh& mesh, LO rows, const Vector& u) 
 
 // u after `steps` steps of the cellular flow from the bump, at half the
 // largest step.
-Vector advected(const Comm& c, const soma::HostMesh& mesh, int steps) {
-  const Space space(c, mesh);
+Vector advected(const Comm& c, const soma::HostMesh& mesh, int steps, FvScheme scheme = FvScheme::upwind) {
+  const Space space(c, mesh, scheme);
   const auto phi = space.normal_flux(Cellular{});
   Vector u = bump_on(space, mesh);
   const Real dt = 0.5 * space.max_dt(c, phi);
   for (int n = 0; n < steps; ++n) space.step(c, phi, u, dt);
   return u;
+}
+
+// The largest excursion of the owned u outside [0, 1] over 200 bounded steps
+// at 0.9 of the largest step, from a square wave: 1 in [0.2, 0.45]^d.
+template <class F>
+Real overshoot(const Comm& c, const soma::HostMesh& mesh, const F& a, Real inflow) {
+  const Space space(c, mesh, FvScheme::bounded);
+  const auto phi = space.normal_flux(a);
+  Vector u = space.vector();
+  for (LO e = 0; e < space.cols(); ++e) {
+    const auto x = centre(mesh, e);
+    bool in = true;
+    for (int q = 0; q < mesh.dim(); ++q) {
+      const Real v = x[static_cast<std::size_t>(q)];
+      in = in && v > 0.2 && v < 0.45;
+    }
+    u(e) = in ? 1 : 0;
+  }
+  const Real dt = 0.9 * space.max_dt(c, CVector(phi));
+  Real worst = 0;
+  for (int n = 0; n < 200; ++n) {
+    space.step(c, CVector(phi), u, dt, inflow);
+    for (LO e = 0; e < space.rows(); ++e) worst = std::max({worst, -u(e), u(e) - 1});
+  }
+  return c.allreduce(worst, soma::Op::max);
+}
+
+// The L1 error of a bump (Gaussian, or of compact support) carried by a
+// uniform flow to t = 0.4 on an n-cell box, unperturbed. The Gaussian's tail
+// meets the walls, where nothing flows in: an error that does not shrink,
+// below upwind's but not below a second-order scheme's.
+// A bump of compact support: cos^4 of the distance from (0.3, 0.3, 0.3)
+// scaled to a quarter turn at radius 0.25, zero beyond, so nothing of it
+// reaches the walls (z ignored in 2D).
+Real compact(Real x, Real y, Real z, bool three) {
+  const Real r = std::sqrt((x - 0.3) * (x - 0.3) + (y - 0.3) * (y - 0.3) + (three ? (z - 0.3) * (z - 0.3) : 0));
+  const Real c = std::cos(std::numbers::pi / 2 * r / 0.25);
+  return r < 0.25 ? c * c * c * c : 0;
+}
+
+Real l1_error(const Comm& c, Topology t, int n, FvScheme scheme, bool compact_bump) {
+  const soma::HostMesh mesh = box_part(c, {n, n, solid(t) ? n : 1, t, 1.0, 1.0, 1.0}, Part{.perturb = false});
+  const Space space(c, mesh, scheme);
+  const Uniform a{0.5, 0.25, solid(t) ? 0.125 : 0.0};
+  const auto phi = space.normal_flux(a);
+  Vector u = space.vector();
+  for (LO e = 0; e < space.cols(); ++e) {
+    const auto x = centre(mesh, e);
+    u(e) = compact_bump ? compact(x[0], x[1], x[2], solid(t)) : bump(x[0], x[1], x[2], solid(t));
+  }
+  const Real end = 0.4;
+  const int steps = static_cast<int>(std::ceil(end / (0.5 * space.max_dt(c, CVector(phi)))));
+  const Real dt = end / steps;
+  for (int k = 0; k < steps; ++k) space.step(c, CVector(phi), u, dt);
+  Real local = 0;
+  for (LO e = 0; e < space.rows(); ++e) {
+    const auto x = centre(mesh, e);
+    const Real y[3] = {x[0] - a.a * end, x[1] - a.b * end, x[2] - a.c * end};
+    local += space.volume()(e) * std::abs(u(e) - (compact_bump ? compact(y[0], y[1], y[2], solid(t))
+                                                              : bump(y[0], y[1], y[2], solid(t))));
+  }
+  return c.allreduce(local, soma::Op::sum);
 }
 
 void expect_message(const Comm& c, const soma::HostMesh& mesh, const std::string& part) {
@@ -209,17 +282,19 @@ TEST(Fv, LeastSquaresRecoversLinearGradients) {
 TEST(Fv, ConstantStatesStay) {
   const Comm c = Comm::world();
   for (const Topology t : all) {
-    SCOPED_TRACE(soma::name(t));
-    const soma::HostMesh mesh = box_part(c, spec_of(t, 6));
-    const Space space(c, mesh);
-    const auto phi = space.normal_flux(Uniform{});
-    Vector u = space.vector();
-    Kokkos::deep_copy(u, 2.5);
-    const Real dt = 0.9 * space.max_dt(c, CVector(phi));
-    for (int n = 0; n < 20; ++n) space.step(c, CVector(phi), u, dt, 2.5);
-    Real worst = 0;
-    for (LO e = 0; e < space.cols(); ++e) worst = std::max(worst, std::abs(u(e) - 2.5));
-    EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-13);
+    for (const FvScheme scheme : schemes) {
+      SCOPED_TRACE(testing::Message() << soma::name(t) << " scheme " << static_cast<int>(scheme));
+      const soma::HostMesh mesh = box_part(c, spec_of(t, 6));
+      const Space space(c, mesh, scheme);
+      const auto phi = space.normal_flux(Uniform{});
+      Vector u = space.vector();
+      Kokkos::deep_copy(u, 2.5);
+      const Real dt = 0.9 * space.max_dt(c, CVector(phi));
+      for (int n = 0; n < 20; ++n) space.step(c, CVector(phi), u, dt, 2.5);
+      Real worst = 0;
+      for (LO e = 0; e < space.cols(); ++e) worst = std::max(worst, std::abs(u(e) - 2.5));
+      EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-13);
+    }
   }
 }
 
@@ -231,17 +306,20 @@ TEST(Fv, TheTotalIsConserved) {
   for (const bool exact : {false, true}) {
     soma::set_reproducible(exact);
     for (const Topology t : all) {
-      SCOPED_TRACE(testing::Message() << soma::name(t) << " exact " << exact);
-      const soma::HostMesh mesh = box_part(c, spec_of(t, 6));
-      const Space space(c, mesh);
-      const auto phi = space.normal_flux(Cellular{});
-      Vector u = bump_on(space, mesh);
-      const Real before = space.total(c, CVector(u));
-      const Real dt = 0.5 * space.max_dt(c, CVector(phi));
-      for (int n = 0; n < 200; ++n) space.step(c, CVector(phi), u, dt, 1e3);  // no inflow anywhere
-      const Real after = space.total(c, CVector(u));
-      EXPECT_GT(before, 0);
-      EXPECT_NEAR(after, before, 1e-13 * before);
+      for (const FvScheme scheme : schemes) {
+        SCOPED_TRACE(testing::Message() << soma::name(t) << " exact " << exact << " scheme "
+                                        << static_cast<int>(scheme));
+        const soma::HostMesh mesh = box_part(c, spec_of(t, 6));
+        const Space space(c, mesh, scheme);
+        const auto phi = space.normal_flux(Cellular{});
+        Vector u = bump_on(space, mesh);
+        const Real before = space.total(c, CVector(u));
+        const Real dt = 0.5 * space.max_dt(c, CVector(phi));
+        for (int n = 0; n < 200; ++n) space.step(c, CVector(phi), u, dt, 1e3);  // no inflow anywhere
+        const Real after = space.total(c, CVector(u));
+        EXPECT_GT(before, 0);
+        EXPECT_NEAR(after, before, 1e-13 * before);
+      }
     }
   }
   soma::set_reproducible(saved);
@@ -251,20 +329,23 @@ TEST(Fv, TheTotalIsConserved) {
 TEST(Fv, DistributedStepsAreTheSerialOnesBitForBit) {
   const Comm c = Comm::world();
   for (const Topology t : all) {
-    const soma::testing::BoxSpec spec = spec_of(t, 6);
-    const soma::HostMesh whole = box_part(Comm::self(), spec);
-    const Vector serial = advected(Comm::self(), whole, 30);
-    const auto want = by_gid(whole, whole.segment_table(whole.dim()).owned_end, serial);
-    for (const int deal : {0, 1}) {
-      for (const int bridge : {0, solid(t) ? 2 : 1}) {
-        SCOPED_TRACE(testing::Message() << soma::name(t) << " deal " << deal << " bridge " << bridge);
-        const soma::HostMesh mesh = box_part(c, spec, Part{.deal = deal, .bridge = bridge});
-        const Vector u = advected(c, mesh, 30);
-        LO differ = 0;
-        for (const auto& [g, v] : by_gid(mesh, mesh.segment_table(mesh.dim()).owned_end, u)) {
-          differ += bits(v) == bits(want.at(g)) ? 0 : 1;
+    for (const FvScheme scheme : schemes) {
+      const soma::testing::BoxSpec spec = spec_of(t, 6);
+      const soma::HostMesh whole = box_part(Comm::self(), spec);
+      const Vector serial = advected(Comm::self(), whole, 30, scheme);
+      const auto want = by_gid(whole, whole.segment_table(whole.dim()).owned_end, serial);
+      for (const int deal : {0, 1}) {
+        for (const int bridge : {0, solid(t) ? 2 : 1}) {
+          SCOPED_TRACE(testing::Message() << soma::name(t) << " deal " << deal << " bridge " << bridge << " scheme "
+                                          << static_cast<int>(scheme));
+          const soma::HostMesh mesh = box_part(c, spec, Part{.deal = deal, .bridge = bridge});
+          const Vector u = advected(c, mesh, 30, scheme);
+          LO differ = 0;
+          for (const auto& [g, v] : by_gid(mesh, mesh.segment_table(mesh.dim()).owned_end, u)) {
+            differ += bits(v) == bits(want.at(g)) ? 0 : 1;
+          }
+          EXPECT_EQ(c.allreduce(static_cast<Real>(differ), soma::Op::sum), 0);
         }
-        EXPECT_EQ(c.allreduce(static_cast<Real>(differ), soma::Op::sum), 0);
       }
     }
   }
@@ -286,6 +367,11 @@ TEST(Fv, TheLargestStepIsTheCellCrossingTime) {
   Kokkos::deep_copy(u, 3.0);
   space.step(c, CVector(still), u, forever);
   for (LO e = 0; e < space.cols(); ++e) EXPECT_EQ(u(e), 3.0);
+  const Space bounded(c, mesh, FvScheme::bounded);
+  EXPECT_EQ(bounded.scheme(), FvScheme::bounded);
+  EXPECT_EQ(space.scheme(), FvScheme::upwind);
+  bounded.step(c, CVector(still), u, forever);
+  for (LO e = 0; e < space.cols(); ++e) EXPECT_EQ(u(e), 3.0);
 }
 
 // A bump carried by a uniform flow: the error falls at first order.
@@ -295,22 +381,7 @@ TEST(Fv, UpwindConvergesAtFirstOrder) {
     SCOPED_TRACE(soma::name(t));
     std::vector<Real> errors;
     for (const int n : solid(t) ? std::vector<int>{8, 16, 32} : std::vector<int>{16, 32, 64}) {
-      const soma::HostMesh mesh = box_part(c, {n, n, solid(t) ? n : 1, t, 1.0, 1.0, 1.0}, Part{.perturb = false});
-      const Space space(c, mesh);
-      const Uniform a{0.5, 0.25, solid(t) ? 0.125 : 0.0};
-      const auto phi = space.normal_flux(a);
-      Vector u = bump_on(space, mesh);
-      const Real end = 0.4;
-      const int steps = static_cast<int>(std::ceil(end / (0.5 * space.max_dt(c, CVector(phi)))));
-      const Real dt = end / steps;
-      for (int k = 0; k < steps; ++k) space.step(c, CVector(phi), u, dt);
-      Real local = 0;
-      for (LO e = 0; e < space.rows(); ++e) {
-        const auto x = centre(mesh, e);
-        local += space.volume()(e) *
-                 std::abs(u(e) - bump(x[0] - a.a * end, x[1] - a.b * end, x[2] - a.c * end, solid(t)));
-      }
-      errors.push_back(c.allreduce(local, soma::Op::sum));
+      errors.push_back(l1_error(c, t, n, FvScheme::upwind, false));
       if (c.rank() == 0) std::printf("%s n %d L1 error %.4e\n", soma::name(t), n, errors.back());
     }
     for (std::size_t k = 1; k < errors.size(); ++k) {
@@ -321,14 +392,56 @@ TEST(Fv, UpwindConvergesAtFirstOrder) {
   }
 }
 
+// The bump of compact support, bounded: second order (the clipped peak slows
+// the coarse meshes), and always below upwind's error.
+TEST(Fv, BoundedConvergesAtSecondOrder) {
+  const Comm c = Comm::world();
+  for (const Topology t : all) {
+    SCOPED_TRACE(soma::name(t));
+    std::vector<Real> errors;
+    for (const int n : solid(t) ? std::vector<int>{8, 16, 32} : std::vector<int>{16, 32, 64}) {
+      errors.push_back(l1_error(c, t, n, FvScheme::bounded, true));
+      if (c.rank() == 0) std::printf("%s n %d bounded L1 error %.4e\n", soma::name(t), n, errors.back());
+      EXPECT_LT(errors.back(), l1_error(c, t, n, FvScheme::upwind, true));
+    }
+    EXPECT_GE(std::log2(errors[0] / errors[1]), 1.3) << errors[0] << " " << errors[1];
+    EXPECT_GE(std::log2(errors[1] / errors[2]), 1.6) << errors[1] << " " << errors[2];
+  }
+}
+
+// From a square wave, bounded steps make no new extrema: through a uniform
+// flow on a perturbed mesh and a rigid rotation on an unperturbed one,
+// nothing or 1 flowing in. Without the limiter the same steps overshoot.
+TEST(Fv, BoundedStaysWithinTheInitialRange) {
+  const Comm c = Comm::world();
+  for (const Topology t : all) {
+    const int n = solid(t) ? 8 : 16;
+    const soma::testing::BoxSpec spec{n, n, solid(t) ? n : 1, t, 1.0, 1.0, 1.0};
+    const soma::HostMesh perturbed = box_part(c, spec);
+    const soma::HostMesh even = box_part(c, spec, Part{.perturb = false});
+    for (const Real inflow : {0.0, 1.0}) {
+      SCOPED_TRACE(testing::Message() << soma::name(t) << " inflow " << inflow);
+      EXPECT_LE(overshoot(c, perturbed, Uniform{}, inflow), 1e-14);
+      EXPECT_LE(overshoot(c, even, Rigid{}, inflow), 1e-14);
+    }
+  }
+  const soma::HostMesh mesh = box_part(c, {16, 16, 1, Topology::quad, 1.0, 1.0, 1.0});
+  soma::detail::fv_unlimited = true;
+  const Real unlimited = overshoot(c, mesh, Uniform{}, 0.0);
+  soma::detail::fv_unlimited = false;
+  EXPECT_GT(unlimited, 1e-3);
+}
+
 // Digests of an advection, for compare_threads.cmake, which runs this at
 // several thread counts: they must agree.
 TEST(Fv, SolutionDigests) {
   const Comm self = Comm::self();
   std::uint64_t h = 1469598103934665603ull;
   for (const Topology t : {Topology::tri, Topology::hex}) {
-    const Vector u = advected(self, box_part(self, spec_of(t, 12)), 40);
-    for (std::size_t i = 0; i < u.extent(0); ++i) h = (h ^ bits(u(i))) * 1099511628211ull;
+    for (const FvScheme scheme : schemes) {
+      const Vector u = advected(self, box_part(self, spec_of(t, 12)), 40, scheme);
+      for (std::size_t i = 0; i < u.extent(0); ++i) h = (h ^ bits(u(i))) * 1099511628211ull;
+    }
   }
   std::printf("digest reproducible %016llx\n", static_cast<unsigned long long>(h));
   std::printf("concurrency %d\n", Kokkos::DefaultHostExecutionSpace().concurrency());
