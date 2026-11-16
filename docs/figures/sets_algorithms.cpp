@@ -735,7 +735,7 @@ std::vector<double> by_gid(const soma::Comm& comm, const soma::HostMesh* mesh, c
     const auto gid = mesh->gid(2);
     for (soma::LO e = 0; e < mesh->segment_table(2).owned_end; ++e) {
       const auto at = std::lower_bound(gids.begin(), gids.end(), gid(static_cast<std::size_t>(e)));
-      require(at != gids.end() && *at == gid(static_cast<std::size_t>(e)), "parts: a cell of the mesh read");
+      require(at != gids.end() && *at == gid(static_cast<std::size_t>(e)), "readparts: a cell of the mesh read");
       v[static_cast<std::size_t>(at - gids.begin())] = value + 1;
     }
   }
@@ -749,11 +749,11 @@ std::string parts_json(const std::vector<double>& v) {
   return s + "]";
 }
 
-// parts: data/hybrid_3quad_1tri.h5m written to SOMA files of 4 parts (on the 4
+// readparts: data/hybrid_3quad_1tri.h5m written to SOMA files of 4 parts (on the 4
 // ranks) and of 2 parts (on ranks 0 and 1), then read with rebalance off on 2
 // ranks (N > P) and on 4 (N < P), and with rebalance on 4; for each cell by
-// gid the part that wrote it and the rank that read it, as parts.json.
-void set_parts(const soma::Comm& comm, const fs::path& out) {
+// gid the part that wrote it and the rank that read it, as readparts.json.
+void set_readparts(const soma::Comm& comm, const fs::path& out) {
   const fs::path in = data_file("hybrid_3quad_1tri.h5m");
   const soma::HostMesh mesh = soma::read_file(comm, in);
   // The whole mesh on every rank, for the cells' gids and corners.
@@ -781,26 +781,26 @@ void set_parts(const soma::Comm& comm, const fs::path& out) {
   const std::vector<double> read4 = by_gid(comm, &kept, cells, comm.rank());
   const soma::HostMesh spread = soma::read_soma(comm, out / "two.soma");
   const std::vector<double> rebalanced = by_gid(comm, &spread, cells, comm.rank());
-  require(comm.size() == 4 && cells.size() == 64, "parts: 64 cells on 4 ranks");
+  require(comm.size() == 4 && cells.size() == 64, "readparts: 64 cells on 4 ranks");
   // Part q of N goes to rank floor(qP/N).
   const auto at = [](const std::vector<double>& v, std::size_t i) { return static_cast<int>(v[i]) - 1; };
   for (std::size_t i = 0; i < cells.size(); ++i) {
-    require(at(read2, i) == at(wrote4, i) * 2 / 4, "parts: N = 4, P = 2: part q on rank floor(qP/N)");
-    require(at(read4, i) == at(wrote2, i) * 4 / 2, "parts: N = 2, P = 4: part q on rank floor(qP/N)");
-    require(rebalanced[i] > 0, "parts: every cell read");
+    require(at(read2, i) == at(wrote4, i) * 2 / 4, "readparts: N = 4, P = 2: part q on rank floor(qP/N)");
+    require(at(read4, i) == at(wrote2, i) * 4 / 2, "readparts: N = 2, P = 4: part q on rank floor(qP/N)");
+    require(rebalanced[i] > 0, "readparts: every cell read");
   }
   const auto holds = [&](const std::vector<double>& v, int r) {
     return std::find(v.begin(), v.end(), r + 1.0) != v.end();
   };
-  require(!holds(read4, 1) && !holds(read4, 3), "parts: without rebalance ranks 1 and 3 stay empty");
-  for (int r = 0; r < 4; ++r) require(holds(rebalanced, r), "parts: with rebalance every rank holds cells");
+  require(!holds(read4, 1) && !holds(read4, 3), "readparts: without rebalance ranks 1 and 3 stay empty");
+  for (int r = 0; r < 4; ++r) require(holds(rebalanced, r), "readparts: with rebalance every rank holds cells");
   if (comm.rank() == 0) {
     std::string js = "{\"cells\": [";
     for (std::size_t i = 0; i < order.size(); ++i) js += (i ? ",\n    " : "\n    ") + corners_json(whole, order[i]);
     js += "],\n \"wrote4\": " + parts_json(wrote4) + ",\n \"read2\": " + parts_json(read2) +
           ",\n \"wrote2\": " + parts_json(wrote2) + ",\n \"read4\": " + parts_json(read4) +
           ",\n \"rebalanced\": " + parts_json(rebalanced) + "}";
-    write_json(comm, out / "parts.json", js);
+    write_json(comm, out / "readparts.json", js);
   }
 }
 
@@ -813,7 +813,7 @@ void add_algorithm_sets(Sets& sets) {
   sets["hierarchy"] = {1, set_hierarchy};
   sets["marked"] = {1, set_marked};
   sets["overlap"] = {1, set_overlap};
-  sets["parts"] = {4, set_parts};
+  sets["readparts"] = {4, set_readparts};
   sets["poisson"] = {1, set_poisson};
   sets["remap"] = {1, set_remap};
   sets["search"] = {1, set_search};

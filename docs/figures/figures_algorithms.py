@@ -448,9 +448,9 @@ def coarse_fine(data, path):
     style.save_svg(fig, path)
 
 
-@figure("soma-read-parts", ["parts"], "svg")
+@figure("soma-read-parts", ["readparts"], "svg")
 def soma_read_parts(data, path):
-    d = load_json(data / "parts" / "parts.json")
+    d = load_json(data / "readparts" / "readparts.json")
     panels = [
         ("wrote4", "a file of N = 4 parts", "part"),
         ("read2", "read on P = 2 ranks: parts 0, 1 on rank 0,\nparts 2, 3 on rank 1", "rank"),
