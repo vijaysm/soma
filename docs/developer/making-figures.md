@@ -41,16 +41,18 @@ With tests on, ctest makes every data set (`doc_figures.<set>`) and checks that
 
 ## Adding a figure
 
-1. **The data.** Add a set to `docs/figures/figure_data.cpp`: a function writing VTK files
-   (meshes, with the fields the figure colours by, through `soma::write_file`) or JSON tables
-   into its directory, registered in `sets()` with its rank count. Check what the figure is about
-   in the set (`require(...)`), so a change in SOMA that changes the picture fails the set rather
-   than silently redrawing it. Add `<set>:<ranks>` to `SOMA_FIGURE_SETS` in
+1. **The data.** Add a set to the file of its area, `docs/figures/sets_<area>.cpp` (`concepts`,
+   `parallel` or `algorithms`; the helpers they share are in `figure_data.hpp`): a function
+   writing VTK files (meshes, with the fields the figure colours by, through `soma::write_file`)
+   or JSON tables into its directory, registered in that file's `add_<area>_sets` with its rank
+   count. A set's name is lowercase letters only. Check what the figure is about in the set
+   (`require(...)`), so a change in SOMA that changes the picture fails the set rather than
+   silently redrawing it. Add `<set>:<ranks>` to the area's `SOMA_FIGURE_SETS_<AREA>` list in
    `docs/figures/CMakeLists.txt`. Use the public API; only where it cannot give the data, add a
    small read-only accessor in `soma::detail` with its own unit test.
-2. **The drawing.** Add a function to `docs/figures/render.py` with
-   `@figure("<name>", ["<set>", ...], "png" | "svg")`. It reads `<data>/<set>/...` and writes
-   the path it is given. Render meshes with ParaView (`pv_view`, `pv_surface`, `pv_color_by`,
+2. **The drawing.** Add a function to the area's `docs/figures/figures_<area>.py` with
+   `@figure("<name>", ["<set>", ...], "png" | "svg")`; the helpers the modules share are in
+   `figlib.py`. It reads `<data>/<set>/...` and writes the path it is given. Render meshes with ParaView (`pv_view`, `pv_surface`, `pv_color_by`,
    `pv_save`) as PNG, and draw schematics with matplotlib (`style.svg_figure`, `style.save_svg`)
    as SVG.
 3. **The page.** Show it with a figure directive next to the text it explains:
