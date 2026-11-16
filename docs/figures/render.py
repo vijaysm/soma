@@ -123,6 +123,121 @@ def box_mesh_gids(data, path):
     pv_save(pv, view, path, {"position": [10.5, -8.0, 8.5], "focal": [1.9, 1.5, 0.9], "up": [0, 0, 1]})
 
 
+# ---------------------------------------------------------------- schematics in 3D
+
+class Camera:
+    """An orthographic view with z up, seen from the direction `eye` (from the object to the viewer)."""
+
+    def __init__(self, eye):
+        n = sum(e * e for e in eye) ** 0.5
+        self.eye = [e / n for e in eye]
+        right = [-self.eye[1], self.eye[0], 0.0]  # (0, 0, 1) x eye
+        n = sum(r * r for r in right) ** 0.5
+        self.right = [r / n for r in right]
+        e, r = self.eye, self.right
+        self.up = [e[1] * r[2] - e[2] * r[1], e[2] * r[0] - e[0] * r[2], e[0] * r[1] - e[1] * r[0]]
+
+    def __call__(self, p):
+        return (sum(a * b for a, b in zip(self.right, p)), sum(a * b for a, b in zip(self.up, p)))
+
+    def depth(self, p):
+        """Larger is nearer the viewer."""
+        return sum(a * b for a, b in zip(self.eye, p))
+
+
+# Front, right and above: the view of the reference cells.
+CELL_VIEW = Camera((0.45, -1.0, 0.55))
+
+
+def face_normal(points, face):
+    a, b, c = points[face[0]], points[face[1]], points[face[-1]]
+    u = [b[k] - a[k] for k in range(3)]
+    v = [c[k] - a[k] for k in range(3)]
+    return [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]]
+
+
+def in_front(points, face, camera=CELL_VIEW):
+    return camera.depth(face_normal(points, face)) > 0
+
+
+def centroid(points):
+    return [sum(p[k] for p in points) / len(points) for k in range(len(points[0]))]
+
+
+@figure("reference-cells", ["reference"], "svg")
+def reference_cells(data, path):
+    cells = load_json(data / "reference" / "reference.json")
+    order = ["tri", "quad", "tet", "pyramid", "prism", "hex"]
+    fig, axes = style.svg_figure(10.5, 6.6, nrows=2, ncols=3)
+    for ax, name in zip(axes.flat, order):
+        cell = cells[name]
+        x = cell["points"]
+        p = [CELL_VIEW(q) for q in x] if cell["dim"] == 3 else [(q[0], q[1]) for q in x]
+        mid = centroid(p)
+        faces = cell["faces"]
+        for i, (a, b) in enumerate(cell["edges"]):
+            visible = cell["dim"] == 2 or any(a in f and b in f and in_front(x, f) for f in faces)
+            ax.plot([p[a][0], p[b][0]], [p[a][1], p[b][1]], color="#222222", lw=1.8,
+                    ls="-" if visible else (0, (4, 3)), zorder=1)
+            m = centroid([p[a], p[b]])
+            ax.text(m[0], m[1], f"{i}", color="#777777", fontsize=8.5, ha="center", va="center",
+                    bbox={"boxstyle": "round,pad=0.12", "fc": "white", "ec": "none"}, zorder=2)
+        for i, q in enumerate(p):
+            d = [q[0] - mid[0], q[1] - mid[1]]
+            r = max((d[0] ** 2 + d[1] ** 2) ** 0.5, 1e-9)
+            ax.plot(*q, "o", color=style.OKABE_ITO[5], ms=6, zorder=3)
+            ax.text(q[0] + 0.15 * d[0] / r, q[1] + 0.15 * d[1] / r, str(i), fontsize=12, weight="bold",
+                    ha="center", va="center", color=style.OKABE_ITO[5], zorder=4,
+                    bbox={"boxstyle": "round,pad=0.1", "fc": "white", "ec": "none"})
+        ax.set_title(name, fontsize=13, y=-0.12)
+        ax.autoscale()
+        ax.margins(0.12)
+    style.save_svg(fig, path)
+
+
+@figure("canonical-sides", ["reference"], "svg")
+def canonical_sides(data, path):
+    cells = load_json(data / "reference" / "reference.json")
+    fig, axes = style.svg_figure(11, 5.4, ncols=2)
+    # Each cell from a direction that shows none of its faces edge-on.
+    views = {"hex": Camera((0.55, -1.0, 0.5)), "tet": Camera((1.0, -0.75, 0.55))}
+    for ax, name in zip(axes.flat, ["hex", "tet"]):
+        x = cells[name]["points"]
+        camera = views[name]
+        faces = list(enumerate(cells[name]["faces"]))
+        # Far faces first, so near ones are drawn over them.
+        faces.sort(key=lambda f: camera.depth(centroid([x[v] for v in f[1]])))
+        for i, face in faces:
+            n = face_normal(x, face)
+            length = sum(c * c for c in n) ** 0.5
+            fc = centroid([x[v] for v in face])
+            shift = [0.8 * n[k] / length for k in range(3)]
+            # Each face pulled out along its normal and shrunk towards its centre.
+            corners3 = [[fc[k] + shift[k] + 0.72 * (x[v][k] - fc[k]) for k in range(3)] for v in face]
+            corners = [camera(c) for c in corners3]
+            front = in_front(x, face, camera)
+            colour = style.CATEGORY[i % len(style.CATEGORY)]
+            ax.fill(*zip(*corners), color=colour, alpha=0.35 if front else 0.15, zorder=1 if not front else 3)
+            ax.plot(*zip(*(corners + corners[:1])), color=colour, lw=1.6, zorder=2 if not front else 4,
+                    ls="-" if front else (0, (4, 3)))
+            centre = camera([fc[k] + shift[k] for k in range(3)])
+            for v, c in zip(face, corners):
+                inset = [c[k] + 0.22 * (centre[k] - c[k]) for k in range(2)]
+                ax.text(*inset, str(v), fontsize=10, ha="center", va="center", zorder=6,
+                        color="#000000" if front else "#666666")
+            # The face's sense: an arrow from its first vertex towards its second.
+            a = [corners[0][k] + 0.42 * (centre[k] - corners[0][k]) for k in range(2)]
+            b = [corners[1][k] + 0.42 * (centre[k] - corners[1][k]) for k in range(2)]
+            ax.annotate("", xy=[a[k] + 0.75 * (b[k] - a[k]) for k in range(2)], xytext=a, zorder=6,
+                        arrowprops={"arrowstyle": "-|>", "color": "#000000" if front else "#888888", "lw": 1.3})
+            ax.text(*centre, f"f{i}", fontsize=12, weight="bold", ha="center", va="center", zorder=7,
+                    color="#000000" if front else "#666666")
+        ax.set_title(f"{name}: faces pulled out along their outward normals", fontsize=12, y=-0.1)
+        ax.autoscale()
+        ax.margins(0.04)
+    style.save_svg(fig, path)
+
+
 # ---------------------------------------------------------------- driver
 
 

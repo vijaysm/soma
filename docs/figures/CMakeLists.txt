@@ -11,7 +11,7 @@ target_link_libraries(soma_figure_data PRIVATE soma soma_warnings)
 if(SOMA_ENABLE_TESTS)
   # The sets and their rank counts, as soma_figure_data --list prints them
   # (sorted by name); doc_figures.list fails when the two disagree.
-  set(SOMA_FIGURE_SETS box:1)
+  set(SOMA_FIGURE_SETS box:1 reference:1)
   string(REPLACE ":" " " expected "${SOMA_FIGURE_SETS}")
   string(REPLACE ";" "\n" expected "${expected}")
   add_test(NAME doc_figures.list COMMAND soma_figure_data --list)

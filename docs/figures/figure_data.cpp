@@ -15,21 +15,27 @@
 // Exits 0 on success; 1 when a set fails (the message names the check); 2 for
 // bad arguments, an unknown set, or the wrong rank count.
 
+#include <array>
+#include <cmath>
 #include <cstdio>
 #include <exception>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include <Kokkos_Core.hpp>
 
+#include "soma/algorithms/fem.hpp"
 #include "soma/core/mesh.hpp"
 #include "soma/io/mesh_file.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/runtime/scope_guard.hpp"
 #include "soma/testing/box_mesh.hpp"
+#include "soma/topology/canonical.hpp"
 
 namespace fs = std::filesystem;
 
@@ -60,6 +66,111 @@ void set_box(const soma::Comm& comm, const fs::path& out) {
   soma::write_file(comm, mesh, (out / "box.vtk").string(), {.vtk_fields = std::vector<std::string>{"gid"}});
 }
 
+// The text of a JSON file, written on the first rank.
+void write_json(const soma::Comm& comm, const fs::path& path, const std::string& text) {
+  if (comm.rank() != 0) return;
+  std::ofstream f(path);
+  f << text << "\n";
+  require(static_cast<bool>(f), "cannot write " + path.string());
+}
+
+using Point = std::array<double, 3>;
+
+// Reference coordinates of the cells, in MOAB's convention, with which the
+// figures draw SOMA's numbering. set_reference checks them against SOMA: each
+// face of soma::canonical must be planar with its right-hand normal pointing
+// out of the cell, and the FEM shape functions must be 1 at their own corner.
+const std::map<soma::Topology, std::vector<Point>>& reference_points() {
+  using soma::Topology;
+  static const std::map<Topology, std::vector<Point>> all = {
+      {Topology::tri, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}},
+      {Topology::quad, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}},
+      {Topology::tet, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}},
+      {Topology::pyramid, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0.5, 0.5, 1}}},
+      {Topology::prism, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {0, 1, 1}}},
+      {Topology::hex, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}}},
+  };
+  return all;
+}
+
+Point sub(const Point& a, const Point& b) { return {a[0] - b[0], a[1] - b[1], a[2] - b[2]}; }
+Point cross(const Point& a, const Point& b) {
+  return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+}
+double dot(const Point& a, const Point& b) { return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]; }
+
+std::vector<int> side_vertices(soma::Topology t, int d, int i) {
+  const soma::canonical::SideDef side = soma::canonical::side(t, d, i);
+  return std::vector<int>(side.v, side.v + side.num_vertices);
+}
+
+// The checks above, for one topology.
+void check_reference(soma::Topology t, const std::vector<Point>& x) {
+  const std::string name = soma::name(t);
+  require(static_cast<int>(x.size()) == soma::num_vertices(t), name + ": vertex count");
+  Point centre{0, 0, 0};
+  for (const Point& p : x)
+    for (int a = 0; a < 3; ++a) centre[a] += p[a] / static_cast<double>(x.size());
+  const int dim = soma::dimension(t);
+  if (dim == 2) {
+    // The cell itself, counterclockwise seen from +z, as its edges run.
+    require(cross(sub(x[1], x[0]), sub(x[2], x[0]))[2] > 0, name + ": counterclockwise");
+  }
+  for (int f = 0; dim == 3 && f < soma::canonical::num_sides(t, 2); ++f) {
+    const std::vector<int> v = side_vertices(t, 2, f);
+    const Point n = cross(sub(x[v[1]], x[v[0]]), sub(x[v.back()], x[v[0]]));
+    for (std::size_t k = 3; k < v.size(); ++k) {
+      require(std::abs(dot(n, sub(x[v[k]], x[v[0]]))) < 1e-12, name + ": face " + std::to_string(f) + " planar");
+    }
+    require(dot(n, sub(x[v[0]], centre)) > 0, name + ": face " + std::to_string(f) + " points out");
+  }
+  if (t == soma::Topology::tri || t == soma::Topology::tet || t == soma::Topology::quad || t == soma::Topology::hex) {
+    const bool box = t == soma::Topology::quad || t == soma::Topology::hex;
+    for (std::size_t a = 0; a < x.size(); ++a) {
+      soma::Real xi[3], n[8], dn[8][3];
+      for (int k = 0; k < 3; ++k) xi[k] = box ? 2 * x[a][k] - 1 : x[a][k];
+      const int nodes = soma::fem::shape(t, xi, n, dn);
+      require(nodes == static_cast<int>(x.size()), name + ": shape functions");
+      for (int b = 0; b < nodes; ++b) {
+        require(std::abs(n[b] - (static_cast<int>(a) == b ? 1 : 0)) < 1e-12, name + ": FEM corner order");
+      }
+    }
+  }
+}
+
+// reference: for each cell, its corners (in the convention checked above) and
+// its edges and faces from soma::canonical, as reference.json.
+void set_reference(const soma::Comm& comm, const fs::path& out) {
+  std::ostringstream js;
+  js << "{";
+  const char* sep = "";
+  for (const auto& [t, x] : reference_points()) {
+    check_reference(t, x);
+    js << sep << "\n  \"" << soma::name(t) << "\": {\"dim\": " << soma::dimension(t) << ", \"points\": [";
+    for (std::size_t a = 0; a < x.size(); ++a) {
+      js << (a ? ", " : "") << "[" << x[a][0] << ", " << x[a][1] << ", " << x[a][2] << "]";
+    }
+    for (int d = 1; d <= 2; ++d) {
+      js << "], \"" << (d == 1 ? "edges" : "faces") << "\": [";
+      const int count = d < soma::dimension(t) ? soma::canonical::num_sides(t, d) : 0;
+      for (int i = 0; i < count; ++i) {
+        const std::vector<int> v = side_vertices(t, d, i);
+        js << (i ? ", " : "") << "[";
+        for (std::size_t k = 0; k < v.size(); ++k) js << (k ? ", " : "") << v[k];
+        js << "]";
+      }
+    }
+    js << "]}";
+    sep = ",";
+  }
+  js << "\n}";
+  require(soma::canonical::num_sides(soma::Topology::hex, 1) == 12, "hex: 12 edges");
+  require(soma::canonical::num_sides(soma::Topology::hex, 2) == 6, "hex: 6 faces");
+  require(soma::canonical::num_sides(soma::Topology::tet, 1) == 6, "tet: 6 edges");
+  require(soma::canonical::num_sides(soma::Topology::tet, 2) == 4, "tet: 4 faces");
+  write_json(comm, out / "reference.json", js.str());
+}
+
 struct Set {
   int ranks;
   std::function<void(const soma::Comm&, const fs::path&)> make;
@@ -68,6 +179,7 @@ struct Set {
 const std::map<std::string, Set>& sets() {
   static const std::map<std::string, Set> all = {
       {"box", {1, set_box}},
+      {"reference", {1, set_reference}},
   };
   return all;
 }

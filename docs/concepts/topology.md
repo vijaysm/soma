@@ -207,6 +207,15 @@ Faces (`dim = 2`):
 | knife | (0,1,5,4) (1,2,6,5) (2,3,5,6) (3,0,4,5) (0,3,2,1) |
 | hex | (0,1,5,4) (1,2,6,5) (2,3,7,6) (3,0,4,7) (0,3,2,1) (4,5,6,7) |
 
+```{figure} ../figures/img/canonical-sides.svg
+:alt: The six faces of a hex and the four faces of a tet, each pulled away from the cell along its outward normal, labelled with its face number and its corner numbers, with an arrow from its first corner towards its second
+:width: 100%
+
+The faces of the hex and the tet from the table above, each pulled out along its outward normal.
+Dashed faces face away from the viewer. A face lists its corners counterclockwise seen from
+outside the cell; the arrow runs from its first corner to its second.
+```
+
 An edge has one edge, itself. Polygons have no table: their edges are the vertex cycle, edge $i$
 running from vertex $i$ to vertex $(i + 1) \bmod n$.
 

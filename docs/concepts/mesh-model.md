@@ -37,6 +37,15 @@ format, so they are never renumbered. Device-callable helpers describe each topo
 Polygons are supported as faces (added with `MeshBuilder::add_polygons`); polyhedra are listed
 for file compatibility but cannot be built yet.
 
+```{figure} ../figures/img/reference-cells.svg
+:alt: The tri, quad, tet, pyramid, prism and hex, each with its corners numbered in bold and its edges numbered in grey; edges hidden behind the cell are dashed
+:width: 100%
+
+The local numbering of the fixed topologies: corners in bold, edges in grey, numbered as
+`soma::canonical` gives them (see [canonical side tables](topology.md#canonical-side-tables)).
+An element's connectivity lists its corners in this order.
+```
+
 ## Integer and real types
 
 `soma/core/types.hpp` fixes the types that every array in SOMA uses:
