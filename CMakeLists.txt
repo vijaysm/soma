@@ -32,6 +32,8 @@ set(SOMA_KOKKOS_GPU "AUTO" CACHE STRING
 set_property(CACHE SOMA_KOKKOS_GPU PROPERTY STRINGS AUTO NONE CUDA HIP SYCL)
 option(SOMA_ENABLE_MOAB_REFERENCE "Build MOAB reference tests and benchmarks" OFF)
 option(SOMA_ENABLE_EXAMPLES "Build the example programs (requires SOMA_ENABLE_HDF5)" OFF)
+option(SOMA_ENABLE_DOC_FIGURES "Build the program that makes the documentation figures' data (requires MPI and HDF5)"
+       OFF)
 option(SOMA_ENABLE_MOAB_COMPAT "MOAB's API over SOMA meshes (soma::compat)" OFF)
 option(SOMA_ENABLE_KOKKOSKERNELS "KokkosSparse views of SOMA matrices (set KokkosKernels_ROOT)" OFF)
 option(SOMA_ENABLE_PETSC "PETSc matrices and vectors from SOMA's (set PETSC_DIR)" OFF)
@@ -211,6 +213,13 @@ if(SOMA_ENABLE_EXAMPLES)
     message(FATAL_ERROR "SOMA_ENABLE_EXAMPLES needs SOMA_ENABLE_HDF5")
   endif()
   add_subdirectory(examples)
+endif()
+
+if(SOMA_ENABLE_DOC_FIGURES)
+  if(NOT SOMA_ENABLE_MPI OR NOT SOMA_ENABLE_HDF5)
+    message(FATAL_ERROR "SOMA_ENABLE_DOC_FIGURES needs SOMA_ENABLE_MPI and SOMA_ENABLE_HDF5")
+  endif()
+  add_subdirectory(docs/figures)
 endif()
 
 if(SOMA_INSTALL)

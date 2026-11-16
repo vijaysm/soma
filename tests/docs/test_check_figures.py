@@ -97,6 +97,11 @@ class CheckFiguresTest(unittest.TestCase):
         self.write("_build/x.md", PAGE.replace("a.svg", "none.svg"))
         self.assertEqual(cf.check(self.docs), [])
 
+    def test_figures_shown_as_code_are_not_figures(self):
+        example = "````text\n```{figure} ../figures/img/<name>.png\n:alt: x\n\nx\n```\n````\n"
+        self.write("guide/other.md", "# Other\n\n" + example)
+        self.assertEqual(cf.check(self.docs), [])
+
     def test_main(self):
         self.assertEqual(cf.main(["--docs", str(self.docs)]), 0)
         self.write("figures/img/c.svg", "<svg/>")

@@ -26,13 +26,14 @@ import sys
 from pathlib import Path
 
 DOCS = Path(__file__).resolve().parent.parent
-FENCE = re.compile(r"^(`{3,}|:{3,})\{figure\}\s+(\S+)\s*$")
+FENCE = re.compile(r"^\s*(`{3,}|:{3,})(.*)$")
+FIGURE = re.compile(r"^\{figure\}\s+(\S+)\s*$")
 OPTION = re.compile(r"^:([a-z-]+):\s*(.*)$")
 NOT_PAGES = {"plans", "_build"}
 
 
 def figures(page: Path):
-    """(line, image, alt, caption) of each figure of a page."""
+    """(line, image, alt, caption) of each figure of a page; other fenced blocks are skipped whole."""
     lines = page.read_text(encoding="utf-8").splitlines()
     i = 0
     while i < len(lines):
@@ -40,18 +41,22 @@ def figures(page: Path):
         if not m:
             i += 1
             continue
-        mark, target, start = m.group(1), m.group(2), i + 1
+        mark, start = m.group(1), i + 1
         end = start
-        while end < len(lines) and lines[end].rstrip() != mark:
+        while end < len(lines) and lines[end].strip() != mark:
             end += 1
-        options, body = {}, lines[start:end]
+        i = end + 1
+        figure = FIGURE.match(m.group(2).strip())
+        if not figure:
+            continue
+        target = figure.group(1)
+        options, body = {}, [b.strip() for b in lines[start:end]]
         while body and OPTION.match(body[0]):
             key, value = OPTION.match(body[0]).groups()
             options[key] = value
             body = body[1:]
         caption = " ".join(b.strip() for b in body if b.strip())
         yield start, (page.parent / target).resolve(), options.get("alt", "").strip(), caption
-        i = end + 1
 
 
 def check(docs: Path, max_file: int = 300_000, max_total: int = 6_000_000) -> list[str]:
