@@ -37,6 +37,16 @@ format, so they are never renumbered. Device-callable helpers describe each topo
 Polygons are supported as faces (added with `MeshBuilder::add_polygons`); polyhedra are listed
 for file compatibility but cannot be built yet.
 
+```{figure} ../figures/img/reference-cells.svg
+:alt: The tri, quad, tet, pyramid, prism and hex, each with its corners numbered in bold and its edges numbered in grey; edges hidden behind the cell are dashed
+:width: 100%
+
+The local numbering of the fixed topologies: corners in bold, edges in grey, numbered as
+`soma::canonical` gives them (see [canonical side tables](topology.md#canonical-side-tables)),
+drawn on the reference elements of `soma/fields/node_tables.hpp` (see [fields](fields.md)). An
+element's connectivity lists its corners in this order.
+```
+
 ## Integer and real types
 
 `soma/core/types.hpp` fixes the types that every array in SOMA uses:
@@ -124,6 +134,16 @@ So for dimension `d`:
 | `[0, owned_end)` | everything owned here |
 | `[owned_end, shared_end)` | shared copies |
 | `[shared_end, count)` | ghosts |
+
+```{figure} ../figures/img/segment-table.svg
+:alt: Four bars, the vertices and the cells of rank 0 and of rank 1, each divided into coloured lid ranges: interior, shared and owned here, shared copy, and ghost, with the lid where each range ends and the names of the table's ends
+:width: 100%
+
+The segment tables of `data/hybrid_3quad_1tri.h5m` read on two ranks with one ghost layer. Rank 0
+owns the 14 vertices the ranks share and rank 1 holds copies of them; cells are never shared, so
+their tables have `interior_end = owned_end = shared_end`. Within a kind, the segments split by
+topology: the triangles come before the quads.
+```
 
 A **segment** is a maximal run of entities with one ownership kind, topology and arity (vertex
 count; for vertices 1). Uniform arity lets a kernel be instantiated with a compile-time vertex

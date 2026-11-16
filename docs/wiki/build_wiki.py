@@ -24,6 +24,8 @@ What is rewritten:
 - a link to any other file or directory of the repository becomes a link to it
   on GitHub (--repo-url, --branch); a link that resolves to nothing is an error;
 - a toctree becomes a list of links to its pages, under its caption;
+- a figure becomes its image, linked by its raw URL on GitHub so the wiki shows
+  it, followed by its caption in italics; a missing image is an error;
 - a note or warning becomes a block quote starting **Note:** or **Warning:**;
 - an include is replaced by the lines of the file it names (after
   :start-line:), its links taken relative to that file;
@@ -100,6 +102,7 @@ class Page:
     lines: list[Line] = field(default_factory=list)
     anchors: set[str] = field(default_factory=set)  # its headings' slugs
     toctrees: list[tuple[str, list[Path]]] = field(default_factory=list)
+    figures: list[tuple[Path, str, str]] = field(default_factory=list)  # image, alt, caption
 
 
 def rel(path: Path) -> str:
@@ -150,6 +153,10 @@ def expand(path: Path, raw: list[str], page: Page, errors: list[str]) -> list[Li
             entries = [base / f"{b.strip()}.md" for b in body if b.strip()]
             page.toctrees.append((options.get("caption", ""), entries))
             out.append(Line(f"\0toctree {len(page.toctrees) - 1}", base))
+        elif name == "figure":
+            caption = " ".join(b.strip() for b in body if b.strip())
+            page.figures.append(((base / argument).resolve(), options.get("alt", ""), caption))
+            out.append(Line(f"\0figure {len(page.figures) - 1}", base))
         elif name in ADMONITIONS:
             inner = expand(path, body, page, errors)
             first = True
@@ -264,6 +271,14 @@ class Renderer:
             self.errors.append(f"{where}: a {{role}}`...` is not supported; teach docs/wiki/build_wiki.py")
         return out
 
+    def figure(self, image: Path, alt: str, caption: str, where: str) -> list[str]:
+        if not image.is_file() or not image.is_relative_to(ROOT):
+            self.errors.append(f"{where}: {rel(image)} does not exist")
+            return []
+        raw = self.repo_url.replace("https://github.com/", "https://raw.githubusercontent.com/", 1)
+        out = [f"![{alt}]({raw}/{self.branch}/{image.relative_to(ROOT).as_posix()})"]
+        return out + ["", f"*{caption}*"] if caption else out
+
     def toctree(self, caption: str, entries: list[Path], where: str) -> list[str]:
         out = [f"## {caption}", ""] if caption else []
         for entry in entries:
@@ -281,6 +296,8 @@ class Renderer:
             where = f"{rel(page.source)}:{n}"
             if line.code:
                 out.append(line.text)
+            elif line.text.startswith("\0figure "):
+                out.extend(self.figure(*page.figures[int(line.text.split()[1])], where))
             elif line.text.startswith("\0toctree "):
                 caption, entries = page.toctrees[int(line.text.split()[1])]
                 out.extend(self.toctree(caption, entries, where))

@@ -21,6 +21,7 @@ is turned on but whose dependency cannot be found is a configure error.
 | `SOMA_KOKKOS_GPU` | `AUTO` | GPU backend of a fetched Kokkos: `AUTO`, `NONE`, `CUDA`, `HIP` or `SYCL`. `AUTO` picks one from the toolchain found. |
 | `SOMA_ENABLE_MOAB_REFERENCE` | `OFF` | Build the tests that compare SOMA with MOAB, and the benchmarks (needs MOAB). |
 | `SOMA_ENABLE_EXAMPLES` | `OFF` | Build the example programs (needs `SOMA_ENABLE_HDF5`). |
+| `SOMA_ENABLE_DOC_FIGURES` | `OFF` | Build `soma_figure_data`, which makes the data of the documentation's figures (needs `SOMA_ENABLE_MPI` and `SOMA_ENABLE_HDF5`; see [making figures](../developer/making-figures.md)). |
 | `SOMA_ENABLE_MOAB_COMPAT` | `OFF` | Build `soma::compat`, MOAB's API over SOMA meshes (targets `soma::compat` and `soma::compat_dropin`). |
 | `SOMA_ENABLE_KOKKOSKERNELS` | `OFF` | KokkosSparse views of SOMA matrices. Needs an installed Kokkos, the one KokkosKernels was built with. |
 | `SOMA_ENABLE_PETSC` | `OFF` | PETSc matrices and vectors from SOMA's. Needs `SOMA_ENABLE_MPI` and PETSc 3.19 or newer with real double scalars. |

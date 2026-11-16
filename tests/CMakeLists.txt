@@ -270,7 +270,12 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/docs/wiki/build_wiki.py --check)
   add_test(NAME docs.wiki_converter
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/docs/test_build_wiki.py)
-  set_tests_properties(docs.wiki docs.wiki_converter PROPERTIES TIMEOUT 60)
+  # Every figure exists, is described and shown, within the size limits.
+  add_test(NAME docs.figures
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/docs/figures/check_figures.py)
+  add_test(NAME docs.figures_checker
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/docs/test_check_figures.py)
+  set_tests_properties(docs.wiki docs.wiki_converter docs.figures docs.figures_checker PROPERTIES TIMEOUT 60)
 endif()
 
 if(SOMA_INSTALL)

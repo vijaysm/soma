@@ -22,6 +22,16 @@ bridge `(3, 2)` each region its face neighbours. Every graph is a deterministic 
 topology, whatever the backend or the thread count: upward rows are built with atomics and then
 sorted, so the fill order of threads does not show.
 
+```{figure} ../figures/img/graph-kinds.svg
+:alt: Two copies of a 3 by 2 grid of quads with numbered cells and vertices; on the left vertex 5 and its four cells are highlighted, on the right cell 1 and its three edge neighbours
+:width: 100%
+
+Two graphs of a $3 \times 2$ box of quads. Left: the upward graph `(0, 2)` gives vertex 5 the
+cells it is a corner of. Right: the bridge `(2, 1)` gives cell 1 the cells that share an edge
+with it. Cells 3 and 5 share only a vertex with cell 1, so they would be in its bridge `(2, 0)`
+row but are not in its `(2, 1)` row.
+```
+
 ## Requesting graphs
 
 `soma::AdjacencyRequest` names a set of graphs:
@@ -206,6 +216,15 @@ Faces (`dim = 2`):
 | prism | (0,1,4,3) (1,2,5,4) (0,3,5,2) (0,2,1) (3,4,5) |
 | knife | (0,1,5,4) (1,2,6,5) (2,3,5,6) (3,0,4,5) (0,3,2,1) |
 | hex | (0,1,5,4) (1,2,6,5) (2,3,7,6) (3,0,4,7) (0,3,2,1) (4,5,6,7) |
+
+```{figure} ../figures/img/canonical-sides.svg
+:alt: The six faces of a hex and the four faces of a tet, each pulled away from the cell along its outward normal, labelled with its face number and its corner numbers, with an arrow from its first corner towards its second
+:width: 100%
+
+The faces of the hex and the tet from the table above, each pulled out along its outward normal.
+Dashed faces face away from the viewer. A face lists its corners counterclockwise seen from
+outside the cell; the arrow runs from its first corner to its second.
+```
 
 An edge has one edge, itself. Polygons have no table: their edges are the vertex cycle, edge $i$
 running from vertex $i$ to vertex $(i + 1) \bmod n$.

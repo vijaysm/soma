@@ -42,6 +42,33 @@ The components, from the bottom up, with the other components their public heade
 | `testing` | `soma::testing` | `core` | structured box meshes for tests |
 | `compat` | `soma::compat` | `core` | MOAB's API over a SOMA host mesh |
 
+The same as a graph, an arrow from a component to one it uses; the optional dependencies are
+dashed:
+
+```mermaid
+flowchart BT
+  subgraph model["the data model"]
+    core <--> topology
+    core <--> fields
+  end
+  runtime
+  parallel --> core
+  parallel --> topology
+  amr --> parallel
+  io --> parallel
+  io --> amr
+  io --> core
+  algorithms --> parallel
+  algorithms --> topology
+  algorithms --> runtime
+  algorithms --> core
+  testing --> core
+  compat --> core
+  MPI(["MPI"]) -.-> parallel
+  HDF5(["HDF5"]) -.-> io
+  KK(["KokkosKernels, PETSc, ArborX"]) -.-> algorithms
+```
+
 `core`, `topology` and `fields` form the data model together: a `Mesh` owns its adjacency store
 (`soma/topology/adjacency.hpp`) and its field registry (`soma/fields/registry.hpp`), and
 `soma/core/mesh.hpp` includes `soma/topology/build.hpp` at its end, so including the mesh brings

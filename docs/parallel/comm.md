@@ -13,6 +13,15 @@ configured without MPI (`SOMA_ENABLE_MPI` off) every call is the single-rank ide
 1. The data model and every algorithm are therefore the same in both builds; a serial run is a
 one-rank parallel run.
 
+```mermaid
+flowchart TB
+  callers["parallel, io, algorithms, amr"] --> comm["soma::Comm<br/>soma/parallel/comm.hpp"]
+  mpi["src/parallel/comm_mpi.cpp<br/>MPI calls on the wrapped communicator"]
+  serial["src/parallel/comm_serial.cpp<br/>rank 0 of 1: every collective is the identity"]
+  comm -- "SOMA_ENABLE_MPI on" --> mpi
+  comm -. "SOMA_ENABLE_MPI off" .-> serial
+```
+
 ```cpp
 class Comm {
  public:

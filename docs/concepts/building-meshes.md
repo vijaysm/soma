@@ -187,6 +187,15 @@ The numbering, from the header:
 | quad | gid $1 + i + n_x j$; corners $(i,j), (i{+}1,j), (i{+}1,j{+}1), (i,j{+}1)$ |
 | tri | quad $q$ (0-based) gives triangles $2q + 1 = (v_0, v_1, v_2)$ and $2q + 2 = (v_0, v_2, v_3)$ |
 
+```{figure} ../figures/img/box-mesh-gids.png
+:alt: A box of 4 by 3 by 2 hexes, each cell coloured by its gid, from 1 at the left end of the front bottom row to 24 at the right end of the top back row
+:width: 70%
+
+`box_mesh({.nx = 4, .ny = 3, .nz = 2, .lx = 4, .ly = 3, .lz = 2})`, each hex coloured by its gid:
+$i$ runs fastest, then $j$, then $k$, so the bottom layer holds gids 1 to 12 and the top layer 13
+to 24.
+```
+
 Supported elements are `hex`, `tet`, `quad` and `tri`. Quads and triangles lie in the plane
 $z = 0$, make a 2D mesh, and need `nz == 1`. The default ordering of a box is `Ordering::file`,
 so local ids follow the gids; set `spec.ordering` for another.

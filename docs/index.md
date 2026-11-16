@@ -92,6 +92,7 @@ developer/building-and-testing
 developer/benchmarks
 developer/contributing
 developer/writing-docs
+developer/making-figures
 developer/provenance
 ```
 

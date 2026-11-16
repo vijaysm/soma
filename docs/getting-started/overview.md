@@ -12,6 +12,18 @@ distributed over MPI ranks, and mirrored to a device with only the topology, adj
 fields a computation asks for. Kernels then traverse it through a device-copyable handle, the
 same code running on GPUs or on host threads.
 
+A typical program, each step a SOMA call on every rank:
+
+```mermaid
+flowchart LR
+  read["read_file<br/>or MeshBuilder + build_local_part"] --> ghosts["add_ghosts<br/>(if kernels read neighbours)"]
+  ghosts --> mirror["mesh.mirror#lt;Space#gt;()<br/>what the kernels need"]
+  mirror --> kernels["kernels on mesh.view()"]
+  kernels --> halo["HaloExchange::update<br/>owners' values to copies"]
+  halo --> kernels
+  kernels --> write["write_file"]
+```
+
 Kokkos 5.0 or newer is the only required dependency. MPI, HDF5 and the other libraries are
 optional and off by default; see [installation](installation.md).
 
@@ -107,6 +119,24 @@ applications build against SOMA unchanged. See [MOAB compatibility](../compat/mo
 ## The host and device model
 
 SOMA keeps the full mesh on the host and copies to a device only what a computation needs:
+
+```mermaid
+flowchart LR
+  subgraph host["host: HostMesh"]
+    direction TB
+    h1["topology and coordinates"]
+    h2["adjacency graphs"]
+    h3["fields and sets"]
+    h4["distribution: ownership, sharing"]
+  end
+  subgraph device["device: Mesh#lt;Space#gt;"]
+    direction TB
+    d1["the dimensions, fields, graphs and sets TransferOptions choose"]
+  end
+  host -- "mirror#lt;Space#gt;(TransferOptions)" --> device
+  device -- "view(): a MeshView, captured by value" --> kernels["Kokkos kernels"]
+  device -- "HaloExchange, record transport:<br/>staged through host buffers" --> mpi["MPI<br/>sees host memory only"]
+```
 
 - A `HostMesh` holds everything: topology, coordinates, adjacency graphs, fields, sets and the
   distribution. Reading, building, editing, distributing and writing happen here.

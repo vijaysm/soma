@@ -118,6 +118,15 @@ order; element-node spaces give `num_element_nodes` consecutive rows per member.
 layouts need. `space.entity_rows(dim, lid)` returns the rows of an entity (invalid for a
 non-member), and `space.view()` is the device-copyable form.
 
+```{figure} ../figures/img/cell-and-vertex-fields.png
+:alt: The same plane mesh twice, coloured by u = x + y; on the left each cell has one flat colour, on the right the colour varies smoothly inside each cell
+:width: 90%
+
+The function $u = x + y$ on `data/hybrid_3quad_1tri.h5m` as two per-entity fields: on the left a
+field on the cells (dimension 2), one value per cell, here $u$ at the cell's corners' mean; on
+the right a field on the vertices (dimension 0), drawn interpolated across each cell.
+```
+
 `soma/fields/node_tables.hpp` gives the reference coordinates of the nodes: `gll_points_1d(p)`,
 `make_node_table(key)`, `make_node_permutation(from, to)` between orderings, and the
 process-wide cache `NodeTables<MemSpace>::get(key)` and `permutation(from, to)`. Simplex GLL

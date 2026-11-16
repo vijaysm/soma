@@ -1,0 +1,11 @@
+/* Figures and Mermaid diagrams are drawn on white, so they read the same in
+   the light and dark themes. */
+pre.mermaid,
+div.mermaid {
+  background: #ffffff;
+  border-radius: 6px;
+  padding: 0.75em;
+}
+figure img {
+  background: #ffffff;
+}
