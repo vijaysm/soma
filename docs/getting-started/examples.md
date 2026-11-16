@@ -2,7 +2,7 @@
 
 SOMA ships five example programs in `examples/`, one per algorithm, the command-line tool
 `soma-convert` in `tools/`, and `examples/app/`, an application built outside SOMA's tree (see
-[below](#an-application-outside-soma-s-tree)). Each is a complete program of a page or two that reads a mesh on any
+[below](#an-application-outside-somas-tree)). Each is a complete program of a page or two that reads a mesh on any
 number of ranks, runs one algorithm and writes the result; read them alongside the algorithm
 pages. This page gives each one's purpose, command line, output and the tests that run it.
 
