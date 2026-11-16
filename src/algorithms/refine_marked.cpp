@@ -88,20 +88,25 @@ std::vector<std::optional<GO>> lookup(const Comm& comm, const std::vector<std::p
   for (std::size_t i = 0; i < entries.size(); ++i) put(i, 0, entries[i].first, entries[i].second);
   for (std::size_t q = 0; q < queries.size(); ++q) put(entries.size() + q, 1, queries[q], static_cast<GO>(q));
   const auto in = transport::route(Exec{}, comm, out);
-  std::map<Key, GO> directory;
+  // The entries by key (the first of equal keys), sorted for search.
+  std::vector<std::pair<Key, GO>> directory;
   for (std::size_t i = 0; i < in.size(); ++i) {
     GO row[6];
     std::memcpy(row, &in.payload(i, 0), width);
-    if (row[0] == 0) directory.emplace(Key{row[1], row[2], row[3], row[4]}, row[5]);
+    if (row[0] == 0) directory.push_back({Key{row[1], row[2], row[3], row[4]}, row[5]});
   }
+  std::stable_sort(directory.begin(), directory.end(),
+                   [](const auto& a, const auto& b) { return a.first < b.first; });
   // Answers to the queries found: index, gid.
   std::vector<std::pair<int, std::array<GO, 2>>> answers;
   for (std::size_t i = 0; i < in.size(); ++i) {
     GO row[6];
     std::memcpy(row, &in.payload(i, 0), width);
     if (row[0] != 1) continue;
-    const auto it = directory.find(Key{row[1], row[2], row[3], row[4]});
-    if (it != directory.end()) answers.push_back({in.source(i), {row[5], it->second}});
+    const Key k{row[1], row[2], row[3], row[4]};
+    const auto it = std::lower_bound(directory.begin(), directory.end(), k,
+                                     [](const auto& e, const Key& key) { return e.first < key; });
+    if (it != directory.end() && it->first == k) answers.push_back({in.source(i), {row[5], it->second}});
   }
   transport::RecordBatch<Host> back(answers.size(), 2 * sizeof(GO), "soma::refine_marked.answers");
   for (std::size_t i = 0; i < answers.size(); ++i) {
@@ -352,14 +357,11 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
   const auto cgid = mesh.gid(dim);
   const auto x = mesh.coords();
 
-  // Levels of the owned cells and births of the vertices held, by gid.
-  std::map<GO, std::int32_t> level_of;
-  {
-    const bool has = mesh.fields().contains(level_field);
-    for (LO e = 0; e < owned; ++e) {
-      const auto ei = static_cast<std::size_t>(e);
-      level_of[cgid(e)] = has ? mesh.fields().get<std::int32_t>(level_field, dim).view()(ei, 0) : 0;
-    }
+  // Levels of the owned cells, and births of the vertices held by gid.
+  std::vector<std::int32_t> level_of(static_cast<std::size_t>(owned), 0);
+  if (mesh.fields().contains(level_field)) {
+    const auto l = mesh.fields().get<std::int32_t>(level_field, dim).view();
+    for (LO e = 0; e < owned; ++e) level_of[static_cast<std::size_t>(e)] = l(static_cast<std::size_t>(e), 0);
   }
   std::map<GO, Key> birth_of;
   if (mesh.fields().contains(birth_field)) {
@@ -383,7 +385,10 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
   std::map<GO, P3> where;  // coordinates by gid
   for (LO v = 0; v < mesh.count(0); ++v) where[vgid(v)] = {x(v, 0), x(v, 1), x(v, 2)};
   std::map<Key, GO> known;
+  // Nothing recorded on any rank: nothing to find.
+  const bool recorded = comm.allreduce(static_cast<std::int32_t>(entries.empty() ? 0 : 1), Op::max) != 0;
   const auto ask = [&](const std::vector<Key>& keys) {
+    if (!recorded) return;
     std::vector<Key> q;
     for (const Key& k : keys) {
       if (!known.contains(k)) q.push_back(k);
@@ -404,7 +409,7 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
   };
   std::vector<std::vector<Key>> cell_keys(static_cast<std::size_t>(owned));
   std::vector<std::size_t> own_keys(static_cast<std::size_t>(owned));  // round one's, first in cell_keys
-  {
+  if (recorded) {
     std::vector<Key> keys;
     for (LO e = 0; e < owned; ++e) {
       std::vector<Key>& mine = cell_keys[static_cast<std::size_t>(e)];
@@ -414,7 +419,13 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
     }
     ask(keys);
   }
-  if (mode == Mode::split) {
+  // Every cell split (refine_uniform): nothing to balance.
+  std::int32_t everything = mode == Mode::split ? 1 : 0;
+  for (std::size_t e = 0; everything != 0 && e < static_cast<std::size_t>(owned); ++e) {
+    everything = !marks.empty() && marks[e] != 0 ? 1 : 0;
+  }
+  everything = comm.allreduce(everything, Op::min);
+  if (mode == Mode::split && everything == 0 && recorded) {
     // The children's edges and faces among the nodes known: corners and
     // vertices born on the cell's edges and quad faces.
     std::vector<Key> keys;
@@ -528,7 +539,7 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
   for (LO e = 0; e < cells; ++e) {
     const auto ei = static_cast<std::size_t>(e);
     const auto in = static_cast<std::size_t>(find_lid(in_cell, wc(e)));
-    level[ei] = level_of.at(wc(e));
+    level[ei] = level_of[in];
     bool hangs = false;
     for (std::size_t k = 0; k < own_keys[in]; ++k) hangs = hangs || known.contains(cell_keys[in][k]);
     const bool marked = !marks.empty() && marks[in] != 0;
@@ -547,7 +558,7 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
 
   // Balance: split cells until none is two levels coarser than a cell
   // touching what it watches.
-  if (mode == Mode::split) {
+  if (mode == Mode::split && everything == 0) {
     const HaloExchange<Host> halo(comm, work, 0);
     View2<std::int32_t, Host> finest("soma::refine_marked.finest", static_cast<std::size_t>(work.count(0)), 1);
     for (;;) {
@@ -576,9 +587,24 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
     }
   }
 
+  // A plane cell split, or replaced by triangles from its centre, must be
+  // star-shaped about its corners' average; the others may be any shape.
+  if (dim == 2) {
+    std::int32_t bad = 0;
+    for (LO e = 0; e < cells && bad == 0; ++e) {
+      const Act a = act[static_cast<std::size_t>(e)];
+      if ((a == Act::split || a == Act::transition) && !star_shaped(work, e)) bad = 1;
+    }
+    if (comm.allreduce(bad, Op::max) != 0) {
+      throw std::invalid_argument("refine_marked: a quad or polygon to be split is not star-shaped about its corners' "
+                                  "average (its children would turn against it)");
+    }
+  }
+
   // Bisections and transitions, planned before the numbering; the vertices
   // they reuse are added with their corners, for the fields.
   std::vector<NewVertex> added;
+  std::vector<std::pair<GO, Key>> born_here;  // births of the vertices made here, once per cell at each
   const auto by_gid = [](std::vector<GO> g) {
     std::sort(g.begin(), g.end());
     return g;
@@ -733,7 +759,7 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
           const GO ends[2] = {wv(side.v[0]), wv(side.v[1])};
           const GO gid = nums.vmax + we(edges.targets(static_cast<std::size_t>(e0 + bisected[ei])));
           added.push_back({gid, by_gid({ends[0], ends[1]})});
-          birth_of[gid] = key_of(ends);
+          born_here.emplace_back(gid, key_of(ends));
           return gid;
         }
         const int s = static_cast<int>(-3 - g);
@@ -743,7 +769,7 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
         for (int i = 0; i < side.n; ++i) c.push_back(wv(side.v[i]));
         const GO gid = face_base + work.gid(2)(faces.targets(static_cast<std::size_t>(faces.offsets(ei) + s)));
         added.push_back({gid, by_gid(c)});
-        birth_of[gid] = key_of(c);
+        born_here.emplace_back(gid, key_of(c));
         return gid;
       };
       for (std::size_t k = 0; k < plan[ei].size(); ++k) {
@@ -759,7 +785,7 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
       const topology::Side side = topology::side_of(w, dim, e, 1, s);
       const GO g[2] = {wv(side.v[0]), wv(side.v[1])};
       const GO gid = find(g).value_or(nums.vmax + we(edges.targets(static_cast<std::size_t>(e0 + s))));
-      birth_of[gid] = key_of(g);
+      born_here.emplace_back(gid, key_of(g));
       return gid;
     };
     if (dim == 3) {
@@ -770,7 +796,7 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
         const GO g[4] = {wv(side.v[0]), wv(side.v[1]), wv(side.v[2]), wv(side.v[3])};
         const GO gid =
             find(g).value_or(face_base + work.gid(2)(faces.targets(static_cast<std::size_t>(f0 + s))));
-        birth_of[gid] = key_of(g);
+        born_here.emplace_back(gid, key_of(g));
         return gid;
       };
     }
@@ -778,6 +804,18 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
     split_cell(work, e, nums.child(wc(e), 0) - 1, ids, kid_gids, kid_conn, added);
   }
   Level fine = assemble(comm, mesh, work, kid_gids, kid_conn, added, nums, polygons);
+  // The births of the vertices made here (named once per cell at each),
+  // then those recorded or found before.
+  const auto first_less = [](const auto& a, const auto& b) { return a.first < b.first; };
+  const auto first_equal = [](const auto& a, const auto& b) { return a.first == b.first; };
+  std::sort(born_here.begin(), born_here.end(), first_less);
+  born_here.erase(std::unique(born_here.begin(), born_here.end(), first_equal), born_here.end());
+  const auto birth = [&](GO gid) -> const Key* {
+    const auto it = std::lower_bound(born_here.begin(), born_here.end(), std::pair<GO, Key>{gid, Key{}}, first_less);
+    if (it != born_here.end() && it->first == gid) return &it->second;
+    const auto old = birth_of.find(gid);
+    return old == birth_of.end() ? nullptr : &old->second;
+  };
 
   Pass out;
   RefineResult& r = out.result;
@@ -787,24 +825,25 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
   HostMesh& f = r.mesh;
   // Levels and births on the refined part.
   {
-    std::map<GO, std::int32_t> deeper;
+    std::vector<std::int32_t> deeper(level_of.size(), 0);  // by the input's owned cell
     for (LO e = 0; e < cells; ++e) {
       const auto ei = static_cast<std::size_t>(e);
-      deeper[wc(e)] = act[ei] == Act::split || act[ei] == Act::bisect ? 1 : 0;
+      const auto in = static_cast<std::size_t>(find_lid(in_cell, wc(e)));
+      deeper[in] = act[ei] == Act::split || act[ei] == Act::bisect ? 1 : 0;
     }
     auto lv = f.fields().add_tag<std::int32_t>(level_field, dim, 1).view();
     for (LO c = 0; c < f.count(dim); ++c) {
-      const GO parent = cgid(r.parent[static_cast<std::size_t>(c)]);
-      lv(static_cast<std::size_t>(c), 0) = level_of.at(parent) + deeper.at(parent);
+      const auto parent = static_cast<std::size_t>(r.parent[static_cast<std::size_t>(c)]);
+      lv(static_cast<std::size_t>(c), 0) = level_of[parent] + deeper[parent];
     }
     auto bv = f.fields().add_tag<std::int64_t>(birth_field, 0, birth_width).view();
     for (LO v = 0; v < f.count(0); ++v) {
-      const auto it = birth_of.find(f.gid(0)(v));
-      if (it == birth_of.end()) continue;
+      const Key* b = birth(f.gid(0)(v));
+      if (b == nullptr) continue;
       const auto vi = static_cast<std::size_t>(v);
-      const auto n = static_cast<std::size_t>(key_size(it->second));
+      const auto n = static_cast<std::size_t>(key_size(*b));
       bv(vi, 0) = static_cast<std::int64_t>(n);
-      for (std::size_t k = 0; k < n; ++k) bv(vi, k + 1) = it->second[k];
+      for (std::size_t k = 0; k < n; ++k) bv(vi, k + 1) = (*b)[k];
     }
   }
   // Transition cells: the cell they replace, so that the next call puts it
@@ -830,8 +869,12 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
       for (LO i = 0; i < n; ++i) gv(ci, static_cast<std::size_t>(3 + i)) = vgid(m.vertex(dim, p, i));
     }
   }
-  // Hanging vertices: born on an edge or face a cell still has whole.
-  {
+  // Hanging vertices: born on an edge or face a cell still has whole. None
+  // when every cell was split and no vertex was found on any (a conforming
+  // mesh refined uniformly).
+  const bool none_hang =
+      everything != 0 && comm.allreduce(static_cast<std::int32_t>(known.empty() ? 0 : 1), Op::max) == 0;
+  if (!none_hang) {
     const MeshView<Host> fm = f.view();
     const auto fv = f.gid(0);
     std::vector<std::pair<Key, GO>> whole;
@@ -843,10 +886,10 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
     std::vector<LO> born;
     std::vector<Key> births;
     for (LO v = 0; v < f.count(0); ++v) {
-      const auto it = birth_of.find(fv(v));
-      if (it == birth_of.end()) continue;
+      const Key* b = birth(fv(v));
+      if (b == nullptr) continue;
       born.push_back(v);
-      births.push_back(it->second);
+      births.push_back(*b);
     }
     const auto found = lookup(comm, whole, births);
     Real owned_hanging = 0;
@@ -1036,7 +1079,7 @@ std::optional<Ungreened> ungreen(const Comm& comm, const HostMesh& mesh, std::sp
 
 RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
                            MarkedOptions options) {
-  check(comm, mesh, 1, "refine_marked");
+  check(comm, mesh, 1, "refine_marked", false);  // shapes: of the cells split alone, in pass
   const int dim = mesh.dim();
   const LO owned = mesh.segment_table(dim).owned_end;
   // Bad marks somewhere; a cell not a simplex somewhere.
@@ -1083,6 +1126,38 @@ RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<con
   }
   if (base) {
     for (LO& p : out.parent) p = base->from[static_cast<std::size_t>(p)];
+  }
+  out.child_offsets.assign(static_cast<std::size_t>(owned) + 1, 0);
+  for (const LO p : out.parent) ++out.child_offsets[static_cast<std::size_t>(p) + 1];
+  for (std::size_t p = 0; p < static_cast<std::size_t>(owned); ++p) out.child_offsets[p + 1] += out.child_offsets[p];
+  out.children.resize(out.parent.size());
+  std::vector<Offset> next(out.child_offsets.begin(), out.child_offsets.end() - 1);
+  for (std::size_t c = 0; c < out.parent.size(); ++c) {
+    out.children[static_cast<std::size_t>(next[static_cast<std::size_t>(out.parent[c])]++)] = static_cast<LO>(c);
+  }
+  return out;
+}
+
+RefineResult refine_uniform(const Comm& comm, const HostMesh& mesh, RefineOptions options) {
+  check(comm, mesh, options.levels, "refine_uniform");
+  const int dim = mesh.dim();
+  const LO owned = mesh.segment_table(dim).owned_end;
+  // Each level is marked refinement of every cell: the vertices made before
+  // are reused, levels and births recorded, transition cells put back.
+  RefineResult out;
+  for (int l = 0; l < options.levels; ++l) {
+    const HostMesh& from = l == 0 ? mesh : out.mesh;
+    if (l > 0) check(comm, from, options.levels, "refine_uniform");
+    const std::vector<std::int8_t> all(static_cast<std::size_t>(from.segment_table(dim).owned_end), 1);
+    RefineResult next = refine_marked(comm, from, all);
+    if (l > 0) {
+      for (LO& p : next.parent) p = out.parent[static_cast<std::size_t>(p)];
+      for (std::string& d : next.dropped) {
+        if (std::find(out.dropped.begin(), out.dropped.end(), d) == out.dropped.end()) out.dropped.push_back(d);
+      }
+      next.dropped = std::move(out.dropped);
+    }
+    out = std::move(next);
   }
   out.child_offsets.assign(static_cast<std::size_t>(owned) + 1, 0);
   for (const LO p : out.parent) ++out.child_offsets[static_cast<std::size_t>(p) + 1];

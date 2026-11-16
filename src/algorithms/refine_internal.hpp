@@ -195,7 +195,11 @@ Level assemble(const Comm& comm, const HostMesh& mesh, const HostMesh& work, std
 // Collective: throws std::invalid_argument on every rank if any rank's mesh
 // cannot be refined or the ranks disagree on the levels or the dimension;
 // messages begin with `who`.
-void check(const Comm& comm, const HostMesh& mesh, int levels, const char* who);
+void check(const Comm& comm, const HostMesh& mesh, int levels, const char* who, bool shapes = true);
+
+// Whether a plane cell is star-shaped about its corners' average (its
+// children, and the triangles from that point to its sides, turn as it does).
+bool star_shaped(const HostMesh& mesh, LO e);
 
 }  // namespace soma::detail::refine
 

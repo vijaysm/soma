@@ -654,6 +654,11 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   of tets and pyramids over its faces in 3D), recorded in `refine:green` and put back as the
   cell they replaced before the next call refines (red-green). The result is the same, gid for
   gid and bit for bit, on any number of ranks.
+- `refine_uniform` is `refine_marked` with every cell marked: it records levels and births,
+  reuses vertices on the cells' edges and faces and lists the hanging vertices of a
+  non-conforming mesh (it made them again before), and puts transition cells back first.
+  `refine_marked` checks only the plane cells it splits for star shape, so a mesh holding
+  darts (children of L-shaped polygons) refines where they are not marked.
 - `soma::infer_births(comm, mesh, tol)` rebuilds `refine:birth` from coordinates
   (`match_points`, exactly or within a tolerance) for meshes with hanging vertices but no
   records (read from a format that drops the field, made by other tools, from an AMR

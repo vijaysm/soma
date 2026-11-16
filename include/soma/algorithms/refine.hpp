@@ -55,10 +55,19 @@
 // vertex fields are dropped and named in `dropped`; the internal soma:
 // fields are rebuilt.
 //
+// Each level is refine_marked (below) with every cell marked, so it keeps the
+// refinement state: "refine:level" one up, "refine:birth" recorded for each
+// new vertex (so refine_marked can follow), vertices made earlier on the
+// cells' edges and faces reused, a mesh that has hanging vertices keeping
+// them (listed in RefineResult::hanging), and transition cells of a
+// conforming result put back first. On a conforming mesh without that
+// state, the result is as described above.
+//
 // A child's corners are its parent's mapped from reference coordinates, so a
 // cell not star-shaped about its corners' average (a non-convex quad or
 // polygon; in 3D, a strongly distorted cell) would have children turned
-// against it: plane cells are checked and refused, volume cells are not.
+// against it: plane cells are checked and refused (refine_marked: those it
+// splits), volume cells are not.
 //
 // The refinement runs on the host (a HostMesh in, built with
 // build_local_part); a device mesh is mirrored to the host and back.

@@ -880,6 +880,90 @@ TEST(RefineMarked, CoordinatesFindVerticesLevelsDown) {
   }
 }
 
+// refine_uniform after marked refinement: it reuses the hanging vertices
+// (no point twice, by match_points), lists those still hanging, keeps a
+// linear vertex field exact (hanging vertices included), records levels one
+// up, and puts transition cells back first, as refine_marked does.
+TEST(RefineMarked, UniformRefinementFollowsMarkedRefinement) {
+  const Comm c = Comm::world();
+  for (const Case& k : cases()) {
+    if (!k.again) continue;
+    for (const bool conforming : {false, true}) {
+      SCOPED_TRACE(testing::Message() << k.name << " conforming " << conforming);
+      soma::HostMesh start = build(c, k.cells, 1);
+      auto u = start.fields().add_tag<double>("u", 0, 1).view();
+      for (LO v = 0; v < start.count(0); ++v) u(static_cast<std::size_t>(v), 0) = linear(point(start, v));
+      const soma::HostMesh mesh = rounds(c, std::move(start), 1, {conforming});
+      const int d = mesh.dim();
+      const auto fine = soma::refine_uniform(c, mesh);
+      std::vector<Real> xyz;
+      for (LO v = 0; v < fine.mesh.count(0); ++v) {
+        const auto p = point(fine.mesh, v);
+        xyz.insert(xyz.end(), p.begin(), p.end());
+      }
+      EXPECT_EQ(static_cast<Real>(soma::match_points(c, xyz).count), owned_count(c, fine.mesh, 0));
+      const bool simplices = std::string(k.name) == "tris" || std::string(k.name) == "tets";
+      const Real hanging = c.allreduce(static_cast<Real>(fine.hanging.size()), soma::Op::sum);
+      if (conforming && simplices) {
+        EXPECT_EQ(hanging, 0);  // bisected: nothing hangs
+      } else {
+        EXPECT_GT(hanging, 0);  // transition cells put back: the hanging vertices come back too
+      }
+      EXPECT_FALSE(fine.mesh.fields().contains("refine:green"));
+      // Levels one up from the cells refined (transition cells: their group's).
+      Real wrong = 0, worst = 0;
+      for (LO e = 0; e < fine.mesh.count(d); ++e) {
+        const LO p = fine.parent[static_cast<std::size_t>(e)];
+        wrong += level(fine.mesh, e) == level(mesh, p) + 1 ? 0 : 1;
+      }
+      EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
+      const auto fu = fine.mesh.fields().get<double>("u", 0).view();
+      for (LO v = 0; v < fine.mesh.count(0); ++v) {
+        worst = std::max(worst, std::abs(fu(static_cast<std::size_t>(v), 0) - linear(point(fine.mesh, v))));
+      }
+      EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-13);
+    }
+  }
+}
+
+// Only the cells split must be star-shaped: refined L-octagons leave darts,
+// which marked refinement keeps whole; marking a dart throws on every rank.
+TEST(RefineMarked, OnlyTheCellsSplitMustBeStarShaped) {
+  const Comm c = Comm::world();
+  const Case k = cases()[2];  // octagons
+  const soma::HostMesh mesh = soma::refine_uniform(c, build(c, k.cells, 1)).mesh;
+  EXPECT_THROW((void)soma::refine_uniform(c, mesh), std::invalid_argument);
+  // Star-shaped about the corners' average: every triangle to a side turns alike.
+  const auto dart = [&](LO e) {
+    const auto m = mesh.view();
+    const LO n = m.num_vertices(2, e);
+    std::array<Real, 3> o{0, 0, 0};
+    for (LO i = 0; i < n; ++i) {
+      const auto p = point(mesh, m.vertex(2, e, i));
+      for (std::size_t a = 0; a < 3; ++a) o[a] += p[a] / static_cast<Real>(n);
+    }
+    bool turns = true;
+    for (LO i = 0; i < n; ++i) {
+      const auto a = point(mesh, m.vertex(2, e, i)), b = point(mesh, m.vertex(2, e, (i + 1) % n));
+      turns = turns && (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0]) > 0;
+    }
+    return !turns;
+  };
+  std::vector<std::int8_t> safe, all;
+  Real darts = 0;
+  for (LO e = 0; e < mesh.segment_table(2).owned_end; ++e) {
+    safe.push_back(dart(e) ? 0 : 1);
+    all.push_back(1);
+    darts += dart(e) ? 1 : 0;
+  }
+  EXPECT_GT(c.allreduce(darts, soma::Op::sum), 0);
+  const auto fine = soma::refine_marked(c, mesh, safe);
+  Real inverted = 0;
+  for (LO e = 0; e < fine.mesh.count(2); ++e) inverted += measure(fine.mesh, e) > 0 ? 0 : 1;
+  EXPECT_EQ(c.allreduce(inverted, soma::Op::sum), 0);
+  EXPECT_THROW((void)soma::refine_marked(c, mesh, all), std::invalid_argument);
+}
+
 TEST(RefineMarked, BadInputThrowsOnEveryRank) {
   const Comm c = Comm::world();
   const soma::HostMesh mesh = build(c, plane(4, 4, 0), 0);

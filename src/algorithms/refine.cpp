@@ -449,37 +449,6 @@ int children_of(Topology t, LO corners) {
                                                      : 8;
 }
 
-Level refine_once(const Comm& comm, const HostMesh& mesh) {
-  const int dim = mesh.dim();
-  const HostMesh work = work_part(comm, mesh);
-  const LO cells = work.count(dim);
-  const auto we = work.gid(1);
-  const auto wc = work.gid(dim);
-  const Numbers nums = numbers(
-      comm, work,
-      [&](const MeshView<Host>& v, LO e) -> GO { return children_of(v.topology(dim, e), v.num_vertices(dim, e)); },
-      "refine_uniform");
-  const GO face_base = nums.vmax + nums.emax, centre_base = nums.vmax + nums.emax + nums.fmax;
-  std::vector<NewVertex> added;
-  std::array<std::vector<GO>, 6> kid_gids, kid_conn;
-  const auto edges = work.adjacency(dim, 1);
-  for (LO e = 0; e < cells; ++e) {
-    const Offset e0 = edges.offsets(static_cast<std::size_t>(e));
-    NodeGids ids;
-    ids.edge = [&](int s) { return nums.vmax + we(edges.targets(static_cast<std::size_t>(e0 + s))); };
-    if (dim == 3) {
-      const auto faces = work.adjacency(dim, 2);
-      const Offset f0 = faces.offsets(static_cast<std::size_t>(e));
-      ids.face = [&, faces, f0](int s) {
-        return face_base + work.gid(2)(faces.targets(static_cast<std::size_t>(f0 + s)));
-      };
-    }
-    ids.centre = centre_base + nums.number(wc(e));
-    split_cell(work, e, nums.child(wc(e), 0) - 1, ids, kid_gids, kid_conn, added);
-  }
-  return assemble(comm, mesh, work, kid_gids, kid_conn, added, nums, {});
-}
-
 // Whether a plane cell lies on one side of the lines from its corners'
 // average to its sides: each triangle (centre, v_i, v_i+1) turns as the cell
 // does (as its area vector, so cells off the xy plane are judged in their own
@@ -510,7 +479,7 @@ bool star_shaped(const HostMesh& mesh, LO e) {
 
 // Collective: throws std::invalid_argument on every rank if any rank's mesh
 // cannot be refined or the ranks disagree on the levels or the dimension.
-void check(const Comm& comm, const HostMesh& mesh, int levels, const char* who) {
+void check(const Comm& comm, const HostMesh& mesh, int levels, const char* who, bool shapes) {
   const int dim = mesh.dim();
   int bad = 0;
   if (dim != 2 && dim != 3) {
@@ -523,7 +492,7 @@ void check(const Comm& comm, const HostMesh& mesh, int levels, const char* who) 
       if (!supported_cell(m.topology(dim, e), dim)) bad = 3;
     }
     const LO owned = mesh.segment_table(dim).owned_end;
-    for (LO e = 0; dim == 2 && e < owned && bad == 0; ++e) {
+    for (LO e = 0; shapes && dim == 2 && e < owned && bad == 0; ++e) {
       if (m.topology(2, e) != Topology::tri && !star_shaped(mesh, e)) bad = 5;
     }
   }
@@ -548,36 +517,3 @@ void check(const Comm& comm, const HostMesh& mesh, int levels, const char* who) 
 }
 
 }  // namespace soma::detail::refine
-
-namespace soma {
-
-using namespace detail::refine;
-
-RefineResult refine_uniform(const Comm& comm, const HostMesh& mesh, RefineOptions options) {
-  check(comm, mesh, options.levels, "refine_uniform");
-  const int dim = mesh.dim();
-  RefineResult out;
-  Level level = refine_once(comm, mesh);
-  out.parent = std::move(level.parent);
-  out.dropped = std::move(level.dropped);
-  for (int l = 1; l < options.levels; ++l) {
-    check(comm, level.mesh, options.levels, "refine_uniform");
-    Level next = refine_once(comm, level.mesh);
-    for (LO& p : next.parent) p = out.parent[static_cast<std::size_t>(p)];
-    out.parent = std::move(next.parent);
-    level = std::move(next);
-  }
-  out.mesh = std::move(level.mesh);
-  const LO owned = mesh.segment_table(dim).owned_end;
-  out.child_offsets.assign(static_cast<std::size_t>(owned) + 1, 0);
-  for (const LO p : out.parent) ++out.child_offsets[static_cast<std::size_t>(p) + 1];
-  for (std::size_t p = 0; p < static_cast<std::size_t>(owned); ++p) out.child_offsets[p + 1] += out.child_offsets[p];
-  out.children.resize(out.parent.size());
-  std::vector<Offset> next(out.child_offsets.begin(), out.child_offsets.end() - 1);
-  for (std::size_t c = 0; c < out.parent.size(); ++c) {
-    out.children[static_cast<std::size_t>(next[static_cast<std::size_t>(out.parent[c])]++)] = static_cast<LO>(c);
-  }
-  return out;
-}
-
-}  // namespace soma
