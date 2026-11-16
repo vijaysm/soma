@@ -135,6 +135,7 @@ flowchart LR
   end
   host -- "mirror#lt;Space#gt;(TransferOptions)" --> device
   device -- "view(): a MeshView, captured by value" --> kernels["Kokkos kernels"]
+  device -- "HaloExchange, record transport:<br/>staged through host buffers" --> mpi["MPI<br/>sees host memory only"]
 ```
 
 - A `HostMesh` holds everything: topology, coordinates, adjacency graphs, fields, sets and the

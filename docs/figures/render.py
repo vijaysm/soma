@@ -100,6 +100,12 @@ def pv_surface(pv, view, source):
 
 
 def pv_save(pv, view, path, camera):
+    """Renders with the given camera and saves the shared size.
+
+    A first render lets ParaView reset the camera to the data, as it does on a
+    view's first render; the camera set after it is then the one drawn.
+    """
+    pv.Render(view)
     view.CameraPosition = camera["position"]
     view.CameraFocalPoint = camera["focal"]
     view.CameraViewUp = camera["up"]
@@ -350,7 +356,7 @@ def cell_and_vertex_fields(data, path):
     cells = pv.LegacyVTKReader(FileNames=[str(data / "fields" / "fields-cell.vtk")])
     vertices = pv.LegacyVTKReader(FileNames=[str(data / "fields" / "fields-vertex.vtk")])
     shifted = pv.Transform(Input=vertices)
-    shifted.Transform.Translate = [6.5, 0.0, 0.0]
+    shifted.Transform.Translate = [6.0, 0.0, 0.0]
     for source, association in ((cells, "CELLS"), (shifted, "POINTS")):
         display = pv_surface(pv, view, source)
         display.LineWidth = 2.0
@@ -365,8 +371,10 @@ def cell_and_vertex_fields(data, path):
     bar.RangeLabelFormat = "{:.1f}"
     pv_label(pv, view, "a cell field: one value per cell", [0.1, 0.84])
     pv_label(pv, view, "a vertex field, interpolated in each cell", [0.46, 0.84])
-    pv_save(pv, view, path, {"position": [3.25, 0.37, 30.0], "focal": [3.25, 0.37, 0.0], "up": [0, 1, 0],
-                             "parallel": 1, "parallel_scale": 3.6})
+    # The copies span x in [-2.73, 8.73] and y in [-2, 2.73]; the view is 14.9 wide (1.4 times
+    # twice the parallel scale), leaving the right sixth for the colour bar.
+    pv_save(pv, view, path, {"position": [3.98, 0.6, 30.0], "focal": [3.98, 0.6, 0.0], "up": [0, 1, 0],
+                             "parallel": 1, "parallel_scale": 5.3})
 
 
 @figure("mesh-edit", ["edit"], "svg")

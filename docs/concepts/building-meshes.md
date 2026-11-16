@@ -188,7 +188,7 @@ The numbering, from the header:
 | tri | quad $q$ (0-based) gives triangles $2q + 1 = (v_0, v_1, v_2)$ and $2q + 2 = (v_0, v_2, v_3)$ |
 
 ```{figure} ../figures/img/box-mesh-gids.png
-:alt: A box of 4 by 3 by 2 hexes, each cell coloured by its gid, from 1 at the near bottom corner to 24 at the far top corner
+:alt: A box of 4 by 3 by 2 hexes, each cell coloured by its gid, from 1 at the left end of the front bottom row to 24 at the right end of the top back row
 :width: 70%
 
 `box_mesh({.nx = 4, .ny = 3, .nz = 2, .lx = 4, .ly = 3, .lz = 2})`, each hex coloured by its gid:

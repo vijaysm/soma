@@ -16,8 +16,10 @@ one-rank parallel run.
 ```mermaid
 flowchart TB
   callers["parallel, io, algorithms, amr"] --> comm["soma::Comm<br/>soma/parallel/comm.hpp"]
-  comm -- "SOMA_ENABLE_MPI on" --> mpi["src/parallel/comm_mpi.cpp<br/>MPI calls on the wrapped communicator"]
-  comm -. "SOMA_ENABLE_MPI off" .-> serial["src/parallel/comm_serial.cpp<br/>rank 0 of 1: every collective is the identity"]
+  mpi["src/parallel/comm_mpi.cpp<br/>MPI calls on the wrapped communicator"]
+  serial["src/parallel/comm_serial.cpp<br/>rank 0 of 1: every collective is the identity"]
+  comm -- "SOMA_ENABLE_MPI on" --> mpi
+  comm -. "SOMA_ENABLE_MPI off" .-> serial
 ```
 
 ```cpp

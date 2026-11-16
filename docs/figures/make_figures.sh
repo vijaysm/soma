@@ -20,6 +20,11 @@
 
 set -euo pipefail
 
+if ((BASH_VERSINFO[0] < 4)); then
+  echo "make_figures: needs bash 4 or newer (this is $BASH_VERSION); on macOS: brew install bash" >&2
+  exit 1
+fi
+
 die() {
   echo "make_figures: $*" >&2
   exit 1
@@ -46,10 +51,14 @@ if [[ -z "${PVPYTHON:-}" ]]; then
 fi
 [[ -n "${PVPYTHON:-}" && -x "$PVPYTHON" ]] || die "pvpython not found; install ParaView or set PVPYTHON"
 MPIEXEC=${MPIEXEC:-$(sed -n 's/^MPIEXEC_EXECUTABLE:FILEPATH=//p' "$cache")}
-[[ -n "$MPIEXEC" && -x "$MPIEXEC" ]] || die "mpiexec not found; set MPIEXEC"
+MPIEXEC=$(command -v "$MPIEXEC" || true)
+[[ -n "$MPIEXEC" ]] || die "mpiexec not found; set MPIEXEC"
 data=${FIGURE_DATA:-$build/docs/figures/data}
 
-cmake --build "$build" --target soma_figure_data >/dev/null || die "building soma_figure_data failed"
+if ! log=$(cmake --build "$build" --target soma_figure_data 2>&1); then
+  tail -n 40 <<<"$log" >&2
+  die "building soma_figure_data failed"
+fi
 driver="$build/docs/figures/soma_figure_data"
 
 # The figures asked for, and the data sets they need.
@@ -66,10 +75,14 @@ done <<<"$listing"
 [[ ${#needed[@]} -gt 0 ]] || die "no figure named ${figures[*]}; known: $(cut -d' ' -f1 <<<"$listing" | tr '\n' ' ')"
 
 declare -A ranks=()
-while read -r set n; do ranks[$set]=$n; done < <("$driver" --list)
+sets=$("$driver" --list) || die "soma_figure_data --list failed"
+while read -r set n; do ranks[$set]=$n; done <<<"$sets"
 for set in $(printf '%s\n' "${needed[@]}" | sort -u); do
   [[ -n "${ranks[$set]:-}" ]] || die "soma_figure_data has no data set $set"
   echo "make_figures: data set $set on ${ranks[$set]} rank(s)"
+  # Only this run's files: a set may name its files by rank, and an earlier run may have had more.
+  mkdir -p "$data/$set"
+  rm -f "$data/$set"/*.json "$data/$set"/*.vtk
   OMP_NUM_THREADS=1 "$MPIEXEC" -n "${ranks[$set]}" "$driver" "$set" "$data/$set" --soma-reproducible >/dev/null ||
     die "data set $set failed"
 done

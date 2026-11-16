@@ -12,12 +12,15 @@
 // docs/figures/make_figures.sh runs the sets and renders the figures; see
 // docs/developer/making-figures.md.
 //
-// Exits 0 on success; 1 when a set fails (the message names the check); 2 for
-// bad arguments, an unknown set, or the wrong rank count.
+// Exits 0 on success; 1 when a set fails (each failing rank prints the check,
+// then leaves at once, so the launcher stops the others rather than leaving
+// them waiting in a collective); 2 for bad arguments, an unknown set, or the
+// wrong rank count.
 
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <fstream>
@@ -337,11 +340,14 @@ void set_edit(const soma::Comm& comm, const fs::path& out) {
   const soma::EditReport report = edit.apply();
   require(report.removed[2] == 2 && report.added[2] == 1 && report.added[0] == 2, "edit: the report");
   require(mesh.edited() && mesh.num_live(2) == 11 && mesh.count(2) == 13 && mesh.tail(2) == 1, "edit: edited state");
+  // What the figure's titles and caption say: the added quad is lid 12, gid 13.
+  require(mesh.gid(2)(12) == 13, "edit: the added quad has gid 13");
   write_json(comm, out / "edit-applied.json", edit_snapshot(mesh));
   const soma::Renumbering renumbering = mesh.compress();
   require(!mesh.edited() && mesh.count(2) == 11, "edit: compressed");
   require(renumbering.new_lid[2][5] == soma::invalid_lo && renumbering.new_lid[2][6] == soma::invalid_lo,
           "edit: removed cells have no new lid");
+  require(renumbering.new_lid[2][12] == 10 && mesh.gid(2)(10) == 13, "edit: the added quad becomes lid 10, gid 13");
   write_json(comm, out / "edit-compressed.json", edit_snapshot(mesh));
 }
 
@@ -399,7 +405,8 @@ int main(int argc, char** argv) {
     if (root) std::printf("soma_figure_data: %s written to %s\n", found->first.c_str(), out.c_str());
     return 0;
   } catch (const std::exception& e) {
-    if (root) std::fprintf(stderr, "soma_figure_data: %s: %s\n", found->first.c_str(), e.what());
-    return 1;
+    std::fprintf(stderr, "soma_figure_data: %s (rank %d): %s\n", found->first.c_str(), comm.rank(), e.what());
+    std::fflush(nullptr);
+    std::_Exit(1);  // not a return: the other ranks may be waiting in a collective
   }
 }
