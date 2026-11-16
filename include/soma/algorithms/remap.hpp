@@ -33,7 +33,13 @@
 // fill space without gaps (non-planar and non-convex faces included); faces
 // are taken in the order of their corner gids, so the tets do not depend on
 // how a cell lists its corners. Tets are clipped by one another's face planes
-// (tet_clip.hpp). A cell with a tet thinner than the tolerance, or not
+// (tet_clip.hpp). A hex, prism or pyramid that is convex with flat faces
+// (each corner within the tolerance of its faces' planes) is instead clipped
+// whole, as a polyhedron cut by the other cell's face planes
+// (convex_clip.hpp): the same overlaps to rounding, about 20 times faster
+// between hex grids; its corners are listed from the turn of it whose corner
+// gids come least, so the operator still does not depend on how a cell lists
+// them. A cell with a tet thinner than the tolerance, or not
 // star-shaped about its centroid (its tets turned unlike), throws on every
 // rank; an inverted cell (all its tets turned the other way) is taken at its
 // volume's magnitude.

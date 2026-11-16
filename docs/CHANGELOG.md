@@ -628,6 +628,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   a plane z = const (2D) or not star-shaped about its centroid (3D) throws on every rank, as
   does a tolerance that is bad or differs between ranks. Plane overlaps agree with MOAB's
   `Intx2MeshInPlane` to rounding.
+- `RemapOperator` clips hexes, prisms and pyramids that are convex with flat faces whole
+  (`soma/algorithms/convex_clip.hpp`: a polyhedron cut by the other cell's face planes) rather
+  than as tets about their centroids; other cells are split as before. Building the operator
+  between hex grids of 24^3 and 23^3 cells takes 0.25 s instead of 5.0 s at one rank, hexes
+  onto tets 1.1 s instead of 2.9 s; the overlaps are the same to rounding and the operator
+  still does not depend on the partition or a cell's corner listing.
 - `examples/remap.cpp` remaps a cell field from a `.h5m` or SOMA mesh onto a grid of triangles
   or tets over its bounding box and prints both totals.
 - `soma::refine_uniform(comm, mesh, RefineOptions)` (`soma/algorithms/refine.hpp`) splits
@@ -834,7 +840,7 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   sections time Laplacian smoothing against MOAB's, and `FemSpace`, the three assemblies and
   CG alone; its `advect` section, `FvSpace` and upwind steps alone; its `remap` section, a
   `RemapOperator` between plane grids built and applied, against MOAB's in-plane intersection
-  at one rank, and between volume grids; its `refine` section, `refine_uniform` of hexes and
+  at one rank, and between volume grids (hexes onto tets and onto hexes); its `refine` section, `refine_uniform` of hexes and
   tets, against MOAB's `NestedRefine` of the hexes at one rank, and `refine_marked` of half the
   cells: hexes with hanging vertices and conforming, tets bisected. `bench/run_parallel.sh` runs it
   over rank counts and sizes into JSON files; its header lists what a run at scale needs.

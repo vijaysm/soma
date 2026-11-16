@@ -29,8 +29,8 @@
 //   * remap: a conservative remap between two plane grids of about n^3
 //     cells (quads, and triangles of an offset grid), their rows dealt to the
 //     ranks: RemapOperator built and applied; at one rank also MOAB's
-//     in-plane intersection of the two whole meshes; and n^3 hexes onto a
-//     grid of tets, SOMA alone;
+//     in-plane intersection of the two whole meshes; and n^3 hexes onto
+//     grids of tets and of hexes, SOMA alone;
 //   * refine: n^3 hexes, and the same cubes as tets, refined once
 //     (refine_uniform); at one rank also MOAB's NestedRefine of the hexes;
 //     and the cells of odd gid alone (refine_marked): hexes with hanging
@@ -575,6 +575,15 @@ int main(int argc, char** argv) {
       runner.run("remap", "soma_remap_operator_3d", cells, [&] { volume.reset(); },
                  [&] { volume.emplace(comm, hexes, tets); });
       double filled = 0;
+      for (LO t = 0; t < volume->rows(); ++t) {
+        for (soma::Offset e = volume->offsets()(t); e < volume->offsets()(t + 1); ++e) filled += volume->overlap()(e);
+      }
+      ok = agree(comm, std::abs(comm.allreduce(filled, soma::Op::sum) - 1) <= 1e-12) && ok;
+      // Hexes onto hexes: flat convex cells, clipped whole.
+      const HostMesh coarse = volume_grid(comm, std::max(1, n - 1), false);
+      runner.run("remap", "soma_remap_operator_3d_hex", cells, [&] { volume.reset(); },
+                 [&] { volume.emplace(comm, hexes, coarse); });
+      filled = 0;
       for (LO t = 0; t < volume->rows(); ++t) {
         for (soma::Offset e = volume->offsets()(t); e < volume->offsets()(t + 1); ++e) filled += volume->overlap()(e);
       }

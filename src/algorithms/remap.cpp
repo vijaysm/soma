@@ -13,6 +13,7 @@
 #include <numeric>
 #include <vector>
 
+#include "soma/algorithms/convex_clip.hpp"
 #include "soma/algorithms/grid_index.hpp"
 #include "soma/algorithms/polygon.hpp"
 #include "soma/algorithms/tet_clip.hpp"
@@ -115,6 +116,33 @@ bool plane_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& mea
   return k == p.n - 2;
 }
 
+// The listings of a cell's corners that turn it about itself: a rotation r
+// lists corner r[q] as corner q. Closed from two rotations of each type.
+std::vector<std::vector<int>> rotations(Topology t) {
+  std::vector<std::vector<int>> gens;
+  if (t == Topology::hex) gens = {{1, 2, 3, 0, 5, 6, 7, 4}, {3, 2, 6, 7, 0, 1, 5, 4}};
+  if (t == Topology::prism) gens = {{1, 2, 0, 4, 5, 3}, {3, 5, 4, 0, 2, 1}};
+  if (t == Topology::pyramid) gens = {{1, 2, 3, 0, 4}};
+  if (gens.empty()) return {};
+  std::vector<int> id(gens[0].size());
+  std::iota(id.begin(), id.end(), 0);
+  std::vector<std::vector<int>> all{id};
+  for (std::size_t i = 0; i < all.size(); ++i) {
+    for (const auto& g : gens) {
+      std::vector<int> r(g.size());
+      for (std::size_t q = 0; q < g.size(); ++q) r[q] = all[i][static_cast<std::size_t>(g[q])];
+      if (std::find(all.begin(), all.end(), r) == all.end()) all.push_back(r);
+    }
+  }
+  return all;
+}
+
+const std::vector<std::vector<int>>& rotations_of(Topology t) {
+  static const std::vector<std::vector<int>> hex = rotations(Topology::hex), prism = rotations(Topology::prism),
+                                             pyramid = rotations(Topology::pyramid), none;
+  return t == Topology::hex ? hex : t == Topology::prism ? prism : t == Topology::pyramid ? pyramid : none;
+}
+
 // A volume cell's tets: a tet itself, its corners in gid order; another cell
 // one tet per triangle of its faces, apex its centroid (its corners summed
 // in gid order), a quad face cut along the diagonal from its least-gid
@@ -125,7 +153,11 @@ bool plane_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& mea
 // magnitude). False
 // where a tet is thinner than eps (below eps times its longest edge squared)
 // or turned unlike the others (the cell is not star-shaped about its
-// centroid).
+// centroid). A pyramid, prism or hex that is convex with flat faces (each
+// corner within eps of its faces' planes) is instead one piece, its corners
+// listed as the turn of it whose corner gids come least, so that the piece
+// does not depend on how the cell's corners are listed; the measure is the
+// tets' still.
 bool volume_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& measure) {
   const MeshView<Host> m = mesh.view();
   const auto x = mesh.coords();
@@ -186,7 +218,21 @@ bool volume_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& me
     for (const Point3& p : t.p) out.corner(p.x, p.y, p.z);
     out.close_piece();
   }
-  return thick && (positive == 0 || negative == 0);
+  const bool ok = thick && (positive == 0 || negative == 0);
+  const auto& turns = rotations_of(m.topology(3, e));
+  if (!ok || turns.empty()) return ok;
+  const auto gid_less = [&](int a, int b) { return gid(m.vertex(3, e, a)) < gid(m.vertex(3, e, b)); };
+  const std::vector<int>* least = &turns.front();
+  for (const auto& r : turns) {
+    if (std::lexicographical_compare(r.begin(), r.end(), least->begin(), least->end(), gid_less)) least = &r;
+  }
+  Point3 corner[8];
+  for (int q = 0; q < n; ++q) corner[q] = at(m.vertex(3, e, (*least)[static_cast<std::size_t>(q)]));
+  if (!is_convex(corner, n, eps)) return ok;
+  out.undo_cell();
+  for (int q = 0; q < n; ++q) out.corner(corner[q].x, corner[q].y, corner[q].z);
+  out.close_piece();
+  return ok;
 }
 
 void box_of(const Pieces& p, std::size_t c, Real* box) {
@@ -346,6 +392,15 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
       out.push(q.xyz[3 * static_cast<std::size_t>(c)], q.xyz[3 * static_cast<std::size_t>(c) + 1]);
     }
   };
+  // Piece i's corners (up to 8), their count returned.
+  const auto corners = [](const Pieces& q, Offset i, Point3* out) {
+    const auto first = static_cast<std::size_t>(q.piece[static_cast<std::size_t>(i)]);
+    const auto n = static_cast<int>(q.piece[static_cast<std::size_t>(i) + 1] - q.piece[static_cast<std::size_t>(i)]);
+    for (std::size_t k = 0; k < static_cast<std::size_t>(n); ++k) {
+      out[k] = {q.xyz[3 * (first + k)], q.xyz[3 * (first + k) + 1], q.xyz[3 * (first + k) + 2]};
+    }
+    return n;
+  };
   const auto tet = [](const Pieces& q, Offset i) {
     Tet out;
     const auto c = 3 * static_cast<std::size_t>(q.piece[static_cast<std::size_t>(i)]);
@@ -367,8 +422,13 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
               if (dim == 2) {
                 polygon(sp, j, b);
                 piece = clip(a, b, eps, out);
-              } else {
+              } else if (tp.piece[static_cast<std::size_t>(i) + 1] - tp.piece[static_cast<std::size_t>(i)] == 4 &&
+                         sp.piece[static_cast<std::size_t>(j) + 1] - sp.piece[static_cast<std::size_t>(j)] == 4) {
                 piece = overlap(tet(tp, i), tet(sp, j), eps);
+              } else {
+                Point3 tc[8], sc[8];
+                const int ntc = corners(tp, i, tc), nsc = corners(sp, j, sc);
+                piece = convex_overlap(tc, ntc, sc, nsc, eps);
               }
               if (piece < 0) {
                 ++over;

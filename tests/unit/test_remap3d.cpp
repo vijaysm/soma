@@ -5,7 +5,8 @@
 // prisms and pyramids: overlaps cover each target cell and constants are
 // kept; mass is conserved; any partition gives the serial operator bit for
 // bit; a refinement of a hex mesh is recovered exactly (shared faces leave
-// no slivers); the error falls at first order; bad meshes throw.
+// no slivers); the error falls at first order; bad meshes throw. Cells with
+// flat faces are clipped whole, the others as tets.
 
 #include <algorithm>
 #include <array>
@@ -165,7 +166,10 @@ std::vector<std::pair<Cells, Cells>> cases() {
   return {{grid(4, 3, 3, Topology::hex, 1), grid(3, 3, 4, Topology::tet, 2)},
           {grid(3, 4, 3, Topology::prism, 3), grid(4, 4, 3, Topology::hex, 0)},
           {grid(2, 3, 2, Topology::pyramid, 0), grid(3, 3, 3, Topology::tet, 4)},
-          {grid(3, 3, 3, Topology::tet, 5), grid(4, 3, 4, Topology::prism, 6)}};
+          {grid(3, 3, 3, Topology::tet, 5), grid(4, 3, 4, Topology::prism, 6)},
+          // Flat convex cells, clipped whole.
+          {grid(3, 4, 3, Topology::hex, 0), grid(2, 3, 3, Topology::pyramid, 0)},
+          {grid(2, 2, 3, Topology::prism, 0), grid(3, 2, 2, Topology::hex, 0)}};
 }
 
 }  // namespace
