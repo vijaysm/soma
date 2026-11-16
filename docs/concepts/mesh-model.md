@@ -42,8 +42,9 @@ for file compatibility but cannot be built yet.
 :width: 100%
 
 The local numbering of the fixed topologies: corners in bold, edges in grey, numbered as
-`soma::canonical` gives them (see [canonical side tables](topology.md#canonical-side-tables)).
-An element's connectivity lists its corners in this order.
+`soma::canonical` gives them (see [canonical side tables](topology.md#canonical-side-tables)),
+drawn on the reference elements of `soma/fields/node_tables.hpp` (see [fields](fields.md)). An
+element's connectivity lists its corners in this order.
 ```
 
 ## Integer and real types

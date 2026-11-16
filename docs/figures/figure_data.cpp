@@ -31,7 +31,9 @@
 
 #include "soma/algorithms/fem.hpp"
 #include "soma/core/mesh.hpp"
+#include "soma/core/mesh_edit.hpp"
 #include "soma/core/segments.hpp"
+#include "soma/fields/node_tables.hpp"
 #include "soma/io/mesh_file.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/ghosts.hpp"
@@ -78,21 +80,16 @@ void write_json(const soma::Comm& comm, const fs::path& path, const std::string&
 
 using Point = std::array<double, 3>;
 
-// Reference coordinates of the cells, in MOAB's convention, with which the
-// figures draw SOMA's numbering. set_reference checks them against SOMA: each
-// face of soma::canonical must be planar with its right-hand normal pointing
-// out of the cell, and the FEM shape functions must be 1 at their own corner.
-const std::map<soma::Topology, std::vector<Point>>& reference_points() {
-  using soma::Topology;
-  static const std::map<Topology, std::vector<Point>> all = {
-      {Topology::tri, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}}},
-      {Topology::quad, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}}},
-      {Topology::tet, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}}},
-      {Topology::pyramid, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0.5, 0.5, 1}}},
-      {Topology::prism, {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {0, 1, 1}}},
-      {Topology::hex, {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}}},
-  };
-  return all;
+// The corners of a cell's reference element: the nodes of its order-1 node
+// table (soma/fields/node_tables.hpp), where corner i is canonical vertex i.
+std::vector<Point> reference_points(soma::Topology t) {
+  const soma::NodeTableHost table = soma::make_node_table(
+      {.topology = t, .family = soma::NodeFamily::lagrange_equispaced, .order = 1,
+       .ordering = soma::NodeOrdering::moab_native});
+  std::vector<Point> x(static_cast<std::size_t>(table.count), Point{0, 0, 0});
+  for (int i = 0; i < table.count; ++i)
+    for (int d = 0; d < table.dim; ++d) x[static_cast<std::size_t>(i)][d] = table.coord(i, d);
+  return x;
 }
 
 Point sub(const Point& a, const Point& b) { return {a[0] - b[0], a[1] - b[1], a[2] - b[2]}; }
@@ -106,7 +103,9 @@ std::vector<int> side_vertices(soma::Topology t, int d, int i) {
   return std::vector<int>(side.v, side.v + side.num_vertices);
 }
 
-// The checks above, for one topology.
+// Checks that a cell's reference corners agree with the rest of SOMA: each
+// face of soma::canonical is planar with its right-hand normal pointing out of
+// the cell, and the FEM shape functions are 1 at their own corner.
 void check_reference(soma::Topology t, const std::vector<Point>& x) {
   const std::string name = soma::name(t);
   require(static_cast<int>(x.size()) == soma::num_vertices(t), name + ": vertex count");
@@ -130,7 +129,8 @@ void check_reference(soma::Topology t, const std::vector<Point>& x) {
     const bool box = t == soma::Topology::quad || t == soma::Topology::hex;
     for (std::size_t a = 0; a < x.size(); ++a) {
       soma::Real xi[3], n[8], dn[8][3];
-      for (int k = 0; k < 3; ++k) xi[k] = box ? 2 * x[a][k] - 1 : x[a][k];
+      // The FEM simplices are on [0, 1], the node tables' on [-1, 1]; boxes are [-1, 1] in both.
+      for (int k = 0; k < 3; ++k) xi[k] = box ? x[a][k] : (x[a][k] + 1) / 2;
       const int nodes = soma::fem::shape(t, xi, n, dn);
       require(nodes == static_cast<int>(x.size()), name + ": shape functions");
       for (int b = 0; b < nodes; ++b) {
@@ -140,13 +140,16 @@ void check_reference(soma::Topology t, const std::vector<Point>& x) {
   }
 }
 
-// reference: for each cell, its corners (in the convention checked above) and
-// its edges and faces from soma::canonical, as reference.json.
+// reference: for each fixed cell a figure draws, its reference corners and its
+// edges and faces from soma::canonical, as reference.json.
 void set_reference(const soma::Comm& comm, const fs::path& out) {
   std::ostringstream js;
   js << "{";
   const char* sep = "";
-  for (const auto& [t, x] : reference_points()) {
+  using soma::Topology;
+  for (const Topology t : {Topology::tri, Topology::quad, Topology::tet, Topology::pyramid, Topology::prism,
+                           Topology::hex}) {
+    const std::vector<Point> x = reference_points(t);
     check_reference(t, x);
     js << sep << "\n  \"" << soma::name(t) << "\": {\"dim\": " << soma::dimension(t) << ", \"points\": [";
     for (std::size_t a = 0; a < x.size(); ++a) {
@@ -258,6 +261,90 @@ void set_graphs(const soma::Comm& comm, const fs::path& out) {
   write_json(comm, out / "graphs.json", js.str());
 }
 
+// fields: data/hybrid_3quad_1tri.h5m (64 cells, coarse enough to see each cell's
+// value), with u = x + y as a cell
+// field (at each cell's corners' mean) in fields-cell.vtk and as a vertex field
+// in fields-vertex.vtk; the same name, so the figure shares one colour scale.
+void set_fields(const soma::Comm& comm, const fs::path& out) {
+  for (const bool cells : {true, false}) {
+    soma::HostMesh mesh = soma::read_file(comm, fs::path(SOMA_SOURCE_DIR) / "data" / "hybrid_3quad_1tri.h5m");
+    const int dim = mesh.dim();
+    const int d = cells ? dim : 0;
+    const auto x = mesh.coords();
+    const auto m = mesh.view();
+    auto u = mesh.fields().add_tag<double>("u", d, 1).view();
+    for (soma::LO e = 0; e < mesh.count(d); ++e) {
+      const auto i = static_cast<std::size_t>(e);
+      if (!cells) {
+        u(i, 0) = x(i, 0) + x(i, 1);
+        continue;
+      }
+      const soma::LO n = m.num_vertices(dim, e);
+      double c = 0;
+      for (soma::LO k = 0; k < n; ++k) {
+        const auto v = static_cast<std::size_t>(m.vertex(dim, e, k));
+        c += (x(v, 0) + x(v, 1)) / n;
+      }
+      u(i, 0) = c;
+    }
+    require(mesh.count(dim) == 64, "fields: 64 cells");
+    soma::write_file(comm, mesh, (out / (cells ? "fields-cell.vtk" : "fields-vertex.vtk")).string(),
+                     {.vtk_fields = std::vector<std::string>{"u"}});
+  }
+}
+
+// A snapshot of a plane mesh for the edit figure: per cell (removed ones too)
+// its lid, gid, corners and whether it is alive; the vertices' coordinates.
+std::string edit_snapshot(const soma::HostMesh& mesh) {
+  const auto x = mesh.coords();
+  const auto conn = mesh.adjacency(2, 0);
+  const auto gid = mesh.gid(2);
+  const auto alive = mesh.alive(2);
+  std::ostringstream js;
+  js << "{\"points\": [";
+  for (soma::LO v = 0; v < mesh.count(0); ++v) {
+    const auto i = static_cast<std::size_t>(v);
+    js << (v ? ", " : "") << "[" << x(i, 0) << ", " << x(i, 1) << "]";
+  }
+  js << "], \"tail\": " << mesh.tail(2) << ", \"edited\": " << (mesh.edited() ? "true" : "false")
+     << ", \"cells\": [";
+  for (soma::LO e = 0; e < mesh.count(2); ++e) {
+    const auto i = static_cast<std::size_t>(e);
+    const bool live = alive.extent(0) == 0 || alive(i) != 0;
+    js << (e ? ", " : "") << "\n  {\"lid\": " << e << ", \"gid\": " << gid(i) << ", \"alive\": "
+       << (live ? "true" : "false") << ", \"corners\": "
+       << json_list(conn.targets, static_cast<std::size_t>(conn.offsets(i)),
+                    static_cast<std::size_t>(conn.offsets(i + 1)))
+       << "}";
+  }
+  js << "]}";
+  return js.str();
+}
+
+// edit: a 4 x 3 box of unit quads; one MeshEdit removes cells 5 and 6 and adds
+// a quad on two new vertices at the right; then compress(). The three states
+// as edit-before.json, edit-applied.json and edit-compressed.json.
+void set_edit(const soma::Comm& comm, const fs::path& out) {
+  soma::HostMesh mesh =
+      soma::testing::box_mesh({.nx = 4, .ny = 3, .nz = 1, .element = soma::Topology::quad, .lx = 4, .ly = 3});
+  write_json(comm, out / "edit-before.json", edit_snapshot(mesh));
+  soma::MeshEdit edit(mesh);
+  edit.set_compress_threshold(0);  // compress below, explicitly
+  const soma::LO v = edit.add_vertices(std::vector<soma::Real>{5, 0, 0, 5, 1, 0});
+  // The box's vertices (4, 0) and (4, 1) have lids 4 and 9.
+  edit.add_elements(soma::Topology::quad, std::vector<soma::LO>{4, v, v + 1, 9});
+  edit.remove(2, std::vector<soma::LO>{5, 6});
+  const soma::EditReport report = edit.apply();
+  require(report.removed[2] == 2 && report.added[2] == 1 && report.added[0] == 2, "edit: the report");
+  require(mesh.edited() && mesh.num_live(2) == 11 && mesh.count(2) == 13 && mesh.tail(2) == 1, "edit: edited state");
+  write_json(comm, out / "edit-applied.json", edit_snapshot(mesh));
+  const soma::Renumbering renumbering = mesh.compress();
+  require(!mesh.edited() && mesh.count(2) == 11, "edit: compressed");
+  require(renumbering.new_lid[2][5] == soma::invalid_lo && renumbering.new_lid[2][6] == soma::invalid_lo,
+          "edit: removed cells have no new lid");
+  write_json(comm, out / "edit-compressed.json", edit_snapshot(mesh));
+}
+
 struct Set {
   int ranks;
   std::function<void(const soma::Comm&, const fs::path&)> make;
@@ -266,6 +353,8 @@ struct Set {
 const std::map<std::string, Set>& sets() {
   static const std::map<std::string, Set> all = {
       {"box", {1, set_box}},
+      {"edit", {1, set_edit}},
+      {"fields", {1, set_fields}},
       {"graphs", {1, set_graphs}},
       {"reference", {1, set_reference}},
       {"segments", {2, set_segments}},

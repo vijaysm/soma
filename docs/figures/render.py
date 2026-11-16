@@ -160,13 +160,21 @@ def in_front(points, face, camera=CELL_VIEW):
     return camera.depth(face_normal(points, face)) > 0
 
 
+def reference_cells_json(data):
+    """reference.json, with the reference elements ([-1, 1] wide) halved to unit size for drawing."""
+    cells = load_json(data / "reference" / "reference.json")
+    for cell in cells.values():
+        cell["points"] = [[c / 2 for c in p] for p in cell["points"]]
+    return cells
+
+
 def centroid(points):
     return [sum(p[k] for p in points) / len(points) for k in range(len(points[0]))]
 
 
 @figure("reference-cells", ["reference"], "svg")
 def reference_cells(data, path):
-    cells = load_json(data / "reference" / "reference.json")
+    cells = reference_cells_json(data)
     order = ["tri", "quad", "tet", "pyramid", "prism", "hex"]
     fig, axes = style.svg_figure(10.5, 6.6, nrows=2, ncols=3)
     for ax, name in zip(axes.flat, order):
@@ -197,7 +205,7 @@ def reference_cells(data, path):
 
 @figure("canonical-sides", ["reference"], "svg")
 def canonical_sides(data, path):
-    cells = load_json(data / "reference" / "reference.json")
+    cells = reference_cells_json(data)
     fig, axes = style.svg_figure(11, 5.4, ncols=2)
     # Each cell from a direction that shows none of its faces edge-on.
     views = {"hex": Camera((0.55, -1.0, 0.5)), "tet": Camera((1.0, -0.75, 0.55))}
@@ -319,6 +327,75 @@ def graph_kinds(data, path):
     for ax in axes:
         ax.autoscale()
         ax.margins(0.06)
+    style.save_svg(fig, path)
+
+
+# ---------------------------------------------------------------- fields and edits
+
+
+def pv_label(pv, view, text, position):
+    """A caption in the view at a normalised position (lower left is 0, 0)."""
+    label = pv.Text(Text=text)
+    display = pv.Show(label, view)
+    display.WindowLocation = "Any Location"
+    display.Position = position
+    display.FontSize = 30
+    display.Color = [0.0, 0.0, 0.0]
+    return display
+
+
+@figure("cell-and-vertex-fields", ["fields"], "png")
+def cell_and_vertex_fields(data, path):
+    pv, view = pv_view()
+    cells = pv.LegacyVTKReader(FileNames=[str(data / "fields" / "fields-cell.vtk")])
+    vertices = pv.LegacyVTKReader(FileNames=[str(data / "fields" / "fields-vertex.vtk")])
+    shifted = pv.Transform(Input=vertices)
+    shifted.Transform.Translate = [6.5, 0.0, 0.0]
+    for source, association in ((cells, "CELLS"), (shifted, "POINTS")):
+        display = pv_surface(pv, view, source)
+        display.LineWidth = 2.0
+        display.EdgeColor = [0.15, 0.15, 0.15]
+        display.Ambient, display.Diffuse = 1.0, 0.0  # flat: a plane mesh needs no shading
+        pv_color_by(pv, view, display, "u", "u = x + y", association=association)
+    # One colour scale for both: the range of the vertex field, which holds the extremes of x + y.
+    lut = pv.GetColorTransferFunction("u")
+    vertices.UpdatePipeline()
+    lut.RescaleTransferFunction(*vertices.PointData["u"].GetRange())
+    bar = pv.GetScalarBar(lut, view)
+    bar.RangeLabelFormat = "{:.1f}"
+    pv_label(pv, view, "a cell field: one value per cell", [0.1, 0.84])
+    pv_label(pv, view, "a vertex field, interpolated in each cell", [0.46, 0.84])
+    pv_save(pv, view, path, {"position": [3.25, 0.37, 30.0], "focal": [3.25, 0.37, 0.0], "up": [0, 1, 0],
+                             "parallel": 1, "parallel_scale": 3.6})
+
+
+@figure("mesh-edit", ["edit"], "svg")
+def mesh_edit(data, path):
+    states = [("before: a 4 x 3 box of quads,\nlid in bold, gid below", "edit-before.json"),
+              ("after apply(): removed cells keep their lids;\nthe added quad is lid 12, in the tail",
+               "edit-applied.json"),
+              ("after compress(): lids renumbered in gid order;\ngids kept", "edit-compressed.json")]
+    fig, axes = style.svg_figure(13, 3.9, ncols=3)
+    for ax, (title, name) in zip(axes, states):
+        snap = load_json(data / "edit" / name)
+        pts = snap["points"]
+        first_tail = len(snap["cells"]) - snap["tail"]
+        for cell in snap["cells"]:
+            xy = [pts[v] for v in cell["corners"]]
+            added = snap["edited"] and cell["lid"] >= first_tail
+            if not cell["alive"]:
+                ax.fill(*zip(*xy), fc="#eeeeee", ec="#999999", lw=1.0, hatch="///", ls=(0, (4, 3)), zorder=1)
+            else:
+                ax.fill(*zip(*xy), fc=style.OKABE_ITO[1] if added else "#ffffff", ec="#333333", lw=1.3, zorder=1)
+            m = centroid(xy)
+            colour = "#888888" if not cell["alive"] else "#000000"
+            ax.text(m[0], m[1] + 0.12, str(cell["lid"]), ha="center", va="center", fontsize=12, weight="bold",
+                    color=colour, zorder=3)
+            ax.text(m[0], m[1] - 0.2, f"gid {cell['gid']}", ha="center", va="center", fontsize=8, color=colour,
+                    zorder=3)
+        ax.set_title(title, fontsize=11, y=-0.3)
+        ax.set_xlim(-0.15, 5.15)
+        ax.set_ylim(-0.15, 3.15)
     style.save_svg(fig, path)
 
 

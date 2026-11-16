@@ -13,7 +13,7 @@ target_compile_definitions(soma_figure_data PRIVATE SOMA_SOURCE_DIR="${PROJECT_S
 if(SOMA_ENABLE_TESTS)
   # The sets and their rank counts, as soma_figure_data --list prints them
   # (sorted by name); doc_figures.list fails when the two disagree.
-  set(SOMA_FIGURE_SETS box:1 graphs:1 reference:1 segments:2)
+  set(SOMA_FIGURE_SETS box:1 edit:1 fields:1 graphs:1 reference:1 segments:2)
   string(REPLACE ":" " " expected "${SOMA_FIGURE_SETS}")
   string(REPLACE ";" "\n" expected "${expected}")
   add_test(NAME doc_figures.list COMMAND soma_figure_data --list)

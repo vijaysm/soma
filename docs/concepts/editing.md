@@ -135,6 +135,16 @@ It returns a `Renumbering`, whose `new_lid[d]` maps each old local id of dimensi
 one (`invalid_lo` for a removed entity); `new_lid[d]` is empty for a dimension left as it was.
 Use it to carry your own per-entity arrays across the compression.
 
+```{figure} ../figures/img/mesh-edit.svg
+:alt: Three copies of a 4 by 3 box of quads labelled with local ids and gids: before an edit; after apply, with cells 5 and 6 hatched as removed and a new quad numbered 12 added at the right; after compress, with the eleven live cells renumbered 0 to 10 and their gids unchanged
+:width: 100%
+
+One `MeshEdit` on a $4 \times 3$ box of quads removes cells 5 and 6 and adds a quad on two new
+vertices. After `apply()` the removed cells keep their slots, masked, and the new quad follows
+the others as lid 12 with the next gid, 13. `compress()` drops the removed cells and orders the
+rest as `MeshBuilder` would, by gid: the new quad becomes lid 10. Gids never change.
+```
+
 ### Automatic compression
 
 Edited meshes pay for the extra slots and the mask on every pass. `apply()` therefore compresses
