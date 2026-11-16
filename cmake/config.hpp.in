@@ -18,9 +18,8 @@
 #cmakedefine01 SOMA_ENABLE_PETSC
 #cmakedefine01 SOMA_ENABLE_ARBORX
 
-// Compile-time default for passing device buffers to MPI. The transport layer
-// also honours the environment variable SOMA_GPU_AWARE_MPI=0|1 at runtime, so
-// GPU-aware MPI can be turned off for debugging without rebuilding.
+// Whether device buffers may be passed to MPI (SOMA_GPU_AWARE_MPI). Recorded
+// only: no exchange reads it yet, and messages are staged through host memory.
 #define SOMA_GPU_AWARE_MPI_DEFAULT @SOMA_GPU_AWARE_MPI_DEFAULT@
 
 #endif  // SOMA_CONFIG_HPP_

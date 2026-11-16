@@ -2,9 +2,8 @@
  * hash3d_exact.hpp -- exact (and optionally tolerance-based) global numbering
  * of FP64 points.  Header-only, any dimension D >= 1.
  *
- * This header is the PRIMARY implementation; python/hash3d_exact.py is a
- * prototype that is kept in sync with it (same keys, ids, representatives).
- * For distributed-memory runs (up to 1e12 points and beyond) see dist.hpp.
+ * It numbers points held by one process; across MPI ranks, match_points
+ * (soma/parallel/point_match.hpp) gives the same numbering.
  *
  * ===========================================================================
  *  API
@@ -46,7 +45,7 @@
  * ===========================================================================
  *  Integration
  *    - Header-only: add the `include/` directory to the include path and
- *          #include <hash3d_exact/hash3d_exact.hpp>
+ *          #include "soma/core/hash3d_exact.hpp"
  *      No libraries, no build step, no dependencies beyond the C++ standard
  *      library.  Every function is a template or `inline`, so the header may
  *      be included from any number of translation units (ODR-safe; checked by

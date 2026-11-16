@@ -5,15 +5,17 @@
 #define SOMA_COMPAT_CORE_HPP_
 
 // MOAB's Interface over a SOMA host mesh: the calls MOAB applications make
-// for reading, querying, creating and deleting entities, tags and sets (design
-// section 19.4), with MOAB's handles, return codes and results.
+// for reading, querying, creating and deleting entities, tags and sets, with
+// MOAB's handles, return codes and results.
 //
 // Model. The SOMA mesh holds the entities and coordinates; tags and sets are
 // kept here, MOAB's way (read from a file's fields and sets on load_file, put
 // back on a copy of the mesh by write_file). Handles keep MOAB's layout: the
 // type in the top 4 bits and a per-type id from 1 in the order the entities
 // were read or created, so a file read here and by MOAB gives the same
-// handles. Ids stay valid until the entity is deleted and are not reused.
+// handles. Ids stay valid until the entity is deleted; a deleted entity's id
+// may be handed out again to a later entity of its type and node count, as
+// MOAB's sequences do.
 // Created entities are staged in a MeshEdit and made visible by the next
 // query (one apply for a burst of creates); deletions apply at once.
 //
