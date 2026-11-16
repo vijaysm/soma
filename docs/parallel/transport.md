@@ -83,6 +83,17 @@ All strategies return the same records in the same order; they differ in message
 The 64-rank threshold of `automatic` is provisional, not a tuned value; pass a strategy
 explicitly when you have measured one to be better on your machine.
 
+```mermaid
+flowchart LR
+  route["transport::route(exec, comm, batch, strategy)"] --> which{strategy}
+  which -- "alltoallv, or automatic with P ≤ 64" --> a2a["alltoallv: counts by alltoall,<br/>then one MPI_Alltoallv"]
+  which -- "crystal, or automatic with P > 64" --> crystal["crystal: ⌈log₂ P⌉ halvings,<br/>one partner per round"]
+  which -- nbx --> nbx["nbx: a synchronous send per destination,<br/>then a non-blocking barrier"]
+  a2a --> out["the same records whatever the strategy:<br/>grouped by source rank, in the sender's order"]
+  crystal --> out
+  nbx --> out
+```
+
 ## Communication plans
 
 When the same pattern of records is exchanged repeatedly, routing each time is wasteful. A
@@ -165,6 +176,16 @@ source rank in each source's order, and returns a `Kokkos::View<std::byte**, Kok
 of one `answer_width`-byte row per arrival. The answers come back to the senders in the order of
 their keys. `resolve_sharing` uses the same placement, sending each gid to `owner(gid, P)`, to
 find which ranks hold it ([distributed meshes](distributed-meshes.md)).
+
+```mermaid
+sequenceDiagram
+  participant A as any rank, with keys and payloads
+  participant K as rank owner(key, P)
+  A->>K: route each key and its payload row to owner(key, P) = mix(key) % P
+  K->>K: answer(keys, arrived): one answer_width-byte row per arrival
+  K->>A: route the answers back to their senders
+  Note over A,K: the answers arrive in the order of this rank's keys
+```
 
 `rendezvous_to(..., answer, dest_of, strategy)` sends each key to `dest_of(key)`, a rank of
 `comm`, instead: a directory placed by the caller (blocks of ids, say).

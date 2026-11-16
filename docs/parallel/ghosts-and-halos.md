@@ -136,6 +136,25 @@ x.update(c, v);   // copies and ghosts now hold their owners' values
 A common pattern is to accumulate into every holder's rows, `reduce` with `Op::sum` so every
 holder has the total, then `update` to refresh the ghosts, which `reduce` leaves alone.
 
+The messages of a `HaloExchange`, between an owner and a rank holding some of its entities as
+ghosts and another holding some as shared copies:
+
+```mermaid
+sequenceDiagram
+  participant G as ghost holder
+  participant O as owner
+  participant C as shared-copy holder
+  Note over G,C: HaloExchange constructor, collective
+  G->>O: route: the gids of the owner's entities held here as ghosts
+  Note over G,C: shared entities: both sides list them by gid, with no message
+  Note over G,C: update(comm, values)
+  O->>O: pack the rows sent (Kokkos kernel), stage them in host memory
+  O->>C: rows of the shared entities, tag 32610
+  O->>G: rows of the ghosts, tag 32610
+  C->>C: unpack into the shared copies
+  G->>G: unpack into the ghosts
+```
+
 ### Behaviour
 
 - **Construction is collective**: ghost holders tell each owner which of its entities they hold.
