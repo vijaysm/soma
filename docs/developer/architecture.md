@@ -13,7 +13,7 @@ the sections on collectives and determinism useful too.
 | `src/<dir>/` | the compiled sources, mirroring `include/soma/` |
 | `tests/` | the test suite: `unit/`, `reference/`, `golden/`, `compat/`, `policy/`, `packaging/` |
 | `bench/` | benchmarks, built with `SOMA_ENABLE_MOAB_REFERENCE` (see [benchmarks](benchmarks.md)) |
-| `examples/` | example programs, built with `SOMA_ENABLE_EXAMPLES` (see [examples](../getting-started/examples.md)) |
+| `examples/` | example programs, built with `SOMA_ENABLE_EXAMPLES`, and `examples/app/`, a standalone project built against an installed SOMA (see [examples](../getting-started/examples.md)) |
 | `tools/` | command-line tools (`soma_convert`), built with `SOMA_ENABLE_HDF5` |
 | `cmake/` | find and fetch modules, the install rules and `config.hpp.in` |
 | `data/` | small meshes used by tests and examples |
@@ -167,7 +167,7 @@ all ranks, so a failure on any rank fails the run on every rank.
 | `tests/golden/` | the parallel sub-entity derivation against a serial reference derivation |
 | `tests/compat/` | the MOAB example gate: MOAB examples built against MOAB and against `soma_compat_dropin` must print and write the same |
 | `tests/policy/` | rules on the source tree: `SOMA_ENABLE_MPI` is tested only in the communication seam (`policy.mpi_seam`); test bodies hold no device lambdas, which CUDA refuses there (`policy.device_lambdas`); a parallel HDF5 without MPI is refused at configure time (`policy.hdf5_guard`) |
-| `tests/packaging/` | an install into an empty prefix and an out-of-tree consumer that finds SOMA only through `find_package` (`packaging.find_package`) |
+| `tests/packaging/` | an install into an empty prefix and an out-of-tree consumer that finds SOMA only through `find_package` (`packaging.find_package`); the same for `examples/app/` (`packaging.example_app`) |
 
 Reference tests compare results that both libraries define, matched in a way that does not depend
 on numbering where the numberings may differ (for example, entities matched by their coordinates).

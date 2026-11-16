@@ -161,6 +161,12 @@ prefix, even with another Kokkos (`SOMA_PACKAGING_SHADOW_PREFIX`) first on the s
 passes the build type through, so it works with multi-configuration generators via
 `ctest -C <config>`.
 
+`packaging.example_app` installs the build tree into another empty prefix the same way, then
+configures, builds and runs the application in `examples/app/` against it (see
+[examples](../getting-started/examples.md)) with `--n 6`, writing a SOMA file when
+`SOMA_ENABLE_HDF5` is on and a legacy VTK file otherwise. It must print
+`OK soma app: 1 rank(s), cells 216 -> 1728`, and in MPI builds the same at two ranks.
+
 ### Example and tool tests
 
 `example_*` and `soma_convert.*` run the example programs and `soma-convert` on bundled meshes

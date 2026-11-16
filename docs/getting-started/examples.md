@@ -1,7 +1,8 @@
 # Example programs
 
-SOMA ships five example programs in `examples/`, one per algorithm, and the command-line tool
-`soma-convert` in `tools/`. Each is a complete program of a page or two that reads a mesh on any
+SOMA ships five example programs in `examples/`, one per algorithm, the command-line tool
+`soma-convert` in `tools/`, and `examples/app/`, an application built outside SOMA's tree (see
+[below](#an-application-outside-soma-s-tree)). Each is a complete program of a page or two that reads a mesh on any
 number of ranks, runs one algorithm and writes the result; read them alongside the algorithm
 pages. This page gives each one's purpose, command line, output and the tests that run it.
 
@@ -144,6 +145,45 @@ soma-convert: wrote m.soma as SOMA
 
 and fails (status 1) for an input of neither format. See [the SOMA format](../io/soma-format.md).
 
+## An application outside SOMA's tree
+
+```text
+soma_app [--n N] [<mesh>] <out>
+```
+
+`examples/app/` is a CMake project of its own, not part of SOMA's build: it reaches SOMA only
+through an installed package, as a downstream application does.
+
+```cmake
+cmake_minimum_required(VERSION 3.24)
+project(soma_app LANGUAGES CXX)
+find_package(soma REQUIRED)
+add_executable(soma_app main.cpp)
+target_link_libraries(soma_app PRIVATE soma::soma)
+```
+
+Build it against an install of SOMA (see [installation](installation.md)):
+
+```bash
+cmake --install build --prefix $HOME/soma
+cmake -S examples/app -B app-build -DCMAKE_PREFIX_PATH="$HOME/soma;/path/to/kokkos"
+cmake --build app-build
+mpiexec -n 4 app-build/soma_app --n 16 out.soma
+```
+
+It reads `<mesh>` with `soma::read_file`, or without one builds an $N^3$ grid of hexes over the
+unit cube with `soma::MeshBuilder` and `soma::build_local_part` (default $N = 8$, slabs of cells
+dealt to the ranks). It gives each cell the density $1 + x + 2y + 3z$ at its corners' mean,
+refines the mesh once with `soma::refine_uniform` (the density carries to the children), remaps
+the density conservatively onto the refined cells with `soma::RemapOperator`, and writes the
+refined mesh with both fields. When `<out>` is a SOMA file it reads it back. It fails unless a hex
+mesh's cell count grows eightfold, the mass $\sum_T |T|\,u_T$ is the same on both meshes to
+$10^{-12}$, and the file read back holds the remapped density as written:
+
+```text
+OK soma app: 2 rank(s), cells 216 -> 1728, mass 4 conserved to 2.2e-16, wrote two.soma and read it back
+```
+
 ## How the tests run them
 
 With `SOMA_ENABLE_TESTS=ON` as well, `examples/CMakeLists.txt` registers a ctest for each
@@ -176,5 +216,9 @@ file and expects `as SOMA` in its output; `to_h5m` converts that file back with
 ```bash
 ctest --test-dir build -R "example_|soma_convert"
 ```
+
+`packaging.example_app` installs SOMA into an empty prefix, builds `examples/app/` against it,
+and runs `soma_app --n 6` at one rank and, with MPI, two; it expects
+`cells 216 -> 1728` in the output.
 
 See [building and testing](../developer/building-and-testing.md) for the rest of the suite.

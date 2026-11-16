@@ -889,3 +889,7 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `SOMA_INSTALL` defaults to ON only when SOMA is the top-level project.
 - An out-of-tree packaging test installs to a clean prefix, builds a consumer, and runs it (at
   two ranks for MPI builds). It also works with multi-config generators through `ctest -C`.
+- `examples/app/`, a standalone CMake project that finds an installed SOMA with
+  `find_package(soma)`: it builds or reads a mesh, refines it, remaps a density conservatively,
+  writes a SOMA file and reads it back. `packaging.example_app` installs SOMA, builds it and runs
+  it at one and two ranks.

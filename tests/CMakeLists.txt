@@ -280,4 +280,22 @@ if(SOMA_INSTALL)
       -DMPIEXEC=${MPIEXEC_EXECUTABLE}
       -P ${PROJECT_SOURCE_DIR}/tests/packaging/run_packaging_test.cmake)
   set_tests_properties(packaging.find_package PROPERTIES TIMEOUT 300)
+  # examples/app, an application outside SOMA's tree, built against the
+  # installed SOMA and run (a SOMA file with HDF5, else legacy VTK).
+  if(SOMA_ENABLE_HDF5)
+    set(SOMA_APP_OUTPUT ".soma")
+  else()
+    set(SOMA_APP_OUTPUT ".vtk")
+  endif()
+  add_test(NAME packaging.example_app
+    COMMAND ${CMAKE_COMMAND}
+      -DSOMA_BINARY_DIR=${PROJECT_BINARY_DIR} -DSOMA_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+      -DSCRATCH_DIR=${PROJECT_BINARY_DIR}/example_app_test
+      -DBUILD_TYPE=$<CONFIG> -DGENERATOR=${CMAKE_GENERATOR}
+      -DMAKE_PROGRAM=${CMAKE_MAKE_PROGRAM} -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
+      -DPREFIX_PATH=${SOMA_PACKAGING_PREFIX_PATH} -DMPI_HOME=${MPI_HOME}
+      -DKOKKOS_SOURCE=${SOMA_KOKKOS_SOURCE} -DKOKKOS_DIR=${Kokkos_DIR}
+      -DOUTPUT=${SOMA_APP_OUTPUT} -DENABLE_MPI=${SOMA_ENABLE_MPI} -DMPIEXEC=${MPIEXEC_EXECUTABLE}
+      -P ${PROJECT_SOURCE_DIR}/tests/packaging/run_example_app.cmake)
+  set_tests_properties(packaging.example_app PROPERTIES TIMEOUT 300)
 endif()

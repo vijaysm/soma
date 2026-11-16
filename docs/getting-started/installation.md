@@ -205,4 +205,5 @@ the ABI or the public headers are macros in `soma/config.hpp` (see
 
 The ctest `packaging.find_package` checks all this: it installs the build tree into an empty
 prefix, configures, builds and runs this consumer (at two ranks too in MPI builds); see
-[building and testing](../developer/building-and-testing.md).
+[building and testing](../developer/building-and-testing.md). For a fuller application built
+this way, see `examples/app/` in [examples](examples.md).
