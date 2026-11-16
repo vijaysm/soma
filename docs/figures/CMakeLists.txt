@@ -19,7 +19,7 @@ if(SOMA_ENABLE_TESTS)
 
   set(SOMA_FIGURE_SETS_PARALLEL)
 
-  set(SOMA_FIGURE_SETS_ALGORITHMS advect:1 children:1 coarsefine:1 hierarchy:1 marked:1 overlap:1 poisson:1
+  set(SOMA_FIGURE_SETS_ALGORITHMS advect:1 children:1 coarsefine:1 hierarchy:1 marked:1 overlap:1 parts:4 poisson:1
                                   remap:1 search:1 smooth:1 sphere:1)
 
   set(SOMA_FIGURE_SETS ${SOMA_FIGURE_SETS_CONCEPTS} ${SOMA_FIGURE_SETS_PARALLEL} ${SOMA_FIGURE_SETS_ALGORITHMS})

@@ -3,6 +3,7 @@
 
 """The figures of the algorithms pages (docs/algorithms, docs/amr and docs/io)."""
 
+from matplotlib.patches import Rectangle
 from PIL import Image
 
 import style
@@ -446,3 +447,38 @@ def coarse_fine(data, path):
                    "and the coarse cells outside they correct (yellow)", fontsize=11, y=-0.13)
     style.save_svg(fig, path)
 
+
+@figure("soma-read-parts", ["parts"], "svg")
+def soma_read_parts(data, path):
+    d = load_json(data / "parts" / "parts.json")
+    panels = [
+        ("wrote4", "a file of N = 4 parts", "part"),
+        ("read2", "read on P = 2 ranks: parts 0, 1 on rank 0,\nparts 2, 3 on rank 1", "rank"),
+        None,
+        ("wrote2", "a file of N = 2 parts", "part"),
+        ("read4", "read on P = 4 ranks, rebalance off:\npart q on rank 2q; ranks 1, 3 empty", "rank"),
+        ("rebalanced", "read on P = 4 ranks, rebalance on\n(the default): every rank gets cells", "rank"),
+    ]
+    fig, axes = style.svg_figure(13, 8.6, nrows=2, ncols=3)
+    for ax, panel in zip(axes.flat, panels):
+        if panel is None:
+            continue
+        key, title, what = panel
+        owner = d[key]
+        for c, o in zip(d["cells"], owner):
+            ax.fill([p[0] for p in c], [p[1] for p in c], fc=style.CATEGORY[o], ec="#333333", lw=0.6)
+        used = sorted(set(owner))
+        # The legend in the empty corner right of the lower arm.
+        for k, o in enumerate(used):
+            ax.add_patch(matplotlib_rect((1.35, -0.5 - 0.42 * k), 0.3, 0.3, style.CATEGORY[o]))
+            ax.text(1.8, -0.35 - 0.42 * k, f"{what} {o}", va="center", fontsize=10)
+        ax.set_title(title, fontsize=11, y=-0.2)
+        ax.set_xlim(-2.8, 2.8)
+        ax.set_ylim(-2.1, 2.8)
+    fig.text(0.07, 0.75, "N > P", fontsize=13, weight="bold", ha="center")
+    fig.text(0.07, 0.3, "N < P", fontsize=13, weight="bold", ha="center")
+    style.save_svg(fig, path)
+
+
+def matplotlib_rect(corner, w, h, colour):
+    return Rectangle(corner, w, h, fc=colour, ec="#333333", lw=0.6)
