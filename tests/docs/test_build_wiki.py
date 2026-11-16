@@ -144,7 +144,7 @@ class BuildWikiTest(unittest.TestCase):
             "[x](b.md#nowhere)": "no heading #nowhere",
             "[x](missing.md)": "missing.md does not exist",
             "[x](../orphan.md)": "is not in any toctree",
-            "```{figure} x.png\n```": "{figure} is not supported",
+            "```{eval-rst}\n.. note:: x\n```": "{eval-rst} is not supported",
             "See {ref}`target`.": "{role}",
         }
         for text, message in cases.items():
@@ -168,6 +168,33 @@ class BuildWikiTest(unittest.TestCase):
         self.assertFalse((out / "Old-page.md").exists())
         self.assertEqual((out / "Hand-written.md").read_text(), "Written in the wiki.\n")
         self.assertEqual((out / "Page-A.md").read_text(), files["Page-A.md"])
+
+    def test_figure_becomes_raw_image(self):
+        figure = "```{figure} ../figures/img/x.svg\n:alt: An x\n:width: 60%\n\nThe x, `drawn`.\n```\n"
+        files, errors = self.converted({"docs/guide/a.md": A + "\n" + figure, "docs/figures/img/x.svg": "<svg/>"})
+        self.assertEqual(errors, [])
+        self.assertIn("![An x](https://raw.githubusercontent.com/o/r/main/docs/figures/img/x.svg)\n\n*The x, `drawn`.*",
+                      files["Page-A.md"])
+
+    def test_figure_options_in_any_order_and_no_caption(self):
+        figure = "```{figure} ../figures/img/x.png\n:width: 50%\n:alt: An x\n```\n"
+        files, errors = self.converted({"docs/guide/a.md": A + "\n" + figure, "docs/figures/img/x.png": "png"})
+        self.assertEqual(errors, [])
+        page = files["Page-A.md"]
+        self.assertIn("![An x](https://raw.githubusercontent.com/o/r/main/docs/figures/img/x.png)", page)
+        self.assertNotIn("*", page.split("x.png)")[1].split("\n\n")[0])
+
+    def test_missing_figure_is_an_error(self):
+        figure = "```{figure} ../figures/img/none.svg\n:alt: None\n\nNothing.\n```\n"
+        _, errors = self.converted({"docs/guide/a.md": A + "\n" + figure})
+        self.assertEqual(len(errors), 1, errors)
+        self.assertIn("figures/img/none.svg does not exist", errors[0])
+
+    def test_mermaid_passes_through(self):
+        diagram = "```mermaid\nflowchart LR\n  a --> b\n```\n"
+        files, errors = self.converted({"docs/guide/a.md": A + "\n" + diagram})
+        self.assertEqual(errors, [])
+        self.assertIn(diagram, files["Page-A.md"])
 
     def test_main_check_and_failure(self):
         Site(self.tmp)

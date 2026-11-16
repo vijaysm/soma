@@ -21,10 +21,12 @@ _match = re.search(r"project\(\s*soma\s+VERSION\s+([0-9.]+)", (root / "CMakeList
 release = _match.group(1) if _match else "unknown"
 version = release
 
-extensions = ["myst_parser", "sphinx_copybutton"]
+extensions = ["myst_parser", "sphinx_copybutton", "sphinxcontrib.mermaid"]
 source_suffix = {".md": "markdown"}
 myst_enable_extensions = ["colon_fence", "deflist", "dollarmath", "fieldlist", "attrs_inline"]
 myst_heading_anchors = 3
+# A plain ```mermaid fence is a diagram here, as it is on GitHub and in the wiki.
+myst_fence_as_directive = ["mermaid"]
 exclude_patterns = ["_build", "plans", "requirements.txt", "CHANGELOG.md"]
 # Files under docs/ that git ignores (private notes in a working copy) are
 # not pages; a checkout without git, like a source tarball, has none.
@@ -41,4 +43,5 @@ suppress_warnings = []
 html_theme = "furo"
 html_title = f"SOMA {release}"
 html_static_path = ["_static"]
+html_css_files = ["figures.css"]
 pygments_style = "default"
