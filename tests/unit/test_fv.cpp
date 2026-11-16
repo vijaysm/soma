@@ -144,10 +144,6 @@ Real overshoot(const Comm& c, const soma::HostMesh& mesh, const F& a, Real inflo
   return c.allreduce(worst, soma::Op::max);
 }
 
-// The L1 error of a bump (Gaussian, or of compact support) carried by a
-// uniform flow to t = 0.4 on an n-cell box, unperturbed. The Gaussian's tail
-// meets the walls, where nothing flows in: an error that does not shrink,
-// below upwind's but not below a second-order scheme's.
 // A bump of compact support: cos^4 of the distance from (0.3, 0.3, 0.3)
 // scaled to a quarter turn at radius 0.25, zero beyond, so nothing of it
 // reaches the walls (z ignored in 2D).
@@ -157,8 +153,13 @@ Real compact(Real x, Real y, Real z, bool three) {
   return r < 0.25 ? c * c * c * c : 0;
 }
 
-Real l1_error(const Comm& c, Topology t, int n, FvScheme scheme, bool compact_bump) {
-  const soma::HostMesh mesh = box_part(c, {n, n, solid(t) ? n : 1, t, 1.0, 1.0, 1.0}, Part{.perturb = false});
+// The L1 error of a bump (Gaussian, or of compact support) carried by a
+// uniform flow to t = 0.4 on an n-cell box, unperturbed or warped. The
+// Gaussian's tail meets the walls, where nothing flows in: an error that does
+// not shrink, below upwind's but not below a second-order scheme's.
+Real l1_error(const Comm& c, Topology t, int n, FvScheme scheme, bool compact_bump, bool warped = false) {
+  const soma::HostMesh mesh =
+      box_part(c, {n, n, solid(t) ? n : 1, t, 1.0, 1.0, 1.0}, Part{.perturb = false, .smooth = warped});
   const Space space(c, mesh, scheme);
   const Uniform a{0.5, 0.25, solid(t) ? 0.125 : 0.0};
   const auto phi = space.normal_flux(a);
@@ -393,19 +394,25 @@ TEST(Fv, UpwindConvergesAtFirstOrder) {
 }
 
 // The bump of compact support, bounded: second order (the clipped peak slows
-// the coarse meshes), and always below upwind's error.
+// the coarse meshes), and always below upwind's error; on box meshes and on
+// their images under a smooth map, where cells are not parallelograms and
+// their corners' mean is off their centroid by O(h^2).
 TEST(Fv, BoundedConvergesAtSecondOrder) {
   const Comm c = Comm::world();
   for (const Topology t : all) {
-    SCOPED_TRACE(soma::name(t));
-    std::vector<Real> errors;
-    for (const int n : solid(t) ? std::vector<int>{8, 16, 32} : std::vector<int>{16, 32, 64}) {
-      errors.push_back(l1_error(c, t, n, FvScheme::bounded, true));
-      if (c.rank() == 0) std::printf("%s n %d bounded L1 error %.4e\n", soma::name(t), n, errors.back());
-      EXPECT_LT(errors.back(), l1_error(c, t, n, FvScheme::upwind, true));
+    for (const bool warped : {false, true}) {
+      SCOPED_TRACE(testing::Message() << soma::name(t) << " warped " << warped);
+      std::vector<Real> errors;
+      for (const int n : solid(t) ? std::vector<int>{8, 16, 32} : std::vector<int>{16, 32, 64}) {
+        errors.push_back(l1_error(c, t, n, FvScheme::bounded, true, warped));
+        if (c.rank() == 0) {
+          std::printf("%s n %d warped %d bounded L1 error %.4e\n", soma::name(t), n, warped, errors.back());
+        }
+        EXPECT_LT(errors.back(), l1_error(c, t, n, FvScheme::upwind, true, warped));
+      }
+      EXPECT_GE(std::log2(errors[0] / errors[1]), 1.3) << errors[0] << " " << errors[1];
+      EXPECT_GE(std::log2(errors[1] / errors[2]), 1.6) << errors[1] << " " << errors[2];
     }
-    EXPECT_GE(std::log2(errors[0] / errors[1]), 1.3) << errors[0] << " " << errors[1];
-    EXPECT_GE(std::log2(errors[1] / errors[2]), 1.6) << errors[1] << " " << errors[2];
   }
 }
 

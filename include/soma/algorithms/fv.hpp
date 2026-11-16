@@ -43,7 +43,8 @@
 // to zero (a divergence-free flow: exactly so for a linear a on cells with
 // planar sides) and dt <= max_dt(), no stage makes a new extremum, and the
 // average of the two stages with the start makes none either: u stays within
-// its starting range (and the inflow's). Each correction leaves one cell and
+// its starting range (and the inflow's), to rounding (a value at an extremum
+// may pass it by a few units in the last place). Each correction leaves one cell and
 // enters the other, so the total is conserved as for upwind. In multiple
 // dimensions no scheme of second order is TVD (Goodman and LeVeque); this one
 // is second order away from extrema and clips them to first order. A stage
@@ -84,8 +85,8 @@ enum class FvScheme { upwind, bounded };
 
 namespace detail {
 
-// For tests: bounded steps without the limiter (every alpha_f = 1), which
-// overshoot. Read when a step starts.
+// For tests only: bounded steps without the limiter (every alpha_f = 1),
+// which overshoot. Read at each stage; not for use while steps run.
 inline bool fv_unlimited = false;
 
 // What an FvSpace works from, built once on the host.

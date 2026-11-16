@@ -200,7 +200,7 @@ expected results below hold on one and two ranks alike:
 | `example_laplacian_smooth` | `laplacian_smooth --iterations 5 64bricks_1khex.h5m smoothed.vtk` | exit status 0 |
 | `example_laplacian_smooth.np2` | the same at two ranks with `--tolerance 1e-9`, writing `.soma` | exit status 0 |
 | `example_poisson`, `.np2` | `poisson 64bricks_1khex.h5m poisson.vtk`; at two ranks `--assembly colored`, writing `.soma` | `max u 9.090723e-01` |
-| `example_advect`, `.np2` | `advect --soma-reproducible 64bricks_1khex.h5m advect.vtk` | `total 2.061703740944819e-01 before, 2.061703740944818e-01 after; u in [-1.251949e-18, 1.199141e-01]` |
+| `example_advect`, `.np2` | `advect --soma-reproducible 64bricks_1khex.h5m advect.vtk` | `total 2.061703740944819e-01 before, 2.061703740944818e-01 after; u in [`(the least, at rounding level, not pinned)`, 1.199141e-01]` |
 | `example_advect.upwind` | `advect --soma-reproducible --scheme upwind --flow rigid 64bricks_1khex.h5m advect_upwind.vtk` | `total 6.948772654115442e-01 before, 4.446464981696669e-01 after` |
 | `example_remap`, `.np2` | `remap hybrid_3quad_1tri.h5m remap.vtk` | `total 2.7464101622e+01 on the source, 2.7464101622e+01 on the grid` |
 | `example_remap3d` | `remap --n 12 64bricks_1khex.h5m remap3d.vtk` | `total 1.2894214008e+02 on the source, 1.2894214008e+02 on the grid` |

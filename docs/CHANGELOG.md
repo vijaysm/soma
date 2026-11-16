@@ -613,7 +613,7 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   rank.
 - `FvSpace(comm, mesh, FvScheme::bounded)` advects by flux-corrected transport with Zalesak's
   limiter over a least-squares linear reconstruction, in two Heun stages: second order where u is
-  smooth, exactly conservative, and with no new extrema in a flow with no discrete divergence.
+  smooth, exactly conservative, and with no new extrema (to rounding) in a flow with no discrete divergence.
   Upwind stays the default and unchanged.
 - `examples/advect.cpp` carries a bump around a `.h5m` or SOMA mesh on any number of ranks and
   writes u as a cell field. `--scheme upwind|bounded` (default bounded) picks the scheme;

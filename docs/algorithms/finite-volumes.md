@@ -4,7 +4,7 @@
 triangles, quads, tets or hexes, on any number of ranks, by one of two schemes:
 
 - `FvScheme::upwind` (the default): first-order upwind and forward Euler;
-- `FvScheme::bounded`: second order where the solution is smooth, with no new extrema anywhere:
+- `FvScheme::bounded`: second order where the solution is smooth, with no new extrema (to rounding):
   flux-corrected transport over a linear reconstruction, in two stages.
 
 It solves
@@ -79,7 +79,8 @@ What it guarantees, with $\Delta t \le$ `max_dt`:
 - **No new extrema**, where each cell's fluxes $\sum_f s_{cf} \phi_f$ sum to zero (a
   divergence-free flow; exactly so for a linear $\mathbf{a}$ on cells with planar sides). Each
   stage keeps every cell within its bounds, and the average of two such stages with the start
-  stays within the range of the start (and of `inflow`). Where the discrete divergence is not
+  stays within the range of the start (and of `inflow`), to rounding: a value at an extremum may
+  pass it by a few units in the last place. Where the discrete divergence is not
   zero, upwinding itself can leave the range, and so can this scheme, by as much.
 - **Second order** where $u$ is smooth. At a smooth peak the limiter takes over and the scheme
   is first order there: it clips the peak a little, as any scheme that makes no new extrema
@@ -195,7 +196,10 @@ mpiexec -n 4 ./advect --steps 100 --cfl 0.5 --scheme bounded in.h5m out.soma
 The layer of cells under the bump's centre, on `data/64bricks_1khex.h5m` refined once (24 by 24 by 24
 hexes), in the example's flow at CFL 0.5, on one colour scale: the start (left), and after half a turn
 upwind (middle) and bounded (right). The peak falls from 0.83 to 0.21 upwind and to 0.54 bounded; both
-keep the total to rounding, and the bounded result stays within the start's range.
+keep the total to rounding, and the bounded result stays within the start's range (to rounding). The
+flow is divergence-free in its rigid core but, sampled at face centroids, not exactly so where it slows,
+so the guarantee of no new extrema covers the core only; the figure's data set checks the range over all
+cells.
 ```
 
 ## Requirements and errors
@@ -220,7 +224,7 @@ rank leaves the exchange and the others complete it.
 ## Limits
 
 - Upwind is first order in space and time, bounded second order away from extrema; both are
-  stable, and bounded makes no new extrema, for $\Delta t \le$ `max_dt`.
+  stable, and bounded makes no new extrema (to rounding), for $\Delta t \le$ `max_dt`.
 - The bounded scheme's guarantee of no new extrema holds for flows with no discrete divergence;
   its gradients use face neighbours only, so a cell with fewer than $d$ independent ones (a
   corner cell) is first order.
