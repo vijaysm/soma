@@ -26,6 +26,19 @@
 // (twice its area over its longest side), crossing itself, or off a plane
 // throws on every rank.
 //
+// Meshes on a sphere (dimension 2, RemapOptions::surface = Surface::sphere):
+// the same cells on a sphere about the origin, their edges great-circle arcs,
+// areas spherical (sphere_clip.hpp). The radius is RemapOptions::radius, or
+// else the largest distance of a vertex from the origin; a corner off the
+// sphere by more than the tolerance throws. A cell is turned counter-
+// clockwise seen from outside; a non-convex one is split by ear clipping in
+// the plane touching the sphere at its corners' mean. Cells are clipped by
+// RemapOptions::sphere_clip: by gnomonic projection onto a cube face's plane
+// (as MOAB's Intx2MeshOnSphere; two cells reaching past the face's horizon,
+// as cells wider than about 45 degrees may, throw) or by the planes of their
+// great circles (any size). The two agree to rounding, and with MOAB's to
+// about 1e-15 of a cell's area; gnomonic is a few percent faster.
+//
 // Volume meshes (dimension 3): tets, hexes, prisms and pyramids, each split
 // into tets: a tet is itself; another cell has one tet per triangle of its
 // faces, apex its centroid, a quad face cut along the diagonal from its
@@ -93,12 +106,26 @@ namespace soma {
 // is built with SOMA_ENABLE_ARBORX).
 enum class SpatialSearch { grid, arborx };
 
+// Where plane meshes lie: in a plane z = const, or on a sphere about the
+// origin (cells' edges great-circle arcs).
+enum class Surface { plane, sphere };
+
+// How cells on a sphere are clipped (sphere_clip.hpp): projected onto a cube
+// face's plane and clipped there (as MOAB's Intx2MeshOnSphere), or by the
+// planes of their great circles.
+enum class SphereClip { gnomonic, great_circle };
+
 struct RemapOptions {
   // The merge tolerance (above): a length in the meshes' units, the same on
   // every rank.
   Real merge_tolerance = 1e-12;
-  // The same on every rank.
+  // The same on every rank, as are the options below.
   SpatialSearch search = SpatialSearch::grid;
+  Surface surface = Surface::plane;
+  // On a sphere: its radius (0: the largest distance of a vertex from the
+  // origin), and the clipping.
+  Real radius = 0;
+  SphereClip sphere_clip = SphereClip::gnomonic;
 };
 
 namespace detail {
@@ -115,12 +142,13 @@ struct RemapPlan {
   std::vector<Real> target_area;  // |T|
   std::vector<GO> source_gid;     // per arrived source cell
   std::vector<LO> sent_cell;      // per sent record: the owned source cell
+  Real radius = 0;                // on a sphere
   transport::CommPlan plan;
 };
 
 // Collective (route, allgather); the flags are not agreed here.
 RemapPlan remap_plan(const Comm& comm, const Mesh<Kokkos::HostSpace>& source, const Mesh<Kokkos::HostSpace>& target,
-                     Real tolerance, SpatialSearch search = SpatialSearch::grid);
+                     const RemapOptions& options);
 
 }  // namespace detail
 
@@ -140,15 +168,22 @@ class RemapOperator {
                 const RemapOptions& options = {}) {
     // Agreed through a flag, as a NaN may drop out of a max on some ranks.
     const Real tol = options.merge_tolerance;
-    const bool good = tol > 0 && Kokkos::isfinite(tol);
+    const bool good = tol > 0 && Kokkos::isfinite(tol) && options.radius >= 0 && Kokkos::isfinite(options.radius);
     const auto search = static_cast<Real>(options.search);
-    Real agree[5] = {good ? Real{0} : Real{1}, good ? tol : 0, good ? -tol : 0, search, -search};
+    // The options below, as one number each, and their negations.
+    const Real choice[3] = {static_cast<Real>(options.surface), static_cast<Real>(options.sphere_clip),
+                            good ? options.radius : 0};
+    Real agree[11] = {good ? Real{0} : Real{1}, good ? tol : 0, good ? -tol : 0, search, -search,
+                      choice[0], -choice[0], choice[1], -choice[1], choice[2], -choice[2]};
     comm.allreduce(std::span<Real>(agree), Op::max);
     if (agree[0] != 0 || agree[1] != -agree[2]) {
       throw std::invalid_argument("RemapOperator: the merge tolerance is not finite and positive, or differs between "
-                                  "ranks");
+                                  "ranks, or the radius is negative or not finite");
     }
     if (agree[3] != -agree[4]) throw std::invalid_argument("RemapOperator: the search differs between ranks");
+    if (agree[5] != -agree[6] || agree[7] != -agree[8] || agree[9] != -agree[10]) {
+      throw std::invalid_argument("RemapOperator: the surface, sphere clipping or radius differs between ranks");
+    }
     if (options.search == SpatialSearch::arborx && !SOMA_ENABLE_ARBORX) {
       throw std::invalid_argument("RemapOperator: ArborX's search needs SOMA built with SOMA_ENABLE_ARBORX");
     }
@@ -170,13 +205,16 @@ class RemapOperator {
       Real flags[4] = {usable ? Real{0} : Real{1}, 0, 0, 0};
       comm.allreduce(std::span<Real>(flags, 1), Op::max);
       if (flags[0] != 0) throw std::invalid_argument("RemapOperator: a rank's source or target mesh has edits");
-      p = detail::remap_plan(comm, *hs, *ht, tol, options.search);
+      p = detail::remap_plan(comm, *hs, *ht, options);
       flags[0] = p.supported ? 0 : 1;
       flags[1] = static_cast<Real>(p.bad_source);
       flags[2] = static_cast<Real>(p.bad_target);
       flags[3] = static_cast<Real>(p.overflow);
       comm.allreduce(std::span<Real>(flags), Op::max);
-      if (flags[3] != 0) throw std::invalid_argument("RemapOperator: an overlap overflowed the clipping capacity");
+      if (flags[3] != 0) {
+        throw std::invalid_argument("RemapOperator: an overlap overflowed the clipping capacity, or two cells on a "
+                                    "sphere reach past their cube face's horizon (gnomonic; use great circles)");
+      }
       if (flags[0] != 0) {
         throw std::invalid_argument("RemapOperator: a rank's meshes are not both of dimension 2 or both of 3, have "
                                     "high-order nodes, or hold a cell other than a triangle, quad or polygon of at "
@@ -185,7 +223,7 @@ class RemapOperator {
       if (flags[1] != 0 || flags[2] != 0) {
         throw std::invalid_argument(std::string("RemapOperator: a rank's ") + (flags[1] != 0 ? "source" : "target") +
                                     " mesh holds a cell thinner than the tolerance, crossing itself, off a plane "
-                                    "z = const (2D), or not star-shaped about its centroid (3D)");
+                                    "z = const or the sphere (2D), or not star-shaped about its centroid (3D)");
       }
     }
     rows_ = static_cast<LO>(p.target_area.size());

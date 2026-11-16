@@ -643,6 +643,15 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   bit for bit. The grid stays the default; between uniform grids the two take about the same
   time (the clipping dominates). Asking for ArborX in a SOMA built without it, or a search that
   differs between ranks, throws on every rank.
+- `RemapOperator` remaps between meshes of triangles, quads and polygons on a sphere
+  (`RemapOptions::surface = Surface::sphere`, `radius`, `sphere_clip`), their edges great-circle
+  arcs and their areas spherical (`soma/algorithms/sphere_clip.hpp`). `SphereClip::gnomonic`
+  (the default) clips on a cube face's plane as MOAB's `Intx2MeshOnSphere` does;
+  `SphereClip::great_circle` clips by the planes of the cells' great circles, so it also takes
+  cells too wide to project. The two agree to rounding and with MOAB's overlaps to about 1e-15
+  of a cell's area; between cubed spheres of about 14000 cells they take 0.60 s and 0.62 s at
+  one rank, MOAB 2.0 s. Candidate cells are found by the boxes of the caps that hold them, and
+  the operator is the same bit for bit on any partition and listing of a cell's corners.
 - `examples/remap.cpp` remaps a cell field from a `.h5m` or SOMA mesh onto a grid of triangles
   or tets over its bounding box and prints both totals.
 - `soma::refine_uniform(comm, mesh, RefineOptions)` (`soma/algorithms/refine.hpp`) splits
@@ -849,7 +858,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   sections time Laplacian smoothing against MOAB's, and `FemSpace`, the three assemblies and
   CG alone; its `advect` section, `FvSpace` and upwind steps alone; its `remap` section, a
   `RemapOperator` between plane grids built and applied, against MOAB's in-plane intersection
-  at one rank, and between volume grids (hexes onto tets and onto hexes); its `refine` section, `refine_uniform` of hexes and
+  at one rank, and between volume grids (hexes onto tets and onto hexes); its `remap_sphere`
+  section, between cubed spheres by both clippings, against MOAB's `Intx2MeshOnSphere` at one
+  rank; its `refine` section, `refine_uniform` of hexes and
   tets, against MOAB's `NestedRefine` of the hexes at one rank, and `refine_marked` of half the
   cells: hexes with hanging vertices and conforming, tets bisected. `bench/run_parallel.sh` runs it
   over rank counts and sizes into JSON files; its header lists what a run at scale needs.
