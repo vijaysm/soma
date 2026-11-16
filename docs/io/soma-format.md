@@ -225,11 +225,19 @@ concatenated in part order; the part table says where each part starts.
 ```mermaid
 flowchart TB
   root["/soma<br/>attribute meta: format_version, dimension,<br/>N parts, dimensions written, counts"]
-  root --> dim["dimD, each dimension written<br/>gid<br/>coords, for D = 0<br/>topology, counts, conn<br/>node_counts, nodes"]
-  root --> fields["fields/fI<br/>attributes name, meta,<br/>default, global;<br/>dimD/ full, domain,<br/>values, counts; sets/"]
-  root --> values["values/vI<br/>attributes name, meta,<br/>default, global"]
-  root --> sets["sets/<br/>gids, flags, children,<br/>parents, members;<br/>per part: entity members,<br/>ordered entries"]
-  root --> parts["parts/offsets<br/>N + 1 rows, one column<br/>per per-part dataset;<br/>attribute columns"]
+  dim["dimD, each dimension written<br/>gid<br/>coords, for D = 0<br/>
+    topology, counts, conn<br/>node_counts, nodes"]
+  fields["fields/fI<br/>attributes name, meta,<br/>default, global;<br/>
+    dimD/ full, domain,<br/>values, counts; sets/"]
+  values["values/vI<br/>attributes name, meta,<br/>default, global"]
+  sets["sets/<br/>gids, flags, children,<br/>parents, members;<br/>
+    per part: entity members,<br/>ordered entries"]
+  root --> dim
+  root --> fields
+  root --> values
+  root --> sets
+  parts["parts/offsets<br/>N + 1 rows, one column<br/>per per-part dataset;<br/>attribute columns"]
+  root --> parts
   dim --> shared["shared/<br/>index, counts, parts"]
 ```
 

@@ -4,7 +4,7 @@
 """The figures of the algorithms pages (docs/algorithms, docs/amr and docs/io)."""
 
 from matplotlib.patches import Rectangle
-from PIL import Image
+from PIL import Image, ImageChops
 
 import style
 from figlib import CELL_VIEW, Camera, centroid, figure, load_json, pv_color_by, pv_label, pv_save, pv_surface, pv_view
@@ -16,10 +16,17 @@ TOP = {"up": [0, 1, 0], "parallel": 1}
 
 
 def save_png(pv, view, path, camera):
-    """pv_save, then the image cut to 256 colours (no dithering): a third of the bytes, the same look."""
+    """pv_save, then the image cropped to its drawing and cut to 256 colours (no dithering)."""
     pv_save(pv, view, path, camera)
     with Image.open(path) as image:
-        small = image.convert("RGB").quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+        rgb = image.convert("RGB")
+    # Cut the blank bands round the drawing, keeping a margin, so the page shows it larger.
+    box = ImageChops.difference(rgb, Image.new("RGB", rgb.size, (255, 255, 255))).getbbox()
+    if box:
+        m = 24
+        rgb = rgb.crop((max(box[0] - m, 0), max(box[1] - m, 0), min(box[2] + m, rgb.width),
+                        min(box[3] + m, rgb.height)))
+    small = rgb.quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
     small.save(path, optimize=True)
 
 

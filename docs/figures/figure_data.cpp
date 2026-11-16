@@ -15,16 +15,17 @@
 //
 // Exits 0 on success; 1 when a set fails (each failing rank prints the check,
 // then leaves at once, so the launcher stops the others rather than leaving
-// them waiting in a collective); 2 for bad arguments, an unknown set, or the
-// wrong rank count.
+// them waiting in a collective); 2 for bad arguments, an unknown set, the
+// wrong rank count, or a set name two areas register (which the doc_figures
+// tests would also catch, as two tests of one name).
 
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
-#include <stdexcept>
-#include <utility>
 #include <fstream>
+#include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <Kokkos_Core.hpp>

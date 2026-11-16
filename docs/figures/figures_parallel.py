@@ -90,7 +90,7 @@ def sfc_curve(data, path):
     for i in range(9):
         ax.plot([i, i], [0, 8], color="#bbbbbb", lw=0.8, zorder=0)
         ax.plot([0, 8], [i, i], color="#bbbbbb", lw=0.8, zorder=0)
-    cmap = matplotlib.cm.get_cmap(style.FIELD_CMAP)
+    cmap = matplotlib.colormaps[style.FIELD_CMAP]
     n = len(centroids)
     for k in range(n - 1):
         (x0, y0), (x1, y1) = centroids[k], centroids[k + 1]

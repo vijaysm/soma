@@ -172,7 +172,9 @@ void set_smooth(const soma::Comm& comm, const fs::path& out) {
   }
   require(report.iterations == 10, "smooth: 10 sweeps");
   require(kept && k == skin.size(), "smooth: the skin stays");
-  require(lo0 < 0.47 && hi0 > 1.6 && lo1 > 0.985 && hi1 < 1.01,
+  // The caption's values, to its two decimals.
+  const auto rounds_to = [](double v, double shown) { return std::abs(v - shown) <= 0.005; };
+  require(rounds_to(lo0, 0.46) && rounds_to(hi0, 1.61) && rounds_to(lo1, 0.99) && rounds_to(hi1, 1.01),
           "smooth: areas 0.46 to 1.61 before, 0.99 to 1.01 after");
   write_json(comm, out / "smooth.json",
              "{\"before\": [" + number(lo0) + ", " + number(hi0) + "], \"after\": [" + number(lo1) + ", " +
@@ -391,7 +393,7 @@ void set_overlap(const soma::Comm& comm, const fs::path& out) {
   }
   pieces += "]";
   const auto count = plan.offsets[row + 1] - plan.offsets[row];
-  require(count >= 4, "overlap: the cell meets at least four source cells");
+  require(count == 6, "overlap: the cell meets six source cells");
   require(std::abs(sum - plan.target_area[row]) < 1e-12 * plan.target_area[row],
           "overlap: the pieces tile the target cell");
   write_json(comm, out / "overlap.json",
@@ -544,7 +546,8 @@ void set_marked(const soma::Comm& comm, const fs::path& out) {
     soma::write_file(comm, fine, (out / (std::string(name) + ".vtk")).string(),
                      {.vtk_fields = std::vector<std::string>{"level"}});
     if (conforming) {
-      require(hanging.empty(), "marked: conforming leaves no hanging vertex");
+      // Each pass marks its own mesh, so the conforming run refines other cells than the default.
+      require(hanging.empty() && fine.count(2) == 929, "marked: conforming: 929 cells, no hanging vertex");
       continue;
     }
     require(fine.count(2) == 730 && fine.count(0) == 751 && hanging.size() == 35,
@@ -583,7 +586,8 @@ void set_search(const soma::Comm& comm, const fs::path& out) {
   }
   const soma::GridIndex<Host> index(boxes);
   const auto pairs = index.query(queries);
-  // The bins split the span of the boxes evenly: bins() of them along each axis.
+  // The bins split the span of the boxes evenly: bins() of them along each axis, as GridIndex
+  // builds them (origin the boxes' low corner, width span / bins; see soma/algorithms/grid_index.hpp).
   const std::array<int, 3> bins = index.bins();
   double origin[2], width[2];
   for (int a = 0; a < 2; ++a) {

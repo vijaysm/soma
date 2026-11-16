@@ -229,7 +229,7 @@ refinement ratio $r$.
 :alt: Two panels of a coarse grid under two fine boxes forming an L. Left: the two-cell ghost ring of one fine box, shaded where it is filled from the coarse level and hatched where it lies in the other fine box. Right: the outline of the L drawn in red along coarse faces, with the coarse cells just outside it shaded
 :width: 90%
 
-Two fine boxes in an L over a 16 by 16 coarse level (ratio 2), from `Hierarchy::coarse_fine_plan` and
+Two fine boxes in an L over part of a 16 by 16 coarse level (ratio 2), from `Hierarchy::coarse_fine_plan` and
 `Hierarchy::make_flux_register`. Left: the ghosts of one fine box for a cell field with two ghosts: the
 coarse-fine fill interpolates those no fine box covers; the rest come from the other box by the same-level
 halo exchange. Right: the register's 32 coarse faces on the outline of the fine level and the coarse cells

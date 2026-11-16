@@ -315,8 +315,9 @@ mpiexec -n 4 ./refine --levels 3 --marked 0.5 --conforming in.h5m out.soma
 
 The example's marked loop on `data/hybrid_3quad_1tri.h5m`: 3 levels, each marking the fraction 0.5 of the
 indicator towards the lower left corner, coloured by `refine:level`. Non-conforming (left, the default): 730
-cells, with the 35 hanging vertices of the last level as dots. Conforming (right): transition triangles
-close the cells next to finer ones.
+cells, with the 35 hanging vertices of the last level as dots. Conforming (right): 929 cells, transition
+triangles closing the cells next to finer ones. Each pass marks the mesh it has, so the two runs refine
+different cells from the second level on, not the same cells closed differently.
 ```
 
 ## Memory spaces and limits
