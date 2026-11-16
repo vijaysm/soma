@@ -17,9 +17,9 @@ All notable changes to SOMA are recorded here. The format follows
 - `SOMA_KOKKOS_GPU` selects the GPU backend of a fetched Kokkos (`AUTO`, `NONE`, `CUDA`,
   `HIP`, `SYCL`). A request the compiler cannot build is a configure error, never a silent CPU
   fallback.
-- `SOMA_GPU_AWARE_MPI` (`AUTO`, `ON`, `OFF`) sets the compile-time default for passing device
-  buffers to MPI. The generated `soma/config.hpp` also honors the environment variable
-  `SOMA_GPU_AWARE_MPI=0|1` at run time.
+- `SOMA_GPU_AWARE_MPI` (`AUTO`, `ON`, `OFF`) records whether device buffers may be passed to
+  MPI as `SOMA_GPU_AWARE_MPI_DEFAULT` in the generated `soma/config.hpp`. No exchange reads it
+  yet: messages are staged through host memory.
 - On AppleClang, SOMA seeds `FindOpenMP` from Homebrew libomp so that Kokkos with its OpenMP
   backend can be found.
 - The configure summary line reports the Kokkos source, host and GPU backends, MPI, tests,
@@ -701,8 +701,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   lambdas in private member functions); test kernels live in named functions.
 
 - GoogleTest harness with a shared `main` that creates the runtime scope first and agrees on
-  the exit code across ranks. `soma_add_test` registers MPI tests at 1, 2 and 4 ranks with a
-  60 second timeout.
+  the exit code across ranks. `soma_add_test` registers an MPI test once per rank count given
+  in `RANKS` (most tests use 1, 2, 3, 4, 5, 7 and 8) with a 60 second timeout.
 - `SOMA_FETCH_GTEST=ON` downloads GoogleTest. Without it, a missing GoogleTest is a clear
   configure error.
 - Smoke tests for Kokkos initialization, a parallel reduction on the default execution space,
@@ -864,6 +864,14 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   tets, against MOAB's `NestedRefine` of the hexes at one rank, and `refine_marked` of half the
   cells: hexes with hanging vertices and conforming, tets bisected. `bench/run_parallel.sh` runs it
   over rank counts and sizes into JSON files; its header lists what a run at scale needs.
+
+### Documentation
+
+- A documentation site under `docs/` in MyST Markdown, built by Sphinx (`docs/conf.py`, pinned
+  tools in `docs/requirements.txt`) and published by Read the Docs (`.readthedocs.yaml`, warnings
+  are errors): getting started, the mesh model and its concepts, parallel meshes, input and
+  output, algorithms, block-structured AMR, the MOAB compatibility layer, a developer guide and
+  references for CMake options and every public header.
 
 ### Packaging
 

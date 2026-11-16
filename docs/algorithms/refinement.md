@@ -1,0 +1,311 @@
+# Mesh refinement
+
+SOMA refines unstructured meshes in parallel: uniformly, splitting every cell, or where cells
+are marked, keeping a 2:1 balance and either leaving hanging vertices or closing the mesh with
+transition cells. The refined mesh is the same, gid for gid and bit for bit, on any number of
+ranks. All the functions here are in `soma/algorithms/refine.hpp`, except `rebalance`, which is
+in `soma/parallel/migrate.hpp`.
+
+## How cells are split
+
+Every edge is split in two, and each cell into children that tile it. A cell's new nodes are
+its edges' midpoints, its quad faces' centres, and its centre where it has one:
+
+| Cell | Children | How |
+| --- | --- | --- |
+| tri | 4 tris | the corners' halves and the middle one |
+| quad | 4 quads | with the centre |
+| polygon | $n$ quads | one per corner, with the centroid (corners averaged) |
+| tet | 8 tets | the corners' halves and four about the shortest diagonal of the octahedron left (the first in edge order of those as short) |
+| hex | 8 hexes | with the faces' centres and the centre |
+| prism | 8 prisms | with the quad faces' centres |
+| pyramid | 6 pyramids + 4 tets | with the base's centre: the corners' halves, one upside down under the apex's, and four tets |
+
+A corner's child is the cell halved about it, so children are oriented as their parent is.
+Every quad face gets a centre and no triangle does, so cells of any type meeting at a face split
+it alike: refining a conforming mesh gives a conforming mesh, mixed meshes included.
+
+A new vertex is the average of its corners (an edge's two, a face's four, a cell's all),
+summed in gid order, so every rank holding it computes the same bits.
+
+### Gids
+
+Gids do not depend on the number of ranks. With $V$, $E$ and $F$ the largest vertex, edge and
+face gid on any rank (edges and faces derived as `build_distributed_adjacencies` derives
+them):
+
+- an edge's midpoint is $V +$ its edge gid;
+- a quad face's centre is $V + E +$ its face gid (3D);
+- with the cells numbered from 1 in gid order ($n = \text{gid} - G + 1$, $G$ the least cell
+  gid), a cell's centre is $V + E + F + n$ ($F = 0$ in 2D), and its child $c$ is
+  $K(n - 1) + c + 1$, $K$ the most children of any cell.
+
+### Star-shaped cells
+
+A child's corners are its parent's mapped from reference coordinates, so a cell that is not
+star-shaped about its corners' average (a non-convex quad or polygon; in 3D a strongly
+distorted cell) would have children turned against it. Plane cells are checked and refused;
+volume cells are not checked. `refine_marked` checks only the plane cells it splits, so a mesh
+holding such cells (for example the dart-shaped children of L-shaped polygons) can still be
+refined where they are not marked.
+
+## Uniform refinement
+
+```cpp
+struct RefineOptions {
+  int levels = 1;  // passes; each splits every edge in two
+};
+
+[[nodiscard]] RefineResult refine_uniform(const Comm& comm, const HostMesh& mesh, RefineOptions options = {});
+```
+
+```cpp
+const soma::RefineResult fine = soma::refine_uniform(comm, mesh, {.levels = 2});
+fine.mesh;       // the refined local part, children on their parent's rank
+fine.parent[c];  // the cell of `mesh` that fine cell c lies in
+```
+
+Each level is `refine_marked` (below) with every cell marked, so uniform refinement keeps the
+same refinement state as marked refinement:
+
+- the cell field `refine:level` goes one up per level;
+- `refine:birth` is recorded for each new vertex, so `refine_marked` can follow;
+- vertices made earlier on the cells' edges and faces are reused;
+- a mesh that has hanging vertices keeps them, and they are listed in `RefineResult::hanging`;
+- transition cells of a conforming result are put back first.
+
+On a conforming mesh without that state the result is plain uniform refinement as described
+above.
+
+`refine_uniform` is collective. It throws `std::invalid_argument` on every rank if any rank's
+mesh is not of dimension 2 (tris, quads, polygons) or 3 (tets, hexes, prisms, pyramids), is
+edited (changed by `MeshEdit::apply` and not compressed since) or has high-order nodes, or
+holds a quad or polygon not star-shaped about its corners' average; if `levels < 1` or the
+ranks differ in `levels` or dimension; or if a gid of the refined mesh would not fit a `GO`.
+
+## The result
+
+```cpp
+struct RefineResult {
+  HostMesh mesh;
+  std::vector<LO> parent;
+  std::vector<Offset> child_offsets;
+  std::vector<LO> children;
+  std::vector<std::string> dropped;
+  std::vector<LO> hanging;
+  std::vector<Offset> hanging_offsets{0};
+  std::vector<GO> hanging_masters;
+  std::vector<Real> hanging_weights;
+};
+```
+
+| Member | Meaning |
+| --- | --- |
+| `mesh` | The refined local part. Children stay on their parent's rank. It has no ghosts: add them again as needed. |
+| `parent` | For each cell of `mesh`, the owned cell of the input it lies in, as a local id of the input. For a cell in a group of transition cells that the call put back, the group's least cell by gid. |
+| `child_offsets`, `children` | The children of the input's owned cells: cell `p`'s are `children[child_offsets[p], child_offsets[p + 1])`, local ids of `mesh`. |
+| `dropped` | Names of the fields not carried over. |
+| `hanging` | The hanging vertices of `mesh` (local ids): each the midpoint of an edge or the centre of a quad face that a cell still has whole. |
+| `hanging_offsets`, `hanging_masters`, `hanging_weights` | Hanging vertex `i` takes the value $\sum_k w_k\, \text{value}(m_k)$ over `k` in `[hanging_offsets[i], hanging_offsets[i + 1])`, masters $m_k$ given by gid. A master may itself be hanging, one level up. |
+
+### Fields
+
+Fields carry over where they are dense: one value per entity of a full domain, per-entity
+layout, not variable-length and not handles (see [fields](../concepts/fields.md)). Their
+default and global values come with them.
+
+- A cell field's children take the parent's value, so integrals of cell averages are kept.
+- A vertex field of floating-point values keeps the values of the old vertices and gives a
+  new vertex the average of its corners' values: exact for linear, bilinear and trilinear
+  fields.
+
+Vertex values are read wherever a rank holds them, shared copies and ghosts included, so these
+must hold their owners' values (update them first) for ranks to agree. Other fields, edge and
+face fields, and integer vertex fields are dropped and named in `dropped`. The internal
+`soma:` fields are rebuilt.
+
+## Marked refinement
+
+```cpp
+enum class VertexMatching : std::uint8_t {
+  recorded,     // by the corners recorded in "refine:birth"
+  coordinates,  // also by coordinates, for vertices with no record (infer_births)
+};
+
+struct MarkedOptions {
+  bool conforming = false;
+  VertexMatching vertices = VertexMatching::recorded;
+  PointTolerance tol{};  // VertexMatching::coordinates: exact by default
+};
+
+[[nodiscard]] RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
+                                         MarkedOptions options = {});
+```
+
+`marks` holds one entry per owned cell, in local id order. The owned cells with a nonzero mark,
+and the cells the 2:1 balance needs, are split once as `refine_uniform` splits them; the others
+stay whole.
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `conforming` | `false` | `false`: leave hanging vertices. `true`: leave none (bisection or transition cells, below). |
+| `vertices` | `VertexMatching::recorded` | How vertices made by earlier refinement are found: by their recorded births, or also by coordinates for vertices without a record. |
+| `tol` | exact | With `VertexMatching::coordinates`, the tolerance of the coordinate match (`PointTolerance`, from `soma/parallel/point_match.hpp`; see [matching and merging](../parallel/matching-and-merging.md)). |
+
+### Refinement state
+
+The refinement state lives in fields of the mesh, so later calls, on any partition, can
+use it:
+
+- `refine:level` (a cell field) holds each cell's level, taken as 0 where the field is missing;
+- `refine:birth` (a vertex field) records, for each vertex refinement made at an edge's
+  midpoint or a quad face's centre, the corners it lies between (a count, then up to four
+  gids). Later calls, on any rank, find and reuse such a vertex through a directory keyed by
+  those corners, whatever the partition;
+- `refine:green` (a cell field) records, on transition cells, the cell each replaced (below);
+  it is zero on other cells.
+
+### Balance
+
+A cell is split when a cell touching it at a corner, or at a vertex born on its edges or
+faces (or on theirs, one level down), would otherwise be two levels finer than it.
+
+### Non-conforming refinement (the default)
+
+Unsplit cells next to split ones keep their edges and faces whole, so the new vertices on
+those edges and faces are hanging. `RefineResult::hanging` lists them, each with its masters
+and weights; a hanging vertex's value is its masters' average.
+
+### Conforming refinement
+
+With `options.conforming`, no hanging vertex is left:
+
+- **Triangles alone, or tets alone: bisection.** Each marked cell is cut in two at the
+  midpoint of its longest edge (the one of least corner gids among equals), and any cell with
+  a vertex on one of its edges is cut so again, until none is left (longest-edge, or Rivara,
+  bisection). Each cut counts as a level.
+- **Any other mesh: transition cells.** Cells are split as in non-conforming refinement, then
+  each cell left with hanging vertices is replaced by transition cells. In 2D these are
+  triangles from its centre to its sides, divided at their hanging vertices. In 3D they are a
+  cone from its centre over each face: tets over triangles, pyramids over quads, a face split
+  as its neighbour split it or else, with hanging vertices on its edges, fanned into triangles
+  from its centre (which both cells on it share).
+
+Transition cells keep their parent's level and are cells like any other in the result. Each
+records the cell it replaced in `refine:green` (its gid, topology, corner count and corners'
+gids). The next call to `refine_marked` puts each group back as that cell before it refines
+(red-green refinement). A group split between ranks is first gathered on the rank of its least
+cell by gid; the restored cell takes that cell's gid, fields and level, and it is marked when
+any cell of its group is.
+
+### Finding earlier vertices by coordinates
+
+By default (`VertexMatching::recorded`) earlier vertices are found by their recorded births
+alone. This needs no coordinates, so vertices may move between calls (for example by
+[smoothing](smoothing.md)).
+
+With `options.vertices = VertexMatching::coordinates`, `refine_marked` first finds, as
+`infer_births` does (below), the births of vertices that have no record, exactly or within
+`options.tol`. This costs one `match_points` over the owned vertices and the points asked, per
+depth of refinement found.
+
+### Behaviour and errors
+
+Gids, coordinates and fields follow `refine_uniform` (a vertex made at a centre takes its
+corners' average), and the result is the same on any number of ranks. `refine_marked` is
+collective. It throws as `refine_uniform` does, except that it checks for star shape only the
+plane cells it splits, and throws `std::invalid_argument` on every rank if a rank's marks are
+not one per owned cell.
+
+## Rebuilding births: `infer_births`
+
+```cpp
+void infer_births(const Comm& comm, HostMesh& mesh, PointTolerance tol = {});
+```
+
+`infer_births` records in `refine:birth` the corners each vertex lies between, found by
+coordinates (`match_points`, exactly or within `tol`) as refinement would have placed it: at
+the midpoint of an owned cell's edge or the centre of its quad face, and then, as refinement
+cuts them, at the midpoints of those edges' halves, of a triangle's halves about an edge's
+midpoint and of its four children, and at the centres of a quad's four children, to any depth.
+
+Use it for meshes with hanging vertices whose records are missing: read from a format that
+drops the field, made by other means, or taken from an AMR hierarchy. `refine_marked` then
+reuses those vertices and lists them as hanging.
+
+- Recorded births stay as they are.
+- Cell levels are not inferred: `refine:level` is 0 where missing.
+- A vertex moved since it was made (smoothed, snapped) is not found.
+
+It is collective and throws as `refine_marked` does and as `match_points` does for `tol`.
+
+## Marking
+
+```cpp
+[[nodiscard]] std::vector<std::int8_t> mark_threshold(std::span<const Real> indicator, Real threshold);
+[[nodiscard]] std::vector<std::int8_t> mark_fraction(const Comm& comm, std::span<const Real> indicator, Real fraction);
+```
+
+Both take an indicator per owned cell, in local id order, and return marks for `refine_marked`.
+
+- `mark_threshold` marks the cells whose indicator exceeds `threshold`. It is local.
+- `mark_fraction` is Doerfler marking: it marks the cells of largest indicator whose indicators
+  add up to at least `fraction` of their sum over every rank. Precisely, it marks the cells
+  whose indicator is at least the largest cutoff that reaches the fraction, so cells of equal
+  indicator are marked alike. A fraction of 0, or a sum of 0, marks nothing. Indicators should
+  be non-negative, such as squared error estimates. The sums are rounded as each partition adds
+  them. It is collective and throws `std::invalid_argument` on every rank for a fraction outside
+  $[0, 1]$, or an indicator that is negative or not finite on any rank.
+
+## Rebalancing
+
+Refinement keeps children on their parent's rank, so refining one region makes the ranks
+holding it heavier. `soma::rebalance` (`soma/parallel/migrate.hpp`) evens them out:
+
+```cpp
+[[nodiscard]] HostMesh rebalance(const Comm& comm, const HostMesh& mesh, Ordering ordering = default_ordering);
+```
+
+It moves the owned cells to the ranks `partition_by_curve` gives their centroids (their
+corners' average), with `migrate`: parts along the curve whose cell counts differ by at most
+one, whatever the partition given. Each entity takes the field values its owner held, so
+the `refine:` fields move with their cells and vertices. It is collective and throws as `migrate` and `partition_by_curve` do. See
+[distributed meshes](../parallel/distributed-meshes.md).
+
+## Example
+
+`examples/refine.cpp` reads a mesh, gives each vertex the linear field $w = x + 2y + 3z$ and
+each cell its gid as `part`, and refines it `--levels` times: uniformly, or with `--marked F`
+the cells holding the fraction `F` of an indicator, rebalancing after each round. Its marked
+loop:
+
+```cpp
+const soma::HostMesh* from = &mesh;
+for (int level = 0; level < options.levels; ++level) {
+  const auto marks = soma::mark_fraction(comm, indicator(*from, corner), fraction);
+  soma::RefineResult r = soma::refine_marked(comm, *from, marks, {.conforming = conforming});
+  hanging = 0;
+  for (const soma::LO v : r.hanging) hanging += v < r.mesh.segment_table(0).owned_end ? 1 : 0;
+  hanging = comm.allreduce(hanging, soma::Op::sum);
+  fine = soma::rebalance(comm, r.mesh);
+  from = &fine;
+}
+```
+
+It prints the cell and vertex counts before and after, the hanging vertices left, and the
+largest error of `w` on the refined vertices, which is zero up to rounding because new
+vertices average linear fields exactly:
+
+```bash
+mpiexec -n 4 ./refine --levels 3 --marked 0.5 in.h5m out.soma
+mpiexec -n 4 ./refine --levels 3 --marked 0.5 --conforming in.h5m out.soma
+```
+
+## Memory spaces and limits
+
+- Refinement runs on the host: the functions take and return a `HostMesh` (built with
+  `build_local_part`).
+- The result has no ghosts.
+- Volume cells are not checked for star shape; a strongly distorted cell can give inverted
+  children.
+- Fields other than dense cell fields and floating-point vertex fields are dropped.
