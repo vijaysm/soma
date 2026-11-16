@@ -17,6 +17,14 @@ Without an installed Kokkos, configure with `-DSOMA_FETCH_KOKKOS=ON` to download
 Threads when OpenMP is unavailable, and a GPU backend chosen by `SOMA_KOKKOS_GPU`
 (`AUTO`, `NONE`, `CUDA`, `HIP`, `SYCL`). Any `Kokkos_*` option you pass wins over these defaults.
 
+Documentation: the site under [docs/](docs/index.md) (Sphinx with MyST Markdown, published on
+Read the Docs through `.readthedocs.yaml`). To build it locally:
+
+```bash
+python3 -m pip install -r docs/requirements.txt
+sphinx-build -W -b html docs docs/_build/html
+```
+
 Changelog: [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
 License: BSD-3-Clause (see [LICENSE](LICENSE)).

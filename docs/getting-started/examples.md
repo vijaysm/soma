@@ -1,0 +1,180 @@
+# Example programs
+
+SOMA ships five example programs in `examples/`, one per algorithm, and the command-line tool
+`soma-convert` in `tools/`. Each is a complete program of a page or two that reads a mesh on any
+number of ranks, runs one algorithm and writes the result; read them alongside the algorithm
+pages. This page gives each one's purpose, command line, output and the tests that run it.
+
+## Building and running them
+
+The examples read and write meshes, so they need HDF5:
+
+```bash
+cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/kokkos \
+  -DSOMA_ENABLE_HDF5=ON -DSOMA_ENABLE_EXAMPLES=ON [-DSOMA_ENABLE_MPI=ON]
+cmake --build build -j
+```
+
+The programs are built under `build/examples/` and `soma-convert` under `build/tools/`;
+`soma-convert` is built whenever `SOMA_ENABLE_HDF5` is on, and installed by `cmake --install`.
+The examples are not installed.
+
+Every program shares the same structure:
+
+- It starts with `soma::ScopeGuard` and runs on `soma::Comm::world()`, so it runs as it is on one
+  rank or under `mpiexec -n P`. SOMA's runtime options (`--soma-reproducible`,
+  `--soma-compress-threshold=<x>`) and Kokkos's (`--kokkos-num-threads=<n>`, ...) may be added
+  to any command line.
+- It reads `<in>` with `soma::read_file`, which accepts a SOMA file, a MOAB `.h5m` file or a
+  legacy VTK file by content, and writes `<out>` with `soma::write_file`, as a SOMA, `.h5m` or
+  `.vtk` file by its extension (see [I/O](../io/overview.md)). On more than one rank a SOMA
+  output file is written in parallel; `.h5m` and `.vtk` are gathered on the first rank.
+- The first rank prints one line on success, starting with the program's name as invoked
+  (`argv[0]`). The exit status is 0 on success, 1 on failure (the
+  message goes to standard error) and 2 for bad arguments (with a usage line).
+
+The bundled meshes in `data/` used below are `64bricks_1khex.h5m`, a box of $12^3 = 1728$ hexes,
+and `hybrid_3quad_1tri.h5m`, a plane mesh.
+
+## laplacian_smooth
+
+```text
+laplacian_smooth [--iterations K] [--bridge-dim B] [--tolerance T] <in> <out>
+```
+
+Adds one ghost layer through vertices (`GhostOptions{1, 0, false}`), smooths the vertex
+coordinates by `K` Jacobi Laplacian sweeps with `soma::laplacian_smooth` (the skin stays fixed),
+removes the ghosts and writes the mesh without fields. `--iterations` defaults to 10;
+`--bridge-dim` and `--tolerance` set `SmoothOptions::bridge_dim` (neighbours through entities of
+that dimension; the cells by default) and `SmoothOptions::tolerance` (stop once no vertex moves
+farther than `T` in a sweep; 0, the default, never stops early). See
+[smoothing](../algorithms/smoothing.md).
+
+It prints the number of sweeps made, with `--tolerance` the largest move in the last sweep, and
+the file written:
+
+```text
+laplacian_smooth: 5 sweeps; wrote smoothed.vtk
+```
+
+## poisson
+
+```text
+poisson [--assembly gather|atomic|colored] [--rtol R] <in> <out>
+```
+
+Solves $-\Delta u = 1$ with $u = 0$ on the boundary by linear finite elements on a mesh of
+triangles, quads, tets or hexes: adds a ghost layer through vertices, builds a
+`soma::FemSpace<Kokkos::HostSpace>` with the chosen assembly (`gather`, the default; `atomic`;
+`colored`), assembles the stiffness matrix and load vector, applies the Dirichlet condition with
+`soma::apply_dirichlet`, and solves with Jacobi-preconditioned conjugate gradients (`soma::cg`)
+to a relative residual of `R` (default `1e-10`). It writes $u$ as the vertex field `"u"` and
+prints whether CG converged, its iterations and residual, and the largest value of $u$. The exit
+status is 1 if CG did not converge. See [finite elements](../algorithms/fem.md) and
+[linear algebra](../algorithms/linear-algebra.md).
+
+## advect
+
+```text
+advect [--steps N] [--cfl C] <in> <out>
+```
+
+Carries a Gaussian bump around the centre of the mesh's bounding box by a rigid rotation in the
+$xy$ plane (one turn in unit time), with first-order upwind finite volumes (`soma::FvSpace`) and
+forward Euler, after adding a ghost layer through vertices. It takes `N` steps (default 100) of
+`C` (in $(0, 1]$, default 0.5) times the largest stable step `FvSpace::max_dt`, nothing flowing
+in. It writes $u$ as the cell field `"u"` and prints the step count and size and the total
+$\sum_e V_e u_e$ before and after, to 16 significant digits. See
+[finite volumes](../algorithms/finite-volumes.md).
+
+With `--soma-reproducible` the totals are summed exactly, and they are the same, bit for bit, on
+any number of ranks and threads; the tests compare them to the last digit on one and two ranks.
+
+## remap
+
+```text
+remap [--n N] [--tolerance T] <in> <out>
+```
+
+Reads a plane mesh of triangles, quads or polygons, or a volume mesh of tets, hexes, prisms or
+pyramids, gives each cell the value $2 + \sin x \cos y$ at the mean of its corners, and remaps
+it conservatively with `soma::RemapOperator<Kokkos::HostSpace>` onto a grid over the mesh's
+bounding box (widened slightly on each side): $N \times N$ squares (default $N = 24$) each cut into
+two triangles in 2D, or $N^3$ cubes each cut into six tets in 3D. The grid is built
+distributed, its slabs dealt to the ranks, with `MeshBuilder` and `build_local_part`.
+`--tolerance` sets `RemapOptions::merge_tolerance`. Since the grid covers every source cell, the
+total $\sum |S| u_S$ is conserved; the program prints it on the source and on the grid and
+writes the grid with the cell field `"u"`. See [remap](../algorithms/remap.md).
+
+## refine
+
+```text
+refine [--levels L] [--marked F [--conforming]] <in> <out>
+```
+
+Gives each vertex the linear field $w = x + 2y + 3z$ and each cell its gid as the field
+`"part"`, then refines the mesh `L` times (default 1):
+
+- without `--marked`, uniformly (`soma::refine_uniform`);
+- with `--marked F`, each round marks the cells that hold the fraction `F` of an indicator
+  favouring large cells near the mesh's lowest corner (`soma::mark_fraction`), refines them
+  (`soma::refine_marked`, leaving hanging vertices, or none with `--conforming`) and rebalances
+  the parts (`soma::rebalance`).
+
+It prints the global cell and vertex counts before and after, the hanging vertices left, and the
+largest $|w - (x + 2y + 3z)|$ over the refined vertices, which is at rounding level because
+averages of a linear field are exact; then it writes the refined mesh with `"w"` and `"part"`.
+See [refinement](../algorithms/refinement.md).
+
+## soma-convert
+
+```text
+soma-convert [--compression N] <in> <out>
+```
+
+Converts a MOAB `.h5m` file into a SOMA file, or a SOMA file into a MOAB `.h5m` file, by the
+input's content (`soma::convert_mesh_file` in `soma/io/soma_file.hpp`). Run it under `mpiexec`
+to convert in parallel: a `.h5m` input is read in parallel and written with `write_soma`; a SOMA
+input is read in parallel, gathered on rank 0 and written there with `write_h5m`. `--compression`
+is the deflate level of the file written (default 0). It prints, for example,
+
+```text
+soma-convert: wrote m.soma as SOMA
+```
+
+and fails (status 1) for an input of neither format. See [the SOMA format](../io/soma-format.md).
+
+## How the tests run them
+
+With `SOMA_ENABLE_TESTS=ON` as well, `examples/CMakeLists.txt` registers a ctest for each
+example on a bundled mesh, and with MPI the same run at two ranks (names ending in `.np2`,
+`TIMEOUT 60`, `PROCESSORS 2`). Most check the printed line with a regular expression, so the
+expected results below hold on one and two ranks alike:
+
+| Test | Command (inputs in `data/`) | Checked output |
+| --- | --- | --- |
+| `example_laplacian_smooth` | `laplacian_smooth --iterations 5 64bricks_1khex.h5m smoothed.vtk` | exit status 0 |
+| `example_laplacian_smooth.np2` | the same at two ranks with `--tolerance 1e-9`, writing `.soma` | exit status 0 |
+| `example_poisson`, `.np2` | `poisson 64bricks_1khex.h5m poisson.vtk`; at two ranks `--assembly colored`, writing `.soma` | `max u 9.090723e-01` |
+| `example_advect`, `.np2` | `advect --soma-reproducible 64bricks_1khex.h5m advect.vtk` | `total 6.948772654115442e-01 before, 4.446464981696669e-01 after` |
+| `example_remap`, `.np2` | `remap hybrid_3quad_1tri.h5m remap.vtk` | `total 2.7464101622e+01 on the source, 2.7464101622e+01 on the grid` |
+| `example_remap3d` | `remap --n 12 64bricks_1khex.h5m remap3d.vtk` | `total 1.2894214008e+02 on the source, 1.2894214008e+02 on the grid` |
+| `example_refine`, `.np2` | `refine 64bricks_1khex.h5m refined.vtk` | `cells 1728 -> 13824, vertices 2197 -> 15625, 0 hanging` |
+| `example_refine_plane` | `refine --levels 2 hybrid_3quad_1tri.h5m refined2.vtk` | `cells 64 -> 1024, vertices 75 -> 969, 0 hanging` |
+| `example_refine_marked` | `refine --levels 3 --marked 0.5 hybrid_3quad_1tri.h5m marked.vtk` | `cells 64 -> 730, vertices 75 -> 751, 35 hanging` |
+| `example_refine_conforming`, `.np2` | `refine --levels 2 --marked 0.4 --conforming 64bricks_1khex.h5m conforming.vtk` | `cells 1728 -> 39998, vertices 2197 -> 29419, 0 hanging` |
+
+Each `refine` test also requires the linear field error to print as `d.de-14` to `d.de-19`, or
+`0.0e+00`: below $10^{-13}$.
+
+`tests/CMakeLists.txt` runs `soma-convert` too, at one rank and, with MPI, at three
+(`soma_convert.*.np1`, `soma_convert.*.np3`): `to_soma` converts `data/hexes_mixed.h5m` to a SOMA
+file and expects `as SOMA` in its output; `to_h5m` converts that file back with
+`--compression 4` and expects `as MOAB`; `rejects` gives it the VTK file
+`data/hexes_mixed.vtk` and expects it to fail. Run them all with
+
+```bash
+ctest --test-dir build -R "example_|soma_convert"
+```
+
+See [building and testing](../developer/building-and-testing.md) for the rest of the suite.

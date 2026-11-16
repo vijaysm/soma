@@ -11,10 +11,14 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <vector>
 
+#include "soma/algorithms/arborx_index.hpp"
+#include "soma/algorithms/convex_clip.hpp"
 #include "soma/algorithms/grid_index.hpp"
 #include "soma/algorithms/polygon.hpp"
+#include "soma/algorithms/sphere_clip.hpp"
 #include "soma/algorithms/tet_clip.hpp"
 #include "soma/parallel/transport/route.hpp"
 #include "soma/topology/sides.hpp"
@@ -115,6 +119,95 @@ bool plane_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& mea
   return k == p.n - 2;
 }
 
+// The listings of a cell's corners that turn it about itself: a rotation r
+// lists corner r[q] as corner q. Closed from two rotations of each type.
+std::vector<std::vector<int>> rotations(Topology t) {
+  std::vector<std::vector<int>> gens;
+  if (t == Topology::hex) gens = {{1, 2, 3, 0, 5, 6, 7, 4}, {3, 2, 6, 7, 0, 1, 5, 4}};
+  if (t == Topology::prism) gens = {{1, 2, 0, 4, 5, 3}, {3, 5, 4, 0, 2, 1}};
+  if (t == Topology::pyramid) gens = {{1, 2, 3, 0, 4}};
+  if (gens.empty()) return {};
+  std::vector<int> id(gens[0].size());
+  std::iota(id.begin(), id.end(), 0);
+  std::vector<std::vector<int>> all{id};
+  for (std::size_t i = 0; i < all.size(); ++i) {
+    for (const auto& g : gens) {
+      std::vector<int> r(g.size());
+      for (std::size_t q = 0; q < g.size(); ++q) r[q] = all[i][static_cast<std::size_t>(g[q])];
+      if (std::find(all.begin(), all.end(), r) == all.end()) all.push_back(r);
+    }
+  }
+  return all;
+}
+
+const std::vector<std::vector<int>>& rotations_of(Topology t) {
+  static const std::vector<std::vector<int>> hex = rotations(Topology::hex), prism = rotations(Topology::prism),
+                                             pyramid = rotations(Topology::pyramid), none;
+  return t == Topology::hex ? hex : t == Topology::prism ? prism : t == Topology::pyramid ? pyramid : none;
+}
+
+// A cell on the sphere of radius r: its corners as unit vectors from its
+// least-gid corner, counter-clockwise seen from outside; itself if convex,
+// else the triangles of its ear clipping in the plane touching the sphere at
+// its corners' mean (where great circles are straight lines); its area. eps
+// is on the unit sphere. False for a corner off the sphere by more than eps
+// r, a corner not in front of that plane, or a cell crossing itself or
+// thinner than eps (its area over its longest chord).
+bool sphere_pieces(const Mesh<Host>& mesh, LO e, Real eps, Real r, Pieces& out, Real& measure) {
+  const MeshView<Host> m = mesh.view();
+  const auto x = mesh.coords();
+  const auto gid = mesh.gid(0);
+  const int n = static_cast<int>(m.num_vertices(2, e));
+  if (n < 3) return false;
+  int least = 0;
+  for (int i = 1; i < n; ++i) {
+    if (gid(m.vertex(2, e, i)) < gid(m.vertex(2, e, least))) least = i;
+  }
+  SpherePolygon s;
+  bool on = true;
+  for (int i = 0; i < n; ++i) {
+    const LO v = m.vertex(2, e, (least + i) % n);
+    const Point3 q{x(v, 0), x(v, 1), x(v, 2)};
+    on = on && std::abs(std::sqrt(dot(q, q)) - r) <= eps * r;
+    s.push(unit(q));
+  }
+  if (!on) return false;
+  if (sphere_area(s) < 0) std::reverse(s.p + 1, s.p + n);  // the same start, the other way round
+  Point3 c{};
+  for (int i = 0; i < n; ++i) c = {c.x + s.p[i].x, c.y + s.p[i].y, c.z + s.p[i].z};
+  c = unit(c);
+  const Point3 a = std::abs(c.x) < 0.9 ? Point3{1, 0, 0} : Point3{0, 1, 0};
+  const Point3 e1 = unit(cross(c, a)), e2 = cross(c, e1);
+  Polygon p;
+  Real longest = 0;
+  for (int i = 0; i < n; ++i) {
+    const Real h = dot(s.p[i], c);
+    if (!(h > 0)) return false;
+    p.push(dot(s.p[i], e1) / h, dot(s.p[i], e2) / h);
+    longest = std::max(longest, chord(s.p[i], s.p[(i + 1) % n]));
+  }
+  const Real area = sphere_area(s);
+  if (!std::isfinite(area) || area < eps * longest || !simple(p)) return false;
+  measure = 0;
+  if (convex(p, eps)) {
+    for (int i = 0; i < n; ++i) out.corner(s.p[i].x, s.p[i].y, s.p[i].z);
+    out.close_piece();
+    measure = area * r * r;
+    return true;
+  }
+  int tri[3 * polygon_capacity];
+  const int k = triangulate(p, eps, tri);
+  for (int t = 0; t < k; ++t) {
+    for (int i = 0; i < 3; ++i) {
+      const Point3& q = s.p[tri[3 * t + i]];
+      out.corner(q.x, q.y, q.z);
+    }
+    out.close_piece();
+    measure += sphere_triangle_area(s.p[tri[3 * t]], s.p[tri[3 * t + 1]], s.p[tri[3 * t + 2]]) * r * r;
+  }
+  return k == n - 2;
+}
+
 // A volume cell's tets: a tet itself, its corners in gid order; another cell
 // one tet per triangle of its faces, apex its centroid (its corners summed
 // in gid order), a quad face cut along the diagonal from its least-gid
@@ -125,7 +218,11 @@ bool plane_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& mea
 // magnitude). False
 // where a tet is thinner than eps (below eps times its longest edge squared)
 // or turned unlike the others (the cell is not star-shaped about its
-// centroid).
+// centroid). A pyramid, prism or hex that is convex with flat faces (each
+// corner within eps of its faces' planes) is instead one piece, its corners
+// listed as the turn of it whose corner gids come least, so that the piece
+// does not depend on how the cell's corners are listed; the measure is the
+// tets' still.
 bool volume_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& measure) {
   const MeshView<Host> m = mesh.view();
   const auto x = mesh.coords();
@@ -186,7 +283,21 @@ bool volume_pieces(const Mesh<Host>& mesh, LO e, Real eps, Pieces& out, Real& me
     for (const Point3& p : t.p) out.corner(p.x, p.y, p.z);
     out.close_piece();
   }
-  return thick && (positive == 0 || negative == 0);
+  const bool ok = thick && (positive == 0 || negative == 0);
+  const auto& turns = rotations_of(m.topology(3, e));
+  if (!ok || turns.empty()) return ok;
+  const auto gid_less = [&](int a, int b) { return gid(m.vertex(3, e, a)) < gid(m.vertex(3, e, b)); };
+  const std::vector<int>* least = &turns.front();
+  for (const auto& r : turns) {
+    if (std::lexicographical_compare(r.begin(), r.end(), least->begin(), least->end(), gid_less)) least = &r;
+  }
+  Point3 corner[8];
+  for (int q = 0; q < n; ++q) corner[q] = at(m.vertex(3, e, (*least)[static_cast<std::size_t>(q)]));
+  if (!is_convex(corner, n, eps)) return ok;
+  out.undo_cell();
+  for (int q = 0; q < n; ++q) out.corner(corner[q].x, corner[q].y, corner[q].z);
+  out.close_piece();
+  return ok;
 }
 
 void box_of(const Pieces& p, std::size_t c, Real* box) {
@@ -204,16 +315,59 @@ void box_of(const Pieces& p, std::size_t c, Real* box) {
 
 }  // namespace
 
-RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host>& target, Real eps) {
+// The box of the cap that holds a cell on the unit sphere: the corners' mean
+// direction c and the widest angle a from it to a corner; on each axis the
+// cap reaches 1 where the axis is within a of c, else cos(angle - a). So the
+// cell's arcs and inside, not only its corners, are in the box.
+void cap_box(const Pieces& p, std::size_t c, Real* box) {
+  box_of(p, c, box);
+  Point3 sum{};
+  const auto first = static_cast<std::size_t>(p.piece[static_cast<std::size_t>(p.cell[c])]);
+  const auto last = static_cast<std::size_t>(p.piece[static_cast<std::size_t>(p.cell[c + 1])]);
+  const auto at = [&](std::size_t k) { return Point3{p.xyz[3 * k], p.xyz[3 * k + 1], p.xyz[3 * k + 2]}; };
+  for (std::size_t k = first; k < last; ++k) sum = {sum.x + at(k).x, sum.y + at(k).y, sum.z + at(k).z};
+  const Point3 d = unit(sum);
+  Real lowest = 1;
+  for (std::size_t k = first; k < last; ++k) lowest = std::min(lowest, dot(d, at(k)));
+  const Real a = std::acos(std::clamp<Real>(lowest, -1, 1));
+  const Real dc[3] = {d.x, d.y, d.z};
+  for (std::size_t k = 0; k < 3; ++k) {
+    const Real up = std::acos(std::clamp<Real>(dc[k], -1, 1)), down = std::acos(std::clamp<Real>(-dc[k], -1, 1));
+    box[k + 3] = std::max(box[k + 3], up <= a ? Real{1} : std::cos(up - a));
+    box[k] = std::min(box[k], down <= a ? Real{-1} : -std::cos(down - a));
+  }
+}
+
+RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host>& target,
+                     const RemapOptions& options) {
   RemapPlan p;
-  p.supported = supported_mesh(source) && supported_mesh(target) && source.dim() == target.dim();
+  p.supported = supported_mesh(source) && supported_mesh(target) && source.dim() == target.dim() &&
+                (options.surface == Surface::plane || target.dim() == 2);
   const int dim = target.dim();
+  const bool sphere = options.surface == Surface::sphere;
+  // On a sphere: its radius, and every length on the unit sphere.
+  Real r = options.radius;
+  if (sphere && !(r > 0)) {
+    r = 0;
+    for (const Mesh<Host>* mesh : {&source, &target}) {
+      const auto x = mesh->coords();
+      for (LO v = 0; v < mesh->count(0); ++v) {
+        r = std::max(r, std::sqrt(x(v, 0) * x(v, 0) + x(v, 1) * x(v, 1) + x(v, 2) * x(v, 2)));
+      }
+    }
+    r = comm.allreduce(r, Op::max);
+  }
+  p.radius = sphere ? r : 0;
+  const Real eps = sphere ? options.merge_tolerance / r : options.merge_tolerance;
+  const SphereClip method = options.sphere_clip;
   const LO nt = p.supported ? target.segment_table(dim).owned_end : 0;
   const LO ns = p.supported ? source.segment_table(dim).owned_end : 0;
   constexpr Real nan = std::numeric_limits<Real>::quiet_NaN();
   constexpr Real inf = std::numeric_limits<Real>::infinity();
   const auto split = [&](const Mesh<Host>& mesh, LO e, Pieces& out, Real& measure) {
-    const bool ok = dim == 2 ? plane_pieces(mesh, e, eps, out, measure) : volume_pieces(mesh, e, eps, out, measure);
+    const bool ok = sphere     ? sphere_pieces(mesh, e, eps, r, out, measure)
+                    : dim == 2 ? plane_pieces(mesh, e, eps, out, measure)
+                               : volume_pieces(mesh, e, eps, out, measure);
     if (!ok) out.undo_cell();
     out.close_cell();
     return ok;
@@ -232,7 +386,7 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
       p.target_area[ti] = 1;
       continue;
     }
-    box_of(tp, ti, &tbox[6 * ti]);
+    (sphere ? cap_box : box_of)(tp, ti, &tbox[6 * ti]);
     for (std::size_t a = 0; a < 3; ++a) {
       span[a] = std::min(span[a], tbox[6 * ti + a]);
       span[a + 3] = std::max(span[a + 3], tbox[6 * ti + a + 3]);
@@ -268,7 +422,7 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
     const auto si = static_cast<std::size_t>(s);
     if (!sgood[si]) continue;
     Real box[6];
-    box_of(spieces, si, box);
+    (sphere ? cap_box : box_of)(spieces, si, box);
     for (std::size_t r = 0; r < ranks; ++r) {
       const Real* q = &spans[6 * r];
       bool meets = true;
@@ -325,7 +479,7 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
     }
     sp.close_cell();
     Real box[6];
-    box_of(sp, i, box);
+    (sphere ? cap_box : box_of)(sp, i, box);
     for (std::size_t a = 0; a < 6; ++a) sbox(i, a) = box[a];
   }
 
@@ -335,8 +489,13 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
   for (std::size_t t = 0; t < static_cast<std::size_t>(nt); ++t) {
     for (std::size_t a = 0; a < 6; ++a) qbox(t, a) = tbox[6 * t + a];
   }
-  const GridIndex<Host> index(sbox, eps);
-  const auto pairs = index.query(qbox);
+  const auto pairs = [&] {
+#if SOMA_ENABLE_ARBORX
+    if (options.search == SpatialSearch::arborx) return ArborXIndex<Host>(sbox, eps).query(qbox);
+#endif
+    if (options.search != SpatialSearch::grid) throw std::invalid_argument("remap_plan: ArborX's search is not built");
+    return GridIndex<Host>(sbox, eps).query(qbox);
+  }();
   std::vector<Real> area(pairs.boxes.extent(0), 0);
   LO overflow = 0;
   // Piece i of a Pieces as a polygon or a tet.
@@ -344,6 +503,22 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
     out.n = 0;
     for (Offset c = q.piece[static_cast<std::size_t>(i)]; c < q.piece[static_cast<std::size_t>(i) + 1]; ++c) {
       out.push(q.xyz[3 * static_cast<std::size_t>(c)], q.xyz[3 * static_cast<std::size_t>(c) + 1]);
+    }
+  };
+  // Piece i's corners (up to 8), their count returned.
+  const auto corners = [](const Pieces& q, Offset i, Point3* out) {
+    const auto first = static_cast<std::size_t>(q.piece[static_cast<std::size_t>(i)]);
+    const auto n = static_cast<int>(q.piece[static_cast<std::size_t>(i) + 1] - q.piece[static_cast<std::size_t>(i)]);
+    for (std::size_t k = 0; k < static_cast<std::size_t>(n); ++k) {
+      out[k] = {q.xyz[3 * (first + k)], q.xyz[3 * (first + k) + 1], q.xyz[3 * (first + k) + 2]};
+    }
+    return n;
+  };
+  const auto on_sphere = [](const Pieces& q, Offset i, SpherePolygon& out) {
+    out.n = 0;
+    for (Offset c = q.piece[static_cast<std::size_t>(i)]; c < q.piece[static_cast<std::size_t>(i) + 1]; ++c) {
+      const auto k = 3 * static_cast<std::size_t>(c);
+      out.push({q.xyz[k], q.xyz[k + 1], q.xyz[k + 2]});
     }
   };
   const auto tet = [](const Pieces& q, Offset i) {
@@ -357,18 +532,33 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
       [&](const LO t, LO& over) {
         const auto ti = static_cast<std::size_t>(t);
         Polygon a, b, out;
+        SpherePolygon sa, sb, sout;
         for (Offset k = pairs.offsets(t); k < pairs.offsets(t + 1); ++k) {
           const auto s = static_cast<std::size_t>(pairs.boxes(k));
           Real sum = 0;
           for (Offset i = tp.cell[ti]; i < tp.cell[ti + 1]; ++i) {
-            if (dim == 2) polygon(tp, i, a);
+            if (sphere) {
+              on_sphere(tp, i, sa);
+            } else if (dim == 2) {
+              polygon(tp, i, a);
+            }
             for (Offset j = sp.cell[s]; j < sp.cell[s + 1]; ++j) {
               Real piece = 0;
-              if (dim == 2) {
+              if (sphere) {
+                on_sphere(sp, j, sb);
+                piece = method == SphereClip::gnomonic ? clip_gnomonic(sa, sb, eps, sout)
+                                                       : clip_great_circle(sa, sb, eps, sout);
+                piece = piece < 0 ? piece : piece * r * r;
+              } else if (dim == 2) {
                 polygon(sp, j, b);
                 piece = clip(a, b, eps, out);
-              } else {
+              } else if (tp.piece[static_cast<std::size_t>(i) + 1] - tp.piece[static_cast<std::size_t>(i)] == 4 &&
+                         sp.piece[static_cast<std::size_t>(j) + 1] - sp.piece[static_cast<std::size_t>(j)] == 4) {
                 piece = overlap(tet(tp, i), tet(sp, j), eps);
+              } else {
+                Point3 tc[8], sc[8];
+                const int ntc = corners(tp, i, tc), nsc = corners(sp, j, sc);
+                piece = convex_overlap(tc, ntc, sc, nsc, eps);
               }
               if (piece < 0) {
                 ++over;

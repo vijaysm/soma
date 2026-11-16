@@ -5,7 +5,8 @@
 // prisms and pyramids: overlaps cover each target cell and constants are
 // kept; mass is conserved; any partition gives the serial operator bit for
 // bit; a refinement of a hex mesh is recovered exactly (shared faces leave
-// no slivers); the error falls at first order; bad meshes throw.
+// no slivers); the error falls at first order; bad meshes throw. Cells with
+// flat faces are clipped whole, the others as tets.
 
 #include <algorithm>
 #include <array>
@@ -165,7 +166,10 @@ std::vector<std::pair<Cells, Cells>> cases() {
   return {{grid(4, 3, 3, Topology::hex, 1), grid(3, 3, 4, Topology::tet, 2)},
           {grid(3, 4, 3, Topology::prism, 3), grid(4, 4, 3, Topology::hex, 0)},
           {grid(2, 3, 2, Topology::pyramid, 0), grid(3, 3, 3, Topology::tet, 4)},
-          {grid(3, 3, 3, Topology::tet, 5), grid(4, 3, 4, Topology::prism, 6)}};
+          {grid(3, 3, 3, Topology::tet, 5), grid(4, 3, 4, Topology::prism, 6)},
+          // Flat convex cells, clipped whole.
+          {grid(3, 4, 3, Topology::hex, 0), grid(2, 3, 3, Topology::pyramid, 0)},
+          {grid(2, 2, 3, Topology::prism, 0), grid(3, 2, 2, Topology::hex, 0)}};
 }
 
 }  // namespace
@@ -239,6 +243,30 @@ TEST(Remap3d, DistributedRemapsAreTheSerialOneBitForBit) {
       }
     }
     ++k;
+  }
+}
+
+// ArborX's search finds the same candidates in the same order: the same
+// operator bit for bit. Without ArborX, asking for it throws on every rank.
+TEST(Remap3d, ArborXSearchGivesTheSameOperator) {
+  const Comm c = Comm::world();
+  int k = 0;
+  for (const auto& [s, t] : cases()) {
+    SCOPED_TRACE(testing::Message() << "case " << k++);
+    const soma::HostMesh source = build(c, s, 0), target = build(c, t, 1);
+#if SOMA_ENABLE_ARBORX
+    const Remap a(c, source, target), b(c, source, target, {.search = soma::SpatialSearch::arborx});
+    ASSERT_EQ(a.offsets().extent(0), b.offsets().extent(0));
+    ASSERT_EQ(a.overlap().extent(0), b.overlap().extent(0));
+    LO differ = 0;
+    for (std::size_t r = 0; r < a.offsets().extent(0); ++r) differ += a.offsets()(r) == b.offsets()(r) ? 0 : 1;
+    for (std::size_t e = 0; e < a.overlap().extent(0); ++e) {
+      differ += bits(a.overlap()(e)) == bits(b.overlap()(e)) && a.columns()(e) == b.columns()(e) ? 0 : 1;
+    }
+    EXPECT_EQ(c.allreduce(static_cast<Real>(differ), soma::Op::sum), 0);
+#else
+    EXPECT_THROW(Remap(c, source, target, {.search = soma::SpatialSearch::arborx}), std::invalid_argument);
+#endif
   }
 }
 

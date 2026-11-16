@@ -10,6 +10,7 @@ set(SOMA_ENABLE_HDF5 @SOMA_ENABLE_HDF5@)
 set(SOMA_LO_64 @SOMA_LO_64@)
 set(SOMA_OFFSET_64 @SOMA_OFFSET_64@)
 set(SOMA_ENABLE_KOKKOSKERNELS @SOMA_ENABLE_KOKKOSKERNELS@)
+set(SOMA_ENABLE_ARBORX @SOMA_ENABLE_ARBORX@)
 set(SOMA_ENABLE_PETSC @SOMA_ENABLE_PETSC@)
 # "installed" or "fetched", as configured; fetched means Kokkos was installed
 # alongside SOMA, into this prefix.
@@ -44,6 +45,12 @@ if(SOMA_ENABLE_KOKKOSKERNELS)
     set(KokkosKernels_DIR "@KokkosKernels_DIR@")
   endif()
   find_dependency(KokkosKernels)
+endif()
+if(SOMA_ENABLE_ARBORX)
+  if(NOT ArborX_DIR AND NOT "@ArborX_DIR@" STREQUAL "")
+    set(ArborX_DIR "@ArborX_DIR@")
+  endif()
+  find_dependency(ArborX)
 endif()
 # The PETSc SOMA was built with, found again through its pkg-config file. A
 # consumer that has found PETSc itself keeps its PkgConfig::PETSC.

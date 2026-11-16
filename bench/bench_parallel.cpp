@@ -29,8 +29,12 @@
 //   * remap: a conservative remap between two plane grids of about n^3
 //     cells (quads, and triangles of an offset grid), their rows dealt to the
 //     ranks: RemapOperator built and applied; at one rank also MOAB's
-//     in-plane intersection of the two whole meshes; and n^3 hexes onto a
-//     grid of tets, SOMA alone;
+//     in-plane intersection of the two whole meshes; and n^3 hexes onto
+//     grids of tets and of hexes, SOMA alone; each operator also by ArborX's
+//     search when SOMA is built with it;
+//   * remap_sphere: cubed spheres of about n^3 cells, the target turned:
+//     RemapOperator by gnomonic projection and by great circles; at one rank
+//     also MOAB's intersection on the sphere (Intx2MeshOnSphere, gnomonic);
 //   * refine: n^3 hexes, and the same cubes as tets, refined once
 //     (refine_uniform); at one rank also MOAB's NestedRefine of the hexes;
 //     and the cells of odd gid alone (refine_marked): hexes with hanging
@@ -66,6 +70,7 @@
 #include "harness.hpp"
 #include "moab/Core.hpp"
 #include "moab/IntxMesh/Intx2MeshInPlane.hpp"
+#include "moab/IntxMesh/Intx2MeshOnSphere.hpp"
 #include "moab/NestedRefine.hpp"
 #include "moab/ParallelComm.hpp"
 #include "MBParallelConventions.h"
@@ -84,6 +89,7 @@
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/ghosts.hpp"
+#include "sphere_meshes.hpp"
 #include "soma/parallel/halo_exchange.hpp"
 #include "soma/runtime/scope_guard.hpp"
 
@@ -568,6 +574,11 @@ int main(int argc, char** argv) {
     area = comm.allreduce(area, soma::Op::sum);
     if (comm.rank() == 0 && !json) std::cout << "  remap: constant off by " << std::scientific << worst << ", area by " << area - 1 << std::defaultfloat << "\n";
     ok = agree(comm, worst <= 1e-12 && std::abs(area - 1) <= 1e-12) && ok;
+#if SOMA_ENABLE_ARBORX
+    const soma::RemapOptions by_tree{.search = soma::SpatialSearch::arborx};
+    runner.run("remap", "soma_remap_operator_arborx", quads, [&] { remap.reset(); },
+               [&] { remap.emplace(comm, source, target, by_tree); });
+#endif
     {
       // Volumes: n^3 hexes onto (n - 1)^3 cubes of tets (MOAB has no 3D intersection).
       const HostMesh hexes = volume_grid(comm, n, false), tets = volume_grid(comm, std::max(1, n - 1), true);
@@ -579,6 +590,21 @@ int main(int argc, char** argv) {
         for (soma::Offset e = volume->offsets()(t); e < volume->offsets()(t + 1); ++e) filled += volume->overlap()(e);
       }
       ok = agree(comm, std::abs(comm.allreduce(filled, soma::Op::sum) - 1) <= 1e-12) && ok;
+      // Hexes onto hexes: flat convex cells, clipped whole.
+      const HostMesh coarse = volume_grid(comm, std::max(1, n - 1), false);
+      runner.run("remap", "soma_remap_operator_3d_hex", cells, [&] { volume.reset(); },
+                 [&] { volume.emplace(comm, hexes, coarse); });
+      filled = 0;
+      for (LO t = 0; t < volume->rows(); ++t) {
+        for (soma::Offset e = volume->offsets()(t); e < volume->offsets()(t + 1); ++e) filled += volume->overlap()(e);
+      }
+      ok = agree(comm, std::abs(comm.allreduce(filled, soma::Op::sum) - 1) <= 1e-12) && ok;
+#if SOMA_ENABLE_ARBORX
+      runner.run("remap", "soma_remap_operator_3d_arborx", cells, [&] { volume.reset(); },
+                 [&] { volume.emplace(comm, hexes, tets, by_tree); });
+      runner.run("remap", "soma_remap_operator_3d_hex_arborx", cells, [&] { volume.reset(); },
+                 [&] { volume.emplace(comm, hexes, coarse, by_tree); });
+#endif
     }
     if (comm.size() == 1) {
       // MOAB: both meshes in sets of one Core, intersected.
@@ -612,6 +638,91 @@ int main(int argc, char** argv) {
                  [&] {
                    moab::Intx2MeshInPlane intx(&*mb);
                    intx.set_error_tolerance(1e-12);
+                   check(intx.FindMaxEdges(ms, mt), "FindMaxEdges");
+                   moab::EntityHandle out;
+                   check(mb->create_meshset(moab::MESHSET_SET, out), "create_meshset");
+                   check(intx.intersect_meshes(ms, mt, out), "intersect_meshes");
+                 });
+    }
+  }
+
+  // ---- remap on a sphere ----
+  {
+    const int m = std::max(2, static_cast<int>(std::lround(std::sqrt(static_cast<double>(cells) / 6))));
+    const std::int64_t quads = 6 * std::int64_t{m} * m;
+    const auto sg = soma::test::cubed_sphere(m, 1), tg = soma::test::cubed_sphere(m + 1, 1, 0.3, 0.2);
+    // The cells in blocks of consecutive gids.
+    const auto build = [&](const soma::test::SphereCells& g) {
+      const auto total = static_cast<std::int64_t>(g.cells.size());
+      const std::int64_t first = total * comm.rank() / comm.size(), last = total * (comm.rank() + 1) / comm.size();
+      std::vector<GO> mine, conn, used, gids;
+      std::vector<double> xyz;
+      for (std::int64_t e = first; e < last; ++e) {
+        mine.push_back(static_cast<GO>(e + 1));
+        const auto& cell = g.cells[static_cast<std::size_t>(e)];
+        conn.insert(conn.end(), cell.begin(), cell.end());
+      }
+      used = conn;
+      std::sort(used.begin(), used.end());
+      used.erase(std::unique(used.begin(), used.end()), used.end());
+      for (std::size_t v = 0; v < g.vg.size(); ++v) {
+        if (!std::binary_search(used.begin(), used.end(), g.vg[v])) continue;
+        gids.push_back(g.vg[v]);
+        xyz.insert(xyz.end(), {g.xyz[3 * v], g.xyz[3 * v + 1], g.xyz[3 * v + 2]});
+      }
+      soma::MeshBuilder builder(2);
+      builder.add_vertices(gids, xyz);
+      builder.add_elements(soma::Topology::quad, mine, conn);
+      return soma::build_local_part(comm, std::move(builder));
+    };
+    const HostMesh source = build(sg), target = build(tg);
+    std::optional<soma::RemapOperator<Host>> remap;
+    for (const auto& [name, method] : {std::pair{"soma_remap_sphere_gnomonic", soma::SphereClip::gnomonic},
+                                       std::pair{"soma_remap_sphere_great_circle", soma::SphereClip::great_circle}}) {
+      const soma::RemapOptions options{.surface = soma::Surface::sphere, .radius = 1, .sphere_clip = method};
+      runner.run("remap_sphere", name, quads, [&] { remap.reset(); },
+                 [&] { remap.emplace(comm, source, target, options); });
+      // The overlaps fill the sphere.
+      double filled = 0;
+      for (LO t = 0; t < remap->rows(); ++t) {
+        for (soma::Offset e = remap->offsets()(t); e < remap->offsets()(t + 1); ++e) filled += remap->overlap()(e);
+      }
+      ok = agree(comm, std::abs(comm.allreduce(filled, soma::Op::sum) - 4 * std::acos(-1.0)) <= 1e-10) && ok;
+    }
+    if (comm.size() == 1) {
+      const auto into_moab = [&](moab::Core& mb, const soma::test::SphereCells& g) {
+        moab::EntityHandle set;
+        check(mb.create_meshset(moab::MESHSET_SET, set), "create_meshset");
+        std::vector<moab::EntityHandle> vh(g.vg.size());
+        std::vector<std::size_t> at(static_cast<std::size_t>(*std::max_element(g.vg.begin(), g.vg.end())) + 1);
+        for (std::size_t v = 0; v < g.vg.size(); ++v) {
+          check(mb.create_vertex(&g.xyz[3 * v], vh[v]), "create_vertex");
+          at[static_cast<std::size_t>(g.vg[v])] = v;
+        }
+        for (std::size_t e = 0; e < g.cells.size(); ++e) {
+          moab::EntityHandle conn[4], h;
+          for (std::size_t c = 0; c < 4; ++c) conn[c] = vh[at[static_cast<std::size_t>(g.cells[e][c])]];
+          check(mb.create_element(moab::MBQUAD, conn, 4, h), "create_element");
+          const int id = static_cast<int>(e + 1);
+          check(mb.tag_set_data(mb.globalId_tag(), &h, 1, &id), "tag_set_data");
+          check(mb.add_entities(set, &h, 1), "add_entities");
+        }
+        return set;
+      };
+      std::optional<moab::Core> mb;
+      moab::EntityHandle ms = 0, mt = 0;
+      runner.run("remap_sphere", "moab_intx_on_sphere", quads,
+                 [&] {
+                   mb.emplace();
+                   ms = into_moab(*mb, sg);
+                   mt = into_moab(*mb, tg);
+                 },
+                 [&] {
+                   moab::Intx2MeshOnSphere intx(&*mb);
+                   intx.set_error_tolerance(1e-12);
+                   intx.set_radius_source_mesh(1);
+                   intx.set_radius_destination_mesh(1);
+                   intx.set_box_error(0.1);
                    check(intx.FindMaxEdges(ms, mt), "FindMaxEdges");
                    moab::EntityHandle out;
                    check(mb->create_meshset(moab::MESHSET_SET, out), "create_meshset");

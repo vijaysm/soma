@@ -38,6 +38,7 @@ endif()
 if(SOMA_ENABLE_MPI AND SOMA_ENABLE_HDF5)
   add_executable(bench_parallel bench_parallel.cpp)
   target_link_libraries(bench_parallel PRIVATE soma soma_warnings ${SOMA_MOAB_TARGET})
+  target_include_directories(bench_parallel PRIVATE ${PROJECT_SOURCE_DIR}/tests/unit)
   target_compile_definitions(bench_parallel PRIVATE
     SOMA_BENCH_BUILD_TYPE="$<IF:$<CONFIG:>,unset,$<CONFIG>>"
     SOMA_BENCH_COMPILER="${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")

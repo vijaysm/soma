@@ -53,7 +53,8 @@
 //
 // Failures throw std::runtime_error naming the file: a file that is not
 // HDF5 or has no /tstt, no nodes or no elements, element types SOMA does not
-// read (Polyhedron, Knife, high-order connectivity), a connectivity entry
+// read (Polyhedron, Knife), a node count per element other than its corners
+// with or without mid-edge, mid-face and mid-region nodes, a connectivity entry
 // that is not a vertex file id, file id ranges that overlap or pass max_id,
 // a malformed poly_indices list, set list or var_indices list, a set member,
 // child, parent, tag entity or handle that names nothing, an ordered set

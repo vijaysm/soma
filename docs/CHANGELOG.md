@@ -17,9 +17,9 @@ All notable changes to SOMA are recorded here. The format follows
 - `SOMA_KOKKOS_GPU` selects the GPU backend of a fetched Kokkos (`AUTO`, `NONE`, `CUDA`,
   `HIP`, `SYCL`). A request the compiler cannot build is a configure error, never a silent CPU
   fallback.
-- `SOMA_GPU_AWARE_MPI` (`AUTO`, `ON`, `OFF`) sets the compile-time default for passing device
-  buffers to MPI. The generated `soma/config.hpp` also honors the environment variable
-  `SOMA_GPU_AWARE_MPI=0|1` at run time.
+- `SOMA_GPU_AWARE_MPI` (`AUTO`, `ON`, `OFF`) records whether device buffers may be passed to
+  MPI as `SOMA_GPU_AWARE_MPI_DEFAULT` in the generated `soma/config.hpp`. No exchange reads it
+  yet: messages are staged through host memory.
 - On AppleClang, SOMA seeds `FindOpenMP` from Homebrew libomp so that Kokkos with its OpenMP
   backend can be found.
 - The configure summary line reports the Kokkos source, host and GPU backends, MPI, tests,
@@ -35,6 +35,9 @@ All notable changes to SOMA are recorded here. The format follows
   3.19 or later, real double scalars, through its pkg-config file under `PETSC_DIR` (and
   `PETSC_ARCH`). A PETSc that carries its own MOAB cannot be built with the MOAB reference.
   Both are replayed for consumers by `somaConfig.cmake`.
+- `SOMA_ENABLE_ARBORX=ON` finds ArborX (2.x, built with the installed Kokkos SOMA uses; a
+  fetched Kokkos is a configure error), links it publicly and sets `SOMA_ENABLE_ARBORX` in
+  `soma/config.hpp`.
 
 ### Runtime and Comm
 
@@ -628,6 +631,27 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   a plane z = const (2D) or not star-shaped about its centroid (3D) throws on every rank, as
   does a tolerance that is bad or differs between ranks. Plane overlaps agree with MOAB's
   `Intx2MeshInPlane` to rounding.
+- `RemapOperator` clips hexes, prisms and pyramids that are convex with flat faces whole
+  (`soma/algorithms/convex_clip.hpp`: a polyhedron cut by the other cell's face planes) rather
+  than as tets about their centroids; other cells are split as before. Building the operator
+  between hex grids of 24^3 and 23^3 cells takes 0.25 s instead of 5.0 s at one rank, hexes
+  onto tets 1.1 s instead of 2.9 s; the overlaps are the same to rounding and the operator
+  still does not depend on the partition or a cell's corner listing.
+- `soma::ArborXIndex<MemSpace>` (`soma/algorithms/arborx_index.hpp`, `SOMA_ENABLE_ARBORX`)
+  finds the pairs `GridIndex` finds, in its order, by ArborX's bounding volume hierarchy, and
+  `RemapOptions::search = SpatialSearch::arborx` makes `RemapOperator` use it: the same operator
+  bit for bit. The grid stays the default; between uniform grids the two take about the same
+  time (the clipping dominates). Asking for ArborX in a SOMA built without it, or a search that
+  differs between ranks, throws on every rank.
+- `RemapOperator` remaps between meshes of triangles, quads and polygons on a sphere
+  (`RemapOptions::surface = Surface::sphere`, `radius`, `sphere_clip`), their edges great-circle
+  arcs and their areas spherical (`soma/algorithms/sphere_clip.hpp`). `SphereClip::gnomonic`
+  (the default) clips on a cube face's plane as MOAB's `Intx2MeshOnSphere` does;
+  `SphereClip::great_circle` clips by the planes of the cells' great circles, so it also takes
+  cells too wide to project. The two agree to rounding and with MOAB's overlaps to about 1e-15
+  of a cell's area; between cubed spheres of about 14000 cells they take 0.60 s and 0.62 s at
+  one rank, MOAB 2.0 s. Candidate cells are found by the boxes of the caps that hold them, and
+  the operator is the same bit for bit on any partition and listing of a cell's corners.
 - `examples/remap.cpp` remaps a cell field from a `.h5m` or SOMA mesh onto a grid of triangles
   or tets over its bounding box and prints both totals.
 - `soma::refine_uniform(comm, mesh, RefineOptions)` (`soma/algorithms/refine.hpp`) splits
@@ -682,8 +706,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   lambdas in private member functions); test kernels live in named functions.
 
 - GoogleTest harness with a shared `main` that creates the runtime scope first and agrees on
-  the exit code across ranks. `soma_add_test` registers MPI tests at 1, 2 and 4 ranks with a
-  60 second timeout.
+  the exit code across ranks. `soma_add_test` registers an MPI test once per rank count given
+  in `RANKS` (most tests use 1, 2, 3, 4, 5, 7 and 8) with a 60 second timeout.
 - `SOMA_FETCH_GTEST=ON` downloads GoogleTest. Without it, a missing GoogleTest is a clear
   configure error.
 - Smoke tests for Kokkos initialization, a parallel reduction on the default execution space,
@@ -839,10 +863,20 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   sections time Laplacian smoothing against MOAB's, and `FemSpace`, the three assemblies and
   CG alone; its `advect` section, `FvSpace` and upwind steps alone; its `remap` section, a
   `RemapOperator` between plane grids built and applied, against MOAB's in-plane intersection
-  at one rank, and between volume grids; its `refine` section, `refine_uniform` of hexes and
+  at one rank, and between volume grids (hexes onto tets and onto hexes); its `remap_sphere`
+  section, between cubed spheres by both clippings, against MOAB's `Intx2MeshOnSphere` at one
+  rank; its `refine` section, `refine_uniform` of hexes and
   tets, against MOAB's `NestedRefine` of the hexes at one rank, and `refine_marked` of half the
   cells: hexes with hanging vertices and conforming, tets bisected. `bench/run_parallel.sh` runs it
   over rank counts and sizes into JSON files; its header lists what a run at scale needs.
+
+### Documentation
+
+- A documentation site under `docs/` in MyST Markdown, built by Sphinx (`docs/conf.py`, pinned
+  tools in `docs/requirements.txt`) and published by Read the Docs (`.readthedocs.yaml`, warnings
+  are errors): getting started, the mesh model and its concepts, parallel meshes, input and
+  output, algorithms, block-structured AMR, the MOAB compatibility layer, a developer guide and
+  references for CMake options and every public header.
 
 ### Packaging
 
