@@ -73,6 +73,9 @@ struct FvPlan {
   std::vector<LO> cell_faces;          // each owned cell's faces in side order
   std::vector<std::int8_t> cell_sign;  // +1 where the cell is the face's left
   std::vector<Real> volume;            // per owned cell
+  std::vector<Real> cell_centroid;     // 3 per cell here, owned and ghost: its corners' mean, summed in gid order
+  std::vector<Real> lsq;               // 9 per owned cell: the inverse of sum_n d d^T over its face neighbours n,
+                                       // d = x_n - x_c (2D: the xy block); zero where that is near-singular
 };
 
 // Host only. A mesh not supported gives a plan with supported = false.

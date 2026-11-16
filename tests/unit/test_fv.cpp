@@ -151,6 +151,59 @@ TEST(Fv, CellsCloseAndFillTheBox) {
   }
 }
 
+// The plan's least-squares matrices give a linear field's gradient exactly
+// in every cell with enough neighbours, and its centroids are the corners'
+// means.
+TEST(Fv, LeastSquaresRecoversLinearGradients) {
+  const Comm c = Comm::world();
+  for (const Topology t : all) {
+    SCOPED_TRACE(soma::name(t));
+    const soma::HostMesh mesh = box_part(c, spec_of(t, 6));
+    const soma::detail::FvPlan p = soma::detail::fv_plan(mesh);
+    const bool three = solid(t);
+    const std::array<Real, 3> want{2, -3, three ? 0.5 : 0};
+    const auto at = [&](LO e, int q) { return p.cell_centroid[static_cast<std::size_t>(3 * e + q)]; };
+    const auto u = [&](LO e) {
+      return 1 + 2 * at(e, 0) - 3 * at(e, 1) + (three ? 0.5 * at(e, 2) : 0);
+    };
+    ASSERT_EQ(p.cell_centroid.size(), static_cast<std::size_t>(3 * mesh.count(mesh.dim())));
+    for (LO e = 0; e < mesh.count(mesh.dim()); ++e) {
+      const auto x = centre(mesh, e);
+      for (int q = 0; q < 3; ++q) {
+        EXPECT_NEAR(at(e, q), x[static_cast<std::size_t>(q)], 1e-14);
+      }
+    }
+    const LO owned = mesh.segment_table(mesh.dim()).owned_end;
+    ASSERT_EQ(p.lsq.size(), static_cast<std::size_t>(9 * owned));
+    LO solved = 0;
+    Real worst = 0;
+    for (LO e = 0; e < owned; ++e) {
+      const Real* m = &p.lsq[static_cast<std::size_t>(9 * e)];
+      if (std::all_of(m, m + 9, [](Real v) { return v == 0; })) continue;
+      ++solved;
+      std::array<Real, 3> r{};
+      for (Offset k = p.cell_offsets[static_cast<std::size_t>(e)]; k < p.cell_offsets[static_cast<std::size_t>(e) + 1];
+           ++k) {
+        const auto f = static_cast<std::size_t>(p.cell_faces[static_cast<std::size_t>(k)]);
+        const LO n = p.left[f] == e ? p.right[f] : p.left[f];
+        if (n < 0) continue;
+        for (int q = 0; q < 3; ++q) {
+          const auto qi = static_cast<std::size_t>(q);
+          r[qi] += (at(n, q) - at(e, q)) * (u(n) - u(e));
+        }
+      }
+      for (int q = 0; q < 3; ++q) {
+        Real g = 0;
+        for (int j = 0; j < 3; ++j) g += m[3 * q + j] * r[static_cast<std::size_t>(j)];
+        worst = std::max(worst, std::abs(g - want[static_cast<std::size_t>(q)]));
+      }
+    }
+    EXPECT_LE(worst, 1e-10);
+    const Real all_owned = c.allreduce(static_cast<Real>(owned), soma::Op::sum);
+    EXPECT_GE(c.allreduce(static_cast<Real>(solved), soma::Op::sum), 0.9 * all_owned);
+  }
+}
+
 // Through a uniform flow a constant state stays, the inflow bringing the
 // same value: to rounding, step after step.
 TEST(Fv, ConstantStatesStay) {

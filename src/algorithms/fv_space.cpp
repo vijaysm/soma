@@ -58,6 +58,60 @@ Canonical canonical(const topology::Side& s, const Gid& gid) {
   return c;
 }
 
+// Each cell's centroid (its corners' mean, summed in gid order so every rank
+// holding the cell gets the same bits), then each owned cell's least-squares
+// matrix over its face neighbours, inverted; zero where it is near-singular
+// (det <= 1e-10 (trace / dim)^dim), as for a corner cell with one neighbour.
+template <class Coords, class Gid>
+void cell_geometry(const MeshView<Kokkos::HostSpace>& m, int dim, LO cells, LO owned, const Coords& x, const Gid& gid,
+                   FvPlan& p) {
+  p.cell_centroid.assign(3 * static_cast<std::size_t>(cells), 0);
+  for (LO e = 0; e < cells; ++e) {
+    std::array<LO, 8> v{};
+    const LO n = m.num_vertices(dim, e);
+    for (LO k = 0; k < n; ++k) v[static_cast<std::size_t>(k)] = m.vertex(dim, e, k);
+    std::sort(v.begin(), v.begin() + n, [&](LO a, LO b) { return gid(a) < gid(b); });
+    for (int q = 0; q < 3; ++q) {
+      Real sum = 0;
+      for (LO k = 0; k < n; ++k) sum += x(v[static_cast<std::size_t>(k)], q);
+      p.cell_centroid[3 * static_cast<std::size_t>(e) + static_cast<std::size_t>(q)] = sum / static_cast<Real>(n);
+    }
+  }
+  const auto at = [&](LO e, int q) {
+    return p.cell_centroid[3 * static_cast<std::size_t>(e) + static_cast<std::size_t>(q)];
+  };
+  p.lsq.assign(9 * static_cast<std::size_t>(owned), 0);
+  for (LO c = 0; c < owned; ++c) {
+    const auto ci = static_cast<std::size_t>(c);
+    std::array<Real, 9> a{};
+    for (Offset k = p.cell_offsets[ci]; k < p.cell_offsets[ci + 1]; ++k) {
+      const auto f = static_cast<std::size_t>(p.cell_faces[static_cast<std::size_t>(k)]);
+      const LO n = p.left[f] == c ? p.right[f] : p.left[f];
+      if (n < 0) continue;
+      const std::array<Real, 3> d{at(n, 0) - at(c, 0), at(n, 1) - at(c, 1), dim == 3 ? at(n, 2) - at(c, 2) : 0};
+      for (std::size_t i = 0; i < 3; ++i) {
+        for (std::size_t j = 0; j < 3; ++j) a[3 * i + j] += d[i] * d[j];
+      }
+    }
+    Real* inv = &p.lsq[9 * ci];
+    if (dim == 2) {
+      const Real det = a[0] * a[4] - a[1] * a[3], scale = (a[0] + a[4]) / 2;
+      if (!(det > 1e-10 * scale * scale)) continue;
+      inv[0] = a[4] / det;
+      inv[1] = -a[1] / det;
+      inv[3] = -a[3] / det;
+      inv[4] = a[0] / det;
+    } else {
+      const std::array<Real, 9> co{a[4] * a[8] - a[5] * a[7], a[2] * a[7] - a[1] * a[8], a[1] * a[5] - a[2] * a[4],
+                                   a[5] * a[6] - a[3] * a[8], a[0] * a[8] - a[2] * a[6], a[2] * a[3] - a[0] * a[5],
+                                   a[3] * a[7] - a[4] * a[6], a[1] * a[6] - a[0] * a[7], a[0] * a[4] - a[1] * a[3]};
+      const Real det = a[0] * co[0] + a[1] * co[3] + a[2] * co[6], scale = (a[0] + a[4] + a[8]) / 3;
+      if (!(det > 1e-10 * scale * scale * scale)) continue;
+      for (std::size_t i = 0; i < 9; ++i) inv[i] = co[i] / det;
+    }
+  }
+}
+
 }  // namespace
 
 FvPlan fv_plan(const Mesh<Kokkos::HostSpace>& mesh) {
@@ -257,6 +311,7 @@ FvPlan fv_plan(const Mesh<Kokkos::HostSpace>& mesh) {
     p.right[f] = maker_left ? face.b : face.a;
   }
   p.cell_sign.resize(p.cell_faces.size());
+  cell_geometry(m, dim, cells, owned, x, gid, p);
   for (LO c = 0; c < owned; ++c) {
     const auto ci = static_cast<std::size_t>(c);
     for (Offset k = p.cell_offsets[ci]; k < p.cell_offsets[ci + 1]; ++k) {
