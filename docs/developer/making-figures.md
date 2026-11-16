@@ -78,8 +78,10 @@ With tests on, ctest makes every data set (`doc_figures.<set>`) and checks that
   wiki (the site also puts Mermaid diagrams on white);
 - categories such as ranks or ownership in the Okabe-Ito palette, which stays distinct for
   colour-blind readers; scalar fields in viridis, integer fields with one colour per value;
-- PNG renders at 1400 by 1000 pixels, shown at about half that size; SVG schematics with their
-  text as outlines and no dates or ids that change between runs.
+- PNG renders at 1400 by 1000 pixels, shown at about half that size; renders with smooth colour
+  gradients (the algorithm figures' `save_png`) are cut to 256 colours with Pillow, which
+  `pvpython` bundles, to stay within the size limit; SVG schematics with their text as outlines
+  and no dates or ids that change between runs.
 
 `docs.figures` fails when a figure's image is missing, a figure has no `:alt:` or no caption, an
 image in `docs/figures/img/` is shown by no page, an image is over 300 KB, or the images together

@@ -21,6 +21,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <exception>
+#include <stdexcept>
+#include <utility>
 #include <fstream>
 #include <string>
 #include <vector>
@@ -67,12 +69,21 @@ const char* ownership_name(soma::Ownership o) {
 
 namespace {
 
+// Every area's sets. Throws std::logic_error when two areas register one name,
+// which would otherwise let the later silently replace the earlier.
 const figures::Sets& sets() {
   static const figures::Sets all = [] {
     figures::Sets s;
-    figures::add_concept_sets(s);
-    figures::add_parallel_sets(s);
-    figures::add_algorithm_sets(s);
+    for (void (*add)(figures::Sets&) :
+         {figures::add_concept_sets, figures::add_parallel_sets, figures::add_algorithm_sets}) {
+      figures::Sets area;
+      add(area);
+      for (auto& [name, set] : area) {
+        if (!s.emplace(name, std::move(set)).second) {
+          throw std::logic_error("set " + name + " is registered by two areas");
+        }
+      }
+    }
     return s;
   }();
   return all;
@@ -84,6 +95,12 @@ int main(int argc, char** argv) {
   const soma::ScopeGuard guard(argc, argv);
   const soma::Comm comm = soma::Comm::world();
   const bool root = comm.rank() == 0;
+  try {
+    (void)sets();
+  } catch (const std::logic_error& e) {
+    if (root) std::fprintf(stderr, "soma_figure_data: %s\n", e.what());
+    return 2;
+  }
   const std::vector<std::string> args(argv + 1, argv + argc);
   if (args.size() == 1 && args[0] == "--list") {
     if (root) {

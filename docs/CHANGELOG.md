@@ -888,6 +888,15 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   and the communication seam. `soma_figure_data` (option `SOMA_ENABLE_DOC_FIGURES`) writes each
   figure's data, `docs/figures/make_figures.sh` draws them with ParaView's `pvpython`, and
   `docs.figures` checks that every figure exists, has alt text and a caption, and is shown.
+- Figures of the parallel pages (a mesh on four ranks, one rank's owned, shared and ghost
+  entities, the space-filling-curve order, ghost layers, merging meshes; halo exchange, routing
+  and the rendezvous directory as diagrams) and of the algorithm, AMR and I/O pages (smoothing,
+  the Poisson and advection examples' results, remap overlap pieces, a remapped field and remap on
+  the sphere, refinement children and marked refinement, a grid index search, an AMR hierarchy and
+  its coarse-fine operators, the SOMA file layout and reading N parts on P ranks). Each figure's
+  data set checks what its caption states; sets that redo an example check the example's printed
+  result. The figure sets of each documentation area live in a file of their own, and two areas
+  registering one set name is an error.
 
 ### Packaging
 
