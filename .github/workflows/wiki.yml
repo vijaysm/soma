@@ -49,7 +49,12 @@ jobs:
         env:
           TOKEN: ${{ secrets.WIKI_TOKEN || secrets.GITHUB_TOKEN }}
         run: |
-          git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki
+          if ! git clone --depth 1 "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.wiki.git" wiki; then
+            wiki="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/wiki"
+            echo "::error title=No wiki to push to::GitHub creates the wiki's repository only when its" \
+              "first page is saved. Open ${wiki}, save any page, and run this workflow again."
+            exit 1
+          fi
           python docs/wiki/build_wiki.py --out wiki --repo-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
           cd wiki
           git add -A
