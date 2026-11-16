@@ -31,6 +31,16 @@ side. Layer 0 is the elements a rank holds other than as ghosts; layer $i$ is ev
 elsewhere joined to layer $i - 1$. The rule does not depend on the partition: however thin the
 parts in between, a rank receives exactly the elements within `layers` steps of its own.
 
+```{figure} ../figures/img/ghost-layers.svg
+:alt: Rank 2's part of the four-rank mesh, its owned cells grey, the first ghost layer orange around them and the second ghost layer blue around that, over the faint whole mesh
+:width: 90%
+
+Rank 2's part of the four-rank mesh of [distributed meshes](distributed-meshes.md) with the
+default `bridge_dim` 0. Layer 1 is the ghosts `add_ghosts` adds with `layers = 1`; layer 2, the
+further ghosts it adds with `layers = 2`. Each layer is the cells sharing a vertex with the one
+inside it, by the layer rule above, wherever they are owned.
+```
+
 ### Adding and removing ghosts
 
 `add_ghosts` and `remove_ghosts` are members of `Mesh` (`soma/core/mesh.hpp`), for host meshes

@@ -6,6 +6,14 @@ how ownership and sharing are recorded, how edges and faces derived after the bu
 their global ids, and how elements are partitioned, migrated and rebalanced. For ghost layers
 and exchanging values between parts, see [ghosts and halo exchange](ghosts-and-halos.md).
 
+```{figure} ../figures/img/partition-4-ranks.png
+:alt: A plane mesh of three strips of quads meeting at a central region of triangles, divided into four parts coloured by owning rank, with a legend for ranks 0 to 3
+:width: 70%
+
+The plane mesh `data/hybrid_3quad_1tri.h5m` read on four ranks and refined once: 256 cells, each
+coloured by the rank that owns it. Every rank owns some.
+```
+
 ## Owned, shared and ghost entities
 
 Every entity has a global id (gid) and, on each rank holding it, a local id (lid). On a rank,
@@ -34,6 +42,17 @@ So `[0, owned_end)` is what this rank owns: a loop over it visits every entity o
 mesh exactly once across the ranks. Within a kind, entities are further ordered by topology,
 arity and node count, then by *neighbour set* (the set of other ranks holding them, so entities
 shared with the same ranks are contiguous), then by the mesh's [ordering](#orderings).
+
+```{figure} ../figures/img/rank-part.svg
+:alt: Rank 2's part of the four-rank mesh with one ghost layer, owned cells in blue and ghost cells in pink over the faint whole mesh, every vertex coloured as interior, shared, shared copy or ghost
+:width: 90%
+
+Rank 2's local part of the mesh above, with one ghost layer: its owned cells, its ghost cells,
+and every vertex it holds coloured by its kind on rank 2. The faint cells are the other ranks'.
+Rank 2 holds all four kinds: interior vertices inside its part, shared vertices it owns,
+shared copies of vertices owned by a lower rank, and the ghost vertices that only ghost cells
+use.
+```
 
 Kernels test ownership with these ends and never read per-entity flags. The sharing is kept in
 two internal fields, from which exchanges are built once:
@@ -176,6 +195,16 @@ orders by:
 
 Within each kind, vertices that are nodes of high-order elements and no element's corner come
 after the others. The Hilbert ordering places entities that are close in space close in memory.
+
+```{figure} ../figures/img/sfc-curve.svg
+:alt: An 8 by 8 grid of cells, each labelled with its local id 0 to 63, joined in local-id order by a line coloured from dark purple to yellow that traces a Hilbert curve
+:width: 60%
+
+An $8 \times 8$ box of quads built in the default ordering, `type_major_sfc`: the cells joined
+through their centroids in local-id order, from the circle (lid 0) to the square (lid 63), each
+labelled in its lower-left corner with its lid. The line is the Hilbert curve: lids follow the
+Hilbert keys of the centroids.
+```
 
 ### Space-filling curve keys
 

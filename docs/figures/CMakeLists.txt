@@ -17,7 +17,7 @@ if(SOMA_ENABLE_TESTS)
   # Set names are lowercase letters only, so CMake's sort and the driver's agree.
   set(SOMA_FIGURE_SETS_CONCEPTS box:1 edit:1 fields:1 graphs:1 reference:1 segments:2)
 
-  set(SOMA_FIGURE_SETS_PARALLEL)
+  set(SOMA_FIGURE_SETS_PARALLEL curve:1 merge:2 parts:4)
 
   set(SOMA_FIGURE_SETS_ALGORITHMS)
 

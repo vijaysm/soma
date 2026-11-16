@@ -195,6 +195,17 @@ Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, const MergeOptions& opt
 `merge_mesh` (collective) merges a built mesh in place: its live vertices that match, on any
 rank, become one, and the mesh is built again in its ordering, with the graphs it held (on any
 rank) and its explicit sides. A typical use is after a local refinement, when ranks have created
+
+```{figure} ../figures/img/merge-meshes.svg
+:alt: Two panels. Before, two 3 by 3 boxes of quads on ranks 0 and 1 drawn pulled apart, each with its own four vertices on x = 3, gids 4, 8, 12, 16 and 101, 105, 109, 113. After, the boxes meet and each of the four is one vertex, gids 4, 8, 12, 16, half orange and half yellow
+:width: 100%
+
+Two ranks each build a $3 \times 3$ box of quads with `build_local_part`, with their own vertex
+gids, so the four points on $x = 3$ are two vertices each, all interior (drawn pulled apart).
+After `merge_mesh` with the default options, each is one vertex with gid 4, 8, 12 or 16, held
+by both ranks: shared and owned on rank 0 (left half of the marker) and a shared copy on rank 1
+(right half).
+```
 vertices along their shared boundary independently. From `tests/unit/test_merge.cpp`:
 
 ```cpp
