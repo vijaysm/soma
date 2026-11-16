@@ -8,6 +8,7 @@
 #   sphinx-build -W -b html docs docs/_build/html
 
 import re
+import subprocess
 from pathlib import Path
 
 root = Path(__file__).resolve().parent.parent
@@ -25,6 +26,16 @@ source_suffix = {".md": "markdown"}
 myst_enable_extensions = ["colon_fence", "deflist", "dollarmath", "fieldlist", "attrs_inline"]
 myst_heading_anchors = 3
 exclude_patterns = ["_build", "plans", "requirements.txt", "CHANGELOG.md"]
+# Files under docs/ that git ignores (private notes in a working copy) are
+# not pages; a checkout without git, like a source tarball, has none.
+try:
+    _ignored = subprocess.run(
+        ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "."],
+        cwd=Path(__file__).resolve().parent, capture_output=True, text=True, check=True,
+    ).stdout.split()
+    exclude_patterns += [p.rstrip("/") for p in _ignored]
+except (OSError, subprocess.CalledProcessError):
+    pass
 suppress_warnings = []
 
 html_theme = "furo"

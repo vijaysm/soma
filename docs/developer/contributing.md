@@ -97,7 +97,9 @@ sphinx-build -W -b html docs docs/_build/html
 
 Pages describe the library as it is. Name only types, functions, options and behaviour that exist,
 quote signatures from the headers, and prefer snippets adapted from `examples/`, `tests/` or
-`bench/`, naming the file they come from. Cross-link pages with relative links.
+`bench/`, naming the file they come from. Cross-link pages with relative links. The same pages
+become the GitHub wiki; see [writing documentation](writing-docs.md) for adding a page and what
+the wiki supports.
 
 ## Changelog
 

@@ -25,6 +25,9 @@ python3 -m pip install -r docs/requirements.txt
 sphinx-build -W -b html docs docs/_build/html
 ```
 
+The same pages are converted to the GitHub wiki by `docs/wiki/build_wiki.py`; see
+[writing documentation](docs/developer/writing-docs.md).
+
 Changelog: [docs/CHANGELOG.md](docs/CHANGELOG.md).
 
 License: BSD-3-Clause (see [LICENSE](LICENSE)).

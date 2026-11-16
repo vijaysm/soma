@@ -262,6 +262,17 @@ add_test(NAME policy.device_lambdas
   COMMAND ${CMAKE_COMMAND} -DSOURCE_DIR=${PROJECT_SOURCE_DIR}
           -P ${CMAKE_CURRENT_SOURCE_DIR}/policy/check_device_lambdas.cmake)
 
+# The documentation converts to GitHub wiki pages without errors (every link
+# and anchor resolves), and the converter passes its own tests.
+find_package(Python3 3.9 COMPONENTS Interpreter QUIET)
+if(Python3_Interpreter_FOUND)
+  add_test(NAME docs.wiki
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/docs/wiki/build_wiki.py --check)
+  add_test(NAME docs.wiki_converter
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/docs/test_build_wiki.py)
+  set_tests_properties(docs.wiki docs.wiki_converter PROPERTIES TIMEOUT 60)
+endif()
+
 if(SOMA_INSTALL)
   set(SOMA_PACKAGING_SHADOW_PREFIX "/opt/kokkos" CACHE PATH
     "Prefix of another Kokkos the fetched-Kokkos packaging test lists first (ignored if absent)")

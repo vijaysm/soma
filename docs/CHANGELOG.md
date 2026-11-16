@@ -877,6 +877,10 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   are errors): getting started, the mesh model and its concepts, parallel meshes, input and
   output, algorithms, block-structured AMR, the MOAB compatibility layer, a developer guide and
   references for CMake options and every public header.
+- The same pages convert to a GitHub wiki (`docs/wiki/build_wiki.py`): links, anchors, notes,
+  includes and the table of contents are rewritten, and anything it cannot convert is an error.
+  `docs.wiki` checks that every page converts; a workflow builds the site and the wiki on pull
+  requests and pushes the wiki from `main`. Files under `docs/` that git ignores are not pages.
 
 ### Packaging
 
