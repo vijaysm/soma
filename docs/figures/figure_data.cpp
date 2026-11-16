@@ -31,8 +31,10 @@
 
 #include "soma/algorithms/fem.hpp"
 #include "soma/core/mesh.hpp"
+#include "soma/core/segments.hpp"
 #include "soma/io/mesh_file.hpp"
 #include "soma/parallel/comm.hpp"
+#include "soma/parallel/ghosts.hpp"
 #include "soma/runtime/scope_guard.hpp"
 #include "soma/testing/box_mesh.hpp"
 #include "soma/topology/canonical.hpp"
@@ -171,6 +173,91 @@ void set_reference(const soma::Comm& comm, const fs::path& out) {
   write_json(comm, out / "reference.json", js.str());
 }
 
+// A JSON list of a view's or vector's values.
+template <class V>
+std::string json_list(const V& v, std::size_t begin, std::size_t end) {
+  std::ostringstream js;
+  js << "[";
+  for (std::size_t i = begin; i < end; ++i) js << (i > begin ? ", " : "") << v(i);
+  js << "]";
+  return js.str();
+}
+
+const char* ownership_name(soma::Ownership o) {
+  switch (o) {
+    case soma::Ownership::interior: return "interior";
+    case soma::Ownership::shared: return "shared";
+    case soma::Ownership::shared_copy: return "shared_copy";
+    case soma::Ownership::ghost: return "ghost";
+  }
+  return "?";
+}
+
+// segments: data/hybrid_3quad_1tri.h5m read on two ranks with one ghost layer;
+// each rank's segment table of every dimension it holds, as segments-<rank>.json.
+void set_segments(const soma::Comm& comm, const fs::path& out) {
+  soma::HostMesh mesh = soma::read_file(comm, fs::path(SOMA_SOURCE_DIR) / "data" / "hybrid_3quad_1tri.h5m");
+  mesh.add_ghosts(comm, soma::GhostOptions{.layers = 1});
+  std::ostringstream js;
+  js << "{\"rank\": " << comm.rank() << ", \"ranks\": " << comm.size() << ", \"dims\": [";
+  const char* sep = "";
+  for (int d = 0; d <= mesh.dim(); ++d) {
+    const soma::SegmentTable& t = mesh.segment_table(d);
+    if (t.count == 0) continue;
+    const std::array<soma::LO, 5> bounds = soma::kind_bounds(t);
+    require(bounds[0] == 0 && bounds[1] == t.interior_end && bounds[2] == t.owned_end && bounds[3] == t.shared_end &&
+                bounds[4] == t.count,
+            "segments: kind_bounds and the table's ends agree");
+    js << sep << "\n  {\"dim\": " << d << ", \"count\": " << t.count << ", \"interior_end\": " << t.interior_end
+       << ", \"owned_end\": " << t.owned_end << ", \"shared_end\": " << t.shared_end << ", \"segments\": [";
+    for (std::size_t k = 0; k < t.segments.size(); ++k) {
+      const soma::Segment& g = t.segments[k];
+      js << (k ? ", " : "") << "{\"begin\": " << g.begin << ", \"end\": " << g.end << ", \"topology\": \""
+         << soma::name(g.topology) << "\", \"ownership\": \"" << ownership_name(g.ownership) << "\"}";
+    }
+    js << "]}";
+    sep = ",";
+  }
+  js << "\n]}";
+  // Every rank writes its own table.
+  std::ofstream f(out / ("segments-" + std::to_string(comm.rank()) + ".json"));
+  f << js.str() << "\n";
+  require(static_cast<bool>(f), "segments: cannot write");
+  const soma::SegmentTable& cells = mesh.segment_table(mesh.dim());
+  const auto ghost_cells = static_cast<long long>(cells.count - cells.shared_end);
+  require(comm.allreduce(ghost_cells, soma::Op::sum) > 0, "segments: some rank holds ghost cells");
+}
+
+// graphs: a 3 x 2 box of unit quads with its vertex-to-cell graph (0, 2) and its
+// cell-to-cell bridge through edges (2, 1), as graphs.json.
+void set_graphs(const soma::Comm& comm, const fs::path& out) {
+  soma::HostMesh mesh =
+      soma::testing::box_mesh({.nx = 3, .ny = 2, .nz = 1, .element = soma::Topology::quad, .lx = 3, .ly = 2});
+  soma::build_adjacencies(mesh, soma::AdjacencyRequest{}.add(0, 2).add_bridge(2, 1));
+  const auto x = mesh.coords();
+  std::ostringstream js;
+  js << "{\"points\": [";
+  for (soma::LO v = 0; v < mesh.count(0); ++v) {
+    const auto i = static_cast<std::size_t>(v);
+    js << (v ? ", " : "") << "[" << x(i, 0) << ", " << x(i, 1) << "]";
+  }
+  const auto rows = [&](const soma::AdjacencyGraph<Kokkos::HostSpace>& g, soma::LO n) {
+    std::ostringstream r;
+    r << "[";
+    for (soma::LO e = 0; e < n; ++e) {
+      const auto i = static_cast<std::size_t>(e);
+      r << (e ? ", " : "") << json_list(g.targets, static_cast<std::size_t>(g.offsets(i)),
+                                        static_cast<std::size_t>(g.offsets(i + 1)));
+    }
+    return r.str() + "]";
+  };
+  js << "],\n \"cells\": " << rows(mesh.adjacency(2, 0), mesh.count(2))
+     << ",\n \"vertex_cells\": " << rows(mesh.adjacency(0, 2), mesh.count(0))
+     << ",\n \"cell_neighbours\": " << rows(mesh.bridge(2, 1), mesh.count(2)) << "}";
+  require(mesh.count(2) == 6 && mesh.count(0) == 12, "graphs: 6 quads, 12 vertices");
+  write_json(comm, out / "graphs.json", js.str());
+}
+
 struct Set {
   int ranks;
   std::function<void(const soma::Comm&, const fs::path&)> make;
@@ -179,7 +266,9 @@ struct Set {
 const std::map<std::string, Set>& sets() {
   static const std::map<std::string, Set> all = {
       {"box", {1, set_box}},
+      {"graphs", {1, set_graphs}},
       {"reference", {1, set_reference}},
+      {"segments", {2, set_segments}},
   };
   return all;
 }

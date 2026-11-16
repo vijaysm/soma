@@ -238,6 +238,90 @@ def canonical_sides(data, path):
     style.save_svg(fig, path)
 
 
+# ---------------------------------------------------------------- tables and graphs
+
+OWNERSHIP = {  # kind: (colour, label)
+    "interior": ("#56B4E9", "interior"),
+    "shared": ("#E69F00", "shared, owned here"),
+    "shared_copy": ("#F0E442", "shared copy"),
+    "ghost": ("#CC79A7", "ghost"),
+}
+
+
+@figure("segment-table", ["segments"], "svg")
+def segment_table(data, path):
+    import matplotlib.patches as mpatches
+
+    tables = [load_json(p) for p in sorted((data / "segments").glob("segments-*.json"))]
+    bars = [(t["rank"], d) for t in tables for d in t["dims"]]
+    fig, ax = style.svg_figure(11, 1.25 * len(bars) + 0.9)
+    ax.set_aspect("auto")
+    width = 10.0
+    for row, (rank, d) in enumerate(bars):
+        y = -1.25 * row
+        scale = width / d["count"]
+        kind = "vertices" if d["dim"] == 0 else ("cells" if d["dim"] == max(e["dim"] for e in tables[0]["dims"])
+                                                 else f"dimension {d['dim']}")
+        ax.text(-0.2, y + 0.3, f"rank {rank}\n{kind}", ha="right", va="center", fontsize=11)
+        for g in d["segments"]:
+            x0, x1 = g["begin"] * scale, g["end"] * scale
+            ax.add_patch(mpatches.Rectangle((x0, y), x1 - x0, 0.6, fc=OWNERSHIP[g["ownership"]][0], ec="#333333",
+                                            lw=1.0))
+            ax.text((x0 + x1) / 2, y + 0.3, f"{g['topology']}\n{g['end'] - g['begin']}", ha="center", va="center",
+                    fontsize=9)
+        # The lids where the ranges end, and the names of the table's ends there.
+        ends = {}
+        for name in ("interior_end", "owned_end", "shared_end"):
+            ends.setdefault(d[name], []).append(name)
+        cuts = sorted({0, d["count"], *ends, *(g["end"] for g in d["segments"])})
+        for lid in cuts:
+            ax.text(lid * scale, y - 0.06, str(lid), ha="center", va="top", fontsize=8.5, color="#444444")
+        for lid, names in ends.items():
+            if 0 < lid < d["count"]:
+                ax.plot([lid * scale] * 2, [y + 0.6, y + 0.78], color="#000000", lw=1.2)
+                ax.text(lid * scale, y + 0.8, " = ".join(names), ha="center", va="bottom", fontsize=8.5)
+        ax.text(width + 0.15, y + 0.3, f"count {d['count']}", ha="left", va="center", fontsize=9.5,
+                color="#444444")
+    handles = [mpatches.Patch(fc=c, ec="#333333", label=label) for c, label in OWNERSHIP.values()]
+    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.02), ncol=4, frameon=False, fontsize=10)
+    ax.set_xlim(-1.6, width + 1.4)
+    ax.set_ylim(-1.25 * (len(bars) - 1) - 0.5, 1.15)
+    style.save_svg(fig, path)
+
+
+def draw_quads(ax, g, cell_fill=None):
+    """The mesh of graphs.json: cells outlined and numbered, vertices numbered."""
+    pts = g["points"]
+    for c, cell in enumerate(g["cells"]):
+        xy = [pts[v] for v in cell]
+        ax.fill(*zip(*xy), color=(cell_fill or {}).get(c, "#ffffff"), ec="#333333", lw=1.4, zorder=1)
+        m = centroid(xy)
+        ax.text(*m, f"c{c}", ha="center", va="center", fontsize=11, weight="bold", zorder=3)
+    for v, p in enumerate(pts):
+        ax.plot(*p, "o", color="#333333", ms=4, zorder=2)
+        ax.text(p[0] + 0.07, p[1] + 0.09, f"v{v}", fontsize=9, color="#333333", zorder=3,
+                bbox={"boxstyle": "round,pad=0.08", "fc": "white", "ec": "none", "alpha": 0.85})
+
+
+@figure("graph-kinds", ["graphs"], "svg")
+def graph_kinds(data, path):
+    g = load_json(data / "graphs" / "graphs.json")
+    fig, axes = style.svg_figure(11, 4.2, ncols=2)
+    vertex, cell = 5, 1
+    row = g["vertex_cells"][vertex]
+    draw_quads(axes[0], g, {c: style.OKABE_ITO[1] for c in row})
+    p = g["points"][vertex]
+    axes[0].plot(*p, "o", color=style.OKABE_ITO[6], ms=11, zorder=4)
+    axes[0].set_title(f"upward (0, 2): row of v{vertex} = cells {' '.join(map(str, row))}", fontsize=11.5, y=-0.16)
+    nbrs = g["cell_neighbours"][cell]
+    draw_quads(axes[1], g, {cell: style.OKABE_ITO[6], **{c: style.OKABE_ITO[2] for c in nbrs}})
+    axes[1].set_title(f"bridge (2, 1): row of c{cell} = cells {' '.join(map(str, nbrs))}", fontsize=11.5, y=-0.16)
+    for ax in axes:
+        ax.autoscale()
+        ax.margins(0.06)
+    style.save_svg(fig, path)
+
+
 # ---------------------------------------------------------------- driver
 
 

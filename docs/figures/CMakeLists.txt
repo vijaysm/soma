@@ -7,11 +7,13 @@
 # its rank count, so the sets keep working as SOMA changes.
 add_executable(soma_figure_data figure_data.cpp)
 target_link_libraries(soma_figure_data PRIVATE soma soma_warnings)
+# Where the driver finds the bundled meshes (data/).
+target_compile_definitions(soma_figure_data PRIVATE SOMA_SOURCE_DIR="${PROJECT_SOURCE_DIR}")
 
 if(SOMA_ENABLE_TESTS)
   # The sets and their rank counts, as soma_figure_data --list prints them
   # (sorted by name); doc_figures.list fails when the two disagree.
-  set(SOMA_FIGURE_SETS box:1 reference:1)
+  set(SOMA_FIGURE_SETS box:1 graphs:1 reference:1 segments:2)
   string(REPLACE ":" " " expected "${SOMA_FIGURE_SETS}")
   string(REPLACE ";" "\n" expected "${expected}")
   add_test(NAME doc_figures.list COMMAND soma_figure_data --list)

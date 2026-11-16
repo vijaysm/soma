@@ -134,6 +134,16 @@ So for dimension `d`:
 | `[owned_end, shared_end)` | shared copies |
 | `[shared_end, count)` | ghosts |
 
+```{figure} ../figures/img/segment-table.svg
+:alt: Four bars, the vertices and the cells of rank 0 and of rank 1, each divided into coloured lid ranges: interior, shared and owned here, shared copy, and ghost, with the lid where each range ends and the names of the table's ends
+:width: 100%
+
+The segment tables of `data/hybrid_3quad_1tri.h5m` read on two ranks with one ghost layer. Rank 0
+owns the 14 vertices the ranks share and rank 1 holds copies of them; cells are never shared, so
+their tables have `interior_end = owned_end = shared_end`. Within a kind, the segments split by
+topology: the triangles come before the quads.
+```
+
 A **segment** is a maximal run of entities with one ownership kind, topology and arity (vertex
 count; for vertices 1). Uniform arity lets a kernel be instantiated with a compile-time vertex
 count per segment. `mesh.segments(d)` returns the segments and `mesh.segment_table(d)` the whole

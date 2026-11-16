@@ -22,6 +22,16 @@ bridge `(3, 2)` each region its face neighbours. Every graph is a deterministic 
 topology, whatever the backend or the thread count: upward rows are built with atomics and then
 sorted, so the fill order of threads does not show.
 
+```{figure} ../figures/img/graph-kinds.svg
+:alt: Two copies of a 3 by 2 grid of quads with numbered cells and vertices; on the left vertex 5 and its four cells are highlighted, on the right cell 1 and its three edge neighbours
+:width: 100%
+
+Two graphs of a $3 \times 2$ box of quads. Left: the upward graph `(0, 2)` gives vertex 5 the
+cells it is a corner of. Right: the bridge `(2, 1)` gives cell 1 the cells that share an edge
+with it. Cells 3 and 5 share only a vertex with cell 1, so they would be in its bridge `(2, 0)`
+row but are not in its `(2, 1)` row.
+```
+
 ## Requesting graphs
 
 `soma::AdjacencyRequest` names a set of graphs:
