@@ -109,30 +109,35 @@ def poisson_solution(data, path):
 def advected_bump(data, path):
     pv, view = pv_view()
     mesh = pv.LegacyVTKReader(FileNames=[str(data / "advect" / "advect.vtk")])
-    # The middle layer of cells (z in [1.17, 1.5]), cut through its centres.
+    # The layer of cells under the bump's centre (z in [4/3, 1.5]), cut through its centres.
     layer = pv.Slice(Input=mesh)
     layer.SliceType = "Plane"
-    layer.SliceType.Origin = [1.5, 1.5, 1.5 - 1.0 / 6.0]
+    layer.SliceType.Origin = [1.5, 1.5, 1.5 - 1.0 / 12.0]
     layer.SliceType.Normal = [0.0, 0.0, 1.0]
     layer.Triangulatetheslice = 0
-    moved = pv.Transform(Input=layer)
-    moved.Transform.Translate = [5.0, 0.0, 0.0]
-    for source, field in ((layer, "start"), (moved, "u")):
+    panels = [(layer, "start")]
+    for shift, field in ((4.6, "upwind"), (9.2, "bounded")):
+        moved = pv.Transform(Input=layer)
+        moved.Transform.Translate = [shift, 0.0, 0.0]
+        panels.append((moved, field))
+    for source, field in panels:
         display = flat(pv_surface(pv, view, source))
-        display.LineWidth = 1.0
+        display.LineWidth = 0.5
         pv_color_by(pv, view, display, field, "u")
-    # Both on the scale of the start, where the bump peaks.
+    # All on the scale of the start, where the bump peaks.
     layer.UpdatePipeline()
     lo, hi = layer.CellData["start"].GetRange()
-    for field in ("start", "u"):
+    for _, field in panels:
         pv.GetColorTransferFunction(field).RescaleTransferFunction(0.0, hi)
-    labels(pv, view, "start", [0.0, 0.2, 0.4, 0.6], "{:.1f}")
-    pv.HideScalarBarIfNotNeeded(pv.GetColorTransferFunction("u"), view)
-    pv.GetDisplayProperties(moved, view).SetScalarBarVisibility(view, False)
-    pv_label(pv, view, "start", [0.18, 0.8])
-    pv_label(pv, view, "after 100 steps", [0.5, 0.8])
-    # The squares span x in [-0.5, 8.5] and y in [-0.5, 3.5]; the view is 11.2 wide.
-    save_png(pv, view, path, {"position": [4.9, 1.5, 20.0], "focal": [4.9, 1.5, 0.0], **TOP, "parallel_scale": 4.0})
+    labels(pv, view, "start", [0.0, 0.2, 0.4, 0.6, 0.8], "{:.1f}")
+    for source, field in panels[1:]:
+        pv.HideScalarBarIfNotNeeded(pv.GetColorTransferFunction(field), view)
+        pv.GetDisplayProperties(source, view).SetScalarBarVisibility(view, False)
+    pv_label(pv, view, "start", [0.11, 0.8])
+    pv_label(pv, view, "upwind, half a turn", [0.33, 0.8])
+    pv_label(pv, view, "bounded, half a turn", [0.62, 0.8])
+    # The squares span x in [-0.5, 12.7] and y in [-0.5, 3.5]; the view is 15.7 wide, room for the colour bar.
+    save_png(pv, view, path, {"position": [7.3, 1.5, 20.0], "focal": [7.3, 1.5, 0.0], **TOP, "parallel_scale": 5.6})
 
 
 @figure("remap-field", ["remap"], "png")

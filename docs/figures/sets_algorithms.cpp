@@ -2,9 +2,10 @@
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
 // The sets of the algorithms pages (docs/algorithms, docs/amr and docs/io).
-// Where a figure shows an example program's result (advect, poisson, remap,
-// refine), its set makes the same library calls on the same input and checks
-// the quantity the example's test checks.
+// Where a figure shows an example program's result (poisson, remap, refine),
+// its set makes the same library calls on the same input and checks the
+// quantity the example's test checks. advect's set runs the example's flow and
+// bump on its mesh refined once, by both schemes, and checks its caption.
 
 #include <algorithm>
 #include <array>
@@ -217,50 +218,86 @@ void set_poisson(const soma::Comm& comm, const fs::path& out) {
   require(std::string(printed) == "9.090723e-01", "poisson: max u 9.090723e-01, as the example's test");
 }
 
+// The advect example's confined flow: a rotation about (cx, cy), one turn in
+// unit time out to r1, slowing smoothly to rest at r2 and still beyond.
 struct Rotation {
-  double cx, cy;
+  double cx, cy, r1, r2;
   KOKKOS_INLINE_FUNCTION Kokkos::Array<double, 3> operator()(double x, double y, double) const {
     constexpr double omega = 2 * 3.14159265358979323846;
-    return {-omega * (y - cy), omega * (x - cx), 0};
+    const double dx = x - cx, dy = y - cy, r = Kokkos::sqrt(dx * dx + dy * dy);
+    double s = 1;
+    if (r >= r2) {
+      s = 0;
+    } else if (r > r1) {
+      const double t = (r2 - r) / (r2 - r1);
+      s = t * t * (3 - 2 * t);
+    }
+    return {-omega * s * dy, omega * s * dx, 0};
   }
 };
 
-// advect: the advect example on data/64bricks_1khex.h5m: a Gaussian bump
-// turned about the box's axis by 100 upwind steps at CFL 0.5; advect.vtk with
-// the cell fields "start" and "u" (after).
+// advect: the advect example's flow and bump on data/64bricks_1khex.h5m
+// refined once (24^3 hexes), half a turn at CFL 0.5 from one start, upwind and
+// bounded; advect.vtk with the cell fields "start", "upwind" and "bounded".
 void set_advect(const soma::Comm& comm, const fs::path& out) {
-  soma::HostMesh mesh = soma::read_file(comm, data_file("64bricks_1khex.h5m"));
+  const soma::HostMesh coarse = soma::read_file(comm, data_file("64bricks_1khex.h5m"));
+  soma::HostMesh mesh = soma::refine_uniform(comm, coarse).mesh;
   mesh.add_ghosts(comm, soma::GhostOptions{1, 0, false});
   const auto [lo, hi] = bounds(comm, mesh);
-  const Rotation a{(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2};
-  const double bx = a.cx + (hi[0] - lo[0]) / 4, by = a.cy, bz = (lo[2] + hi[2]) / 2;
-  const double width = (hi[0] - lo[0]) / 8;
-  double before = 0, after = 0;
-  {
-    const soma::FvSpace<Host> space(comm, mesh);
+  const double cx = (lo[0] + hi[0]) / 2, cy = (lo[1] + hi[1]) / 2, h = std::fmin(hi[0] - lo[0], hi[1] - lo[1]) / 2;
+  const Rotation a{cx, cy, 2 * h / 3, 0.9 * h};
+  const double bx = cx + h / 3, by = cy, bz = (lo[2] + hi[2]) / 2, width = h / 6;
+  const auto start = mesh.fields().add_tag<double>("start", 3, 1).view();
+  for (soma::LO e = 0; e < mesh.count(3); ++e) {
+    const auto c = centre(mesh, e);
+    const double r2 = (c[0] - bx) * (c[0] - bx) + (c[1] - by) * (c[1] - by) + (c[2] - bz) * (c[2] - bz);
+    start(e, 0) = std::exp(-r2 / (width * width));
+  }
+  struct Run {
+    double before, after, least, most;
+  };
+  std::map<std::string, Run> runs;
+  double peak = 0;
+  for (const auto& [name, scheme] : {std::pair{"upwind", soma::FvScheme::upwind},
+                                     std::pair{"bounded", soma::FvScheme::bounded}}) {
+    const soma::FvSpace<Host> space(comm, mesh, scheme);
     const auto phi = space.normal_flux(a);
     const CView fluxes(phi);
     auto u = space.vector();
-    for (soma::LO e = 0; e < space.cols(); ++e) {
-      const auto c = centre(mesh, e);
-      const double r2 = (c[0] - bx) * (c[0] - bx) + (c[1] - by) * (c[1] - by) + (c[2] - bz) * (c[2] - bz);
-      u(e) = std::exp(-r2 / (width * width));
+    for (soma::LO e = 0; e < space.cols(); ++e) u(e) = start(e, 0);
+    peak = 0;
+    for (soma::LO e = 0; e < space.rows(); ++e) peak = std::max(peak, u(e));
+    peak = comm.allreduce(peak, soma::Op::max);
+    Run run{space.total(comm, CView(u)), 0, HUGE_VAL, -HUGE_VAL};
+    const int steps = static_cast<int>(std::ceil(0.5 / (0.5 * space.max_dt(comm, fluxes))));
+    for (int n = 0; n < steps; ++n) space.step(comm, fluxes, u, 0.5 / steps);
+    run.after = space.total(comm, CView(u));
+    for (soma::LO e = 0; e < space.rows(); ++e) {
+      run.least = std::min(run.least, u(e));
+      run.most = std::max(run.most, u(e));
     }
-    const auto start = mesh.fields().add_tag<double>("start", 3, 1).view();
-    for (soma::LO e = 0; e < space.cols(); ++e) start(e, 0) = u(e);
-    before = space.total(comm, CView(u));
-    const double dt = 0.5 * space.max_dt(comm, fluxes);
-    for (int n = 0; n < 100; ++n) space.step(comm, fluxes, u, dt);
-    after = space.total(comm, CView(u));
-    const auto values = mesh.fields().add_tag<double>("u", 3, 1).view();
+    run.least = comm.allreduce(run.least, soma::Op::min);
+    run.most = comm.allreduce(run.most, soma::Op::max);
+    runs[name] = run;
+    const auto values = mesh.fields().add_tag<double>(name, 3, 1).view();
     for (soma::LO e = 0; e < space.cols(); ++e) values(e, 0) = u(e);
+    if (comm.rank() == 0) {
+      std::printf("advect: %s, %d steps; total %.15e before, %.15e after; u in [%.3e, %.6f]; start peak %.6f\n", name,
+                  steps, run.before, run.after, run.least, run.most, peak);
+    }
   }
   mesh.remove_ghosts(comm);
   soma::write_file(comm, mesh, (out / "advect.vtk").string(),
-                   {.vtk_fields = std::vector<std::string>{"start", "u"}});
-  // The example's test prints these to the last digit with --soma-reproducible.
-  require(std::abs(before - 6.948772654115442e-01) < 1e-12, "advect: total 6.948772654115442e-01 before");
-  require(std::abs(after - 4.446464981696669e-01) < 1e-12, "advect: total 4.446464981696669e-01 after");
+                   {.vtk_fields = std::vector<std::string>{"start", "upwind", "bounded"}});
+  for (const auto& [name, run] : runs) {
+    require(std::abs(run.after - run.before) <= 1e-13 * run.before, "advect: " + name + " keeps the total");
+  }
+  require(runs["bounded"].least >= -1e-15 && runs["bounded"].most <= peak,
+          "advect: bounded stays within the start's range");
+  // The caption's peaks, to its two decimals.
+  const auto rounds_to = [](double v, double shown) { return std::abs(v - shown) <= 0.005; };
+  require(rounds_to(peak, 0.83) && rounds_to(runs["upwind"].most, 0.21) && rounds_to(runs["bounded"].most, 0.54),
+          "advect: peaks 0.83 at the start, 0.21 upwind, 0.54 bounded");
 }
 
 // The remap example's target: n x n squares over [lo, hi] in the plane z =

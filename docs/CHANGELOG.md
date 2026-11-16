@@ -611,8 +611,14 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   way round; a cell folded over its neighbour, of no positive volume, or (in 2D) off a plane
   z = const, a side of three cells, or no ghost layer on more than one rank, throws on every
   rank.
-- `examples/advect.cpp` carries a bump around a `.h5m` or SOMA mesh by a rigid rotation on any
-  number of ranks and writes u as a cell field.
+- `FvSpace(comm, mesh, FvScheme::bounded)` advects by flux-corrected transport with Zalesak's
+  limiter over a least-squares linear reconstruction, in two Heun stages: second order where u is
+  smooth, exactly conservative, and with no new extrema in a flow with no discrete divergence.
+  Upwind stays the default and unchanged.
+- `examples/advect.cpp` carries a bump around a `.h5m` or SOMA mesh on any number of ranks and
+  writes u as a cell field. `--scheme upwind|bounded` (default bounded) picks the scheme;
+  `--flow confined` (the default) turns the bump in a rotation that comes to rest before the walls,
+  so the total stays to rounding, and `--flow rigid` turns the whole box as before.
 - `soma::GridIndex<MemSpace>` (`soma/algorithms/grid_index.hpp`) bins axis-aligned boxes in a
   uniform grid (Kokkos only) and returns, for each query box, the boxes it meets within a
   tolerance, each once and in order, the same at any thread count.

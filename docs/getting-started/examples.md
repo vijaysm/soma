@@ -77,16 +77,20 @@ status is 1 if CG did not converge. See [finite elements](../algorithms/fem.md) 
 ## advect
 
 ```text
-advect [--steps N] [--cfl C] <in> <out>
+advect [--steps N] [--cfl C] [--scheme upwind|bounded] [--flow confined|rigid] <in> <out>
 ```
 
-Carries a Gaussian bump around the centre of the mesh's bounding box by a rigid rotation in the
-$xy$ plane (one turn in unit time), with first-order upwind finite volumes (`soma::FvSpace`) and
-forward Euler, after adding a ghost layer through vertices. It takes `N` steps (default 100) of
-`C` (in $(0, 1]$, default 0.5) times the largest stable step `FvSpace::max_dt`, nothing flowing
-in. It writes $u$ as the cell field `"u"` and prints the step count and size and the total
-$\sum_e V_e u_e$ before and after, to 16 significant digits. See
-[finite volumes](../algorithms/finite-volumes.md).
+Carries a Gaussian bump about the vertical axis through the centre of the mesh's bounding box by
+finite volumes (`soma::FvSpace`), after adding a ghost layer through vertices. It takes `N` steps
+(default 100) of `C` (in $(0, 1]$, default 0.5) times the largest stable step
+`FvSpace::max_dt`, nothing flowing in, by the scheme `--scheme` names (default `bounded`; see
+[finite volumes](../algorithms/finite-volumes.md)). The flow `confined` (the default) turns once in
+unit time out to two thirds of the box's half-width $h$ in $x$ and $y$, slows smoothly to rest at
+$0.9 h$ and is still beyond, so nothing crosses the walls; the bump starts at $h / 3$ from the axis,
+of width $h / 6$. The flow `rigid` turns the whole box, across its walls, with the bump at a quarter
+of the box's width from the axis and of an eighth of it. It writes $u$ as the cell field `"u"`
+and prints the scheme, the flow, the step count and size, the total $\sum_e V_e u_e$ before and
+after (to 16 significant digits) and the range of $u$ after.
 
 With `--soma-reproducible` the totals are summed exactly, and they are the same, bit for bit, on
 any number of ranks and threads; the tests compare them to the last digit on one and two ranks.
@@ -196,7 +200,8 @@ expected results below hold on one and two ranks alike:
 | `example_laplacian_smooth` | `laplacian_smooth --iterations 5 64bricks_1khex.h5m smoothed.vtk` | exit status 0 |
 | `example_laplacian_smooth.np2` | the same at two ranks with `--tolerance 1e-9`, writing `.soma` | exit status 0 |
 | `example_poisson`, `.np2` | `poisson 64bricks_1khex.h5m poisson.vtk`; at two ranks `--assembly colored`, writing `.soma` | `max u 9.090723e-01` |
-| `example_advect`, `.np2` | `advect --soma-reproducible 64bricks_1khex.h5m advect.vtk` | `total 6.948772654115442e-01 before, 4.446464981696669e-01 after` |
+| `example_advect`, `.np2` | `advect --soma-reproducible 64bricks_1khex.h5m advect.vtk` | `total 2.061703740944819e-01 before, 2.061703740944818e-01 after; u in [-1.251949e-18, 1.199141e-01]` |
+| `example_advect.upwind` | `advect --soma-reproducible --scheme upwind --flow rigid 64bricks_1khex.h5m advect_upwind.vtk` | `total 6.948772654115442e-01 before, 4.446464981696669e-01 after` |
 | `example_remap`, `.np2` | `remap hybrid_3quad_1tri.h5m remap.vtk` | `total 2.7464101622e+01 on the source, 2.7464101622e+01 on the grid` |
 | `example_remap3d` | `remap --n 12 64bricks_1khex.h5m remap3d.vtk` | `total 1.2894214008e+02 on the source, 1.2894214008e+02 on the grid` |
 | `example_refine`, `.np2` | `refine 64bricks_1khex.h5m refined.vtk` | `cells 1728 -> 13824, vertices 2197 -> 15625, 0 hanging` |
