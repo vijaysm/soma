@@ -35,6 +35,7 @@ option(SOMA_ENABLE_EXAMPLES "Build the example programs (requires SOMA_ENABLE_HD
 option(SOMA_ENABLE_MOAB_COMPAT "MOAB's API over SOMA meshes (soma::compat)" OFF)
 option(SOMA_ENABLE_KOKKOSKERNELS "KokkosSparse views of SOMA matrices (set KokkosKernels_ROOT)" OFF)
 option(SOMA_ENABLE_PETSC "PETSc matrices and vectors from SOMA's (set PETSC_DIR)" OFF)
+option(SOMA_ENABLE_ARBORX "ArborX's bounding volume hierarchy as the remap's search (set ArborX_ROOT)" OFF)
 option(SOMA_LO_64 "64-bit local ordinals (ABI-breaking)" OFF)
 option(SOMA_OFFSET_64 "64-bit CSR offsets (ABI-breaking)" OFF)
 option(SOMA_DEBUG "Device-side bounds and contract checks" OFF)
@@ -67,6 +68,14 @@ if(SOMA_ENABLE_KOKKOSKERNELS)
       "was built with")
   endif()
   find_package(KokkosKernels REQUIRED)
+endif()
+if(SOMA_ENABLE_ARBORX)
+  # ArborX finds the Kokkos it was built with when no Kokkos is found yet,
+  # which a fetched Kokkos is not.
+  if(SOMA_KOKKOS_SOURCE STREQUAL "fetched")
+    message(FATAL_ERROR "SOMA_ENABLE_ARBORX needs an installed Kokkos (Kokkos_ROOT), the one ArborX was built with")
+  endif()
+  find_package(ArborX REQUIRED)
 endif()
 if(SOMA_ENABLE_PETSC)
   if(NOT SOMA_ENABLE_MPI)
@@ -142,6 +151,9 @@ endif()
 if(SOMA_ENABLE_KOKKOSKERNELS)
   target_link_libraries(soma PUBLIC Kokkos::kokkoskernels)
 endif()
+if(SOMA_ENABLE_ARBORX)
+  target_link_libraries(soma PUBLIC ArborX::ArborX)
+endif()
 if(SOMA_ENABLE_PETSC)
   target_link_libraries(soma PUBLIC PkgConfig::PETSC)
 endif()
@@ -211,6 +223,6 @@ message(STATUS "SOMA ${PROJECT_VERSION}: Kokkos ${SOMA_KOKKOS_VERSION_FOUND}"
   " MPI=${SOMA_ENABLE_MPI} HDF5=${SOMA_ENABLE_HDF5} tests=${SOMA_ENABLE_TESTS}"
   " GPU-aware-MPI=${SOMA_GPU_AWARE_MPI_RESOLVED}"
   " MOAB-reference=${SOMA_ENABLE_MOAB_REFERENCE} MOAB-compat=${SOMA_ENABLE_MOAB_COMPAT}"
-  " KokkosKernels=${SOMA_ENABLE_KOKKOSKERNELS} PETSc=${SOMA_ENABLE_PETSC}"
+  " KokkosKernels=${SOMA_ENABLE_KOKKOSKERNELS} PETSc=${SOMA_ENABLE_PETSC} ArborX=${SOMA_ENABLE_ARBORX}"
   " LO64=${SOMA_LO_64}"
   " build=${CMAKE_BUILD_TYPE}")

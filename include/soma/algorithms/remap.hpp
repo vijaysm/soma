@@ -56,8 +56,10 @@
 // The meshes may be partitioned differently and need no ghosts. Each rank
 // shares the bounding box of its owned target cells (an allgather of P
 // boxes) and sends each owned source cell to every rank whose box it meets
-// (transport::route); there a GridIndex over the cells that arrived finds
-// the candidates for each owned target cell, whose overlaps are clipped. A
+// (transport::route); there a GridIndex (or, with RemapOptions::search,
+// ArborX's bounding volume hierarchy: the same candidates in the same order,
+// so the same operator bit for bit) over the cells that arrived finds the
+// candidates for each owned target cell, whose overlaps are clipped. A
 // row's entries are ordered by source gid, so the operator, and apply(), are
 // the same bit for bit on any partition and thread count. apply() replays
 // the routing for the source values: one exchange with the ranks found.
@@ -86,10 +88,17 @@
 
 namespace soma {
 
+// How the cells that arrived are searched: a uniform grid of bins
+// (GridIndex), or ArborX's bounding volume hierarchy (ArborXIndex, when SOMA
+// is built with SOMA_ENABLE_ARBORX).
+enum class SpatialSearch { grid, arborx };
+
 struct RemapOptions {
   // The merge tolerance (above): a length in the meshes' units, the same on
   // every rank.
   Real merge_tolerance = 1e-12;
+  // The same on every rank.
+  SpatialSearch search = SpatialSearch::grid;
 };
 
 namespace detail {
@@ -111,7 +120,7 @@ struct RemapPlan {
 
 // Collective (route, allgather); the flags are not agreed here.
 RemapPlan remap_plan(const Comm& comm, const Mesh<Kokkos::HostSpace>& source, const Mesh<Kokkos::HostSpace>& target,
-                     Real tolerance);
+                     Real tolerance, SpatialSearch search = SpatialSearch::grid);
 
 }  // namespace detail
 
@@ -124,18 +133,24 @@ class RemapOperator {
   // meshes are not both of dimension 2 or both of 3, have edits or
   // high-order nodes, or hold a cell other than a triangle, quad or polygon
   // (of at most 64 corners) in 2D, a tet, hex, prism or pyramid in 3D; if a
-  // cell is bad as above; or if the tolerance is not finite and positive or
-  // differs between ranks.
+  // cell is bad as above; if the tolerance is not finite and positive or
+  // differs between ranks; or if the search differs between ranks or is
+  // ArborX's in a SOMA built without it.
   RemapOperator(const Comm& comm, const Mesh<MemSpace>& source, const Mesh<MemSpace>& target,
                 const RemapOptions& options = {}) {
     // Agreed through a flag, as a NaN may drop out of a max on some ranks.
     const Real tol = options.merge_tolerance;
     const bool good = tol > 0 && Kokkos::isfinite(tol);
-    Real agree[3] = {good ? Real{0} : Real{1}, good ? tol : 0, good ? -tol : 0};
+    const auto search = static_cast<Real>(options.search);
+    Real agree[5] = {good ? Real{0} : Real{1}, good ? tol : 0, good ? -tol : 0, search, -search};
     comm.allreduce(std::span<Real>(agree), Op::max);
     if (agree[0] != 0 || agree[1] != -agree[2]) {
       throw std::invalid_argument("RemapOperator: the merge tolerance is not finite and positive, or differs between "
                                   "ranks");
+    }
+    if (agree[3] != -agree[4]) throw std::invalid_argument("RemapOperator: the search differs between ranks");
+    if (options.search == SpatialSearch::arborx && !SOMA_ENABLE_ARBORX) {
+      throw std::invalid_argument("RemapOperator: ArborX's search needs SOMA built with SOMA_ENABLE_ARBORX");
     }
     detail::RemapPlan p;
     {
@@ -155,7 +170,7 @@ class RemapOperator {
       Real flags[4] = {usable ? Real{0} : Real{1}, 0, 0, 0};
       comm.allreduce(std::span<Real>(flags, 1), Op::max);
       if (flags[0] != 0) throw std::invalid_argument("RemapOperator: a rank's source or target mesh has edits");
-      p = detail::remap_plan(comm, *hs, *ht, tol);
+      p = detail::remap_plan(comm, *hs, *ht, tol, options.search);
       flags[0] = p.supported ? 0 : 1;
       flags[1] = static_cast<Real>(p.bad_source);
       flags[2] = static_cast<Real>(p.bad_target);

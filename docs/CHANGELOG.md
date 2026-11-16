@@ -35,6 +35,9 @@ All notable changes to SOMA are recorded here. The format follows
   3.19 or later, real double scalars, through its pkg-config file under `PETSC_DIR` (and
   `PETSC_ARCH`). A PETSc that carries its own MOAB cannot be built with the MOAB reference.
   Both are replayed for consumers by `somaConfig.cmake`.
+- `SOMA_ENABLE_ARBORX=ON` finds ArborX (2.x, built with the installed Kokkos SOMA uses; a
+  fetched Kokkos is a configure error), links it publicly and sets `SOMA_ENABLE_ARBORX` in
+  `soma/config.hpp`.
 
 ### Runtime and Comm
 
@@ -634,6 +637,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   between hex grids of 24^3 and 23^3 cells takes 0.25 s instead of 5.0 s at one rank, hexes
   onto tets 1.1 s instead of 2.9 s; the overlaps are the same to rounding and the operator
   still does not depend on the partition or a cell's corner listing.
+- `soma::ArborXIndex<MemSpace>` (`soma/algorithms/arborx_index.hpp`, `SOMA_ENABLE_ARBORX`)
+  finds the pairs `GridIndex` finds, in its order, by ArborX's bounding volume hierarchy, and
+  `RemapOptions::search = SpatialSearch::arborx` makes `RemapOperator` use it: the same operator
+  bit for bit. The grid stays the default; between uniform grids the two take about the same
+  time (the clipping dominates). Asking for ArborX in a SOMA built without it, or a search that
+  differs between ranks, throws on every rank.
 - `examples/remap.cpp` remaps a cell field from a `.h5m` or SOMA mesh onto a grid of triangles
   or tets over its bounding box and prints both totals.
 - `soma::refine_uniform(comm, mesh, RefineOptions)` (`soma/algorithms/refine.hpp`) splits

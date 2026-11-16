@@ -11,8 +11,10 @@
 #include <cstring>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 #include <vector>
 
+#include "soma/algorithms/arborx_index.hpp"
 #include "soma/algorithms/convex_clip.hpp"
 #include "soma/algorithms/grid_index.hpp"
 #include "soma/algorithms/polygon.hpp"
@@ -250,7 +252,8 @@ void box_of(const Pieces& p, std::size_t c, Real* box) {
 
 }  // namespace
 
-RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host>& target, Real eps) {
+RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host>& target, Real eps,
+                     SpatialSearch search) {
   RemapPlan p;
   p.supported = supported_mesh(source) && supported_mesh(target) && source.dim() == target.dim();
   const int dim = target.dim();
@@ -381,8 +384,13 @@ RemapPlan remap_plan(const Comm& comm, const Mesh<Host>& source, const Mesh<Host
   for (std::size_t t = 0; t < static_cast<std::size_t>(nt); ++t) {
     for (std::size_t a = 0; a < 6; ++a) qbox(t, a) = tbox[6 * t + a];
   }
-  const GridIndex<Host> index(sbox, eps);
-  const auto pairs = index.query(qbox);
+  const auto pairs = [&] {
+#if SOMA_ENABLE_ARBORX
+    if (search == SpatialSearch::arborx) return ArborXIndex<Host>(sbox, eps).query(qbox);
+#endif
+    if (search != SpatialSearch::grid) throw std::invalid_argument("remap_plan: ArborX's search is not built");
+    return GridIndex<Host>(sbox, eps).query(qbox);
+  }();
   std::vector<Real> area(pairs.boxes.extent(0), 0);
   LO overflow = 0;
   // Piece i of a Pieces as a polygon or a tet.

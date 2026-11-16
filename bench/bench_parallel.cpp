@@ -30,7 +30,8 @@
 //     cells (quads, and triangles of an offset grid), their rows dealt to the
 //     ranks: RemapOperator built and applied; at one rank also MOAB's
 //     in-plane intersection of the two whole meshes; and n^3 hexes onto
-//     grids of tets and of hexes, SOMA alone;
+//     grids of tets and of hexes, SOMA alone; each operator also by ArborX's
+//     search when SOMA is built with it;
 //   * refine: n^3 hexes, and the same cubes as tets, refined once
 //     (refine_uniform); at one rank also MOAB's NestedRefine of the hexes;
 //     and the cells of odd gid alone (refine_marked): hexes with hanging
@@ -568,6 +569,11 @@ int main(int argc, char** argv) {
     area = comm.allreduce(area, soma::Op::sum);
     if (comm.rank() == 0 && !json) std::cout << "  remap: constant off by " << std::scientific << worst << ", area by " << area - 1 << std::defaultfloat << "\n";
     ok = agree(comm, worst <= 1e-12 && std::abs(area - 1) <= 1e-12) && ok;
+#if SOMA_ENABLE_ARBORX
+    const soma::RemapOptions by_tree{.search = soma::SpatialSearch::arborx};
+    runner.run("remap", "soma_remap_operator_arborx", quads, [&] { remap.reset(); },
+               [&] { remap.emplace(comm, source, target, by_tree); });
+#endif
     {
       // Volumes: n^3 hexes onto (n - 1)^3 cubes of tets (MOAB has no 3D intersection).
       const HostMesh hexes = volume_grid(comm, n, false), tets = volume_grid(comm, std::max(1, n - 1), true);
@@ -588,6 +594,12 @@ int main(int argc, char** argv) {
         for (soma::Offset e = volume->offsets()(t); e < volume->offsets()(t + 1); ++e) filled += volume->overlap()(e);
       }
       ok = agree(comm, std::abs(comm.allreduce(filled, soma::Op::sum) - 1) <= 1e-12) && ok;
+#if SOMA_ENABLE_ARBORX
+      runner.run("remap", "soma_remap_operator_3d_arborx", cells, [&] { volume.reset(); },
+                 [&] { volume.emplace(comm, hexes, tets, by_tree); });
+      runner.run("remap", "soma_remap_operator_3d_hex_arborx", cells, [&] { volume.reset(); },
+                 [&] { volume.emplace(comm, hexes, coarse, by_tree); });
+#endif
     }
     if (comm.size() == 1) {
       // MOAB: both meshes in sets of one Core, intersected.

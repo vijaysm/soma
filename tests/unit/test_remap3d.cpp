@@ -246,6 +246,30 @@ TEST(Remap3d, DistributedRemapsAreTheSerialOneBitForBit) {
   }
 }
 
+// ArborX's search finds the same candidates in the same order: the same
+// operator bit for bit. Without ArborX, asking for it throws on every rank.
+TEST(Remap3d, ArborXSearchGivesTheSameOperator) {
+  const Comm c = Comm::world();
+  int k = 0;
+  for (const auto& [s, t] : cases()) {
+    SCOPED_TRACE(testing::Message() << "case " << k++);
+    const soma::HostMesh source = build(c, s, 0), target = build(c, t, 1);
+#if SOMA_ENABLE_ARBORX
+    const Remap a(c, source, target), b(c, source, target, {.search = soma::SpatialSearch::arborx});
+    ASSERT_EQ(a.offsets().extent(0), b.offsets().extent(0));
+    ASSERT_EQ(a.overlap().extent(0), b.overlap().extent(0));
+    LO differ = 0;
+    for (std::size_t r = 0; r < a.offsets().extent(0); ++r) differ += a.offsets()(r) == b.offsets()(r) ? 0 : 1;
+    for (std::size_t e = 0; e < a.overlap().extent(0); ++e) {
+      differ += bits(a.overlap()(e)) == bits(b.overlap()(e)) && a.columns()(e) == b.columns()(e) ? 0 : 1;
+    }
+    EXPECT_EQ(c.allreduce(static_cast<Real>(differ), soma::Op::sum), 0);
+#else
+    EXPECT_THROW(Remap(c, source, target, {.search = soma::SpatialSearch::arborx}), std::invalid_argument);
+#endif
+  }
+}
+
 // Cells whose corners are listed from another corner (the same cell, turned
 // the same way) give the same operator bit for bit.
 TEST(Remap3d, TheCornerOrderOfACellDoesNotMatter) {
