@@ -63,8 +63,9 @@ there without breaking a local build.
 
 The pages under `docs/reference/api/` hold the API reference. Each is one public header's page: its
 name, a line on what it provides, and a `doxygenfile` directive. When Sphinx starts,
-`docs/conf.py` runs Doxygen (`docs/Doxyfile`) into `docs/_build/doxygen`, unless that XML is
-newer than every header, and Breathe renders each page from it. So a local build needs Doxygen on
+`docs/conf.py` runs Doxygen (`docs/Doxyfile`, from `docs/`) into `docs/_build/doxygen`, unless
+that XML is current (newer than every header, and made from the same headers, Doxyfile and Doxygen
+version), and Breathe renders each page from it. So a local build needs Doxygen on
 the `PATH`; the version the docs are checked with is 1.17.0, which Read the Docs and the workflow
 download and verify. Any Doxygen warning stops the build: in a comment, write code, paths and
 placeholders such as `<NAME>` in backticks.

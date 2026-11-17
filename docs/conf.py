@@ -8,10 +8,10 @@
 #   sphinx-build -W -b html docs docs/_build/html
 #
 # The API reference needs Doxygen (docs/Doxyfile): the build runs it into
-# docs/_build/doxygen first, unless its XML is newer than every header.
+# docs/_build/doxygen first, unless its XML is current (see _run_doxygen).
 
+import hashlib
 import logging
-import os
 import re
 import shutil
 import subprocess
@@ -62,26 +62,39 @@ pygments_style = "default"
 
 
 def _run_doxygen():
-    """Doxygen's XML for the reference, made again when a header or the Doxyfile is newer.
-    Any Doxygen warning (prose it misreads, as <NAME> outside a code span) is an error."""
+    """Doxygen's XML for the reference, made again unless it is current: no header newer than it,
+    and the same headers, Doxyfile and Doxygen as last time (a stamp beside it records those, so a
+    header renamed or removed counts). Any Doxygen warning (prose it misreads, as <NAME> outside a
+    code span) is an error."""
     docs = root / "docs"
-    index = _doxygen_out / "xml" / "index.xml"
-    inputs = [docs / "Doxyfile", *(root / "include" / "soma").rglob("*.hpp")]
-    log = _doxygen_out / "warnings.log"
-    if not (index.exists() and index.stat().st_mtime >= max(p.stat().st_mtime for p in inputs)):
-        _doxygen(docs)
-    warnings = log.read_text().strip() if log.exists() else ""
-    if warnings:
-        raise RuntimeError(f"Doxygen warns about the headers (put code in `backticks`):\n{warnings}")
-
-
-def _doxygen(docs):
     doxygen = shutil.which("doxygen")
     if doxygen is None:
         raise RuntimeError("the API reference needs Doxygen (see docs/developer/writing-docs.md)")
-    _doxygen_out.mkdir(parents=True, exist_ok=True)
-    env = {**os.environ, "SOMA_DOXYGEN_OUTPUT": str(_doxygen_out)}
-    subprocess.run([doxygen, "Doxyfile"], cwd=docs, check=True, env=env)
+    headers = sorted((root / "include" / "soma").rglob("*.hpp"))
+    version = subprocess.run([doxygen, "--version"], capture_output=True, text=True, check=True).stdout.strip()
+    stamp_text = "\n".join([
+        version,
+        hashlib.sha256((docs / "Doxyfile").read_bytes()).hexdigest(),
+        *(h.relative_to(root).as_posix() for h in headers),
+    ])
+    index = _doxygen_out / "xml" / "index.xml"
+    stamp = _doxygen_out / "inputs.stamp"
+    current = (
+        index.exists()
+        and stamp.exists()
+        and stamp.read_text() == stamp_text
+        and index.stat().st_mtime >= max(h.stat().st_mtime for h in headers)
+    )
+    if not current:
+        # A removed header's XML stays behind (Breathe's cache of the build reads it), unused:
+        # the index Doxygen writes again lists only the headers there are.
+        _doxygen_out.mkdir(parents=True, exist_ok=True)
+        subprocess.run([doxygen, "Doxyfile"], cwd=docs, check=True)
+        stamp.write_text(stamp_text)
+    log = _doxygen_out / "warnings.log"
+    warnings = log.read_text().strip() if log.exists() else ""
+    if warnings:
+        raise RuntimeError(f"Doxygen warns about the headers (put code in `backticks`):\n{warnings}")
 
 
 class _NamespaceRepeat(logging.Filter):

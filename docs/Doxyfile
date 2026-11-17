@@ -2,9 +2,9 @@
 # Copyright (c) 2022-2026, Vijay Mahadevan.
 
 # Doxygen for SOMA's API reference: XML only, read by Breathe when Sphinx
-# builds the site (docs/conf.py runs Doxygen, from docs/, with
-# SOMA_DOXYGEN_OUTPUT set to a directory beside the HTML). The headers'
-# comments are Doxygen comments (docs/developer/contributing.md).
+# builds the site. docs/conf.py runs it from docs/ (as "doxygen Doxyfile" by
+# hand does too), into docs/_build/doxygen. The headers' comments are Doxygen
+# comments (docs/developer/contributing.md).
 
 PROJECT_NAME           = SOMA
 INPUT                  = ../include/soma
@@ -15,7 +15,7 @@ EXCLUDE_PATTERNS       = */compat/dropin/* */compat/serial_mpi/*
 EXCLUDE_SYMBOLS        = *::detail *::detail::* detail
 STRIP_FROM_PATH        = ../include
 STRIP_FROM_INC_PATH    = ../include
-OUTPUT_DIRECTORY       = $(SOMA_DOXYGEN_OUTPUT)
+OUTPUT_DIRECTORY       = _build/doxygen
 GENERATE_HTML          = NO
 GENERATE_LATEX         = NO
 GENERATE_XML           = YES
@@ -39,4 +39,4 @@ PREDEFINED             = KOKKOS_INLINE_FUNCTION= \
 QUIET                  = YES
 WARN_IF_UNDOCUMENTED   = NO
 WARN_IF_DOC_ERROR      = YES
-WARN_LOGFILE           = $(SOMA_DOXYGEN_OUTPUT)/warnings.log
+WARN_LOGFILE           = _build/doxygen/warnings.log
