@@ -67,6 +67,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   target_compile_options(test_fem_elements PRIVATE -ffp-contract=on)
 endif()
 soma_add_test(test_fem_space SOURCES unit/test_fem_space.cpp RANKS 1 2 3 4 5 7 8)
+soma_add_test(test_sem_gll SOURCES unit/test_sem_gll.cpp)
 soma_add_test(test_cg SOURCES unit/test_cg.cpp RANKS 1 2 3 4 5 7 8)
 # Reproducible CG is the same bit for bit at any number of threads.
 add_test(NAME test_cg.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_cg> -DFILTER=Cg.SolutionDigests
