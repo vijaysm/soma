@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2022-2026, Vijay Mahadevan.
+
+# Doxygen for SOMA's API reference: XML only, read by Breathe when Sphinx
+# builds the site (docs/conf.py runs Doxygen, from docs/, with
+# SOMA_DOXYGEN_OUTPUT set to a directory beside the HTML). The headers'
+# comments are Doxygen comments (docs/developer/contributing.md).
+
+PROJECT_NAME           = SOMA
+INPUT                  = ../include/soma
+RECURSIVE              = YES
+FILE_PATTERNS          = *.hpp
+# The MOAB and MPI stand-ins keep those libraries' names; not SOMA's API.
+EXCLUDE_PATTERNS       = */compat/dropin/* */compat/serial_mpi/*
+EXCLUDE_SYMBOLS        = *::detail *::detail::* detail
+STRIP_FROM_PATH        = ../include
+STRIP_FROM_INC_PATH    = ../include
+OUTPUT_DIRECTORY       = $(SOMA_DOXYGEN_OUTPUT)
+GENERATE_HTML          = NO
+GENERATE_LATEX         = NO
+GENERATE_XML           = YES
+XML_PROGRAMLISTING     = NO
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+MARKDOWN_SUPPORT       = YES
+AUTOLINK_SUPPORT       = NO
+JAVADOC_AUTOBRIEF      = NO
+# Kokkos's function markers mean nothing to the reference; the optional
+# features' headers are read as if enabled.
+ENABLE_PREPROCESSING   = YES
+MACRO_EXPANSION        = YES
+EXPAND_ONLY_PREDEF     = YES
+PREDEFINED             = KOKKOS_INLINE_FUNCTION= \
+                         KOKKOS_FUNCTION= \
+                         KOKKOS_FORCEINLINE_FUNCTION= \
+                         SOMA_ENABLE_MPI=1 \
+                         SOMA_ENABLE_HDF5=1
+QUIET                  = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+WARN_LOGFILE           = $(SOMA_DOXYGEN_OUTPUT)/warnings.log
