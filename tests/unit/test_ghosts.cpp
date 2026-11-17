@@ -126,6 +126,18 @@ TEST(Ghosts, TheMeshRecordsItsLayers) {
   EXPECT_EQ(m.ghost_bridge_dim(), 0);
 }
 
+// Deriving distributed edges after the ghosts reorders the mesh's entities;
+// the mesh still records its ghosts.
+TEST(Ghosts, DistributedEdgesKeepTheRecord) {
+  const Comm c = Comm::world();
+  soma::HostMesh m = soma::build_local_part(c, local_builder(cell_ranks(c), c.rank()));
+  m.add_ghosts(c, soma::GhostOptions{1, 0, false});
+  soma::build_distributed_adjacencies(c, m, soma::AdjacencyRequest{}.add(m.dim(), 1));
+  ASSERT_GT(m.count(1), 0);
+  EXPECT_EQ(m.ghost_layers(), 1);
+  EXPECT_EQ(m.ghost_bridge_dim(), 0);
+}
+
 TEST(Ghosts, BadOptionsThrowOnEveryRank) {
   const Comm c = Comm::world();
   const soma::HostMesh m = soma::build_local_part(c, local_builder(cell_ranks(c), c.rank()));
