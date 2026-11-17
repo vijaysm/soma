@@ -174,4 +174,33 @@ TEST(CApiEdit, ApplyDropsTheConnectivityCopy) {
   soma_mesh_free(m);
 }
 
+TEST(CApiEdit, ClonesShareTheEditedMesh) {
+  // A clone is the same mesh: an edit applied through the original is seen
+  // through the clone, whose connectivity copy is dropped too.
+  soma_mesh_t* m = quads();
+  soma_mesh_t* c = nullptr;
+  ASSERT_EQ(soma_mesh_clone(m, &c), SOMA_OK);
+  const soma_lo_t* conn1 = nullptr;
+  const soma_offset_t* off1 = nullptr;
+  soma_lo_t n = 0;
+  ASSERT_EQ(soma_mesh_conn1(c, 2, &conn1, &off1, &n), SOMA_OK);
+  ASSERT_EQ(n, 4);
+  soma_edit_t* e = nullptr;
+  ASSERT_EQ(soma_edit_create(m, &e), SOMA_OK);
+  const soma_lo_t corners[4] = {0, 1, 4, 3};
+  soma_lo_t q = -1;
+  ASSERT_EQ(soma_edit_add_elements(e, SOMA_QUAD, 4, corners, 0, nullptr, 0, &q), SOMA_OK);
+  soma_lo_t added[4], removed[4];
+  ASSERT_EQ(soma_edit_apply(e, added, removed, nullptr), SOMA_OK);
+  soma_lo_t count = 0;
+  EXPECT_EQ(soma_mesh_count(c, 2, &count), SOMA_OK);
+  EXPECT_EQ(count, 5);
+  ASSERT_EQ(soma_mesh_conn1(c, 2, &conn1, &off1, &n), SOMA_OK);
+  ASSERT_EQ(n, 5);
+  for (int k = 0; k < 4; ++k) EXPECT_EQ(conn1[off1[4] - 1 + k], corners[k] + 1);
+  soma_edit_free(e);
+  soma_mesh_free(m);
+  soma_mesh_free(c);
+}
+
 }  // namespace

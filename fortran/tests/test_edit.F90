@@ -18,7 +18,7 @@ program test_edit
   call soma_initialize()
   block
     type(soma_comm) :: self
-    type(soma_mesh) :: m
+    type(soma_mesh) :: m, alias
     type(soma_edit) :: e
     type(soma_renumbering) :: r
     integer(soma_lo) :: v, q, first
@@ -30,6 +30,9 @@ program test_edit
 
     self = soma_comm_self()
     m = soma_box_mesh(self, 2, 2, 1, element=SOMA_QUAD)  ! 9 vertices, 4 quads
+    alias = m  ! the same mesh: it sees every edit made through m
+    call alias%conn(2, conn, off)
+    call check(size(off) == 5, 'four quads through the alias')
     e = soma_edit(m)
     call e%set_compress_threshold(1d0)
     call e%add_vertices(reshape([3d0, 3d0, 0d0], [3, 1]), gids=[100_soma_go], first=v)
@@ -46,6 +49,9 @@ program test_edit
     x => m%coords()
     call check(all(conn(off(5):off(6) - 1) == [5, 6, 9, 10]), 'the new quad''s corners, 1-based')
     call check(all(x(conn(off(6) - 1), :) == [3d0, 3d0, 0d0]), 'x(conn(k), :) of the added vertex')
+    call alias%conn(2, conn, off)
+    call check(size(off) == 6, 'the alias sees the added quad')
+    call check(all(conn(off(5):off(6) - 1) == [5, 6, 9, 10]), 'and its corners')
 
     r = m%compress()
     new_ids = r%new_ids(2)
