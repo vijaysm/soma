@@ -32,6 +32,7 @@ set(SOMA_KOKKOS_GPU "AUTO" CACHE STRING
 set_property(CACHE SOMA_KOKKOS_GPU PROPERTY STRINGS AUTO NONE CUDA HIP SYCL)
 option(SOMA_ENABLE_MOAB_REFERENCE "Build MOAB reference tests and benchmarks" OFF)
 option(SOMA_ENABLE_EXAMPLES "Build the example programs (requires SOMA_ENABLE_HDF5)" OFF)
+option(SOMA_ENABLE_PYTHON "Python bindings (nanobind; set Python_EXECUTABLE to the interpreter to build for)" OFF)
 option(SOMA_ENABLE_DOC_FIGURES "Build the program that makes the documentation figures' data (requires MPI and HDF5)"
        OFF)
 option(SOMA_ENABLE_MOAB_COMPAT "MOAB's API over SOMA meshes (soma::compat)" OFF)
@@ -136,6 +137,10 @@ endif()
 
 add_library(soma ${SOMA_SOURCES})
 add_library(soma::soma ALIAS soma)
+if(SOMA_ENABLE_PYTHON)
+  # The Python extension module links the library into a shared object.
+  set_target_properties(soma PROPERTIES POSITION_INDEPENDENT_CODE ON)
+endif()
 target_compile_features(soma PUBLIC cxx_std_20)
 target_include_directories(soma PUBLIC
   $<BUILD_INTERFACE:${PROJECT_SOURCE_DIR}/include>
@@ -206,6 +211,10 @@ endif()
 
 if(SOMA_ENABLE_MOAB_REFERENCE)
   add_subdirectory(bench)
+endif()
+
+if(SOMA_ENABLE_PYTHON)
+  add_subdirectory(python)
 endif()
 
 if(SOMA_ENABLE_EXAMPLES)
