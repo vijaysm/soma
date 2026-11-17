@@ -46,12 +46,10 @@ add_custom_target(soma_python_files ALL DEPENDS ${soma_python_copies})
 add_dependencies(_soma soma_python_files)
 
 if(SOMA_INSTALL)
-  if(NOT SOMA_PYTHON_INSTALL_DIR)
-    execute_process(
-      COMMAND "${Python_EXECUTABLE}" -c "import sysconfig; print(sysconfig.get_path('platlib'))"
-      OUTPUT_VARIABLE soma_platlib OUTPUT_STRIP_TRAILING_WHITESPACE)
-    set(SOMA_PYTHON_INSTALL_DIR "${soma_platlib}" CACHE PATH "Directory the Python package soma is installed in")
-  endif()
+  # Relative to the install prefix by default, so cmake --install --prefix P writes only under P;
+  # give an absolute path (such as the interpreter's site-packages) to install there instead.
+  set(SOMA_PYTHON_INSTALL_DIR "lib/python${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}/site-packages"
+      CACHE STRING "Directory the Python package soma is installed in (relative: under the install prefix)")
   install(TARGETS _soma LIBRARY DESTINATION "${SOMA_PYTHON_INSTALL_DIR}/soma")
   install(FILES ${soma_python_sources} DESTINATION "${SOMA_PYTHON_INSTALL_DIR}/soma")
 endif()
@@ -83,6 +81,14 @@ if(SOMA_ENABLE_TESTS)
   soma_add_python_test(tests/test_parallel.py RANKS 1 2 3 4)
   soma_add_python_test(tests/test_algorithms.py RANKS 1 2 3 4)
   soma_add_python_test(tests/test_vis.py RANKS 1 2)
+  # cmake --install --prefix P puts the package under P and nowhere else.
+  if(SOMA_INSTALL)
+    add_test(NAME python.install
+      COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_install.py" "${CMAKE_COMMAND}"
+              "${CMAKE_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/install_test"
+              "${Python_VERSION_MAJOR}.${Python_VERSION_MINOR}")
+    set_tests_properties(python.install PROPERTIES TIMEOUT 120)
+  endif()
   # The pipeline example in C++ and in Python: the same digests, files that read back alike.
   if(SOMA_ENABLE_EXAMPLES AND SOMA_ENABLE_MPI)
     foreach(np 1 3)

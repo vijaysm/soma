@@ -20,9 +20,11 @@ cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/kokkos -DSOMA_ENABLE_MPI=ON -DS
 cmake --build build -j
 ```
 
-The package is then importable from the build tree with `PYTHONPATH=build/python`, and
-`cmake --install build` copies it to the interpreter's `site-packages` (set
-`SOMA_PYTHON_INSTALL_DIR` to choose another directory). pyvista is optional; only
+The package is then importable from the build tree with `PYTHONPATH=build/python`.
+`cmake --install build` puts it under the install prefix, in `lib/python3.X/site-packages/soma`
+(add that directory to `PYTHONPATH`); to install into the interpreter's own `site-packages`, set
+`SOMA_PYTHON_INSTALL_DIR` to it, for example
+`-DSOMA_PYTHON_INSTALL_DIR=$(python -c "import sysconfig; print(sysconfig.get_path('platlib'))")`. pyvista is optional; only
 `soma.to_pyvista` needs it.
 
 ## Running under MPI
