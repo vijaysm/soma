@@ -24,4 +24,4 @@ configure_file("${PROJECT_SOURCE_DIR}/include/soma/c/soma_config.h.in"
 add_library(soma_c runtime.cpp mesh.cpp edit.cpp fields.cpp io.cpp parallel.cpp algorithms.cpp)
 add_library(soma::soma_c ALIAS soma_c)
 # soma links MPI::MPI_CXX publicly, which carries mpi.h for the C header.
-target_link_libraries(soma_c PUBLIC soma PRIVATE soma_warnings)
+target_link_libraries(soma_c PUBLIC soma PRIVATE $<BUILD_INTERFACE:soma_warnings>)

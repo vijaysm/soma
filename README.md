@@ -21,6 +21,12 @@ Python: with `-DSOMA_ENABLE_PYTHON=ON` (nanobind, NumPy, and mpi4py built agains
 the package `soma` runs SOMA from scripts under `mpiexec`, with NumPy arrays over the mesh's own
 memory; see [Python](docs/getting-started/python.md).
 
+Fortran and C: with `-DSOMA_ENABLE_FORTRAN=ON` (or `-DSOMA_ENABLE_C_API=ON` for C alone), the
+Fortran 2008 module `soma` and the C header `soma/c/soma.h` offer the same operations, with
+1-based ids and pointers into the mesh's memory from Fortran; see
+[Fortran and C](docs/getting-started/fortran.md) and, for codes using iMOAB,
+[From iMOAB](docs/getting-started/from-imoab.md).
+
 Documentation: the site under [docs/](docs/index.md) (Sphinx with MyST Markdown, published on
 Read the Docs through `.readthedocs.yaml`), with an API reference that Doxygen generates from the
 headers' comments. To build it locally (Doxygen on the `PATH`; 1.17.0 is the version checked):

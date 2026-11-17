@@ -722,6 +722,26 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - `soma::testing::box_mesh(comm, spec)` splits a box across the ranks in layers along its last
   axis; `soma::owner_ranks(comm, mesh, d)` gives the owning rank of each entity.
 
+### Fortran bindings
+
+- A C API, `soma/c/soma.h` (`SOMA_ENABLE_C_API=ON`, library `soma_c`): opaque reference-counted
+  handles, `int` status codes with a per-thread last message, and 0-based ids, over the same
+  operations as the Python package. Collective calls agree on their arguments, so a bad argument
+  on one rank fails the call on every rank with the same status.
+- The Fortran 2008 module `soma` (`SOMA_ENABLE_FORTRAN=ON`, library `soma_fortran`) over the C
+  API: derived types with type-bound procedures and finalizers, 1-based ids, coordinates and
+  fields as pointers into the mesh, connectivity as a 1-based copy made once per topology change,
+  and an optional `ierr` on every call (without it, a failure stops the program with SOMA's
+  message).
+- Coordinates are shared as `x(n, 3)`; `get_coords` and `set_coords` copy to and from an
+  interleaved `xyz(3, n)`, and `get_field` and `set_field` do the same for fields.
+- `find_package(soma COMPONENTS c fortran)` gives `soma::soma_c` and `soma::soma_fortran`; the
+  module files install to `include/soma/fortran` (test `packaging.c_fortran`).
+- `fortran/examples/pipeline.F90` takes the steps of `examples/pipeline.cpp` and prints the same
+  digests, to the last bit (test `fortran.pipeline`).
+- The page "From iMOAB" places each iMOAB function of MOAB 5.6.0 on SOMA's. The coupler calls
+  (send and receive, communication graphs, coverage, map files) are not in this release.
+
 ### Testing
 
 - `policy.device_lambdas` fails when a test body holds a `KOKKOS_LAMBDA` (CUDA refuses extended

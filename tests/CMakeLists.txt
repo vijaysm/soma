@@ -333,4 +333,17 @@ if(SOMA_INSTALL)
       -DOUTPUT=${SOMA_APP_OUTPUT} -DENABLE_MPI=${SOMA_ENABLE_MPI} -DMPIEXEC=${MPIEXEC_EXECUTABLE}
       -P ${PROJECT_SOURCE_DIR}/tests/packaging/run_example_app.cmake)
   set_tests_properties(packaging.example_app PROPERTIES TIMEOUT 300)
+  # A C and a Fortran program against the installed C API and Fortran module.
+  if(SOMA_ENABLE_FORTRAN)
+    add_test(NAME packaging.c_fortran
+      COMMAND ${CMAKE_COMMAND}
+        -DSOMA_BINARY_DIR=${PROJECT_BINARY_DIR} -DSOMA_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+        -DSCRATCH_DIR=${PROJECT_BINARY_DIR}/c_fortran_test
+        -DBUILD_TYPE=$<CONFIG> -DGENERATOR=${CMAKE_GENERATOR} -DMAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
+        -DC_COMPILER=${CMAKE_C_COMPILER} -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
+        -DFortran_COMPILER=${CMAKE_Fortran_COMPILER}
+        -DPREFIX_PATH=${SOMA_PACKAGING_PREFIX_PATH} -DMPI_HOME=${MPI_HOME}
+        -P ${PROJECT_SOURCE_DIR}/tests/packaging/run_c_fortran_test.cmake)
+    set_tests_properties(packaging.c_fortran PROPERTIES TIMEOUT 300 ENVIRONMENT OMP_NUM_THREADS=1)
+  endif()
 endif()
