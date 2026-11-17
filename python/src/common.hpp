@@ -15,11 +15,14 @@
 #include <cstdint>
 #include <memory>
 #include <utility>
+#include <vector>
 
 #include <nanobind/nanobind.h>
 #include <nanobind/ndarray.h>
 
 #include <Kokkos_Core.hpp>
+
+#include "soma/core/mesh.hpp"
 
 namespace soma_py {
 
@@ -73,7 +76,25 @@ nb::ndarray<nb::numpy, T> view_array(const View& view) {
                                    owner, strides.data());
 }
 
+/// A NumPy array owning a vector's elements (a copy made by the caller).
+template <class T>
+nb::ndarray<nb::numpy, T> vector_array(std::vector<T>&& values) {
+  auto* holder = new std::vector<T>(std::move(values));
+  nb::capsule owner(holder, [](void* p) noexcept { delete static_cast<std::vector<T>*>(p); });
+  const std::size_t n = holder->size();
+  return nb::ndarray<nb::numpy, T>(holder->data(), 1, &n, owner);
+}
+
+/// A mesh owned by Python: the C++ mesh behind a guard (above).
+struct PyMesh {
+  Guarded<soma::HostMesh> guard;
+  explicit PyMesh(soma::HostMesh&& m) : guard(std::make_unique<soma::HostMesh>(std::move(m))) {}
+  soma::HostMesh& get() noexcept { return *guard.value; }
+  const soma::HostMesh& get() const noexcept { return *guard.value; }
+};
+
 void bind_runtime(nb::module_& m);
+void bind_mesh(nb::module_& m);
 
 }  // namespace soma_py
 
