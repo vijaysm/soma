@@ -4,11 +4,16 @@
 #include "soma/testing/box_mesh.hpp"
 
 #include <cmath>
+#include <cstdint>
+#include <exception>
 #include <limits>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+
+#include "soma/parallel/distributed.hpp"
 
 namespace soma::testing {
 
@@ -87,7 +92,12 @@ BoxCounts box_counts(const BoxSpec& spec) {
   return c;
 }
 
-HostMesh box_mesh(const BoxSpec& spec) {
+namespace {
+
+// The builder of the elements in layers [first, last) along the box's last
+// axis (k for hex and tet, j for quad and tri) and of the vertices of layers
+// [first, last]; none when first == last.
+MeshBuilder box_builder(const BoxSpec& spec, std::int64_t first, std::int64_t last) {
   const BoxCounts counts = box_counts(spec);
   const Topology t = spec.element;
   const bool solid = t == Topology::hex || t == Topology::tet;
@@ -108,6 +118,8 @@ HostMesh box_mesh(const BoxSpec& spec) {
   xyz.reserve(3 * nv);
   for (std::int64_t k = 0; k < pz; ++k) {
     for (std::int64_t j = 0; j < py; ++j) {
+      const std::int64_t layer = solid ? k : j;
+      if (first == last || layer < first || layer > last) continue;
       for (std::int64_t i = 0; i < px; ++i) {
         vertex_gids.push_back(vertex(i, j, k));
         xyz.push_back(coordinate(spec.lx, i, nx));
@@ -123,6 +135,8 @@ HostMesh box_mesh(const BoxSpec& spec) {
   conn.reserve(static_cast<std::size_t>(counts.connectivity));
   for (std::int64_t k = 0; k < (solid ? nz : 1); ++k) {
     for (std::int64_t j = 0; j < ny; ++j) {
+      const std::int64_t layer = solid ? k : j;
+      if (layer < first || layer >= last) continue;
       for (std::int64_t i = 0; i < nx; ++i) {
         const std::int64_t cell = i + nx * (j + ny * k);
         const GO v0 = vertex(i, j, k);
@@ -167,7 +181,35 @@ HostMesh box_mesh(const BoxSpec& spec) {
   MeshBuilder builder(solid ? 3 : 2);
   builder.add_vertices(vertex_gids, xyz);
   builder.add_elements(t, element_gids, conn);
-  return std::move(builder).build(spec.ordering);
+  return builder;
+}
+
+}  // namespace
+
+HostMesh box_mesh(const BoxSpec& spec) {
+  const bool solid = spec.element == Topology::hex || spec.element == Topology::tet;
+  return box_builder(spec, 0, solid ? spec.nz : spec.ny).build(spec.ordering);
+}
+
+HostMesh box_mesh(const Comm& comm, const BoxSpec& spec) {
+  const bool solid = spec.element == Topology::hex || spec.element == Topology::tet;
+  const std::int64_t n = solid ? spec.nz : spec.ny;
+  const std::int64_t first = n * comm.rank() / comm.size();
+  const std::int64_t last = n * (comm.rank() + 1) / comm.size();
+  std::exception_ptr failure;
+  std::optional<MeshBuilder> builder;
+  try {
+    builder.emplace(box_builder(spec, first, last));
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  // A bad spec throws on every rank alike; agreeing keeps any rank from
+  // entering build_local_part alone.
+  if (comm.allreduce(static_cast<std::int32_t>(failure != nullptr), Op::max) != 0) {
+    if (failure) std::rethrow_exception(failure);
+    throw std::invalid_argument("box_mesh: the box specification failed on another rank");
+  }
+  return build_local_part(comm, std::move(*builder), spec.ordering);
 }
 
 }  // namespace soma::testing

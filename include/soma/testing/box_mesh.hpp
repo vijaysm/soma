@@ -30,6 +30,7 @@
 #include "soma/core/mesh_builder.hpp"
 #include "soma/core/topology.hpp"
 #include "soma/core/types.hpp"
+#include "soma/parallel/comm.hpp"
 
 namespace soma::testing {
 
@@ -59,6 +60,14 @@ BoxCounts box_counts(const BoxSpec& spec);
 /// spec.ordering, so under Ordering::file the vertex and element local ids
 /// follow the gids.
 HostMesh box_mesh(const BoxSpec& spec);
+
+/// Collective: the same box, split across the ranks of `comm` by element
+/// layers along its last axis (z for hex and tet, y for quad and tri). Rank r
+/// of P gets layers [n r / P, n (r + 1) / P), so ranks get none when P > n,
+/// and the part is built by build_local_part with spec.ordering. Gids and
+/// coordinates are those of box_mesh(spec). Throws box_counts' exceptions on
+/// every rank.
+HostMesh box_mesh(const Comm& comm, const BoxSpec& spec);
 
 }  // namespace soma::testing
 

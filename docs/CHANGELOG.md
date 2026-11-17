@@ -706,6 +706,22 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   after each round, and prints the counts, the hanging vertices and the error of a linear
   vertex field.
 
+### Python bindings
+
+- The package `soma` (`SOMA_ENABLE_PYTHON=ON`, nanobind) runs SOMA from Python scripts under
+  `mpiexec`: building meshes from arrays and boxes, queries, edits, fields, files, partitioning,
+  migration, ghosts and halo exchange, Laplacian smoothing, refinement, remap, and a pyvista view
+  of a rank's part. Communicators come from mpi4py, which must use SOMA's MPI library (checked
+  at import).
+- Mesh and field arrays are NumPy arrays over SOMA's memory, without copies; each keeps its
+  memory alive, and arrays taken before an in-place change keep the old values.
+- At exit the module finalizes Kokkos and leaves the memory of objects still alive to the
+  operating system.
+- `examples/pipeline.cpp` and `python/examples/pipeline.py` take the same steps and print the same
+  digests, to the last bit (test `python.pipeline`).
+- `soma::testing::box_mesh(comm, spec)` splits a box across the ranks in layers along its last
+  axis; `soma::owner_ranks(comm, mesh, d)` gives the owning rank of each entity.
+
 ### Testing
 
 - `policy.device_lambdas` fails when a test body holds a `KOKKOS_LAMBDA` (CUDA refuses extended

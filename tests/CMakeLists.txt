@@ -56,6 +56,7 @@ soma_add_test(test_point_match SOURCES unit/test_point_match.cpp RANKS 1 2 3 4 5
 soma_add_test(test_merge SOURCES unit/test_merge.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_point_key SOURCES unit/test_point_key.cpp)
 soma_add_test(test_distributed_mesh SOURCES unit/test_distributed_mesh.cpp RANKS 1 2 3 4 5 7 8)
+soma_add_test(test_box_mesh_parallel SOURCES unit/test_box_mesh_parallel.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_migrate SOURCES unit/test_migrate.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_ghosts SOURCES unit/test_ghosts.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_fem_elements SOURCES unit/test_fem_elements.cpp)

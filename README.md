@@ -17,6 +17,10 @@ Without an installed Kokkos, configure with `-DSOMA_FETCH_KOKKOS=ON` to download
 Threads when OpenMP is unavailable, and a GPU backend chosen by `SOMA_KOKKOS_GPU`
 (`AUTO`, `NONE`, `CUDA`, `HIP`, `SYCL`). Any `Kokkos_*` option you pass wins over these defaults.
 
+Python: with `-DSOMA_ENABLE_PYTHON=ON` (nanobind, NumPy, and mpi4py built against SOMA's MPI),
+the package `soma` runs SOMA from scripts under `mpiexec`, with NumPy arrays over the mesh's own
+memory; see [Python](docs/getting-started/python.md).
+
 Documentation: the site under [docs/](docs/index.md) (Sphinx with MyST Markdown, published on
 Read the Docs through `.readthedocs.yaml`), with an API reference that Doxygen generates from the
 headers' comments. To build it locally (Doxygen on the `PATH`; 1.17.0 is the version checked):
