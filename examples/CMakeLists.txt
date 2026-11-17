@@ -14,6 +14,8 @@ add_executable(remap remap.cpp)
 target_link_libraries(remap PRIVATE soma soma_warnings)
 add_executable(refine refine.cpp)
 target_link_libraries(refine PRIVATE soma soma_warnings)
+add_executable(pipeline pipeline.cpp)
+target_link_libraries(pipeline PRIVATE soma soma_warnings)
 
 if(SOMA_ENABLE_TESTS)
   set(in "${PROJECT_SOURCE_DIR}/data/64bricks_1khex.h5m")

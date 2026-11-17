@@ -83,6 +83,17 @@ if(SOMA_ENABLE_TESTS)
   soma_add_python_test(tests/test_parallel.py RANKS 1 2 3 4)
   soma_add_python_test(tests/test_algorithms.py RANKS 1 2 3 4)
   soma_add_python_test(tests/test_vis.py RANKS 1 2)
+  # The pipeline example in C++ and in Python: the same digests, files that read back alike.
+  if(SOMA_ENABLE_EXAMPLES AND SOMA_ENABLE_MPI)
+    foreach(np 1 3)
+      add_test(NAME python.pipeline.np${np}
+        COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_pipeline.py"
+                ${MPIEXEC_EXECUTABLE} ${np} $<TARGET_FILE:pipeline> "${Python_EXECUTABLE}"
+                "${CMAKE_CURRENT_SOURCE_DIR}/examples/pipeline.py" "${CMAKE_CURRENT_BINARY_DIR}/pipeline_np${np}")
+      set_tests_properties(python.pipeline.np${np} PROPERTIES TIMEOUT 120 PROCESSORS ${np}
+        ENVIRONMENT "PYTHONPATH=${CMAKE_BINARY_DIR}/python;OMP_NUM_THREADS=1;PYTHONDONTWRITEBYTECODE=1")
+    endforeach()
+  endif()
   if(SOMA_ENABLE_HDF5)
     soma_add_python_test(tests/test_io.py RANKS 1 2 3 4)
   endif()
