@@ -102,5 +102,6 @@ developer/provenance
 
 reference/cmake-options
 reference/headers
+reference/api/index
 reference/changelog
 ```

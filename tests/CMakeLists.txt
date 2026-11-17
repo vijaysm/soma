@@ -278,8 +278,13 @@ if(Python3_Interpreter_FOUND)
   # The script that turns header comments into Doxygen comments passes its tests.
   add_test(NAME docs.doxify
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/docs/test_doxify.py)
-  set_tests_properties(docs.wiki docs.wiki_converter docs.figures docs.figures_checker docs.doxify
-                       PROPERTIES TIMEOUT 60)
+  # Every public header has a reference page and Doxygen comments.
+  add_test(NAME docs.api
+    COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/docs/reference/check_api.py)
+  add_test(NAME docs.api_checker
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/docs/test_check_api.py)
+  set_tests_properties(docs.wiki docs.wiki_converter docs.figures docs.figures_checker docs.doxify docs.api
+                       docs.api_checker PROPERTIES TIMEOUT 60)
 endif()
 
 if(SOMA_INSTALL)
