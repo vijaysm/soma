@@ -9,6 +9,12 @@ import soma
 from conftest import allsum, comm_world
 
 
+# The tolerance of computed values: these tests check that values pass through
+# the bindings, not the algorithms' accuracy (the C++ tests pin that, to 1e-14).
+# 1e-10 leaves room for other compilers, rank and thread counts, and still
+# catches a wrong or missing value (about 1/cells, 1e-3 here).
+TOLERANCE = 1e-10
+
 def tet_volumes(m, n):
     x = m.coords()
     c = m.conn(3).reshape(-1, 4)[:n]
@@ -86,11 +92,11 @@ def remap_case(comm, nz_source):
     op.apply(comm, us[:, 0], ut[:, 0])
     s_int = allsum(float((us[:ns, 0] * tet_volumes(source, ns)).sum()))
     t_int = allsum(float((ut[:nt, 0] * tet_volumes(target, nt)).sum()))
-    assert abs(s_int - t_int) <= 1e-12 * abs(s_int)
+    assert abs(s_int - t_int) <= TOLERANCE * abs(s_int)
     ones_s = np.ones(source.count(3))
     ones_t = np.zeros(target.count(3))
     op.apply(comm, ones_s, ones_t)
-    assert np.allclose(ones_t[:nt], 1.0, rtol=0, atol=1e-13)
+    assert np.allclose(ones_t[:nt], 1.0, rtol=0, atol=TOLERANCE)
 
 
 def test_remap_conserves_and_reproduces_constants():
@@ -117,7 +123,7 @@ def test_smooth_with_empty_ranks():
     m.add_ghosts(comm, 1, 0)
     before = m.coords().copy()
     soma.laplacian_smooth(comm, m, iterations=2)
-    assert np.allclose(m.coords(), before, rtol=0, atol=1e-12)  # a grid is already smooth
+    assert np.allclose(m.coords(), before, rtol=0, atol=TOLERANCE)  # a grid is already smooth
 
 
 def test_rejects_lossy_integer_inputs():

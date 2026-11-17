@@ -19,6 +19,8 @@ getting-started/installation
 getting-started/quickstart
 getting-started/examples
 getting-started/python
+getting-started/fortran
+getting-started/from-imoab
 ```
 
 ```{toctree}

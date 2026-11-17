@@ -70,4 +70,13 @@ if(SOMA_ENABLE_HDF5)
 endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/somaTargets.cmake")
+# Components: c (soma::soma_c, the C API) and fortran (soma::soma_fortran, the
+# Fortran module; its .mod files need the Fortran compiler SOMA was built with).
+foreach(_soma_component c fortran)
+  if(TARGET soma::soma_${_soma_component})
+    set(soma_${_soma_component}_FOUND TRUE)
+  else()
+    set(soma_${_soma_component}_FOUND FALSE)
+  endif()
+endforeach()
 check_required_components(soma)

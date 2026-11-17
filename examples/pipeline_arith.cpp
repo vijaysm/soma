@@ -7,6 +7,9 @@
 // header kernels must compile as the Python module compiles them.
 
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
+#include <cstring>
 
 #include "pipeline_arith.hpp"
 
@@ -35,3 +38,23 @@ double tet_volume(const double a[3], const double b[3], const double c[3], const
 double accumulate(double sum, double u, double v) { return sum + u * v; }
 
 }  // namespace pipeline
+
+extern "C" std::uint64_t pipeline_fnv(std::int64_t n, const double* values) {
+  std::uint64_t h = 1469598103934665603ULL;
+  for (std::int64_t i = 0; i < n; ++i) {
+    unsigned char b[sizeof(double)];
+    std::memcpy(b, &values[i], sizeof b);
+    for (const unsigned char c : b) {
+      h ^= c;
+      h *= 1099511628211ULL;
+    }
+  }
+  return h;
+}
+
+extern "C" void pipeline_print(std::uint64_t coords_digest, std::uint64_t remap_digest, double integral) {
+  std::printf("coords digest: %016llx\n", static_cast<unsigned long long>(coords_digest));
+  std::printf("remap digest: %016llx\n", static_cast<unsigned long long>(remap_digest));
+  std::printf("integral: %.17g\n", integral);
+  std::fflush(stdout);
+}

@@ -78,6 +78,15 @@ endif()
 if(SOMA_ENABLE_PETSC)
   soma_add_test(test_petsc SOURCES unit/test_petsc.cpp RANKS 1 2 3 4 5 7 8)
 endif()
+if(SOMA_ENABLE_C_API)
+  soma_add_test(test_c_api_runtime SOURCES unit/test_c_api_runtime.cpp RANKS 1 2 3 4 LIBS soma_c)
+  soma_add_test(test_c_api_mesh SOURCES unit/test_c_api_mesh.cpp RANKS 1 2 3 4 LIBS soma_c)
+  soma_add_test(test_c_api_edit SOURCES unit/test_c_api_edit.cpp RANKS 1 LIBS soma_c)
+  soma_add_test(test_c_api_fields SOURCES unit/test_c_api_fields.cpp RANKS 1 2 3 4 LIBS soma_c)
+  soma_add_test(test_c_api_io_parallel SOURCES unit/test_c_api_io_parallel.cpp RANKS 1 2 3 4 LIBS soma_c)
+  target_compile_definitions(test_c_api_io_parallel PRIVATE SOMA_TEST_HDF5=$<BOOL:${SOMA_ENABLE_HDF5}>)
+  soma_add_test(test_c_api_algorithms SOURCES unit/test_c_api_algorithms.cpp RANKS 1 2 3 4 LIBS soma_c)
+endif()
 soma_add_test(test_grid_index SOURCES unit/test_grid_index.cpp)
 if(SOMA_ENABLE_ARBORX)
   soma_add_test(test_arborx_index SOURCES unit/test_arborx_index.cpp)
@@ -324,4 +333,17 @@ if(SOMA_INSTALL)
       -DOUTPUT=${SOMA_APP_OUTPUT} -DENABLE_MPI=${SOMA_ENABLE_MPI} -DMPIEXEC=${MPIEXEC_EXECUTABLE}
       -P ${PROJECT_SOURCE_DIR}/tests/packaging/run_example_app.cmake)
   set_tests_properties(packaging.example_app PROPERTIES TIMEOUT 300)
+  # A C and a Fortran program against the installed C API and Fortran module.
+  if(SOMA_ENABLE_FORTRAN)
+    add_test(NAME packaging.c_fortran
+      COMMAND ${CMAKE_COMMAND}
+        -DSOMA_BINARY_DIR=${PROJECT_BINARY_DIR} -DSOMA_SOURCE_DIR=${PROJECT_SOURCE_DIR}
+        -DSCRATCH_DIR=${PROJECT_BINARY_DIR}/c_fortran_test
+        -DBUILD_TYPE=$<CONFIG> -DGENERATOR=${CMAKE_GENERATOR} -DMAKE_PROGRAM=${CMAKE_MAKE_PROGRAM}
+        -DC_COMPILER=${CMAKE_C_COMPILER} -DCXX_COMPILER=${CMAKE_CXX_COMPILER}
+        -DFortran_COMPILER=${CMAKE_Fortran_COMPILER}
+        -DPREFIX_PATH=${SOMA_PACKAGING_PREFIX_PATH} -DMPI_HOME=${MPI_HOME}
+        -P ${PROJECT_SOURCE_DIR}/tests/packaging/run_c_fortran_test.cmake)
+    set_tests_properties(packaging.c_fortran PROPERTIES TIMEOUT 300 ENVIRONMENT OMP_NUM_THREADS=1)
+  endif()
 endif()
