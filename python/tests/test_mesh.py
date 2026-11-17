@@ -70,11 +70,26 @@ def test_arrays_share_memory():
 def test_array_outlives_mesh():
     comm = comm_world()
     m = soma.box_mesh(comm, 2, 2, 4)
-    g = m.gids(3).copy()
-    a = m.gids(3)
+    g, x = m.gids(3).copy(), m.coords().copy()
+    a, c = m.gids(3), m.coords()
     del m
     gc.collect()
+    # Allocations of the same sizes reuse any memory the mesh freed; overwrite them.
+    others = [soma.box_mesh(comm, 2, 2, 4) for _ in range(20)]
+    for o in others:
+        o.coords()[:] = -1.0
     assert (a == g).all()
+    assert np.array_equal(c, x)
+
+
+def test_array_holds_the_allocation():
+    m = soma.box_mesh(soma.Comm.self(), 2, 2, 2)
+    before = soma._soma.testing_coords_use_count(m)
+    a = m.coords()
+    assert soma._soma.testing_coords_use_count(m) == before + 1
+    del a
+    gc.collect()
+    assert soma._soma.testing_coords_use_count(m) == before
 
 
 def test_input_dtypes():

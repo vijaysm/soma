@@ -117,6 +117,10 @@ nb::class_<PyMesh> bind_mesh(nb::module_& m) {
       "Consumes the builder.");
 
   m.def(
+      "testing_coords_use_count", [](const PyMesh& mesh) { return mesh.get().coords().use_count(); },
+      nb::arg("mesh"), "Test hook: the reference count of the mesh's coordinate allocation.");
+
+  m.def(
       "box_mesh",
       [](const soma::Comm& comm, int nx, int ny, int nz, soma::Topology element, Real lx, Real ly, Real lz,
          soma::Ordering ordering) {
