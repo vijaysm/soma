@@ -14,11 +14,13 @@ add_executable(remap remap.cpp)
 target_link_libraries(remap PRIVATE soma soma_warnings)
 add_executable(refine refine.cpp)
 target_link_libraries(refine PRIVATE soma soma_warnings)
-add_executable(pipeline pipeline.cpp pipeline_arith.cpp)
-target_link_libraries(pipeline PRIVATE soma soma_warnings)
 # The example's own arithmetic rounds as Python's: no fused multiply-adds (pipeline_arith.cpp only).
-set_source_files_properties(pipeline_arith.cpp PROPERTIES
-  COMPILE_OPTIONS "$<$<CXX_COMPILER_ID:Clang,AppleClang,GNU>:-ffp-contract=off>")
+# The Fortran pipeline links it too, for its digests and printing.
+add_library(pipeline_arith OBJECT pipeline_arith.cpp)
+target_link_libraries(pipeline_arith PRIVATE soma_warnings)
+target_compile_options(pipeline_arith PRIVATE "$<$<CXX_COMPILER_ID:Clang,AppleClang,GNU>:-ffp-contract=off>")
+add_executable(pipeline pipeline.cpp)
+target_link_libraries(pipeline PRIVATE soma soma_warnings pipeline_arith)
 
 if(SOMA_ENABLE_TESTS)
   set(in "${PROJECT_SOURCE_DIR}/data/64bricks_1khex.h5m")

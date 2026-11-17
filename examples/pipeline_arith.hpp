@@ -7,6 +7,8 @@
 #ifndef SOMA_EXAMPLES_PIPELINE_ARITH_HPP_
 #define SOMA_EXAMPLES_PIPELINE_ARITH_HPP_
 
+#include <cstdint>
+
 namespace pipeline {
 
 double moved(double x, double a, double s);                         // x + a s
@@ -16,5 +18,12 @@ double tet_volume(const double a[3], const double b[3], const double c[3], const
 double accumulate(double sum, double u, double v);                  // sum + u v
 
 }  // namespace pipeline
+
+// For the Fortran pipeline: the FNV-1a digest of n doubles, and rank 0's
+// three lines, printed exactly as the C++ pipeline prints them.
+extern "C" {
+std::uint64_t pipeline_fnv(std::int64_t n, const double* values);
+void pipeline_print(std::uint64_t coords_digest, std::uint64_t remap_digest, double integral);
+}
 
 #endif  // SOMA_EXAMPLES_PIPELINE_ARITH_HPP_

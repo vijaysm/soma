@@ -87,3 +87,22 @@ if(SOMA_ENABLE_TESTS)
       ENVIRONMENT OMP_NUM_THREADS=1)
   endforeach()
 endif()
+
+# The pipeline example in Fortran: the C++ example's steps and digests.
+if(SOMA_ENABLE_EXAMPLES AND SOMA_ENABLE_MPI)
+  find_package(MPI REQUIRED COMPONENTS Fortran)
+  add_executable(pipeline_f examples/pipeline.F90)
+  target_link_libraries(pipeline_f PRIVATE soma_fortran pipeline_arith MPI::MPI_Fortran)
+  # Its arithmetic rounds as the C++ example's: no fused multiply-adds.
+  target_compile_options(pipeline_f PRIVATE "$<$<COMPILE_LANG_AND_ID:Fortran,GNU>:-ffp-contract=off>")
+  if(SOMA_ENABLE_TESTS)
+    foreach(np IN ITEMS 1 3)
+      add_test(NAME fortran.pipeline.np${np}
+        COMMAND ${CMAKE_COMMAND} -DMPIEXEC=${MPIEXEC_EXECUTABLE} -DNP=${np} -DCXX=$<TARGET_FILE:pipeline>
+                -DFORTRAN=$<TARGET_FILE:pipeline_f> -DWORK=${CMAKE_CURRENT_BINARY_DIR}/pipeline_np${np}
+                -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_pipeline.cmake")
+      set_tests_properties(fortran.pipeline.np${np} PROPERTIES TIMEOUT 120 PROCESSORS ${np}
+        ENVIRONMENT OMP_NUM_THREADS=1)
+    endforeach()
+  endif()
+endif()
