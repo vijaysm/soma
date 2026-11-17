@@ -95,7 +95,7 @@ Derived<typename ExecSpace::memory_space> derive(
   const UView1<Offset, M> up_off = vertex_to_elements.offsets;
   const UView1<LO, M> up_tgt = vertex_to_elements.targets;
 
-  /// Sides per element, and their slots.
+  // Sides per element, and their slots.
   View1<Offset, M> nsides(base + "::nsides", static_cast<std::size_t>(ne));
   Kokkos::parallel_for(
       base + "::count_sides", Policy(exec, 0, ne),
@@ -104,7 +104,7 @@ Derived<typename ExecSpace::memory_space> derive(
   const Offset nslots = soma::topology::detail::exclusive_scan(exec, base + "::scan_sides", ne,
                                                                nsides, side_off);
 
-  /// The creator slot of every slot.
+  // The creator slot of every slot.
   View1<Offset, M> creator(Kokkos::view_alloc(exec, base + "::creator", Kokkos::WithoutInitializing),
                            static_cast<std::size_t>(nslots));
   Kokkos::parallel_for(
@@ -116,7 +116,7 @@ Derived<typename ExecSpace::memory_space> derive(
         }
       });
 
-  /// Creators per element and kind (kind 1 = quads, k = 2 only).
+  // Creators per element and kind (kind 1 = quads, k = 2 only).
   View1<Offset, M> count0(base + "::count0", static_cast<std::size_t>(ne));
   View1<Offset, M> count1(base + "::count1", static_cast<std::size_t>(ne));
   Kokkos::parallel_for(
@@ -146,7 +146,7 @@ Derived<typename ExecSpace::memory_space> derive(
     throw std::length_error(base + ": " + std::to_string(total) + " entities do not fit LO");
   }
   const LO n = static_cast<LO>(total);
-  const int a0 = k == 1 ? 2 : 3;  ///< arity of kind 0
+  const int a0 = k == 1 ? 2 : 3;  // arity of kind 0
   const int a1 = 4;
   const Topology t0 = k == 1 ? Topology::edge : Topology::tri;
 
@@ -195,7 +195,7 @@ Derived<typename ExecSpace::memory_space> derive(
         }
       });
 
-  /// Adoption of the explicit entities of dimension k.
+  // Adoption of the explicit entities of dimension k.
   View1<LO, M> adopted(Kokkos::view_alloc(exec, base + "::adopted"), static_cast<std::size_t>(n));
   Kokkos::deep_copy(exec, adopted, detail::no_entity);
   const LO nx = mesh.count(k);
@@ -258,8 +258,8 @@ Derived<typename ExecSpace::memory_space> derive(
     if (max_gid < 0) max_gid = 0;
   }
 
-  /// Gids: explicit ones kept, new ones from max_gid + 1 in id order. Adopted
-  /// entities take the explicit vertex order.
+  // Gids: explicit ones kept, new ones from max_gid + 1 in id order. Adopted
+  // entities take the explicit vertex order.
   View1<Offset, M> fresh(base + "::fresh", static_cast<std::size_t>(n));
   Kokkos::parallel_for(
       base + "::mark_new", Policy(exec, 0, n),
@@ -280,8 +280,8 @@ Derived<typename ExecSpace::memory_space> derive(
         for (Offset q = 0; q < offs(id + 1) - offs(id); ++q) conn(offs(id) + q) = xconn(xoff(x) + q);
       });
 
-  /// Adopted high-order entities keep their nodes, which follow the explicit
-  /// vertex order they keep; derived ones have none.
+  // Adopted high-order entities keep their nodes, which follow the explicit
+  // vertex order they keep; derived ones have none.
   if (mesh.has_nodes(k)) {
     const auto xnoff = mesh.node_offsets(k);
     const auto xnodes = mesh.nodes(k);
@@ -307,8 +307,8 @@ Derived<typename ExecSpace::memory_space> derive(
         });
   }
 
-  /// Every slot: its entity and its orientation against the stored vertices.
-  /// A side fails to match when an explicit entity or an element is tangled.
+  // Every slot: its entity and its orientation against the stored vertices.
+  // A side fails to match when an explicit entity or an element is tangled.
   Kokkos::View<LO, M> crossed(base + "::crossed");
   Kokkos::deep_copy(exec, crossed, detail::no_entity);
   Kokkos::parallel_for(
@@ -337,7 +337,7 @@ Derived<typename ExecSpace::memory_space> derive(
     }
   }
 
-  /// Segments: one per kind present.
+  // Segments: one per kind present.
   SegmentTable& st = b.segments;
   if (n0 > 0) st.segments.push_back(Segment{0, static_cast<LO>(n0), t0, static_cast<std::uint16_t>(a0), Ownership::interior});
   if (n1 > 0) st.segments.push_back(Segment{static_cast<LO>(n0), n, Topology::quad, 4, Ownership::interior});

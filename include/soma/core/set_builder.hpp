@@ -174,7 +174,7 @@ class SetBuilder {
     h.host_gid_ = h.gid_;
 
     EntitySets<MemSpace> built = h.template mirror<MemSpace>({true, true, true, true}, true);
-    /// Nothing below throws.
+    // Nothing below throws.
     mesh.sets_ = std::move(built);
     mesh.fields_.set_entities(set_dim, mesh.sets_.count(), mesh.sets_.gid());
     specs_.clear();

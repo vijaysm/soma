@@ -5,3 +5,4 @@ build/
 *.trace/
 CMakeUserPresets.json
 docs/_build/
+__pycache__/

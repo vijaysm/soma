@@ -494,8 +494,8 @@ class FieldRegistry {
     using Buffer = std::map<LO, std::vector<T>>;
     const Buffer* held = e.pending.has_value() ? std::any_cast<Buffer>(&e.pending) : nullptr;
     if (held == nullptr || held->find(lid) == held->end()) check_free(e, lid);
-    /// Everything that allocates happens before the buffer is touched, so a
-    /// throw leaves the old buffer and its count as they were.
+    // Everything that allocates happens before the buffer is touched, so a
+    // throw leaves the old buffer and its count as they were.
     std::vector<T> value(values.begin(), values.end());
     if (held == nullptr) {
       Buffer fresh;
@@ -587,7 +587,7 @@ class FieldRegistry {
     for (Entry& e : entries_) {
       if (e.alive && selected(e, all, names, dims)) commit_entry(e);
     }
-    /// Built aside and swapped in, so a throw leaves `dst` empty and reusable.
+    // Built aside and swapped in, so a throw leaves `dst` empty and reusable.
     FieldRegistry<Dst> built;
     built.epoch_ = epoch_;
     for (const Family& f : families_) {
@@ -859,7 +859,7 @@ class FieldRegistry {
     const std::vector<T>& def = old.default_value() ? *old.default_value() : none;
     std::vector<Offset> new_offs(static_cast<std::size_t>(out.space.rows()) + 1, 0);
     std::vector<T> new_vals;
-    /// Members are visited in row order (blocks stacked, members sorted).
+    // Members are visited in row order (blocks stacked, members sorted).
     for (std::size_t m = 0; m < rm.new_begin.size(); ++m) {
       for (LO r = 0; r < rm.width[m]; ++r) {
         const auto to = static_cast<std::size_t>(rm.new_begin[m] + r);
@@ -1263,7 +1263,7 @@ class FieldRegistry {
     const DomainBlockInfo& bi = old_domain.info(0);
     const int ncomp = e.info.ncomp;
 
-    /// Merged member list, sorted by entity; remember where each old row goes.
+    // Merged member list, sorted by entity; remember where each old row goes.
     const std::vector<LO> old_members = old_domain.members(0);
     std::vector<LO> lids;
     lids.reserve(old_members.size() + buf.size());
@@ -1285,10 +1285,10 @@ class FieldRegistry {
     if (ent.set) gids = ent.gids;
     const auto domain = Domain<MemSpace>::from_list(bi.dim, bi.count, old_domain.epoch(), lids, gids);
     const Space<MemSpace> space(domain, Layout::per_entity());
-    /// The checks in add() and set_pending() keep members and buffers disjoint, so
-    /// this cannot fire through the public API today. It stays a thrown
-    /// FieldOverlap rather than an assert so that a broken family invariant
-    /// cannot corrupt a release build silently.
+    // The checks in add() and set_pending() keep members and buffers disjoint, so
+    // this cannot fire through the public API today. It stays a thrown
+    // FieldOverlap rather than an assert so that a broken family invariant
+    // cannot corrupt a release build silently.
     check_disjoint(e.info.name, e.info.type, ncomp, e.info.handle, space, e.info.id);
 
     const auto old_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, old_field.view());
@@ -1303,9 +1303,9 @@ class FieldRegistry {
     }
     const View2<T, MemSpace> data = Kokkos::create_mirror_view_and_copy(MemSpace{}, merged);
 
-    /// Everything that allocates happens before the first change to the entry,
-    /// and the changes below cannot throw, so a failure leaves the entry as it
-    /// was.
+    // Everything that allocates happens before the first change to the entry,
+    // and the changes below cannot throw, so a failure leaves the entry as it
+    // was.
     Field<T, MemSpace> grown(e.info.id, space, data, old_field.default_value(),
                              old_field.global_value(), e.info.revision + 1, serial_);
     std::any grown_any(grown);

@@ -241,8 +241,8 @@ void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRe
     if (req.has_slot(s) && !conn) made[static_cast<std::size_t>(s)] = builder.get(s);
   }
 
-  /// Set members are lids: map each renumbered one through its gid, which
-  /// adoption keeps.
+  // Set members are lids: map each renumbered one through its gid, which
+  // adoption keeps.
   std::optional<EntitySets<M>> sets;
   for (int k = 1; k < D; ++k) {
     if (!derive_k[static_cast<std::size_t>(k)] || mesh.count(k) == 0 || mesh.sets().count() == 0) {
@@ -262,7 +262,7 @@ void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRe
     sets = (sets ? *sets : mesh.sets()).renumbered(k, new_lid, work.count(k));
   }
 
-  /// Install; nothing below throws.
+  // Install; nothing below throws.
   if (sets) Access::sets(mesh) = std::move(*sets);
   auto& store = Access::store(mesh);
   for (int k = 1; k < D; ++k) {

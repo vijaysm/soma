@@ -254,9 +254,7 @@ inline bool within(const Point<D>& a, const Point<D>& b, double tol, Norm norm) 
 /// One-time check that double arithmetic behaves as strict IEEE-754:
 ///  * subnormals are not flushed (-ffast-math links FTZ/DAZ start-up code),
 ///  * two L2 tie pairs known to flip under FMA contraction / reassociation
-/// ```
 ///    produce the unfused answer.
-/// ```
 inline bool fp_environment_compute() {
 #if defined(__FAST_MATH__) || defined(_M_FP_FAST)
     return false;  // translation unit compiled with -ffast-math / /fp:fast: x/tol may become x*(1/tol), etc.

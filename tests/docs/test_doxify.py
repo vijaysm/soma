@@ -82,6 +82,37 @@ class Doxify(unittest.TestCase):
         )
         self.check(src, src)
 
+    def test_template_function_body_comments_stay(self):
+        src = (
+            "\ntemplate <class T>\n  requires std::integral<T>\nT f(T t) {\n  // body\n  T u = t;  // trailing\n  return u;\n}\n\n"
+            "template <class M>\nvoid g(const M& m) {\n  // body too\n}\n"
+        )
+        self.check(src, src)
+
+    def test_template_class_is_a_scope(self):
+        self.check(
+            "\ntemplate <class T>\nclass C {\n public:\n  // A member.\n  int f() const;\n  int n;  // count\n};\n",
+            "\ntemplate <class T>\nclass C {\n public:\n  /// A member.\n  int f() const;\n  int n;  ///< count\n};\n",
+        )
+
+    def test_wrapped_list_items_are_not_code(self):
+        self.check(
+            "\n// Two kinds:\n// - the first, which\n//   wraps here;\n// - the second.\nint f(int);\n",
+            "\n/// Two kinds:\n/// - the first, which\n///   wraps here;\n/// - the second.\nint f(int);\n",
+        )
+
+    def test_indented_list_items_are_not_code(self):
+        self.check(
+            "\n// Checks:\n//  * one,\n//  * two, which\n//    wraps.\nint f(int);\n",
+            "\n/// Checks:\n///  * one,\n///  * two, which\n///    wraps.\nint f(int);\n",
+        )
+
+    def test_table_line_like_a_list_item_stays_code(self):
+        self.check(
+            "\n// Table:\n//\n//   pyramid  6 pyramids, one\n//            + 4 tets\nint f(int);\n",
+            "\n/// Table:\n///\n/// ```\n///   pyramid  6 pyramids, one\n///            + 4 tets\n/// ```\nint f(int);\n",
+        )
+
     def test_indented_code_fenced(self):
         self.check(
             "\n// Use it so:\n//\n//   f(1);\n//   g(2);\n//\n// and done.\nint f(int);\n",

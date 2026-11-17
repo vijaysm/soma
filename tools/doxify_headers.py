@@ -36,7 +36,28 @@ import re
 import sys
 from pathlib import Path
 
-SCOPE = re.compile(r'\b(namespace|class|struct|union|enum)\b|extern\s+"C"')
+# A brace opens a scope (not a function body) when its statement, less any
+# template head, starts with one of these.
+SCOPE = re.compile(r'^\s*(inline\s+)?(namespace|class|struct|union|enum)\b|^\s*extern\s+"C"')
+LIST_ITEM = re.compile(r"^([-*+]|\d+[.)])\s")
+
+
+def without_template_heads(statement: str) -> str:
+    """The statement with each "template <...>" head removed, so that
+    "template <class T> T f()" does not read as a class."""
+    out, i = [], 0
+    while i < len(statement):
+        m = re.compile(r"\btemplate\s*<").search(statement, i)
+        if not m:
+            out.append(statement[i:])
+            break
+        out.append(statement[i : m.start()])
+        depth, j = 1, m.end()
+        while j < len(statement) and depth:
+            depth += {"<": 1, ">": -1}.get(statement[j], 0)
+            j += 1
+        i = j
+    return "".join(out)
 ACCESS = re.compile(r"^(public|protected|private)\s*:")
 # A namespace (documented nowhere per header: Doxygen would merge the texts)
 # or a forward declaration (the class is documented where it is defined).
@@ -73,8 +94,24 @@ def is_plain(stripped: str) -> bool:
 
 
 def fence(texts: list[str]) -> list[str]:
-    """Texts with each run of code lines (two spaces or more in) inside ``` lines."""
-    code = [t.startswith("  ") and t.strip() != "" for t in texts]
+    """Texts with each run of code lines (two spaces or more in) inside ``` lines.
+    A line indented under a list item ("- ...", "1. ...", at most one space in)
+    continues the item."""
+    code: list[bool] = []
+    item_indent = None  # the indent of the list item being continued
+    for t in texts:
+        indent = len(t) - len(t.lstrip())
+        if t.strip() == "":
+            item_indent = None
+            code.append(False)
+        elif indent <= 1 and LIST_ITEM.match(t.lstrip()):
+            item_indent = indent
+            code.append(False)
+        elif item_indent is not None and indent > item_indent:
+            code.append(False)
+        else:
+            item_indent = None
+            code.append(indent >= 2)
     out: list[str] = []
     i = 0
     while i < len(texts):
@@ -158,9 +195,14 @@ def convert(text: str) -> tuple[str, list[int]]:
                 trailing_indent = len(line) - len(line.lstrip())
             elif stripped and not (stripped.startswith("///<") and trailing_indent is not None):
                 trailing_indent = None
-        for c in code:
+        if stripped.startswith("#") or ACCESS.match(stripped):
+            continue_statement = False  # preprocessor lines and access specifiers are not part of one
+        else:
+            continue_statement = True
+        for c in (code if continue_statement else ""):
             if c == "{":
-                stack.append("scope" if SCOPE.search(statement) and "body" not in stack else "body")
+                scope = SCOPE.search(without_template_heads(statement)) is not None
+                stack.append("scope" if scope and "body" not in stack else "body")
                 statement = ""
             elif c == "}":
                 if stack:
@@ -170,7 +212,8 @@ def convert(text: str) -> tuple[str, list[int]]:
                 statement = ""
             else:
                 statement += c
-        statement += " "
+        if continue_statement:
+            statement += " "
         i += 1
     return "\n".join(out), converted
 
