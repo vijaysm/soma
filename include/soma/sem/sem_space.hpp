@@ -351,7 +351,7 @@ class SemSpace {
     }
   }
 
-  // Ghost elements take their owners' values.
+  /// Ghost elements take their owners' values.
   void refresh_ghosts(const Comm& comm, const View2<Real, MemSpace>& values) const {
     using Policy = typename detail::DssKernels<MemSpace>::Policy;
     const LO ppe = points_per_element();
@@ -374,9 +374,9 @@ class SemSpace {
     typename MemSpace::execution_space{}.fence();
   }
 
-  // Owners sum m u over each shared vertex and edge, copies and ghosts take
-  // the owners' sums, and every element's shared points take sum / mass
-  // (the sums themselves when mass is empty).
+  /// Owners sum m u over each shared vertex and edge, copies and ghosts take
+  /// the owners' sums, and every element's shared points take sum / mass
+  /// (the sums themselves when mass is empty).
   void sum_and_scatter(const Comm& comm, const View2<Real, MemSpace>& in, const View2<Real, MemSpace>& out,
                        const View2<const Real, MemSpace>& mass) const {
     const auto nc = static_cast<std::size_t>(in.extent(1));

@@ -65,6 +65,7 @@ io/amr-checkpoints
 
 algorithms/smoothing
 algorithms/fem
+algorithms/spectral-elements
 algorithms/finite-volumes
 algorithms/linear-algebra
 algorithms/spatial-search

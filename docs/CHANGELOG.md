@@ -706,6 +706,23 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   after each round, and prints the counts, the hanging vertices and the error of a linear
   vertex field.
 
+### Spectral elements
+
+- `soma::sem::SemSpace` (`soma/sem/sem_space.hpp`): continuous spectral elements of order 1 to 32
+  over quads in the plane or on a sphere, each element storing its own values at its GLL points.
+  The geometry is bilinear or, from Quad8 and Quad9 nodes, biquadratic; on a sphere each point is
+  projected radially and the tangent vectors are derivatives of the projected map.
+- `dss` (direct stiffness summation), the assembled `mass` and exact `integral`s give the same
+  bits on any number of ranks and threads: owners sum each shared vertex and edge in element-gid
+  order over a ghost layer through vertices.
+- `soma/sem/operators.hpp`: gradient, divergence, vorticity, tangent projection, the weak Laplacian
+  and hyperviscosity.
+- `soma::sem::cubed_sphere_mesh` builds the equiangular cubed sphere (`ne` x `ne` quads per face,
+  Quad4 or Quad9), split across the ranks with gids that do not depend on their number.
+- `soma::sem::gll_weights_1d`, `gll_derivative_1d` (`soma/sem/gll.hpp`).
+- A mesh keeps its ghost record (`ghost_layers()`) when `build_distributed_adjacencies` reorders
+  its entities.
+
 ### Python bindings
 
 - The package `soma` (`SOMA_ENABLE_PYTHON=ON`, nanobind) runs SOMA from Python scripts under

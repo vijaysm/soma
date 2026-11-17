@@ -117,6 +117,17 @@ algorithms/refine
 algorithms/remap
 ```
 
+## `soma/sem`
+
+```{toctree}
+:maxdepth: 1
+
+sem/cubed_sphere
+sem/gll
+sem/operators
+sem/sem_space
+```
+
 ## `soma/amr`
 
 ```{toctree}
