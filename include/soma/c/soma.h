@@ -348,6 +348,63 @@ int soma_mesh_add_ghosts(const soma_comm_t* comm, soma_mesh_t* mesh, int layers,
 /// Collective, in place: drops the ghosts.
 int soma_mesh_remove_ghosts(const soma_comm_t* comm, soma_mesh_t* mesh);
 
+/* ---- Smoothing -------------------------------------------------------- */
+
+/// Collective, in place: Laplacian smoothing of the vertex coordinates.
+/// Vertices are neighbours through entities of bridge_dim (-1: the cells).
+/// tolerance > 0 stops once no vertex moved farther in a sweep. fixed[n]
+/// (n = count(0)) marks the vertices that stay, or NULL with n = 0: the skin
+/// stays. Needs a ghost layer through vertices on more than one rank.
+/// *done: the sweeps made; *largest_move: in the last sweep (0 unless
+/// tolerance > 0).
+int soma_laplacian_smooth(const soma_comm_t* comm, soma_mesh_t* mesh, int iterations, int bridge_dim,
+                          double tolerance, soma_lo_t nfixed, const uint8_t* fixed, int* done, double* largest_move);
+
+/* ---- Refinement ------------------------------------------------------- */
+
+/// Collective: a new mesh with every edge split in two, levels times, and its
+/// maps to the input (which is unchanged).
+int soma_refine_uniform(const soma_comm_t* comm, const soma_mesh_t* mesh, int levels, soma_refine_t** out);
+/// Collective: a new mesh with the cells marked (marks[n], n = cells held,
+/// nonzero = refine) refined; conforming != 0: no hanging vertices.
+/// vertices: SOMA_VERTICES_RECORDED or SOMA_VERTICES_COORDINATES.
+int soma_refine_marked(const soma_comm_t* comm, const soma_mesh_t* mesh, soma_lo_t n, const int8_t* marks,
+                       int conforming, int vertices, soma_refine_t** out);
+/// The refined mesh: a new handle on it.
+int soma_refine_mesh(const soma_refine_t* refine, soma_mesh_t** out);
+/// Maps of lids: SOMA_PARENT (per cell of the new mesh, the input's owned
+/// cell), SOMA_CHILDREN (cells of the new mesh), SOMA_HANGING (vertices of the
+/// new mesh).
+int soma_refine_lids(const soma_refine_t* refine, int which, const soma_lo_t** lids, int64_t* count);
+/// SOMA_CHILD_OFFSETS: cell p's children are children[offsets[p],
+/// offsets[p + 1]); SOMA_HANGING_OFFSETS: hanging vertex i's masters are
+/// masters[offsets[i], offsets[i + 1]).
+int soma_refine_offsets(const soma_refine_t* refine, int which, const soma_offset_t** offsets, int64_t* count);
+/// The hanging vertices' masters, by gid, and their weights.
+int soma_refine_masters(const soma_refine_t* refine, const soma_go_t** gids, int64_t* count);
+int soma_refine_weights(const soma_refine_t* refine, const double** weights, int64_t* count);
+/// Fields not carried to the new mesh, by name.
+int soma_refine_dropped_count(const soma_refine_t* refine, int* count);
+int soma_refine_dropped_name(const soma_refine_t* refine, int i, char* name, size_t len);
+int soma_refine_clone(const soma_refine_t* refine, soma_refine_t** out);
+void soma_refine_free(soma_refine_t* refine);
+
+/* ---- Remap ------------------------------------------------------------ */
+
+/// Collective: the first-order conservative remap from the cells of source
+/// to those of target (both kept alive): their overlap and the weights.
+/// search: SOMA_SEARCH_*; surface: SOMA_SURFACE_*; radius: the sphere's
+/// (surface sphere); sphere_clip: SOMA_SPHERE_CLIP_*; merge_tolerance: a
+/// length in the meshes' units.
+int soma_remap_create(const soma_comm_t* comm, soma_mesh_t* source, soma_mesh_t* target, double merge_tolerance,
+                      int search, int surface, double radius, int sphere_clip, soma_remap_t** out);
+/// Collective: u_target[nt] from u_source[ns]: at least one value per owned
+/// cell of each mesh.
+int soma_remap_apply(const soma_remap_t* remap, const soma_comm_t* comm, soma_lo_t ns, const double* u_source,
+                     soma_lo_t nt, double* u_target);
+int soma_remap_clone(const soma_remap_t* remap, soma_remap_t** out);
+void soma_remap_free(soma_remap_t* remap);
+
 #ifdef __cplusplus
 }
 #endif
