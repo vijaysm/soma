@@ -121,7 +121,7 @@ target_compile_options(soma_warnings INTERFACE
 
 set(SOMA_SOURCES src/runtime/scope_guard.cpp src/runtime/options.cpp src/core/segments.cpp src/fields/node_tables.cpp src/core/mesh_builder.cpp src/core/mesh_edit.cpp src/core/permute.cpp src/testing/box_mesh.cpp src/io/vtk_writer.cpp src/io/vtk_reader.cpp src/io/mesh_file.cpp src/amr/box_list.cpp src/amr/box_array.cpp src/amr/halo.cpp src/amr/copy.cpp src/amr/interlevel.cpp src/amr/flux_register.cpp src/amr/cluster.cpp src/amr/hierarchy.cpp src/amr/vtk_amr.cpp src/parallel/transport/route.cpp src/parallel/transport/comm_plan.cpp src/parallel/transport/sort.cpp src/parallel/comm_counts.cpp src/parallel/partition.cpp src/parallel/sharing.cpp src/parallel/point_match.cpp src/parallel/merge.cpp src/parallel/distributed.cpp src/parallel/migrate.cpp src/parallel/ghosts.cpp
                  src/algorithms/smoothing_graph.cpp src/algorithms/vertex_graph.cpp
-                 src/algorithms/fem_space.cpp src/algorithms/fv_space.cpp src/sem/gll.cpp
+                 src/algorithms/fem_space.cpp src/algorithms/fv_space.cpp src/sem/gll.cpp src/sem/cubed_sphere.cpp
                  src/algorithms/remap.cpp src/algorithms/refine.cpp
                  src/algorithms/refine_marked.cpp)
 if(SOMA_ENABLE_MPI)
