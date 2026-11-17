@@ -43,3 +43,6 @@ def _at_exit():
 
 
 _atexit.register(_at_exit)
+
+
+from .vis import to_pyvista  # noqa: E402
