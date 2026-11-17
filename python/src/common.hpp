@@ -98,6 +98,8 @@ void bind_runtime(nb::module_& m);
 nb::class_<PyMesh> bind_mesh(nb::module_& m);
 void bind_edit(nb::module_& m, nb::class_<PyMesh>& mesh);
 void bind_fields(nb::module_& m, nb::class_<PyMesh>& mesh);
+void bind_io(nb::module_& m);
+void bind_parallel(nb::module_& m, nb::class_<PyMesh>& mesh);
 
 }  // namespace soma_py
 

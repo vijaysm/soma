@@ -11,4 +11,6 @@ NB_MODULE(_soma, m) {
   auto mesh = soma_py::bind_mesh(m);
   soma_py::bind_edit(m, mesh);
   soma_py::bind_fields(m, mesh);
+  soma_py::bind_io(m);
+  soma_py::bind_parallel(m, mesh);
 }
