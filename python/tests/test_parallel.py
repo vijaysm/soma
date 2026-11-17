@@ -62,3 +62,28 @@ def test_ghosts_in_place():
         assert grew > 0
     m.remove_ghosts(comm)
     assert m.count(3) == held
+
+
+def test_partition_empty_ranks_with_flat_arrays():
+    comm = comm_world()
+    m = soma.box_mesh(comm, 2, 2, 1, element=soma.Topology.quad)  # empty ranks from 2
+    n = m.owned_count(2)
+    c = np.array([m.coords()[m.conn(2)[4 * e:4 * e + 4]].mean(axis=0) for e in range(n)])  # (0,) when empty
+    dest = soma.partition_by_curve(comm, c, m.gids(2)[:n])
+    assert dest.shape == (n,)
+
+
+def test_partition_bad_shape_is_collective():
+    comm = comm_world()
+    pts = np.zeros((1, 2)) if comm.rank == 0 else np.zeros((1, 3))
+    with pytest.raises(ValueError):
+        soma.partition_by_curve(comm, pts, np.array([comm.rank + 1], dtype=np.int64))
+
+
+def test_ghosts_with_empty_ranks():
+    comm = comm_world()
+    m = soma.box_mesh(comm, 2, 2, 2)
+    owned = owned_totals(m)
+    m.add_ghosts(comm, 1, 0)
+    assert owned_totals(m) == owned
+    m.remove_ghosts(comm)

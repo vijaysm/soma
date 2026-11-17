@@ -17,6 +17,17 @@ except ImportError:  # a build without MPI needs no mpi4py
 from . import _soma
 from ._soma import *  # noqa: F401,F403
 
+
+
+def _at_exit():
+    _gc.collect()
+    _soma._finalize()
+
+
+# Registered first: loading _soma initialized Kokkos, which must be finalized at exit even when
+# the import fails below (a process that never finalizes Kokkos aborts at exit).
+_atexit.register(_at_exit)
+
 has_mpi = _soma.has_mpi
 Error = _soma.Error
 
@@ -35,14 +46,6 @@ if has_mpi:
     if _MPI is None:
         raise ImportError("this soma was built with MPI and needs mpi4py")
     _check_mpi(_soma.mpi_library_version(), _MPI.Get_library_version())
-
-
-def _at_exit():
-    _gc.collect()
-    _soma._finalize()
-
-
-_atexit.register(_at_exit)
 
 
 from .vis import to_pyvista  # noqa: E402

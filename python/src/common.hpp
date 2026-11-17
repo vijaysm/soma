@@ -10,6 +10,11 @@
 #define SOMA_PYTHON_COMMON_HPP_
 
 #include <array>
+#include <exception>
+#include <limits>
+#include <optional>
+#include <stdexcept>
+#include <string>
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
@@ -24,6 +29,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "soma/core/mesh.hpp"
+#include "soma/parallel/comm.hpp"
 
 namespace soma_py {
 
@@ -84,6 +90,73 @@ nb::ndarray<nb::numpy, T> vector_array(std::vector<T>&& values) {
   nb::capsule owner(holder, [](void* p) noexcept { delete static_cast<std::vector<T>*>(p); });
   const std::size_t n = holder->size();
   return nb::ndarray<nb::numpy, T>(holder->data(), 1, &n, owner);
+}
+
+/// Runs `check` (argument checks and conversions before a collective call)
+/// and agrees on the outcome: if it threw on any rank, it throws on every rank
+/// (its own exception where it failed), so no rank enters the collective alone.
+template <class F>
+void agree(const soma::Comm& comm, F&& check) {
+  std::exception_ptr failure;
+  try {
+    check();
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  if (comm.allreduce(static_cast<std::int32_t>(failure != nullptr), soma::Op::max) != 0) {
+    if (failure) std::rethrow_exception(failure);
+    throw std::invalid_argument("invalid arguments on another rank");
+  }
+}
+
+template <class T>
+constexpr const char* numpy_name() {
+  if constexpr (std::is_same_v<T, std::int64_t>) return "int64";
+  else if constexpr (std::is_same_v<T, std::int32_t>) return "int32";
+  else if constexpr (std::is_same_v<T, std::int8_t>) return "int8";
+  else if constexpr (std::is_same_v<T, std::uint8_t>) return "uint8";
+  else static_assert(sizeof(T) == 0, "numpy_name: add the type");
+}
+
+template <class T>
+using IntArray = nb::ndarray<const T, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
+using PointArray = nb::ndarray<const double, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
+
+/// A 1-D array of integers as T, refusing what a cast would misread: floats
+/// (TypeError) and values outside T's range (ValueError). Booleans and every
+/// integer type convert. The result references a converted copy when needed.
+template <class T>
+IntArray<T> checked_ints(nb::handle values, const std::string& what) {
+  const nb::module_ np = nb::module_::import_("numpy");
+  const nb::object a = np.attr("asarray")(values);
+  const std::string kind = nb::cast<std::string>(a.attr("dtype").attr("kind"));
+  if (kind != "i" && kind != "u" && kind != "b") {
+    throw nb::type_error((what + ": expected integers, got " + nb::cast<std::string>(a.attr("dtype").attr("name"))).c_str());
+  }
+  if (nb::cast<int>(a.attr("ndim")) != 1) throw std::invalid_argument(what + ": expected a 1-D array");
+  if (kind != "b" && nb::cast<std::size_t>(a.attr("size")) > 0) {
+    const nb::object info = np.attr("iinfo")(numpy_name<T>());
+    const nb::module_ op = nb::module_::import_("operator");
+    const nb::object lo = nb::module_::import_("builtins").attr("int")(a.attr("min")());
+    const nb::object hi = nb::module_::import_("builtins").attr("int")(a.attr("max")());
+    if (nb::cast<bool>(op.attr("lt")(lo, info.attr("min"))) || nb::cast<bool>(op.attr("gt")(hi, info.attr("max")))) {
+      throw std::invalid_argument(what + ": values outside the range of " + numpy_name<T>());
+    }
+  }
+  return nb::cast<IntArray<T>>(np.attr("ascontiguousarray")(a, nb::arg("dtype") = numpy_name<T>()));
+}
+
+/// Points as a C-ordered (n, 3) float64 array; an empty array of any shape is
+/// no points.
+inline PointArray points(nb::handle values, const std::string& what) {
+  const nb::module_ np = nb::module_::import_("numpy");
+  nb::object a = np.attr("asarray")(values, nb::arg("dtype") = "float64");
+  if (nb::cast<std::size_t>(a.attr("size")) == 0) a = a.attr("reshape")(0, 3);
+  const nb::object shape = a.attr("shape");
+  if (nb::cast<int>(a.attr("ndim")) != 2 || nb::cast<std::size_t>(shape[1]) != 3) {
+    throw std::invalid_argument(what + ": expected points of shape (n, 3)");
+  }
+  return nb::cast<PointArray>(np.attr("ascontiguousarray")(a));
 }
 
 /// A mesh owned by Python: the C++ mesh behind a guard (above).

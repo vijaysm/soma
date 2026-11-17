@@ -17,33 +17,32 @@
 
 namespace soma_py {
 
-namespace {
-
-using RankArray = nb::ndarray<const int, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
-using GidArray = nb::ndarray<const soma::GO, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
-using XyzArray = nb::ndarray<const soma::Real, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
-
-}  // namespace
-
 void bind_parallel(nb::module_& m, nb::class_<PyMesh>& mesh) {
   m.def(
       "partition_by_curve",
-      [](const soma::Comm& comm, XyzArray centroids, GidArray gids) {
-        if (centroids.shape(1) != 3) throw std::invalid_argument("partition_by_curve: centroids must be (n, 3)");
-        return vector_array<int>(soma::partition_by_curve(comm, {centroids.data(), 3 * centroids.shape(0)},
-                                                          {gids.data(), gids.shape(0)}));
+      [](const soma::Comm& comm, nb::handle centroid_values, nb::handle gid_values) {
+        std::optional<PointArray> centroids;
+        std::optional<IntArray<soma::GO>> gids;
+        agree(comm, [&] {
+          centroids = points(centroid_values, "partition_by_curve: centroids");
+          gids = checked_ints<soma::GO>(gid_values, "partition_by_curve: gids");
+        });
+        return vector_array<int>(soma::partition_by_curve(comm, {centroids->data(), 3 * centroids->shape(0)},
+                                                          {gids->data(), gids->shape(0)}));
       },
       nb::arg("comm"), nb::arg("centroids"), nb::arg("gids"),
       "Collective: the destination rank of each element given, by its centroid on a space-filling curve.");
   m.def(
       "migrate",
-      [](const soma::Comm& comm, const PyMesh& from, RankArray dest, std::optional<soma::Ordering> ordering) {
-        return new PyMesh(soma::migrate(comm, from.get(), {dest.data(), dest.shape(0)},
+      [](const soma::Comm& comm, const PyMesh& from, nb::handle dest_values, std::optional<soma::Ordering> ordering) {
+        std::optional<IntArray<int>> dest;
+        agree(comm, [&] { dest = checked_ints<int>(dest_values, "migrate: dest"); });
+        return new PyMesh(soma::migrate(comm, from.get(), {dest->data(), dest->shape(0)},
                                         ordering.value_or(soma::default_ordering)));
       },
       nb::arg("comm"), nb::arg("mesh"), nb::arg("dest"), nb::arg("ordering") = nb::none(),
       nb::rv_policy::take_ownership,
-      "Collective: a new mesh with each element of dimension dim moved to dest[lid] (one rank per element "
+      "Collective: a new mesh with each element moved to dest[lid] (one rank per element "
       "held, owned or not), with its closure, fields and sets. The input is unchanged.");
   m.def(
       "rebalance",

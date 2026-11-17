@@ -11,11 +11,10 @@
 //   5. both meshes written to <out_dir> as source and target, .soma and .vtk.
 //
 // Rank 0 prints FNV-1a digests of the vertex coordinates and of the remapped
-// values (in gid order) and the integral of the remapped u. Its own arithmetic
-// is one operation per statement, so no compiler fuses a multiply and an add
-// that Python rounds apart (flags such as -ffp-contract=off would also change
-// SOMA's header kernels compiled here, which the Python module compiles with
-// the defaults).
+// values (in gid order) and the integral of the remapped u. Its own scalar
+// arithmetic lives in pipeline_arith.cpp, compiled without contraction so it
+// rounds as Python does; this file keeps the default flags, so SOMA's header
+// kernels compile here as they do in the Python module.
 
 #include <algorithm>
 #include <cmath>
@@ -38,6 +37,8 @@
 #include "soma/parallel/ghosts.hpp"
 #include "soma/runtime/scope_guard.hpp"
 #include "soma/testing/box_mesh.hpp"
+
+#include "pipeline_arith.hpp"
 
 namespace {
 
@@ -72,19 +73,11 @@ std::vector<double> by_gid(const soma::Comm& comm, std::span<const GO> gids, std
 }
 
 double tet_volume(const soma::CoordView<Kokkos::HostSpace>& x, const LO* c) {
-  double e[3][3];
-  for (int k = 0; k < 3; ++k) {
-    for (int i = 0; i < 3; ++i) e[k][i] = x(c[k + 1], i) - x(c[0], i);
+  double p[4][3];
+  for (int k = 0; k < 4; ++k) {
+    for (int i = 0; i < 3; ++i) p[k][i] = x(c[k], i);
   }
-  // One operation per statement (see the top of the file).
-  const double p0 = e[1][1] * e[2][2], p1 = e[1][2] * e[2][1];
-  const double p2 = e[1][2] * e[2][0], p3 = e[1][0] * e[2][2];
-  const double p4 = e[1][0] * e[2][1], p5 = e[1][1] * e[2][0];
-  const double cx = p0 - p1, cy = p2 - p3, cz = p4 - p5;
-  const double q0 = e[0][0] * cx, q1 = e[0][1] * cy, q2 = e[0][2] * cz;
-  const double s01 = q0 + q1;
-  const double det = s01 + q2;
-  return std::abs(det) / 6.0;
+  return pipeline::tet_volume(p[0], p[1], p[2], p[3]);
 }
 
 int run(const soma::Comm& comm, const std::filesystem::path& out) {
@@ -104,10 +97,9 @@ int run(const soma::Comm& comm, const std::filesystem::path& out) {
     if (skin) continue;
     const double gd = static_cast<double>(g(v));
     const double a = 0.05 * h;
-    const double d0 = a * std::sin(gd), d1 = a * std::cos(gd), d2 = a * std::sin(2.0 * gd);
-    x(v, 0) += d0;
-    x(v, 1) += d1;
-    x(v, 2) += d2;
+    x(v, 0) = pipeline::moved(x(v, 0), a, std::sin(gd));
+    x(v, 1) = pipeline::moved(x(v, 1), a, std::cos(gd));
+    x(v, 2) = pipeline::moved(x(v, 2), a, std::sin(2.0 * gd));
   }
 
   // 3. Smoothing.
@@ -121,12 +113,9 @@ int run(const soma::Comm& comm, const std::filesystem::path& out) {
   for (LO e = 0; e < source.count(3); ++e) {
     double c[3];
     for (int i = 0; i < 3; ++i) {
-      c[i] = (((x(conn(4 * e), i) + x(conn(4 * e + 1), i)) + x(conn(4 * e + 2), i)) + x(conn(4 * e + 3), i)) / 4.0;
+      c[i] = pipeline::centroid(x(conn(4 * e), i), x(conn(4 * e + 1), i), x(conn(4 * e + 2), i), x(conn(4 * e + 3), i));
     }
-    const double t1 = 2.0 * c[1], t2 = 3.0 * c[2];
-    const double s = 1.0 + c[0];
-    const double s1 = s + t1;
-    u(e, 0) = s1 + t2;
+    u(e, 0) = pipeline::linear(c[0], c[1], c[2]);
   }
   HostMesh target = soma::testing::box_mesh(comm, BoxSpec{.nx = 5, .ny = 5, .nz = 5, .element = soma::Topology::tet});
   auto ut = target.fields().add_tag<double>("u", 3, 1).view();
@@ -160,8 +149,7 @@ int run(const soma::Comm& comm, const std::filesystem::path& out) {
   double integral = 0;
   for (std::size_t i = 0; i < remapped.size(); i += 2) {
     dr.add(remapped[i]);
-    const double part = remapped[i] * remapped[i + 1];
-    integral += part;
+    integral = pipeline::accumulate(integral, remapped[i], remapped[i + 1]);
   }
   if (comm.rank() == 0) {
     std::printf("coords digest: %016llx\n", static_cast<unsigned long long>(dc.h));

@@ -141,3 +141,22 @@ def test_segments():
     segs = m.segments(3)
     assert sum(s[1] - s[0] for s in segs) == m.count(3)
     assert all(s[2] == soma.Topology.tet and s[3] == 4 for s in segs)
+
+
+def test_rejects_lossy_integer_inputs():
+    b = soma.MeshBuilder(2)
+    with pytest.raises(TypeError):
+        b.add_vertices(np.array([1.9, 2.2, 3.0]), np.eye(3))
+    with pytest.raises(ValueError):
+        b.add_vertices(np.array([2**63], dtype=np.uint64), np.zeros((1, 3)))
+
+
+def test_interior_count_and_adjacencies():
+    comm = comm_world()
+    m = soma.box_mesh(comm, 2, 2, 4)
+    assert 0 <= m.interior_count(3) <= m.owned_count(3) <= m.count(3)
+    if comm.size == 1:
+        assert m.interior_count(0) == m.count(0)
+    m.build_adjacencies(comm, [(3, 2), (3, 1)])
+    faces = allsum(m.owned_count(2))
+    assert faces == 2 * 2 * 5 + 2 * 3 * 4 + 3 * 2 * 4  # z-faces + y-faces + x-faces of a 2x2x4 box

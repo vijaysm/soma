@@ -25,10 +25,6 @@ using soma::GO;
 using soma::LO;
 using soma::Real;
 
-using LidArray = nb::ndarray<const LO, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
-using GidArray = nb::ndarray<const GO, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
-using OffsetArray = nb::ndarray<const soma::Offset, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
-using XyzArray = nb::ndarray<const Real, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
 
 // An edit of a mesh; keeps the mesh alive (keep_alive in the binding).
 struct PyEdit {
@@ -42,9 +38,11 @@ nb::list renumbering(const soma::Renumbering& r) {
   return out;
 }
 
-std::span<const Real> points(const XyzArray& xyz) {
-  if (xyz.shape(1) != 3) throw std::invalid_argument("xyz must have shape (n, 3)");
-  return {xyz.data(), 3 * xyz.shape(0)};
+std::span<const Real> span_of(const PointArray& xyz) { return {xyz.data(), 3 * xyz.shape(0)}; }
+
+template <class T>
+std::span<const T> span_of(const IntArray<T>& a) {
+  return {a.data(), a.shape(0)};
 }
 
 }  // namespace
@@ -58,20 +56,22 @@ void bind_edit(nb::module_& m, nb::class_<PyMesh>& mesh) {
           nb::arg("mesh"), nb::keep_alive<1, 2>())
       .def(
           "add_vertices",
-          [](PyEdit& self, XyzArray xyz, std::optional<GidArray> gids) {
-            if (!gids) return self.edit->add_vertices(points(xyz));
-            if (gids->shape(0) != xyz.shape(0)) throw std::invalid_argument("add_vertices: one gid per point");
-            return self.edit->add_vertices({gids->data(), gids->shape(0)}, points(xyz));
+          [](PyEdit& self, nb::handle xyz_values, nb::handle gid_values) {
+            const PointArray xyz = points(xyz_values, "add_vertices: xyz");
+            if (gid_values.is_none()) return self.edit->add_vertices(span_of(xyz));
+            const auto gids = checked_ints<GO>(gid_values, "add_vertices: gids");
+            if (gids.shape(0) != xyz.shape(0)) throw std::invalid_argument("add_vertices: one gid per point");
+            return self.edit->add_vertices(span_of(gids), span_of(xyz));
           },
           nb::arg("xyz"), nb::arg("gids") = nb::none(),
           "Vertices to add, (n, 3); returns the lid the first will have. Gids are derived when not given.")
       .def(
           "add_elements",
-          [](PyEdit& self, soma::Topology t, LidArray vertex_lids, std::optional<GidArray> gids,
-             int nodes_per_element) {
-            const std::span<const LO> lids{vertex_lids.data(), vertex_lids.shape(0)};
-            if (!gids) return self.edit->add_elements(t, lids, nodes_per_element);
-            return self.edit->add_elements(t, {gids->data(), gids->shape(0)}, lids, nodes_per_element);
+          [](PyEdit& self, soma::Topology t, nb::handle lid_values, nb::handle gid_values, int nodes_per_element) {
+            const auto lids = checked_ints<LO>(lid_values, "add_elements: vertex_lids");
+            if (gid_values.is_none()) return self.edit->add_elements(t, span_of(lids), nodes_per_element);
+            const auto gids = checked_ints<GO>(gid_values, "add_elements: gids");
+            return self.edit->add_elements(t, span_of(gids), span_of(lids), nodes_per_element);
           },
           nb::arg("topology"), nb::arg("vertex_lids"), nb::arg("gids") = nb::none(),
           nb::arg("nodes_per_element") = 0,
@@ -79,13 +79,17 @@ void bind_edit(nb::module_& m, nb::class_<PyMesh>& mesh) {
           "the lid the first will have.")
       .def(
           "add_polygons",
-          [](PyEdit& self, OffsetArray offsets, LidArray lids) {
-            return self.edit->add_polygons({offsets.data(), offsets.shape(0)}, {lids.data(), lids.shape(0)});
+          [](PyEdit& self, nb::handle offset_values, nb::handle lid_values) {
+            const auto offsets = checked_ints<soma::Offset>(offset_values, "add_polygons: offsets");
+            const auto lids = checked_ints<LO>(lid_values, "add_polygons: vertex_lids");
+            return self.edit->add_polygons(span_of(offsets), span_of(lids));
           },
           nb::arg("offsets"), nb::arg("vertex_lids"), "Polygons as offsets into a flat array of vertex lids.")
       .def(
           "remove",
-          [](PyEdit& self, int d, LidArray lids) { self.edit->remove(d, {lids.data(), lids.shape(0)}); },
+          [](PyEdit& self, int d, nb::handle lid_values) {
+            self.edit->remove(d, span_of(checked_ints<LO>(lid_values, "remove: lids")));
+          },
           nb::arg("d"), nb::arg("lids"), "Entities of dimension d to remove.")
       .def(
           "set_compress_threshold", [](PyEdit& self, double t) { self.edit->set_compress_threshold(t); },

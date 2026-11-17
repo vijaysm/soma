@@ -3,6 +3,7 @@
 """Laplacian smoothing, refinement and remap from Python."""
 
 import numpy as np
+import pytest
 
 import soma
 from conftest import allsum, comm_world
@@ -108,3 +109,21 @@ def test_remap_keeps_meshes_alive():
     del s, t
     out = np.zeros(48)
     op.apply(comm, np.ones(48), out)
+
+
+def test_smooth_with_empty_ranks():
+    comm = comm_world()
+    m = soma.box_mesh(comm, 3, 3, 2)
+    m.add_ghosts(comm, 1, 0)
+    before = m.coords().copy()
+    soma.laplacian_smooth(comm, m, iterations=2)
+    assert np.allclose(m.coords(), before, rtol=0, atol=1e-12)  # a grid is already smooth
+
+
+def test_rejects_lossy_integer_inputs():
+    comm = comm_world()
+    m = soma.box_mesh(comm, 2, 2, 2, element=soma.Topology.tet)
+    with pytest.raises(ValueError):
+        soma.refine_marked(comm, m, np.full(m.count(3), 256))
+    with pytest.raises(TypeError):
+        soma.refine_marked(comm, m, np.zeros(m.count(3), dtype=np.float64))

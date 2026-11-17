@@ -30,8 +30,6 @@ using soma::GO;
 using soma::HostMesh;
 using soma::Real;
 
-using GidArray = nb::ndarray<const GO, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
-using XyzArray = nb::ndarray<const Real, nb::ndim<2>, nb::c_contig, nb::device::cpu>;
 
 // A builder used once: build_local_part consumes it.
 struct PyBuilder {
@@ -88,8 +86,9 @@ nb::class_<PyMesh> bind_mesh(nb::module_& m) {
            nb::arg("dim"))
       .def(
           "add_vertices",
-          [](PyBuilder& self, GidArray gids, XyzArray xyz) {
-            if (xyz.shape(1) != 3) throw std::invalid_argument("add_vertices: xyz must have shape (n, 3)");
+          [](PyBuilder& self, nb::handle gid_values, nb::handle xyz_values) {
+            const auto gids = checked_ints<GO>(gid_values, "add_vertices: gids");
+            const auto xyz = points(xyz_values, "add_vertices: xyz");
             if (xyz.shape(0) != gids.shape(0)) {
               throw std::invalid_argument("add_vertices: " + std::to_string(gids.shape(0)) + " gids but " +
                                           std::to_string(xyz.shape(0)) + " points");
@@ -99,7 +98,9 @@ nb::class_<PyMesh> bind_mesh(nb::module_& m) {
           nb::arg("gids"), nb::arg("xyz"), "Vertices by global id, with their coordinates (n, 3).")
       .def(
           "add_elements",
-          [](PyBuilder& self, soma::Topology t, GidArray gids, GidArray vertex_gids) {
+          [](PyBuilder& self, soma::Topology t, nb::handle gid_values, nb::handle vertex_values) {
+            const auto gids = checked_ints<GO>(gid_values, "add_elements: gids");
+            const auto vertex_gids = checked_ints<GO>(vertex_values, "add_elements: vertex_gids");
             self.get().add_elements(t, {gids.data(), gids.shape(0)}, {vertex_gids.data(), vertex_gids.shape(0)});
           },
           nb::arg("topology"), nb::arg("gids"), nb::arg("vertex_gids"),

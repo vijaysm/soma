@@ -19,7 +19,9 @@ target_link_libraries(_soma PRIVATE soma::soma)
 # units; with nanobind's hidden visibility the binding sources would see other
 # type_info objects for the same template instances (macOS arm64), and every
 # any_cast across the boundary would fail. The module keeps default visibility.
-set_target_properties(_soma PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF)
+set_target_properties(_soma PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF
+  # The installed module finds Kokkos and MPI where it was linked against them.
+  INSTALL_RPATH_USE_LINK_PATH TRUE)
 set_target_properties(_soma PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${soma_python_dir}")
 if(SOMA_ENABLE_MPI)
   execute_process(
@@ -82,7 +84,8 @@ if(SOMA_ENABLE_TESTS)
   soma_add_python_test(tests/test_algorithms.py RANKS 1 2 3 4)
   soma_add_python_test(tests/test_vis.py RANKS 1 2)
   # cmake --install --prefix P puts the package under P and nowhere else.
-  if(SOMA_INSTALL)
+  # Only for an install directory under the prefix: an absolute one is outside any test prefix.
+  if(SOMA_INSTALL AND NOT IS_ABSOLUTE "${SOMA_PYTHON_INSTALL_DIR}")
     add_test(NAME python.install
       COMMAND "${Python_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/tests/check_install.py" "${CMAKE_COMMAND}"
               "${CMAKE_BINARY_DIR}" "${CMAKE_CURRENT_BINARY_DIR}/install_test"

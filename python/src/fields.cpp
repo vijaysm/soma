@@ -86,16 +86,25 @@ using FieldArray = nb::ndarray<T, nb::device::cpu>;
 
 // An unmanaged (rows, ncomp) view over a writable column-major array.
 template <class T>
-soma::View2<T, Kokkos::HostSpace> as_view(FieldArray<T> a) {
-  const std::size_t rows = a.ndim() >= 1 ? a.shape(0) : 0;
-  const std::size_t ncomp = a.ndim() == 2 ? a.shape(1) : 1;
-  const bool column_major = a.ndim() == 1 ? a.stride(0) == 1 || rows <= 1
-                                          : (a.stride(0) == 1 || rows <= 1) &&
-                                                (static_cast<std::size_t>(a.stride(1)) == rows || ncomp <= 1);
-  if (a.ndim() < 1 || a.ndim() > 2 || !column_major) {
+soma::View2<T, Kokkos::HostSpace> as_view(const FieldArray<T>& a) {
+  if (a.ndim() < 1 || a.ndim() > 2) {
     throw std::invalid_argument("expected a (rows, ncomp) column-major array, such as a field's");
   }
+  const std::size_t rows = a.shape(0);
+  const std::size_t ncomp = a.ndim() == 2 ? a.shape(1) : 1;
+  // An empty array has no layout to check (a rank holding nothing passes one).
+  const bool column_major = rows == 0 || ncomp == 0 ||
+                            ((a.stride(0) == 1 || rows == 1) &&
+                             (a.ndim() == 1 || ncomp == 1 || static_cast<std::size_t>(a.stride(1)) == rows));
+  if (!column_major) throw std::invalid_argument("expected a (rows, ncomp) column-major array, such as a field's");
   return soma::View2<T, Kokkos::HostSpace>(a.data(), rows, ncomp);
+}
+
+template <class T>
+soma::View2<T, Kokkos::HostSpace> agreed_view(const soma::Comm& comm, const FieldArray<T>& a) {
+  soma::View2<T, Kokkos::HostSpace> v;
+  agree(comm, [&] { v = as_view<T>(a); });
+  return v;
 }
 
 template <class T>
@@ -103,14 +112,14 @@ void bind_exchange_type(nb::class_<Guarded<HostHalo>>& c) {
   c.def(
        "update",
        [](const Guarded<HostHalo>& self, const soma::Comm& comm, FieldArray<T> values) {
-         self.value->update(comm, as_view<T>(values));
+         self.value->update(comm, agreed_view<T>(comm, values));
        },
        nb::arg("comm"), nb::arg("values").noconvert(),
        "Collective: owners' values overwrite every copy's, in place.")
       .def(
           "reduce",
           [](const Guarded<HostHalo>& self, const soma::Comm& comm, FieldArray<T> values, soma::Op op) {
-            self.value->reduce(comm, as_view<T>(values), op);
+            self.value->reduce(comm, agreed_view<T>(comm, values), op);
           },
           nb::arg("comm"), nb::arg("values").noconvert(), nb::arg("op"),
           "Collective: every holder gets all holders' values combined by op, in rank order, in place.");

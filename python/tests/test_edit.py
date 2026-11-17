@@ -53,3 +53,16 @@ def test_edit_keeps_mesh_alive():
     del m
     e.add_vertices(np.zeros((1, 3)))
     e.apply()
+
+
+def test_add_polygons_and_lossy_lids():
+    import pytest
+
+    m = soma.box_mesh(soma.Comm.self(), 2, 2, 1, element=soma.Topology.quad)
+    e = soma.MeshEdit(m)
+    first = e.add_polygons(np.array([0, 5], dtype=np.int64), np.array([0, 1, 4, 7, 3], dtype=np.int32))
+    assert first == 4
+    e.apply()
+    assert m.count(2) == 5 and soma.Topology(int(m.topology(2)[4])) == soma.Topology.polygon
+    with pytest.raises(ValueError):
+        soma.MeshEdit(m).remove(0, np.array([2**32 + 1]))

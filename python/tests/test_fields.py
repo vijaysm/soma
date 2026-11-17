@@ -74,3 +74,25 @@ def test_halo_rejects_a_copy_in_another_dtype():
     m = soma.box_mesh(comm, 2, 2, 2)
     with pytest.raises(TypeError):
         soma.HaloExchange(comm, m, 0).update(comm, np.zeros((m.count(0), 1), dtype=np.float32))
+
+
+def test_halo_multicomponent_with_empty_ranks():
+    comm = comm_world()
+    m = soma.box_mesh(comm, 2, 2, 2)  # empty ranks at 3 and 4
+    v = m.add_field("v2", 0, 2, np.int64)
+    v[:] = -1
+    n = m.owned_count(0)
+    v[:n, 0] = m.gids(0)[:n]
+    v[:n, 1] = 2 * m.gids(0)[:n]
+    soma.HaloExchange(comm, m, 0).update(comm, v)
+    assert np.array_equal(v[:, 0], m.gids(0)) and np.array_equal(v[:, 1], 2 * m.gids(0))
+    soma.HaloExchange(comm, m, 0).reduce(comm, v, soma.Op.max)
+
+
+def test_halo_bad_array_is_collective():
+    comm = comm_world()
+    m = soma.box_mesh(comm, 2, 2, 4)  # every rank holds vertices at up to 4 ranks
+    v = m.add_field("v3", 0, 2)
+    arg = np.zeros((m.count(0), 2)) if comm.rank == 0 else v  # row-major on rank 0 only
+    with pytest.raises(ValueError):
+        soma.HaloExchange(comm, m, 0).update(comm, arg)

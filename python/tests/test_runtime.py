@@ -57,3 +57,23 @@ def test_exit_with_live_object_is_clean():
     r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=50)
     assert r.returncode == 0, r.stderr
     assert r.stderr == ""
+
+
+@pytest.mark.skipif(not soma.has_mpi, reason="a build without MPI")
+def test_import_failure_exits_cleanly():
+    if MPI.COMM_WORLD.Get_rank() != 0:
+        pytest.skip("runs once, on rank 0")
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("PMI_", "PMIX_", "HYDRA_", "MPIR_"))}
+    code = (
+        "import mpi4py.MPI as M\n"
+        "M.Get_library_version = lambda: 'another MPI'\n"
+        "try:\n"
+        "    import soma\n"
+        "except ImportError as e:\n"
+        "    assert 'different MPI libraries' in str(e)\n"
+        "else:\n"
+        "    raise SystemExit('imported')\n"
+    )
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, timeout=50)
+    assert r.returncode == 0, r.stderr
+    assert "terminating" not in r.stderr

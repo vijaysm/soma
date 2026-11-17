@@ -25,8 +25,6 @@ namespace {
 
 using soma::Real;
 using HostRemap = soma::RemapOperator<Kokkos::HostSpace>;
-using MaskArray = nb::ndarray<const std::uint8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
-using MarkArray = nb::ndarray<const std::int8_t, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using InArray = nb::ndarray<const Real, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 using OutArray = nb::ndarray<Real, nb::ndim<1>, nb::c_contig, nb::device::cpu>;
 
@@ -66,9 +64,12 @@ E choose(const std::string& value, std::initializer_list<std::pair<const char*, 
 void bind_algorithms(nb::module_& m) {
   m.def(
       "laplacian_smooth",
-      [](const soma::Comm& comm, PyMesh& mesh, int iterations, int bridge_dim, Real tolerance,
-         std::optional<MaskArray> fixed) {
+      [](const soma::Comm& comm, PyMesh& mesh, int iterations, int bridge_dim, Real tolerance, nb::handle mask) {
         soma::SmoothOptions o{.iterations = iterations, .bridge_dim = bridge_dim, .tolerance = tolerance};
+        std::optional<IntArray<std::uint8_t>> fixed;
+        agree(comm, [&] {
+          if (!mask.is_none()) fixed = checked_ints<std::uint8_t>(mask, "laplacian_smooth: fixed");
+        });
         if (fixed) o.fixed = {fixed->data(), fixed->shape(0)};
         const soma::SmoothReport r = soma::laplacian_smooth(comm, mesh.get(), o);
         nb::dict d;
@@ -102,14 +103,17 @@ void bind_algorithms(nb::module_& m) {
       "Collective: a new mesh with every edge split in two, levels times. The input is unchanged.");
   m.def(
       "refine_marked",
-      [](const soma::Comm& comm, const PyMesh& mesh, MarkArray marks, bool conforming, const std::string& vertices) {
+      [](const soma::Comm& comm, const PyMesh& mesh, nb::handle mark_values, bool conforming,
+         const std::string& vertices) {
+        std::optional<IntArray<std::int8_t>> marks;
+        agree(comm, [&] { marks = checked_ints<std::int8_t>(mark_values, "refine_marked: marks"); });
         soma::MarkedOptions o;
         o.conforming = conforming;
         o.vertices = choose<soma::VertexMatching>(
             vertices,
             {{"recorded", soma::VertexMatching::recorded}, {"coordinates", soma::VertexMatching::coordinates}},
             "refine_marked: vertices");
-        return wrap(soma::refine_marked(comm, mesh.get(), {marks.data(), marks.shape(0)}, o));
+        return wrap(soma::refine_marked(comm, mesh.get(), {marks->data(), marks->shape(0)}, o));
       },
       nb::arg("comm"), nb::arg("mesh"), nb::arg("marks"), nb::arg("conforming") = false,
       nb::arg("vertices") = "recorded",

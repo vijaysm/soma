@@ -5,6 +5,7 @@
 Usage: check_install.py <cmake> <build_dir> <prefix> <python_version>   (version as 3.9)
 """
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -25,7 +26,14 @@ def main(cmake, build, prefix, version):
                if "soma" in line and ("Installing" in line or "Up-to-date" in line) and str(prefix) not in line]
     if outside:
         sys.exit("installed outside the prefix:\n" + "\n".join(outside))
-    print(f"package installed under {want}")
+    # The installed package imports on its own: its extension finds Kokkos and MPI.
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("PMI_", "PMIX_", "HYDRA_", "MPIR_"))}
+    env["PYTHONPATH"] = str(want.parent)
+    r = subprocess.run([sys.executable, "-c", "import soma; print(soma.__file__)"], env=env, capture_output=True,
+                       text=True, timeout=60, cwd=str(prefix))  # not the build tree's package
+    if r.returncode != 0 or str(want) not in r.stdout:
+        sys.exit(f"the installed package does not import:\n{r.stdout}\n{r.stderr}")
+    print(f"package installed under {want}, and imports")
 
 
 if __name__ == "__main__":
