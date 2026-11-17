@@ -7,15 +7,20 @@
 #ifndef SOMA_SRC_C_HANDLES_HPP_
 #define SOMA_SRC_C_HANDLES_HPP_
 
+#include <array>
 #include <atomic>
 #include <cstdint>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "soma/c/soma.h"
+#include "soma/core/mesh.hpp"
+#include "soma/core/mesh_builder.hpp"
 #include "soma/parallel/comm.hpp"
 
 namespace soma::c {
@@ -111,11 +116,57 @@ T& out(T* p, const char* what) {
   return *p;
 }
 
+/// Throws invalid_argument unless 0 <= n.
+void check_count(std::int64_t n, const char* what);
+/// Throws invalid_argument when p is null and n > 0 (an empty array may be null).
+void check_array(const void* p, std::int64_t n, const char* what);
+/// A topology value (SOMA_VERTEX .. SOMA_POLYHEDRON), or invalid_argument.
+Topology topology_of(int t, const char* what);
+/// An ordering value; SOMA_ORDERING_DEFAULT is the library's default.
+Ordering ordering_of(int o, const char* what);
+/// Throws invalid_argument unless 0 <= d <= mesh.dim().
+void check_dim(const HostMesh& mesh, int d);
+
+/// A dimension's connectivity, 1-based, for Fortran.
+struct Conn1 {
+  std::vector<LO> conn;
+  std::vector<Offset> offsets;
+};
+
+/// A mesh and what the C layer keeps beside it, shared by the mesh's handles
+/// and by the handles built from it (edits, halo exchanges, remap operators).
+struct MeshState {
+  std::shared_ptr<HostMesh> mesh;
+  /// Bumped by every call that changes topology or numbering.
+  std::uint64_t generation = 0;
+  std::array<std::optional<Conn1>, 4> conn1;
+
+  explicit MeshState(HostMesh&& m);
+  /// Records a change of topology or numbering: drops the 1-based copies.
+  void changed();
+};
+
 }  // namespace soma::c
 
 struct soma_comm {
   std::shared_ptr<soma::Comm> comm;
   soma::c::Live live;
 };
+
+struct soma_builder {
+  std::shared_ptr<std::optional<soma::MeshBuilder>> builder;
+  soma::c::Live live;
+  /// The builder, or StateError once build_local_part consumed it.
+  soma::MeshBuilder& get(const char* what) const;
+};
+
+struct soma_mesh {
+  std::shared_ptr<soma::c::MeshState> state;
+  soma::c::Live live;
+  soma::HostMesh& get() const { return *state->mesh; }
+};
+
+/// A new mesh handle on a mesh the C layer now owns.
+soma_mesh_t* soma_c_new_mesh(soma::HostMesh&& mesh);
 
 #endif  // SOMA_SRC_C_HANDLES_HPP_

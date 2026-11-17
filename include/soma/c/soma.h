@@ -167,6 +167,73 @@ int soma_comm_barrier(const soma_comm_t* comm);
 int soma_comm_clone(const soma_comm_t* comm, soma_comm_t** out);
 void soma_comm_free(soma_comm_t* comm);
 
+/* ---- Mesh creation ---------------------------------------------------- */
+
+/// A builder of this rank's vertices and elements, by gid, for a mesh of
+/// dimension dim.
+int soma_builder_create(int dim, soma_builder_t** out);
+/// n vertices: gids[n] and coordinates xyz[3 n], interleaved (x, y, z).
+int soma_builder_add_vertices(soma_builder_t* builder, soma_lo_t n, const soma_go_t* gids, const double* xyz);
+/// n elements of one topology: gids[n] and their corners' vertex gids,
+/// element after element (nv of them).
+int soma_builder_add_elements(soma_builder_t* builder, int topology, soma_lo_t n, const soma_go_t* gids,
+                              soma_offset_t nv, const soma_go_t* vertex_gids);
+int soma_builder_clone(const soma_builder_t* builder, soma_builder_t** out);
+void soma_builder_free(soma_builder_t* builder);
+
+/// Collective: this rank's part of the mesh the builders of every rank
+/// describe, with its sharing. Consumes the builder (later use: SOMA_ERR_STATE).
+int soma_build_local_part(const soma_comm_t* comm, soma_builder_t* builder, int ordering, soma_mesh_t** out);
+
+/// Collective: a box [0, lx] x [0, ly] x [0, lz] of nx x ny x nz cells of hex,
+/// tet, quad or tri elements (nz = 1 for quad and tri), split across the ranks
+/// in layers along its last axis.
+int soma_box_mesh(const soma_comm_t* comm, int nx, int ny, int nz, int element, double lx, double ly, double lz,
+                  int ordering, soma_mesh_t** out);
+
+/* ---- Mesh queries ----------------------------------------------------- */
+
+int soma_mesh_dim(const soma_mesh_t* mesh, int* dim);
+/// Entities of dimension d held here: owned, copies and ghosts.
+int soma_mesh_count(const soma_mesh_t* mesh, int d, soma_lo_t* count);
+/// Entities owned here: lids [0, owned).
+int soma_mesh_owned_count(const soma_mesh_t* mesh, int d, soma_lo_t* owned);
+/// Entities held by this rank alone: lids [0, interior).
+int soma_mesh_interior_count(const soma_mesh_t* mesh, int d, soma_lo_t* interior);
+/// Runs of entities alike: lids [begin, end), topology, arity, ownership.
+int soma_mesh_segment_count(const soma_mesh_t* mesh, int d, int* count);
+int soma_mesh_segment(const soma_mesh_t* mesh, int d, int i, soma_lo_t* begin, soma_lo_t* end, int* topology,
+                      int* arity, int* ownership);
+/// The vertex coordinates, writable, shared with the mesh: column-major
+/// (n, 3), so x[v + n i] is coordinate i of vertex v.
+int soma_mesh_coords(soma_mesh_t* mesh, double** x, soma_lo_t* n);
+/// Copies of the first n vertices' coordinates, interleaved: xyz[3 v + i].
+int soma_mesh_get_coords_interleaved(const soma_mesh_t* mesh, soma_lo_t n, double* xyz);
+int soma_mesh_set_coords_interleaved(soma_mesh_t* mesh, soma_lo_t n, const double* xyz);
+/// Global ids of dimension d (count of them), shared, read-only.
+int soma_mesh_gids(const soma_mesh_t* mesh, int d, const soma_go_t** gids, soma_lo_t* count);
+/// Corner vertex lids of dimension d: entity e's are
+/// conn[offsets[e], offsets[e + 1]); count + 1 offsets. Shared, read-only.
+/// Vertices store no connectivity: dimension 0 gives count 0.
+int soma_mesh_conn(const soma_mesh_t* mesh, int d, const soma_lo_t** conn, const soma_offset_t** offsets,
+                   soma_lo_t* count);
+/// The same, 1-based (lids and offsets plus one), for Fortran: a copy made
+/// once and kept with the mesh until its topology changes.
+int soma_mesh_conn1(soma_mesh_t* mesh, int d, const soma_lo_t** conn, const soma_offset_t** offsets,
+                    soma_lo_t* count);
+/// Each entity's topology (a SOMA_* shape value). Shared, read-only.
+/// Vertices store none: dimension 0 gives count 0.
+int soma_mesh_topology(const soma_mesh_t* mesh, int d, const uint8_t** topology, soma_lo_t* count);
+/// The rank owning each of the count(d) entities of dimension d, into owners.
+int soma_mesh_owner_ranks(const soma_comm_t* comm, const soma_mesh_t* mesh, int d, int* owners);
+/// Collective: builds the adjacency graphs pairs[2 k] -> pairs[2 k + 1] and the
+/// bridges (bridges[2 k] through bridges[2 k + 1]), deriving edges and faces
+/// with their sharing.
+int soma_mesh_build_adjacencies(const soma_comm_t* comm, soma_mesh_t* mesh, int npairs, const int* pairs,
+                                int nbridges, const int* bridges);
+int soma_mesh_clone(const soma_mesh_t* mesh, soma_mesh_t** out);
+void soma_mesh_free(soma_mesh_t* mesh);
+
 #ifdef __cplusplus
 }
 #endif
