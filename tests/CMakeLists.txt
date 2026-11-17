@@ -275,7 +275,11 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/docs/figures/check_figures.py)
   add_test(NAME docs.figures_checker
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/docs/test_check_figures.py)
-  set_tests_properties(docs.wiki docs.wiki_converter docs.figures docs.figures_checker PROPERTIES TIMEOUT 60)
+  # The script that turns header comments into Doxygen comments passes its tests.
+  add_test(NAME docs.doxify
+    COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/docs/test_doxify.py)
+  set_tests_properties(docs.wiki docs.wiki_converter docs.figures docs.figures_checker docs.doxify
+                       PROPERTIES TIMEOUT 60)
 endif()
 
 if(SOMA_INSTALL)
