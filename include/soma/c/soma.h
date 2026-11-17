@@ -234,6 +234,43 @@ int soma_mesh_build_adjacencies(const soma_comm_t* comm, soma_mesh_t* mesh, int 
 int soma_mesh_clone(const soma_mesh_t* mesh, soma_mesh_t** out);
 void soma_mesh_free(soma_mesh_t* mesh);
 
+/* ---- Edits ----------------------------------------------------------- */
+
+/// Batched edits of a mesh (which the edit keeps alive), made visible
+/// together by soma_edit_apply. Existing entities keep their lids; added ones
+/// follow; removed ones stay, masked, until compressed.
+int soma_edit_create(soma_mesh_t* mesh, soma_edit_t** out);
+/// n vertices, xyz[3 n] interleaved; gids[n] or NULL (the next free gids).
+/// first: the lid the first will have.
+int soma_edit_add_vertices(soma_edit_t* edit, soma_lo_t n, const double* xyz, const soma_go_t* gids,
+                           soma_lo_t* first);
+/// Elements of one topology by their nodes' lids (nlids of them, element after
+/// element; lids of vertices added by this edit count), nodes_per_element
+/// each (0: the topology's corners); gids[ngids] (one per element) or NULL.
+int soma_edit_add_elements(soma_edit_t* edit, int topology, soma_offset_t nlids, const soma_lo_t* vertex_lids,
+                           soma_lo_t ngids, const soma_go_t* gids, int nodes_per_element, soma_lo_t* first);
+/// Polygons: polygon k's corners are lids[offsets[k], offsets[k + 1]).
+int soma_edit_add_polygons(soma_edit_t* edit, soma_lo_t noffsets, const soma_offset_t* offsets, soma_offset_t nlids,
+                           const soma_lo_t* lids, soma_lo_t* first);
+/// Entities of dimension d that exist before this edit.
+int soma_edit_remove(soma_edit_t* edit, int d, soma_lo_t n, const soma_lo_t* lids);
+/// apply compresses when a dimension's removed fraction reaches t, in [0, 1].
+int soma_edit_set_compress_threshold(soma_edit_t* edit, double t);
+/// Applies the edits: added[d] and removed[d] count the entities per
+/// dimension; *compressed (when not NULL) is the renumbering if apply
+/// compressed the mesh, else NULL. The edit is then empty and can be used again.
+int soma_edit_apply(soma_edit_t* edit, soma_lo_t added[4], soma_lo_t removed[4], soma_renumbering_t** compressed);
+int soma_edit_clone(const soma_edit_t* edit, soma_edit_t** out);
+void soma_edit_free(soma_edit_t* edit);
+
+/// Drops the removed entities; *renumbering gives each old lid's new one.
+int soma_mesh_compress(soma_mesh_t* mesh, soma_renumbering_t** renumbering);
+/// The new lid of each old lid of dimension d (-1: removed); count of them.
+int soma_renumbering_new_lids(const soma_renumbering_t* renumbering, int d, const soma_lo_t** new_lids,
+                              soma_lo_t* count);
+int soma_renumbering_clone(const soma_renumbering_t* renumbering, soma_renumbering_t** out);
+void soma_renumbering_free(soma_renumbering_t* renumbering);
+
 #ifdef __cplusplus
 }
 #endif
