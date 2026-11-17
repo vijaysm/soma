@@ -18,6 +18,7 @@ getting-started/overview
 getting-started/installation
 getting-started/quickstart
 getting-started/examples
+getting-started/python
 ```
 
 ```{toctree}
