@@ -84,7 +84,8 @@ class _NamespaceRepeat(logging.Filter):
 
     def __init__(self, namespaces):
         super().__init__()
-        self.namespaces = namespaces
+        # Breathe declares a nested namespace by its last name (amr for soma::amr).
+        self.namespaces = set(namespaces) | {n.rsplit("::", 1)[-1] for n in namespaces}
 
     def filter(self, record):
         m = self._pattern.search(record.getMessage())
