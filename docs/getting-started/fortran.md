@@ -84,7 +84,14 @@ before `soma_finalize`.
   the widths SOMA was built with (`SOMA_LO_64`, `SOMA_OFFSET_64`); `soma_go` is always 64 bits.
 - **Handles** (`soma_mesh`, `soma_comm`, `soma_halo`, ...) are reference counted. Assignment shares
   the object, and the last handle to go (by `free` or out of scope) frees it. A halo exchange,
-  an edit or a remap operator keeps its meshes alive.
+  an edit or a remap operator keeps its meshes alive. Arrays of handles and handles inside your
+  own types work the same way, element by element; an array is allocated before a whole-array
+  assignment to it (`allocate (meshes(n))`, then `meshes = m`). `allocate (b, source=a)` and
+  `transfer` copy a handle without sharing it, so use assignment instead.
+- **Stale objects.** A halo exchange or a remap operator refers to its meshes' numbering. Once a
+  mesh is renumbered (an edit's `apply`, `compress`, ghosts added or removed), using it fails with
+  `SOMA_ERR_STATE`; build it again. Moving vertices is not detected: rebuild a remap operator
+  after moving its meshes.
 
 ## Errors
 
@@ -93,7 +100,8 @@ Every procedure takes an optional `integer :: ierr`. When it is present it recei
 `soma_error_message()` gives SOMA's message. When it is absent, a failure writes
 `soma: <message>` to standard error and stops the program with `error stop 1`. Collective calls
 agree on their arguments first, so a bad argument on one rank fails the call on every rank, and
-every rank returns the same status.
+every rank returns the same status. Calls before `soma_initialize` or after `soma_finalize` fail
+with `SOMA_ERR_STATE`, except those on communicators and errors.
 
 ## What a program can do
 

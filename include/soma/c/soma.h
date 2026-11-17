@@ -147,6 +147,8 @@ int soma_set_last_error(int status, const char* message);
 int soma_initialize(void);
 /// Finalizes Kokkos when soma_initialize initialized it. Objects still alive
 /// then leave their memory to the operating system; freeing them is safe.
+/// Calls other than the runtime, communicator and error calls fail with
+/// SOMA_ERR_STATE before initialization and after finalization.
 int soma_finalize(void);
 
 /// Test hooks: the number of live handles, and a failure of the given status.
@@ -403,7 +405,8 @@ void soma_refine_free(soma_refine_t* refine);
 int soma_remap_create(const soma_comm_t* comm, soma_mesh_t* source, soma_mesh_t* target, double merge_tolerance,
                       int search, int surface, double radius, int sphere_clip, soma_remap_t** out);
 /// Collective: u_target[nt] from u_source[ns]: at least one value per owned
-/// cell of each mesh.
+/// cell of each mesh. SOMA_ERR_STATE once either mesh was renumbered (an
+/// edit's apply, compress, ghosts) after the operator was built.
 int soma_remap_apply(const soma_remap_t* remap, const soma_comm_t* comm, soma_lo_t ns, const double* u_source,
                      soma_lo_t nt, double* u_target);
 int soma_remap_clone(const soma_remap_t* remap, soma_remap_t** out);

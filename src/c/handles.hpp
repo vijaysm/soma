@@ -68,10 +68,15 @@ int status_of(const std::exception_ptr& e, std::string& message) noexcept;
 /// Throws the exception matching `status` with `message`.
 [[noreturn]] void raise(int status, const std::string& message);
 
-/// The error boundary of every entry point: runs f, mapping exceptions to
-/// status codes.
+/// Throws StateError unless Kokkos is running: before soma_initialize (or the
+/// caller's own Kokkos::initialize) and after finalization, no entry point
+/// that touches a mesh may run.
+void need_runtime();
+
+/// The error boundary of the runtime and communicator entry points: runs f,
+/// mapping exceptions to status codes.
 template <class F>
-int call(F&& f) noexcept {
+int call_any(F&& f) noexcept {
   try {
     f();
     return SOMA_OK;
@@ -80,6 +85,16 @@ int call(F&& f) noexcept {
     const int status = status_of(std::current_exception(), message);
     return fail(status, message);
   }
+}
+
+/// The error boundary of every other entry point: call_any, with Kokkos
+/// required to be running.
+template <class F>
+int call(F&& f) noexcept {
+  return call_any([&] {
+    need_runtime();
+    f();
+  });
 }
 
 /// Runs `check` (argument checks and conversions before a collective step) and

@@ -732,7 +732,10 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   API: derived types with type-bound procedures and finalizers, 1-based ids, coordinates and
   fields as pointers into the mesh, connectivity as a 1-based copy made once per topology change,
   and an optional `ierr` on every call (without it, a failure stops the program with SOMA's
-  message).
+  message). Assignment and finalization are elemental, so arrays of handles share and free
+  element by element.
+- Calls before initialization or after finalization, and halo exchanges or remap operators used
+  after their mesh was renumbered, fail with `SOMA_ERR_STATE` on every rank.
 - Coordinates are shared as `x(n, 3)`; `get_coords` and `set_coords` copy to and from an
   interleaved `xyz(3, n)`, and `get_field` and `set_field` do the same for fields.
 - `find_package(soma COMPONENTS c fortran)` gives `soma::soma_c` and `soma::soma_fortran`; the

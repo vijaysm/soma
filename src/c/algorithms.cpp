@@ -41,6 +41,7 @@ struct soma_refine {
 struct soma_remap {
   std::shared_ptr<soma::c::MeshState> source, target;  // the operator's plan refers to both
   std::shared_ptr<const HostRemap> op;
+  std::uint64_t source_generation = 0, target_generation = 0;  // the meshes' when the operator was built
   soma::c::Live live;
 };
 
@@ -62,7 +63,9 @@ soma_refine_t* wrap(soma::RefineResult&& r) {
 
 template <class E>
 E enum_of(int v, int last, const char* what, const char* kind) {
-  if (v < 0 || v > last) throw std::invalid_argument(std::string(what) + ": " + std::to_string(v) + " is not a " + kind);
+  if (v < 0 || v > last) {
+    throw std::invalid_argument(std::string(what) + ": " + std::to_string(v) + " is not a " + kind);
+  }
   return static_cast<E>(v);
 }
 
@@ -257,7 +260,8 @@ int soma_remap_create(const soma_comm_t* comm, soma_mesh_t* source, soma_mesh_t*
       o.radius = radius;
       o.sphere_clip = enum_of<soma::SphereClip>(sphere_clip, SOMA_SPHERE_CLIP_GREAT_CIRCLE, what, "sphere clip");
     });
-    r = new soma_remap{s->state, t->state, soma::c::guarded(HostRemap(c, s->get(), t->get(), o)), {}};
+    r = new soma_remap{s->state, t->state, soma::c::guarded(HostRemap(c, s->get(), t->get(), o)),
+                       s->state->generation, t->state->generation, {}};
   });
 }
 
@@ -269,6 +273,10 @@ int soma_remap_apply(const soma_remap_t* remap, const soma_comm_t* comm, soma_lo
     const soma_remap* r = nullptr;
     soma::c::agree(c, what, [&] {
       r = &need(remap, what);
+      if (r->source_generation != r->source->generation || r->target_generation != r->target->generation) {
+        throw soma::c::StateError(std::string(what) +
+                                  ": a mesh was renumbered since the operator was built; build the operator again");
+      }
       check_array(u_source, ns, what);
       check_array(u_target, nt, what);
       const LO os = r->source->mesh->segment_table(r->source->mesh->dim()).owned_end;
@@ -287,7 +295,8 @@ int soma_remap_apply(const soma_remap_t* remap, const soma_comm_t* comm, soma_lo
 int soma_remap_clone(const soma_remap_t* remap, soma_remap_t** result) {
   return call([&] {
     const soma_remap& r = need(remap, "soma_remap_clone");
-    out(result, "soma_remap_clone") = new soma_remap{r.source, r.target, r.op, {}};
+    out(result, "soma_remap_clone") =
+        new soma_remap{r.source, r.target, r.op, r.source_generation, r.target_generation, {}};
   });
 }
 

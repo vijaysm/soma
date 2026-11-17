@@ -303,4 +303,31 @@ TEST(CApiRemap, OutlivesMeshesAndChecksInput) {
   soma_remap_free(op);
 }
 
+TEST(CApiRemap, StaleAfterRenumbering) {
+  // The operator refers to the meshes' numbering: once a mesh is renumbered
+  // (here compressed, on rank 0 only), applying it fails on every rank.
+  World w;
+  int rank = 0;
+  ASSERT_EQ(soma_comm_rank(w.comm, &rank), SOMA_OK);
+  soma_mesh_t* s = box(w, 2, 2, 2, SOMA_TET);
+  soma_mesh_t* t = box(w, 2, 2, 2, SOMA_TET);
+  const soma_lo_t ns = count(s, 3), nt = count(t, 3);
+  soma_remap_t* op = nullptr;
+  ASSERT_EQ(soma_remap_create(w.comm, s, t, 1e-12, SOMA_SEARCH_GRID, SOMA_SURFACE_PLANE, 0.0,
+                              SOMA_SPHERE_CLIP_GNOMONIC, &op),
+            SOMA_OK);
+  std::vector<double> one(static_cast<std::size_t>(ns) + 1, 1.0), out(static_cast<std::size_t>(nt) + 1, 0.0);
+  ASSERT_EQ(soma_remap_apply(op, w.comm, ns, one.data(), nt, out.data()), SOMA_OK) << last_error();
+  if (rank == 0) {
+    soma_renumbering_t* r = nullptr;
+    ASSERT_EQ(soma_mesh_compress(s, &r), SOMA_OK);
+    soma_renumbering_free(r);
+  }
+  EXPECT_EQ(soma_remap_apply(op, w.comm, ns, one.data(), nt, out.data()), SOMA_ERR_STATE);
+  if (rank == 0) EXPECT_NE(last_error().find("build the operator again"), std::string::npos) << last_error();
+  soma_remap_free(op);
+  soma_mesh_free(s);
+  soma_mesh_free(t);
+}
+
 }  // namespace

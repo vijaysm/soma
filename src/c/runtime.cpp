@@ -30,6 +30,11 @@ std::atomic<long>& live_handles() noexcept {
 
 bool kokkos_finalized() noexcept { return finalized.load(); }
 
+void need_runtime() {
+  if (finalized || Kokkos::is_finalized()) throw StateError("SOMA was finalized; no call may follow soma_finalize");
+  if (!Kokkos::is_initialized()) throw StateError("SOMA is not initialized: call soma_initialize first");
+}
+
 int fail(int status, const std::string& message) noexcept {
   try {
     last_message = message;
@@ -86,7 +91,7 @@ soma_comm_t* new_comm(soma::Comm comm) { return new soma_comm{std::make_shared<s
 
 }  // namespace soma::c
 
-using soma::c::call;
+using soma::c::call_any;
 using soma::c::need;
 using soma::c::out;
 
@@ -107,7 +112,7 @@ int soma_set_last_error(int status, const char* message) {
 }
 
 int soma_initialize(void) {
-  return call([] {
+  return call_any([] {
     if (soma::c::finalized) throw soma::c::StateError("soma_initialize: SOMA was finalized; Kokkos cannot restart");
     if (!Kokkos::is_initialized() && !Kokkos::is_finalized()) {
       Kokkos::initialize(Kokkos::InitializationSettings().set_disable_warnings(true));
@@ -117,7 +122,7 @@ int soma_initialize(void) {
 }
 
 int soma_finalize(void) {
-  return call([] {
+  return call_any([] {
     if (soma::c::initialized_here && !soma::c::finalized) {
       soma::c::finalized = true;  // first: objects freed from here on leak instead
       Kokkos::finalize();
@@ -126,18 +131,18 @@ int soma_finalize(void) {
 }
 
 int soma_testing_live_handles(long* count) {
-  return call([&] { out(count, "soma_testing_live_handles") = soma::c::live_handles().load(); });
+  return call_any([&] { out(count, "soma_testing_live_handles") = soma::c::live_handles().load(); });
 }
 
 int soma_testing_raise(int status) {
-  return call([&] {
+  return call_any([&] {
     if (status != SOMA_OK) soma::c::raise(status, "soma test error: status " + std::to_string(status));
   });
 }
 
 #if SOMA_C_HAVE_MPI
 int soma_comm_create(MPI_Comm comm, soma_comm_t** result) {
-  return call([&] {
+  return call_any([&] {
     soma_comm_t*& r = out(result, "soma_comm_create");
     r = nullptr;
     if (comm == MPI_COMM_NULL) throw std::invalid_argument("soma_comm_create: MPI_COMM_NULL is not a communicator");
@@ -151,7 +156,7 @@ int soma_comm_create_f(int fcomm, soma_comm_t** result) {
   return soma_comm_create(MPI_Comm_f2c(static_cast<MPI_Fint>(fcomm)), result);
 #else
   (void)fcomm;
-  return call([&] {
+  return call_any([&] {
     out(result, "soma_comm_create_f") = nullptr;
     throw std::invalid_argument("soma_comm_create_f: SOMA was built without MPI; use soma_comm_self");
   });
@@ -159,33 +164,33 @@ int soma_comm_create_f(int fcomm, soma_comm_t** result) {
 }
 
 int soma_comm_world(soma_comm_t** result) {
-  return call([&] { out(result, "soma_comm_world") = soma::c::new_comm(soma::Comm::world()); });
+  return call_any([&] { out(result, "soma_comm_world") = soma::c::new_comm(soma::Comm::world()); });
 }
 
 int soma_comm_self(soma_comm_t** result) {
-  return call([&] { out(result, "soma_comm_self") = soma::c::new_comm(soma::Comm::self()); });
+  return call_any([&] { out(result, "soma_comm_self") = soma::c::new_comm(soma::Comm::self()); });
 }
 
 int soma_comm_rank(const soma_comm_t* comm, int* rank) {
-  return call([&] {
+  return call_any([&] {
     const soma_comm& c = need(comm, "soma_comm_rank");
     out(rank, "soma_comm_rank") = c.comm->rank();
   });
 }
 
 int soma_comm_size(const soma_comm_t* comm, int* size) {
-  return call([&] {
+  return call_any([&] {
     const soma_comm& c = need(comm, "soma_comm_size");
     out(size, "soma_comm_size") = c.comm->size();
   });
 }
 
 int soma_comm_barrier(const soma_comm_t* comm) {
-  return call([&] { need(comm, "soma_comm_barrier").comm->barrier(); });
+  return call_any([&] { need(comm, "soma_comm_barrier").comm->barrier(); });
 }
 
 int soma_comm_clone(const soma_comm_t* comm, soma_comm_t** result) {
-  return call([&] {
+  return call_any([&] {
     const soma_comm& c = need(comm, "soma_comm_clone");
     out(result, "soma_comm_clone") = new soma_comm{c.comm, {}};
   });

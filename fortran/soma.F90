@@ -20,6 +20,9 @@
 !>   to stderr and stops the program.
 !> - Handles are reference counted: assignment shares the object, and the
 !>   last handle freed (by free, or when it goes out of scope) frees it.
+!>   Assignment and finalization are elemental, so arrays of handles and
+!>   handle components of user types share and free element by element;
+!>   allocate(source=) and transfer copy without sharing and must not be used.
 module soma
   use, intrinsic :: iso_c_binding
   use, intrinsic :: iso_fortran_env, only: error_unit
@@ -352,7 +355,7 @@ contains
     self%ptr = c_null_ptr
   end subroutine
 
-  subroutine comm_assign(lhs, rhs)
+  impure elemental subroutine comm_assign(lhs, rhs)
     class(soma_comm), intent(inout) :: lhs
     type(soma_comm), intent(in) :: rhs
     type(c_ptr) :: p
@@ -363,7 +366,7 @@ contains
     lhs%ptr = p
   end subroutine
 
-  subroutine comm_final(self)
+  impure elemental subroutine comm_final(self)
     type(soma_comm), intent(inout) :: self
     call c_comm_free(self%ptr)
     self%ptr = c_null_ptr
@@ -409,7 +412,7 @@ contains
     self%ptr = c_null_ptr
   end subroutine
 
-  subroutine builder_assign(lhs, rhs)
+  impure elemental subroutine builder_assign(lhs, rhs)
     class(soma_builder), intent(inout) :: lhs
     type(soma_builder), intent(in) :: rhs
     type(c_ptr) :: p
@@ -420,7 +423,7 @@ contains
     lhs%ptr = p
   end subroutine
 
-  subroutine builder_final(self)
+  impure elemental subroutine builder_final(self)
     type(soma_builder), intent(inout) :: self
     call c_builder_free(self%ptr)
     self%ptr = c_null_ptr
@@ -662,7 +665,7 @@ contains
     self%ptr = c_null_ptr
   end subroutine
 
-  subroutine mesh_assign(lhs, rhs)
+  impure elemental subroutine mesh_assign(lhs, rhs)
     class(soma_mesh), intent(inout) :: lhs
     type(soma_mesh), intent(in) :: rhs
     type(c_ptr) :: p
@@ -673,7 +676,7 @@ contains
     lhs%ptr = p
   end subroutine
 
-  subroutine mesh_final(self)
+  impure elemental subroutine mesh_final(self)
     type(soma_mesh), intent(inout) :: self
     call c_mesh_free(self%ptr)
     self%ptr = c_null_ptr
@@ -1219,7 +1222,7 @@ contains
     self%ptr = c_null_ptr
   end subroutine
 
-  subroutine edit_assign(lhs, rhs)
+  impure elemental subroutine edit_assign(lhs, rhs)
     class(soma_edit), intent(inout) :: lhs
     type(soma_edit), intent(in) :: rhs
     type(c_ptr) :: p
@@ -1230,7 +1233,7 @@ contains
     lhs%ptr = p
   end subroutine
 
-  subroutine edit_final(self)
+  impure elemental subroutine edit_final(self)
     type(soma_edit), intent(inout) :: self
     call c_edit_free(self%ptr)
     self%ptr = c_null_ptr
@@ -1270,7 +1273,7 @@ contains
     self%ptr = c_null_ptr
   end subroutine
 
-  subroutine renumbering_assign(lhs, rhs)
+  impure elemental subroutine renumbering_assign(lhs, rhs)
     class(soma_renumbering), intent(inout) :: lhs
     type(soma_renumbering), intent(in) :: rhs
     type(c_ptr) :: p
@@ -1281,7 +1284,7 @@ contains
     lhs%ptr = p
   end subroutine
 
-  subroutine renumbering_final(self)
+  impure elemental subroutine renumbering_final(self)
     type(soma_renumbering), intent(inout) :: self
     call c_renumbering_free(self%ptr)
     self%ptr = c_null_ptr
@@ -1671,7 +1674,7 @@ contains
     self%ptr = c_null_ptr
   end subroutine
 
-  subroutine refine_assign(lhs, rhs)
+  impure elemental subroutine refine_assign(lhs, rhs)
     class(soma_refine), intent(inout) :: lhs
     type(soma_refine), intent(in) :: rhs
     type(c_ptr) :: p
@@ -1682,7 +1685,7 @@ contains
     lhs%ptr = p
   end subroutine
 
-  subroutine refine_final(self)
+  impure elemental subroutine refine_final(self)
     type(soma_refine), intent(inout) :: self
     call c_refine_free(self%ptr)
     self%ptr = c_null_ptr
@@ -1737,7 +1740,7 @@ contains
     self%ptr = c_null_ptr
   end subroutine
 
-  subroutine remap_assign(lhs, rhs)
+  impure elemental subroutine remap_assign(lhs, rhs)
     class(soma_remap), intent(inout) :: lhs
     type(soma_remap), intent(in) :: rhs
     type(c_ptr) :: p
@@ -1748,7 +1751,7 @@ contains
     lhs%ptr = p
   end subroutine
 
-  subroutine remap_final(self)
+  impure elemental subroutine remap_final(self)
     type(soma_remap), intent(inout) :: self
     call c_remap_free(self%ptr)
     self%ptr = c_null_ptr
@@ -1762,7 +1765,7 @@ contains
     self%ptr = c_null_ptr
   end subroutine
 
-  subroutine halo_assign(lhs, rhs)
+  impure elemental subroutine halo_assign(lhs, rhs)
     class(soma_halo), intent(inout) :: lhs
     type(soma_halo), intent(in) :: rhs
     type(c_ptr) :: p
@@ -1773,7 +1776,7 @@ contains
     lhs%ptr = p
   end subroutine
 
-  subroutine halo_final(self)
+  impure elemental subroutine halo_final(self)
     type(soma_halo), intent(inout) :: self
     call c_halo_free(self%ptr)
     self%ptr = c_null_ptr
