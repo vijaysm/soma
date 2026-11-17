@@ -177,34 +177,37 @@ TEST(SemOperators, ProjectTangentRemovesTheNormal) {
 
 TEST(SemOperators, MatchesSerialBitwise) {
   const Comm c = Comm::world();
-  const auto f = [](Real x, Real y, Real z) { return Array1{std::sin(3 * x) * y + z * z * x}; };
-  std::map<std::tuple<GO, LO, int>, Real> expected;
-  const auto gather = [](const Space& s, const HostMesh& m, const Values& a, const Values& b) {
-    std::map<std::tuple<GO, LO, int>, Real> out;
-    const auto gid = m.gid(2);
-    for (LO r = 0; r < rows(s); ++r) {
-      const LO e = r / s.points_per_element(), k = r % s.points_per_element();
-      out[{gid(e), k, 0}] = a(r, 0);
-      out[{gid(e), k, 1}] = b(r, 0);
+  for (const int ne : {1, 3}) {
+    const auto f = [](Real x, Real y, Real z) { return Array1{std::sin(3 * x) * y + z * z * x}; };
+    const auto gather = [](const Space& s, const HostMesh& m, const Values& a, const Values& b) {
+      std::map<std::tuple<GO, LO, int>, Real> out;
+      const auto gid = m.gid(2);
+      for (LO r = 0; r < rows(s); ++r) {
+        const LO e = r / s.points_per_element(), k = r % s.points_per_element();
+        out[{gid(e), k, 0}] = a(r, 0);
+        out[{gid(e), k, 1}] = b(r, 0);
+      }
+      return out;
+    };
+    std::map<std::tuple<GO, LO, int>, Real> expected;
+    {
+      HostMesh whole = sphere(Comm::self(), ne);
+      const Space s(Comm::self(), whole, 4, SemGeometry::sphere(1));
+      Values lap = make(s, 1), hyper = make(s, 1);
+      soma::sem::laplacian(Comm::self(), s, sample(s, 1, f), lap);
+      soma::sem::hyperviscosity(Comm::self(), s, sample(s, 1, f), hyper);
+      expected = gather(s, whole, lap, hyper);
     }
-    return out;
-  };
-  {
-    HostMesh whole = sphere(Comm::self(), 3);
-    const Space s(Comm::self(), whole, 4, SemGeometry::sphere(1));
+    HostMesh part = sphere(c, ne);
+    const Space s(c, part, 4, SemGeometry::sphere(1));
     Values lap = make(s, 1), hyper = make(s, 1);
-    soma::sem::laplacian(Comm::self(), s, sample(s, 1, f), lap);
-    soma::sem::hyperviscosity(Comm::self(), s, sample(s, 1, f), hyper);
-    expected = gather(s, whole, lap, hyper);
-  }
-  HostMesh part = sphere(c, 3);
-  const Space s(c, part, 4, SemGeometry::sphere(1));
-  Values lap = make(s, 1), hyper = make(s, 1);
-  soma::sem::laplacian(c, s, sample(s, 1, f), lap);
-  soma::sem::hyperviscosity(c, s, sample(s, 1, f), hyper);
-  for (const auto& [key, value] : gather(s, part, lap, hyper)) {
-    EXPECT_EQ(std::bit_cast<std::uint64_t>(value), std::bit_cast<std::uint64_t>(expected.at(key)))
-        << "element " << std::get<0>(key) << " point " << std::get<1>(key) << " operator " << std::get<2>(key);
+    soma::sem::laplacian(c, s, sample(s, 1, f), lap);
+    soma::sem::hyperviscosity(c, s, sample(s, 1, f), hyper);
+    for (const auto& [key, value] : gather(s, part, lap, hyper)) {
+      EXPECT_EQ(std::bit_cast<std::uint64_t>(value), std::bit_cast<std::uint64_t>(expected.at(key)))
+          << "ne " << ne << " element " << std::get<0>(key) << " point " << std::get<1>(key) << " operator "
+          << std::get<2>(key);
+    }
   }
 }
 

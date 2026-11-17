@@ -95,14 +95,33 @@ SemGeometryData sem_geometry(const Mesh<Kokkos::HostSpace>& mesh, int order, con
   const auto topology = mesh.topology(2);
   const LO elements = mesh.count(2);
   const int np = order + 1, ppe = np * np;
+  bool radius_off = false;
+  GO radius_gid = 0;
   for (LO e = 0; e < elements; ++e) {
     const LO n = view.num_nodes(2, e);
+    if (sphere && n >= 4) {
+      // The geometry's sphere must be the mesh's: corners within 1e-8 of R.
+      for (LO q = 0; q < 4; ++q) {
+        const LO v = view.vertex(2, e, q);
+        const Real r = std::hypot(view.x(v, 0), view.x(v, 1), view.x(v, 2));
+        const bool off = !(std::abs(r - geometry.radius) <= 1e-8 * geometry.radius);
+        if (off && (!radius_off || view.gid(2, e) < radius_gid)) {
+          radius_off = true;
+          radius_gid = view.gid(2, e);
+        }
+      }
+    }
     if (topology(e) != static_cast<std::uint8_t>(Topology::quad) || (n != 4 && n != 8 && n != 9)) {
       if (out.error != SemGeometryData::Error::topology || view.gid(2, e) < out.gid) out.gid = view.gid(2, e);
       out.error = SemGeometryData::Error::topology;
     }
   }
   if (out.error != SemGeometryData::Error::none) return out;
+  if (radius_off) {
+    out.error = SemGeometryData::Error::radius;
+    out.gid = radius_gid;
+    return out;
+  }
 
   const std::vector<Real> xi = gll_points_1d(order), w = gll_weights_1d(order);
   const auto rows = static_cast<std::size_t>(elements) * static_cast<std::size_t>(ppe);
@@ -253,6 +272,12 @@ void check_sem_geometry(const Comm& comm, const SemGeometryData& data, int dim, 
     case E::topology:
       throw std::invalid_argument("SemSpace: element gid " + std::to_string(gid) +
                                   " is not a quad of 4, 8 or 9 nodes");
+    case E::edited:
+      throw std::invalid_argument("SemSpace: a rank's mesh has removed entities; call compress() first");
+    case E::radius:
+      throw std::invalid_argument("SemSpace: element gid " + std::to_string(gid) +
+                                  " has a corner off the sphere of the geometry's radius: the radius must be the "
+                                  "mesh's");
     case E::ghosts:
       throw std::invalid_argument(
           "SemSpace: on more than one rank the mesh needs a ghost layer through vertices and distributed edges: "

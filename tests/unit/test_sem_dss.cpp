@@ -112,15 +112,17 @@ TEST(SemDss, IdempotentToRoundoff) {
 
 TEST(SemDss, MatchesSerialBitwise) {
   const Comm c = Comm::world();
-  for (const int ne : {1, 3}) {
-    HostMesh whole = sphere(Comm::self(), ne);
-    const Space serial(Comm::self(), whole, 4, SemGeometry::sphere(1));
+  // ne = 1 leaves ranks empty at 8; p = 1 has no edge interiors; order 2 is Quad9.
+  for (const auto& [ne, p, order] : {std::tuple{1, 4, 1}, std::tuple{3, 4, 1}, std::tuple{3, 1, 1},
+                                     std::tuple{2, 4, 2}}) {
+    HostMesh whole = sphere(Comm::self(), ne, 1, order);
+    const Space serial(Comm::self(), whole, p, SemGeometry::sphere(1));
     const Values a = sample(serial, whole, 0.25, 2);
     serial.dss(Comm::self(), a);
     const auto expected = by_gid(serial, whole, a, true);
 
-    HostMesh part = sphere(c, ne);
-    const Space s(c, part, 4, SemGeometry::sphere(1));
+    HostMesh part = sphere(c, ne, 1, order);
+    const Space s(c, part, p, SemGeometry::sphere(1));
     const Values b = sample(s, part, 0.25, 2);
     // Ghost elements' values are not read: their owners' are.
     for (LO r = s.owned_elements() * s.points_per_element(); r < rows(s); ++r) {
@@ -130,7 +132,8 @@ TEST(SemDss, MatchesSerialBitwise) {
     // Ghosts too: they hold their owners' results.
     for (const auto& [key, value] : by_gid(s, part, b, false)) {
       EXPECT_EQ(std::bit_cast<std::uint64_t>(value), std::bit_cast<std::uint64_t>(expected.at(key)))
-          << "ne " << ne << " element " << std::get<0>(key) << " point " << std::get<1>(key);
+          << "ne " << ne << " p " << p << " order " << order << " element " << std::get<0>(key) << " point "
+          << std::get<1>(key);
     }
   }
 }

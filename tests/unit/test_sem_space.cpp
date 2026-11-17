@@ -19,6 +19,7 @@
 
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/core/mesh_edit.hpp"
 #include "soma/core/topology.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
@@ -195,6 +196,57 @@ TEST(SemSpace, RejectsBadInput) {
   }
   // A plane mesh is not a sphere: its quads' normals are not outward.
   EXPECT_THROW(Space(c, quads, 2, SemGeometry::sphere(1)), std::invalid_argument);
+}
+
+// A mesh with removed elements not yet compressed is refused: its counts
+// still include the removed quads.
+TEST(SemSpace, RejectsAnEditedMesh) {
+  const Comm c = Comm::world();
+  HostMesh m = box(c, 3, 2, 1.0, 1.0);
+  // The last rank always holds a layer of the box's quads.
+  const bool edits = c.rank() == c.size() - 1 && m.segment_table(2).owned_end > 0;
+  if (edits) {
+    soma::MeshEdit edit(m);
+    const std::vector<LO> first{0};
+    edit.remove(2, first);
+    edit.apply();
+  }
+  ASSERT_EQ(c.allreduce(static_cast<std::int32_t>(edits ? 1 : 0), Op::sum), 1);
+  try {
+    const Space s(c, m, 2, SemGeometry::plane());
+    ADD_FAILURE() << "an edited mesh was accepted";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_NE(std::string(e.what()).find("compress"), std::string::npos) << e.what();
+  }
+}
+
+// The geometry's radius must be the mesh's: a unit sphere's geometry on a
+// mesh of radius 2 would give areas wrong by a factor 4.
+TEST(SemSpace, RejectsARadiusOtherThanTheMeshs) {
+  const Comm c = Comm::world();
+  HostMesh m = sphere(c, 2, 2.0);
+  EXPECT_NO_THROW(Space(c, m, 3, SemGeometry::sphere(2.0)));
+  try {
+    const Space s(c, m, 3, SemGeometry::sphere(1.0));
+    ADD_FAILURE() << "a radius other than the mesh's was accepted";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_NE(std::string(e.what()).find("radius"), std::string::npos) << e.what();
+  }
+}
+
+// What a space reads through the host mirror it makes of a mesh in another
+// memory space: the (2, 1) graph and, on more than one rank, the sharing.
+TEST(SemSpace, HostMirrorKeepsWhatThePlanNeeds) {
+  const Comm c = Comm::world();
+  HostMesh m = sphere(c, 2);
+  (void)Space(c, m, 3, SemGeometry::sphere(1));  // derives the edges on one rank
+  const HostMesh mirror = m.mirror<Kokkos::HostSpace>(soma::sem::detail::sem_mirror_options(m));
+  EXPECT_TRUE(mirror.has_adjacency(2, 1));
+  if (c.size() > 1) {
+    EXPECT_NO_THROW((void)mirror.fields().get_var<int>(soma::sharing_field, 1));
+    EXPECT_NO_THROW((void)mirror.fields().get<int>(soma::owner_field, 1));
+  }
+  EXPECT_TRUE(soma::sem::detail::sem_dss_plan(mirror, 3).complete);
 }
 
 TEST(SemSpace, EdgeCasesP1AndP12) {

@@ -65,6 +65,7 @@
 
 #include "soma/algorithms/to_space.hpp"
 #include "soma/core/mesh.hpp"
+#include "soma/core/transfer.hpp"
 #include "soma/core/types.hpp"
 #include "soma/core/view_types.hpp"
 #include "soma/fields/domain_mesh.hpp"
@@ -94,7 +95,7 @@ namespace detail {
 /// The geometry of every element of a host mesh, or why there is none.
 /// Errors are ordered: the largest any rank finds is reported.
 struct SemGeometryData {
-  enum class Error : std::uint8_t { none, ghosts, orientation, topology, order, dimension };
+  enum class Error : std::uint8_t { none, ghosts, orientation, radius, topology, edited, order, dimension };
   Error error = Error::none;
   GO gid = 0;  ///< the first offending element, for topology and orientation
   View2<Real, Kokkos::HostSpace> x, covariant, contravariant, jacobian, local_mass;
@@ -200,6 +201,22 @@ struct DssKernels {
   }
 };
 
+/// What a space's host mirror of a mesh in another memory space must carry:
+/// the (2, 1) graph when the mesh holds it, and the sharing and owner fields
+/// of the halo exchanges when it has them.
+template <class MemSpace>
+TransferOptions sem_mirror_options(const Mesh<MemSpace>& mesh) {
+  TransferOptions o;
+  for (const char* name : {sharing_field, owner_field}) {
+    if (mesh.fields().contains(name)) o.fields.emplace_back(name);
+  }
+  if (mesh.dim() == 2 && mesh.has_adjacency(2, 1)) {
+    o.adjacencies = AdjacencyRequest{}.add(2, 1);
+    o.adj_source = TransferOptions::AdjSource::copy;
+  }
+  return o;
+}
+
 /// Collective: throws std::invalid_argument on every rank naming the worst
 /// error any rank found (and the smallest offending gid for the elements').
 void check_sem_geometry(const Comm& comm, const SemGeometryData& data, int dim, int order);
@@ -212,8 +229,10 @@ class SemSpace {
   /// Collective. Throws std::invalid_argument on every rank if any rank's
   /// mesh is not of dimension 2, `order` is outside [1, max_node_order], an
   /// element is not a quad of 4, 8 or 9 nodes, or one's normal points the
-  /// wrong way (plane: not along +z; sphere: not outward) somewhere (the
-  /// message names the smallest such element gid), or, on more than one
+  /// wrong way (plane: not along +z; sphere: not outward) somewhere, or (on
+  /// a sphere) one has a corner off the geometry's radius by more than 1e-8
+  /// of it (the message names the smallest such element gid), the mesh has
+  /// removed entities not yet compressed, or, on more than one
   /// rank, the mesh lacks the ghost layer through vertices or the
   /// distributed edges. On one rank, derives the mesh's edges if it has none.
   SemSpace(const Comm& comm, Mesh<MemSpace>& mesh, int order, SemGeometry geometry)
@@ -226,10 +245,15 @@ class SemSpace {
     if constexpr (std::is_same_v<MemSpace, Kokkos::HostSpace>) {
       host = &mesh;
     } else {
-      mirror.emplace(mesh.template mirror<Kokkos::HostSpace>());
+      mirror.emplace(mesh.template mirror<Kokkos::HostSpace>(detail::sem_mirror_options(mesh)));
       host = &*mirror;
     }
-    detail::SemGeometryData g = detail::sem_geometry(*host, order, geometry);
+    detail::SemGeometryData g;
+    if (mesh.edited()) {
+      g.error = detail::SemGeometryData::Error::edited;
+    } else {
+      g = detail::sem_geometry(*host, order, geometry);
+    }
     detail::SemDssPlan plan;
     if (g.error == detail::SemGeometryData::Error::none) {
       const bool distributed = comm.size() == 1 || (mesh.ghost_layers() >= 1 && mesh.ghost_bridge_dim() == 0 &&
