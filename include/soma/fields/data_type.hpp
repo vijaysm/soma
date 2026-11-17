@@ -39,7 +39,7 @@ constexpr const char* name(DataType t) noexcept {
   return "unknown";
 }
 
-// Invokes f.template operator()<T>() for the C++ type matching `type`.
+/// Invokes f.template operator()<T>() for the C++ type matching `type`.
 template <class F>
 void dispatch_data_type(DataType type, F&& f) {
   switch (type) {

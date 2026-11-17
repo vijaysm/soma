@@ -4,24 +4,27 @@
 #ifndef SOMA_AMR_HIERARCHY_HPP_
 #define SOMA_AMR_HIERARCHY_HPP_
 
-// A hierarchy of levels over one domain: level 0 covers it, and each finer
-// level, refined by the ratio from the one below, is a union of disjoint
-// boxes aligned to the blocking factor and properly nested in the level
-// below (by `nesting` cells of that level, or up to the domain boundary).
-// Fields over every level are vectors of LevelFields; the hierarchy keeps
-// the halo and coarse-fine plans of its levels and fills a field's ghosts
-// level by level, coarse first.
-//
-// Over many ranks (the constructor taking a Comm) every rank holds every
-// level's boxes, each level cut along the curve by box cost (point count, or
-// options.cost), and fields hold the boxes their rank owns. Fills, restriction
-// and regrids are collective; a regrid gathers the tagged blocks, so every
-// rank makes the same boxes as one process would, and rebalances.
-//
-//   amr::Hierarchy h(amr::Geometry{amr::Box({0, 0, 0}, {63, 63, 63})}, {.max_level = 2});
-//   auto u = h.make_field<double>(amr::IndexType::cell(), 1, 2);
-//   h.fill_halo(u);
-//   h.average_down(u);
+/// \file
+/// A hierarchy of levels over one domain: level 0 covers it, and each finer
+/// level, refined by the ratio from the one below, is a union of disjoint
+/// boxes aligned to the blocking factor and properly nested in the level
+/// below (by `nesting` cells of that level, or up to the domain boundary).
+/// Fields over every level are vectors of LevelFields; the hierarchy keeps
+/// the halo and coarse-fine plans of its levels and fills a field's ghosts
+/// level by level, coarse first.
+///
+/// Over many ranks (the constructor taking a Comm) every rank holds every
+/// level's boxes, each level cut along the curve by box cost (point count, or
+/// options.cost), and fields hold the boxes their rank owns. Fills, restriction
+/// and regrids are collective; a regrid gathers the tagged blocks, so every
+/// rank makes the same boxes as one process would, and rebalances.
+///
+/// ```
+///   amr::Hierarchy h(amr::Geometry{amr::Box({0, 0, 0}, {63, 63, 63})}, {.max_level = 2});
+///   auto u = h.make_field<double>(amr::IndexType::cell(), 1, 2);
+///   h.fill_halo(u);
+///   h.average_down(u);
+/// ```
 
 #include <array>
 #include <cstdint>
@@ -45,7 +48,7 @@
 
 namespace soma::amr {
 
-// The level-0 cells and the physical box they cover.
+/// The level-0 cells and the physical box they cover.
 struct Geometry {
   Box domain;
   std::array<double, 3> lo{0.0, 0.0, 0.0};
@@ -61,33 +64,35 @@ struct HierarchyOptions {
   double efficiency = 0.7;
   int nesting = 1;
   Curve curve = Curve::morton;
-  // The cost of a box of a level, which load balancing evens out over the
-  // ranks; it must give every rank the same value. Empty: its point count.
+  /// The cost of a box of a level, which load balancing evens out over the
+  /// ranks; it must give every rank the same value. Empty: its point count.
   std::function<double(int level, const Box& box)> cost;
 };
 
 namespace detail {
 
-// The parts of `boxes` in the domain, those beyond a periodic side moved
-// back into it.
+/// The parts of `boxes` in the domain, those beyond a periodic side moved
+/// back into it.
 BoxList wrap(const BoxList& boxes, const Box& domain, Periodicity periodic);
-// The coarse cells a properly nested level below fine boxes `fine` must
-// cover: their coarsening grown by `nesting`, wrapped into the domain.
+/// The coarse cells a properly nested level below fine boxes `fine` must
+/// cover: their coarsening grown by `nesting`, wrapped into the domain.
 BoxList nest_region(const BoxList& fine, int ratio, int nesting, const Box& coarse_domain, Periodicity periodic);
 
 }  // namespace detail
 
-// One LevelField per level.
+/// One LevelField per level.
 template <class T>
 using MultiLevelField = std::vector<LevelField<T>>;
 
-// A byte per cell of a level, nonzero where the level should be refined.
+/// A byte per cell of a level, nonzero where the level should be refined.
 using TagField = LevelField<std::uint8_t>;
 
-// A physical boundary is a callable
-//   physical(const LevelField<T>& field, int level, int box, const Box& region, int dir, int side)
-// that fills the ghost points `region` of box `box` outside the domain (a
-// generic lambda serves fields of every element type). This one leaves them.
+/// A physical boundary is a callable
+/// ```
+///   physical(const LevelField<T>& field, int level, int box, const Box& region, int dir, int side)
+/// ```
+/// that fills the ghost points `region` of box `box` outside the domain (a
+/// generic lambda serves fields of every element type). This one leaves them.
 struct NoBoundary {
   template <class T>
   void operator()(const LevelField<T>&, int, int, const Box&, int, int) const {}
@@ -95,19 +100,19 @@ struct NoBoundary {
 
 class Hierarchy {
  public:
-  // tagger(level, tags): marks the cells of `level` to refine (tags arrive
-  // zeroed, without ghosts).
+  /// tagger(level, tags): marks the cells of `level` to refine (tags arrive
+  /// zeroed, without ghosts).
   using Tagger = std::function<void(int level, const TagField& tags)>;
 
-  // Level 0 only, the domain chopped to max_box. With `fine`, levels 1 to
-  // fine.size() take those boxes (each level's cells). Throws
-  // std::invalid_argument for invalid options (ratio 2 or 4, a blocking
-  // factor that is a multiple of the ratio, max_box a multiple of the
-  // blocking factor, a domain of whole blocks) or boxes outside their
-  // domain, overlapping, not aligned to the blocking factor or not properly
-  // nested.
+  /// Level 0 only, the domain chopped to max_box. With `fine`, levels 1 to
+  /// fine.size() take those boxes (each level's cells). Throws
+  /// std::invalid_argument for invalid options (ratio 2 or 4, a blocking
+  /// factor that is a multiple of the ratio, max_box a multiple of the
+  /// blocking factor, a domain of whole blocks) or boxes outside their
+  /// domain, overlapping, not aligned to the blocking factor or not properly
+  /// nested.
   Hierarchy(const Geometry& geometry, const HierarchyOptions& options, const std::vector<BoxList>& fine = {});
-  // The same over the ranks of comm (collective only in what it calls).
+  /// The same over the ranks of comm (collective only in what it calls).
   Hierarchy(const Comm& comm, const Geometry& geometry, const HierarchyOptions& options,
             const std::vector<BoxList>& fine = {});
 
@@ -116,8 +121,8 @@ class Hierarchy {
   int num_levels() const { return static_cast<int>(levels_.size()); }
   int finest_level() const { return num_levels() - 1; }
   const BoxArray& boxes(int level) const { return levels_.at(static_cast<std::size_t>(level)); }
-  // Who owns each box of a level, this rank, and the communicator (none for
-  // a hierarchy on one process).
+  /// Who owns each box of a level, this rank, and the communicator (none for
+  /// a hierarchy on one process).
   const Distribution& distribution(int level) const { return owners_.at(static_cast<std::size_t>(level)); }
   int rank() const { return comm_ ? comm_->rank() : 0; }
   const std::optional<Comm>& comm() const { return comm_; }
@@ -136,62 +141,62 @@ class Hierarchy {
     return out;
   }
 
-  // Plans built on first use and kept (not safe to call concurrently).
+  /// Plans built on first use and kept (not safe to call concurrently).
   const HaloPlan& halo_plan(int level, IndexType type, int ghosts) const;
-  // Fills the uncovered ghosts of `level` from level - 1.
+  /// Fills the uncovered ghosts of `level` from level - 1.
   const CoarseFinePlan& coarse_fine_plan(int level, IndexType type, int ghosts, Interp interp) const;
-  // Restricts `level` to level - 1.
+  /// Restricts `level` to level - 1.
   const AverageDownPlan& average_down_plan(int level, IndexType type) const;
-  // A flux register between `level` and level - 1.
+  /// A flux register between `level` and level - 1.
   FluxRegister make_flux_register(int level, int ncomp) const;
 
-  // Level by level from 0: ghosts from the same level, then (above level 0)
-  // the uncovered ones from the level below, then those outside the domain
-  // through `physical`.
+  /// Level by level from 0: ghosts from the same level, then (above level 0)
+  /// the uncovered ones from the level below, then those outside the domain
+  /// through `physical`.
   template <class T, class P = NoBoundary>
   void fill_halo(const MultiLevelField<T>& u, Interp interp = Interp::linear, const P& physical = {}) const;
-  // The same split: begin starts every level's same-level fill (work may go
-  // between), end() finishes them coarse first with the coarse-fine fill and
-  // the boundary. The field and `physical` must outlive the pending fill.
+  /// The same split: begin starts every level's same-level fill (work may go
+  /// between), end() finishes them coarse first with the coarse-fine fill and
+  /// the boundary. The field and `physical` must outlive the pending fill.
   template <class T, class P = NoBoundary>
   class PendingFill;
   template <class T, class P = NoBoundary>
   PendingFill<T, P> begin_fill_halo(const MultiLevelField<T>& u, Interp interp = Interp::linear,
                                     const P& physical = {}) const;
-  // From the finest level down: each level's valid points to the level
-  // below.
+  /// From the finest level down: each level's valid points to the level
+  /// below.
   template <class T>
   void average_down(const MultiLevelField<T>& u) const;
 
-  // The boxes of new levels 1, 2, ... from the tags of levels 0 to
-  // min(finest, max_level - 1), built from the top down: the tagged cells of
-  // level l, with the cells under the new level l + 2 grown by the nesting,
-  // are clustered on blocks of blocking_factor / ratio cells, refined, and
-  // chopped to max_box; empty levels on top are dropped. Level 0 stays.
+  /// The boxes of new levels 1, 2, ... from the tags of levels 0 to
+  /// min(finest, max_level - 1), built from the top down: the tagged cells of
+  /// level l, with the cells under the new level l + 2 grown by the nesting,
+  /// are clustered on blocks of blocking_factor / ratio cells, refined, and
+  /// chopped to max_box; empty levels on top are dropped. Level 0 stays.
   std::vector<BoxList> make_grids(const Tagger& tagger) const;
-  // Field u of hierarchy `from` on this hierarchy's boxes (same geometry
-  // and ratio): level by level from 0, prolonged from the new level below
-  // (its halos filled first), overwritten where the old level had valid
-  // points, then restricted from the finest level down. Linear and quadratic
-  // prolongation need at least one ghost.
+  /// Field u of hierarchy `from` on this hierarchy's boxes (same geometry
+  /// and ratio): level by level from 0, prolonged from the new level below
+  /// (its halos filled first), overwritten where the old level had valid
+  /// points, then restricted from the finest level down. Linear and quadratic
+  /// prolongation need at least one ghost.
   template <class T, class P = NoBoundary>
   MultiLevelField<T> transfer(const Hierarchy& from, const MultiLevelField<T>& u, Interp interp = Interp::linear,
                               const P& physical = {}) const;
-  // Tags, makes the new levels and moves every field to them; on an
-  // exception the hierarchy and the fields are unchanged.
+  /// Tags, makes the new levels and moves every field to them; on an
+  /// exception the hierarchy and the fields are unchanged.
   template <class P, class... T>
   void regrid(const Tagger& tagger, Interp interp, const P& physical, MultiLevelField<T>&... fields);
-  // The same, balancing measured costs: measured[l][b], the cost of box b
-  // of this rank's part of level l (levels missing or empty: options.cost).
-  // A new box costs the old boxes' costs in proportion to its overlap with
-  // them, and options.cost where it overlaps none.
+  /// The same, balancing measured costs: measured[l][b], the cost of box b
+  /// of this rank's part of level l (levels missing or empty: options.cost).
+  /// A new box costs the old boxes' costs in proportion to its overlap with
+  /// them, and options.cost where it overlaps none.
   template <class P, class... T>
   void regrid(const Tagger& tagger, const std::vector<std::vector<double>>& measured, Interp interp, const P& physical,
               MultiLevelField<T>&... fields);
 
  private:
-  // The levels' owners from options.cost, or from measured costs of the
-  // levels of `old` (gathered here).
+  /// The levels' owners from options.cost, or from measured costs of the
+  /// levels of `old` (gathered here).
   void distribute(const Hierarchy* old, const std::vector<std::vector<double>>* measured);
   template <class T>
   void check(const MultiLevelField<T>& u) const;

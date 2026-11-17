@@ -4,29 +4,30 @@
 #ifndef SOMA_COMPAT_CORE_HPP_
 #define SOMA_COMPAT_CORE_HPP_
 
-// MOAB's Interface over a SOMA host mesh: the calls MOAB applications make
-// for reading, querying, creating and deleting entities, tags and sets, with
-// MOAB's handles, return codes and results.
-//
-// Model. The SOMA mesh holds the entities and coordinates; tags and sets are
-// kept here, MOAB's way (read from a file's fields and sets on load_file, put
-// back on a copy of the mesh by write_file). Handles keep MOAB's layout: the
-// type in the top 4 bits and a per-type id from 1 in the order the entities
-// were read or created, so a file read here and by MOAB gives the same
-// handles. Ids stay valid until the entity is deleted; a deleted entity's id
-// may be handed out again to a later entity of its type and node count, as
-// MOAB's sequences do.
-// Created entities are staged in a MeshEdit and made visible by the next
-// query (one apply for a burst of creates); deletions apply at once.
-//
-// Not MOAB: one file per instance (load_file on a non-empty instance gives
-// MB_NOT_IMPLEMENTED); file options other than none give MB_UNHANDLED_OPTION;
-// .h5m (with SOMA_ENABLE_HDF5) and .vtk only; host meshes only; no parallel
-// calls. Elements are as SOMA stores them: polyhedra and knives cannot be
-// created. Deleting an entity takes it out of every set (MOAB leaves it in
-// sets that do not track their members). The first instance initializes
-// Kokkos if the application has not, and finalizes it at exit; an instance
-// must not outlive main().
+/// \file
+/// MOAB's Interface over a SOMA host mesh: the calls MOAB applications make
+/// for reading, querying, creating and deleting entities, tags and sets, with
+/// MOAB's handles, return codes and results.
+///
+/// Model. The SOMA mesh holds the entities and coordinates; tags and sets are
+/// kept here, MOAB's way (read from a file's fields and sets on load_file, put
+/// back on a copy of the mesh by write_file). Handles keep MOAB's layout: the
+/// type in the top 4 bits and a per-type id from 1 in the order the entities
+/// were read or created, so a file read here and by MOAB gives the same
+/// handles. Ids stay valid until the entity is deleted; a deleted entity's id
+/// may be handed out again to a later entity of its type and node count, as
+/// MOAB's sequences do.
+/// Created entities are staged in a MeshEdit and made visible by the next
+/// query (one apply for a burst of creates); deletions apply at once.
+///
+/// Not MOAB: one file per instance (load_file on a non-empty instance gives
+/// MB_NOT_IMPLEMENTED); file options other than none give MB_UNHANDLED_OPTION;
+/// .h5m (with SOMA_ENABLE_HDF5) and .vtk only; host meshes only; no parallel
+/// calls. Elements are as SOMA stores them: polyhedra and knives cannot be
+/// created. Deleting an entity takes it out of every set (MOAB leaves it in
+/// sets that do not track their members). The first instance initializes
+/// Kokkos if the application has not, and finalizes it at exit; an instance
+/// must not outlive main().
 
 #include <memory>
 #include <string>
@@ -56,7 +57,7 @@ class Interface {
   ErrorCode query_interface(ScdInterface*& iface);
   ErrorCode release_interface(ScdInterface* iface);
 
-  // Files.
+  /// Files.
   ErrorCode load_file(const char* file_name, const EntityHandle* file_set = nullptr, const char* options = nullptr,
                       const char* set_tag_name = nullptr, const int* set_tag_values = nullptr,
                       int num_set_tag_values = 0);
@@ -69,7 +70,7 @@ class Interface {
   ErrorCode write_mesh(const char* file_name, const EntityHandle* output_sets = nullptr, int num_sets = 0);
   ErrorCode delete_mesh();
 
-  // Handles.
+  /// Handles.
   EntityType type_from_handle(EntityHandle h) const { return type_of(h); }
   EntityID id_from_handle(EntityHandle h) const { return id_of(h); }
   int dimension_from_handle(EntityHandle h) const;
@@ -77,7 +78,7 @@ class Interface {
   ErrorCode get_dimension(int& dim) const;
   ErrorCode set_dimension(int dim);
 
-  // Coordinates.
+  /// Coordinates.
   ErrorCode get_vertex_coordinates(std::vector<double>& xyz) const;
   ErrorCode get_coords(const Range& vertices, double* xyz) const;
   ErrorCode get_coords(const EntityHandle* vertices, int n, double* xyz) const;
@@ -85,7 +86,7 @@ class Interface {
   ErrorCode set_coords(const EntityHandle* vertices, int n, const double* xyz);
   ErrorCode set_coords(const Range& vertices, const double* xyz);
 
-  // Connectivity: corners then higher-order nodes (corners_only: corners).
+  /// Connectivity: corners then higher-order nodes (corners_only: corners).
   ErrorCode get_connectivity(EntityHandle e, const EntityHandle*& conn, int& n, bool corners_only = false,
                              std::vector<EntityHandle>* storage = nullptr) const;
   ErrorCode get_connectivity(const EntityHandle* es, int n, std::vector<EntityHandle>& conn,
@@ -94,8 +95,8 @@ class Interface {
   ErrorCode get_connectivity(const EntityHandle* es, int n, Range& vertices, bool corners_only = false) const;
   ErrorCode get_connectivity(const Range& es, Range& vertices, bool corners_only = false) const;
 
-  // Adjacencies among the entities that exist; with create_if_missing, the
-  // sides a downward query lacks are created first, as MOAB creates them.
+  /// Adjacencies among the entities that exist; with create_if_missing, the
+  /// sides a downward query lacks are created first, as MOAB creates them.
   ErrorCode get_adjacencies(const EntityHandle* from, int n, int to_dim, bool create_if_missing,
                             std::vector<EntityHandle>& adj, int op = INTERSECT);
   ErrorCode get_adjacencies(const EntityHandle* from, int n, int to_dim, bool create_if_missing, Range& adj,
@@ -103,7 +104,7 @@ class Interface {
   ErrorCode get_adjacencies(const Range& from, int to_dim, bool create_if_missing, Range& adj, int op = INTERSECT);
   ErrorCode side_number(EntityHandle parent, EntityHandle child, int& side, int& sense, int& offset) const;
 
-  // Entities of the instance (meshset 0) or of a set.
+  /// Entities of the instance (meshset 0) or of a set.
   ErrorCode get_entities_by_dimension(EntityHandle meshset, int dim, Range& out, bool recursive = false) const;
   ErrorCode get_entities_by_dimension(EntityHandle meshset, int dim, std::vector<EntityHandle>& out,
                                       bool recursive = false) const;
@@ -113,8 +114,8 @@ class Interface {
   ErrorCode get_entities_by_handle(EntityHandle meshset, Range& out, bool recursive = false) const;
   ErrorCode get_entities_by_handle(EntityHandle meshset, std::vector<EntityHandle>& out,
                                    bool recursive = false) const;
-  // Entities of a type with the given tags, each with the given value where
-  // values[i] is not null; op combines the tags (INTERSECT or UNION).
+  /// Entities of a type with the given tags, each with the given value where
+  /// values[i] is not null; op combines the tags (INTERSECT or UNION).
   ErrorCode get_entities_by_type_and_tag(EntityHandle meshset, EntityType type, const Tag* tags,
                                          const void* const* values, int num_tags, Range& out, int op = INTERSECT,
                                          bool recursive = false) const;
@@ -122,14 +123,14 @@ class Interface {
   ErrorCode get_number_entities_by_type(EntityHandle meshset, EntityType type, int& n, bool recursive = false) const;
   ErrorCode get_number_entities_by_handle(EntityHandle meshset, int& n, bool recursive = false) const;
 
-  // Creation and deletion.
+  /// Creation and deletion.
   ErrorCode create_vertex(const double xyz[3], EntityHandle& h);
   ErrorCode create_vertices(const double* xyz, int n, Range& handles);
   ErrorCode create_element(EntityType type, const EntityHandle* conn, int num_nodes, EntityHandle& h);
   ErrorCode delete_entities(const EntityHandle* es, int n);
   ErrorCode delete_entities(const Range& es);
 
-  // Tags.
+  /// Tags.
   ErrorCode tag_get_handle(const char* name, int size, DataType type, Tag& tag, unsigned flags = 0,
                            const void* default_value = nullptr, bool* created = nullptr);
   ErrorCode tag_get_handle(const char* name, int size, DataType type, Tag& tag, unsigned flags,
@@ -158,17 +159,17 @@ class Interface {
   ErrorCode tag_delete_data(Tag tag, const EntityHandle* es, int n);
   ErrorCode tag_delete_data(Tag tag, const Range& es);
   ErrorCode tag_delete(Tag tag);
-  // The values of a dense run of entities of one type, in place: count is how
-  // many from begin are contiguous in storage. With allocate, entities
-  // without a value get the default (or zeros) first.
+  /// The values of a dense run of entities of one type, in place: count is how
+  /// many from begin are contiguous in storage. With allocate, entities
+  /// without a value get the default (or zeros) first.
   ErrorCode tag_iterate(Tag tag, Range::const_iterator begin, Range::const_iterator end, int& count,
                         void*& data, bool allocate = true);
-  // Values are stored as they are set, so nothing is ever pending.
+  /// Values are stored as they are set, so nothing is ever pending.
   ErrorCode tag_commit(Tag tag);
   ErrorCode tag_commit_all();
   bool tag_has_pending(Tag tag) const;
 
-  // Sets.
+  /// Sets.
   ErrorCode create_meshset(unsigned options, EntityHandle& set, int start_id = 0);
   ErrorCode clear_meshset(const EntityHandle* sets, int n);
   ErrorCode clear_meshset(const Range& sets);
@@ -197,8 +198,8 @@ class Interface {
 
   ErrorCode get_last_error(std::string& message) const;
 
-  // SOMA's view: the mesh as it stands (staged creations applied), without
-  // the tags and sets kept here.
+  /// SOMA's view: the mesh as it stands (staged creations applied), without
+  /// the tags and sets kept here.
   const HostMesh& soma_mesh() const;
 
  private:

@@ -4,9 +4,10 @@
 #ifndef SOMA_COMPAT_TYPES_HPP_
 #define SOMA_COMPAT_TYPES_HPP_
 
-// The types and constants of MOAB's interface, with MOAB's values, in
-// soma::compat (the drop-in headers under soma/compat/dropin name the
-// namespace moab).
+/// \file
+/// The types and constants of MOAB's interface, with MOAB's values, in
+/// soma::compat (the drop-in headers under soma/compat/dropin name the
+/// namespace moab).
 
 #include <cstdint>
 
@@ -31,7 +32,7 @@ enum EntityType {
   MBMAXTYPE
 };
 
-// Prefix increment, as MOAB's loops over types use.
+/// Prefix increment, as MOAB's loops over types use.
 inline EntityType& operator++(EntityType& t) { return t = static_cast<EntityType>(static_cast<int>(t) + 1); }
 inline EntityType operator++(EntityType& t, int) {
   const EntityType old = t;
@@ -90,7 +91,7 @@ enum EntitySetProperty { MESHSET_TRACK_OWNER = 0x1, MESHSET_SET = 0x2, MESHSET_O
 class TagInfo;
 using Tag = TagInfo*;
 
-// Handle layout: the type in the top 4 bits, a per-type id (from 1) below.
+/// Handle layout: the type in the top 4 bits, a per-type id (from 1) below.
 inline constexpr int MB_TYPE_WIDTH = 4;
 inline constexpr int MB_ID_WIDTH = 64 - MB_TYPE_WIDTH;
 inline constexpr EntityHandle MB_ID_MASK = ~EntityHandle{0} >> MB_TYPE_WIDTH;

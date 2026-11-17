@@ -4,10 +4,11 @@
 #ifndef SOMA_TOPOLOGY_BRIDGE_HPP_
 #define SOMA_TOPOLOGY_BRIDGE_HPP_
 
-// Bridge adjacency: x -> the entities z != x of the same dimension that share
-// an entity of the bridge dimension, z in second(y) for y in first(x). Two
-// passes: gather every candidate into a buffer sized by an exact upper bound,
-// sort and deduplicate each row in place, then compact by a scan.
+/// \file
+/// Bridge adjacency: x -> the entities z != x of the same dimension that share
+/// an entity of the bridge dimension, z in second(y) for y in first(x). Two
+/// passes: gather every candidate into a buffer sized by an exact upper bound,
+/// sort and deduplicate each row in place, then compact by a scan.
 
 #include <cstdint>
 #include <string>
@@ -43,7 +44,7 @@ KOKKOS_INLINE_FUNCTION Offset sort_unique(const Targets& t, Offset b, Offset e) 
 
 }  // namespace detail
 
-// first: n rows (dimension dim -> via); second: via -> dim. codes is empty.
+/// first: n rows (dimension dim -> via); second: via -> dim. codes is empty.
 template <class ExecSpace>
 Adjacency<typename ExecSpace::memory_space> bridge(
     const ExecSpace& exec, LO n,

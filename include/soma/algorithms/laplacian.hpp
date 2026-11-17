@@ -4,29 +4,32 @@
 #ifndef SOMA_ALGORITHMS_LAPLACIAN_HPP_
 #define SOMA_ALGORITHMS_LAPLACIAN_HPP_
 
-// Laplacian smoothing of vertex coordinates: Jacobi sweeps that move each
-// free vertex to the mean of its neighbours' coordinates before the sweep,
-// as MOAB's LaplacianSmoother example does.
-//
-//   mesh.add_ghosts(comm, soma::GhostOptions{1, 0});  // on more than one rank
-//   soma::SmoothOptions o;
-//   o.iterations = 10;
-//   const soma::SmoothReport r = soma::laplacian_smooth(comm, mesh, o);
-//
-// The neighbours of a vertex are the other corners of the entities of
-// dimension bridge_dim around it: the cells by default (all 26 around an
-// interior hex vertex), 1 for edges. They are read off the cells' canonical
-// sides, so the mesh need not hold those entities. Each vertex sums its
-// neighbours in ascending gid order, so the result is the same, bit for bit,
-// on any number of ranks and threads.
-//
-// Fixed vertices stay where they are: those of the mask, else the skin, the
-// corners of the sides of dimension dim - 1 that only one cell has. On more
-// than one rank the mesh must hold a ghost layer through vertices
-// (GhostOptions{1, 0}): every cell around a held vertex is then held, so a
-// vertex's neighbours are all here and the skin found here is the global
-// one. Owners move their vertices; a halo update then gives copies and
-// ghosts their owners' coordinates after every sweep.
+/// \file
+/// Laplacian smoothing of vertex coordinates: Jacobi sweeps that move each
+/// free vertex to the mean of its neighbours' coordinates before the sweep,
+/// as MOAB's LaplacianSmoother example does.
+///
+/// ```
+///   mesh.add_ghosts(comm, soma::GhostOptions{1, 0});  // on more than one rank
+///   soma::SmoothOptions o;
+///   o.iterations = 10;
+///   const soma::SmoothReport r = soma::laplacian_smooth(comm, mesh, o);
+/// ```
+///
+/// The neighbours of a vertex are the other corners of the entities of
+/// dimension bridge_dim around it: the cells by default (all 26 around an
+/// interior hex vertex), 1 for edges. They are read off the cells' canonical
+/// sides, so the mesh need not hold those entities. Each vertex sums its
+/// neighbours in ascending gid order, so the result is the same, bit for bit,
+/// on any number of ranks and threads.
+///
+/// Fixed vertices stay where they are: those of the mask, else the skin, the
+/// corners of the sides of dimension dim - 1 that only one cell has. On more
+/// than one rank the mesh must hold a ghost layer through vertices
+/// (GhostOptions{1, 0}): every cell around a held vertex is then held, so a
+/// vertex's neighbours are all here and the skin found here is the global
+/// one. Owners move their vertices; a halo update then gives copies and
+/// ghosts their owners' coordinates after every sweep.
 
 #include <array>
 #include <cmath>
@@ -49,40 +52,40 @@ namespace soma {
 
 struct SmoothOptions {
   int iterations = 1;
-  // Vertices are neighbours through the entities of this dimension that
-  // hold both: -1 the mesh's dimension (the cells), else 1 to dim.
+  /// Vertices are neighbours through the entities of this dimension that
+  /// hold both: -1 the mesh's dimension (the cells), else 1 to dim.
   int bridge_dim = -1;
-  // > 0: stop once no vertex moved farther than this in a sweep.
+  /// > 0: stop once no vertex moved farther than this in a sweep.
   Real tolerance = 0;
-  // Per vertex lid, nonzero for a vertex that stays; empty: the skin stays.
+  /// Per vertex lid, nonzero for a vertex that stays; empty: the skin stays.
   std::span<const std::uint8_t> fixed;
 };
 
 struct SmoothReport {
-  int iterations = 0;     // sweeps made
-  Real largest_move = 0;  // in the last sweep, over every rank; 0 unless tolerance > 0
+  int iterations = 0;     ///< sweeps made
+  Real largest_move = 0;  ///< in the last sweep, over every rank; 0 unless tolerance > 0
 };
 
 namespace detail {
 
-// The neighbour rows and the skin of a host mesh, built once per call.
+/// The neighbour rows and the skin of a host mesh, built once per call.
 struct SmoothingGraph {
-  std::vector<Offset> offsets;     // vertex count + 1
-  std::vector<LO> targets;         // each row ascending by gid
-  std::vector<std::uint8_t> skin;  // per vertex: a corner of a side only one cell has
+  std::vector<Offset> offsets;     ///< vertex count + 1
+  std::vector<LO> targets;         ///< each row ascending by gid
+  std::vector<std::uint8_t> skin;  ///< per vertex: a corner of a side only one cell has
 };
 
-// bridge_dim in [1, mesh.dim()]; the mesh not edited. Host only.
+/// bridge_dim in [1, mesh.dim()]; the mesh not edited. Host only.
 SmoothingGraph smoothing_graph(const Mesh<Kokkos::HostSpace>& mesh, int bridge_dim);
 
 }  // namespace detail
 
-// Collective. Throws std::invalid_argument on every rank if any rank passes
-// a negative iteration count, a bridge_dim other than -1 or in [1, dim], a
-// tolerance that is negative or not finite, a mask whose length is not the
-// vertex count, a mesh of dimension 0 or one with unremoved edits, or, on
-// more than one rank, a mesh without a ghost layer through vertices; or if
-// ranks differ in iterations, bridge_dim or tolerance.
+/// Collective. Throws std::invalid_argument on every rank if any rank passes
+/// a negative iteration count, a bridge_dim other than -1 or in [1, dim], a
+/// tolerance that is negative or not finite, a mask whose length is not the
+/// vertex count, a mesh of dimension 0 or one with unremoved edits, or, on
+/// more than one rank, a mesh without a ghost layer through vertices; or if
+/// ranks differ in iterations, bridge_dim or tolerance.
 template <class MemSpace>
 SmoothReport laplacian_smooth(const Comm& comm, Mesh<MemSpace>& mesh, const SmoothOptions& options = {}) {
   using Exec = typename MemSpace::execution_space;

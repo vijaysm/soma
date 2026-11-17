@@ -4,11 +4,12 @@
 #ifndef SOMA_ALGORITHMS_CSR_HPP_
 #define SOMA_ALGORITHMS_CSR_HPP_
 
-// A rank's rows of a sparse matrix over vertices, in compressed sparse rows:
-// the rows are its owned vertices [0, rows), the columns all its vertices
-// [0, cols) (owned, then copies and ghosts), each row's columns ascending by
-// gid. Sums along a row run in that order, so a product is the same, bit for
-// bit, on any number of ranks and threads.
+/// \file
+/// A rank's rows of a sparse matrix over vertices, in compressed sparse rows:
+/// the rows are its owned vertices [0, rows), the columns all its vertices
+/// [0, cols) (owned, then copies and ghosts), each row's columns ascending by
+/// gid. Sums along a row run in that order, so a product is the same, bit for
+/// bit, on any number of ranks and threads.
 
 #include <cstddef>
 #include <cstdint>
@@ -25,15 +26,15 @@ template <class MemSpace>
 struct CsrMatrix {
   LO rows = 0;
   LO cols = 0;
-  View1<Offset, MemSpace> offsets;  // rows + 1
+  View1<Offset, MemSpace> offsets;  ///< rows + 1
   View1<LO, MemSpace> columns;
   View1<Real, MemSpace> values;
 };
 
-// y[i] = sum_j A[i][j] x[j] over the rows; x holds cols entries, y at least
-// rows. Local: on more than one rank x's copies and ghosts must hold their
-// owners' values (FemSpace::multiply updates them first). Throws
-// std::invalid_argument if x or y is too short.
+/// y[i] = sum_j A[i][j] x[j] over the rows; x holds cols entries, y at least
+/// rows. Local: on more than one rank x's copies and ghosts must hold their
+/// owners' values (FemSpace::multiply updates them first). Throws
+/// std::invalid_argument if x or y is too short.
 template <class MemSpace>
 void multiply(const CsrMatrix<MemSpace>& a, const View1<const Real, MemSpace>& x, const View1<Real, MemSpace>& y) {
   using Exec = typename MemSpace::execution_space;
@@ -52,13 +53,13 @@ void multiply(const CsrMatrix<MemSpace>& a, const View1<const Real, MemSpace>& x
   Exec{}.fence();
 }
 
-// Dirichlet conditions by symmetric elimination: the row of a fixed vertex
-// becomes the identity's with b = its value; every other row moves its fixed
-// columns' terms to b and zeroes them. fixed and values hold one entry per
-// column (vertex), the same on every rank that holds the vertex: values of
-// free vertices are not read. A symmetric matrix stays symmetric. Local;
-// throws std::invalid_argument if b is shorter than the rows, fixed or
-// values than the columns.
+/// Dirichlet conditions by symmetric elimination: the row of a fixed vertex
+/// becomes the identity's with b = its value; every other row moves its fixed
+/// columns' terms to b and zeroes them. fixed and values hold one entry per
+/// column (vertex), the same on every rank that holds the vertex: values of
+/// free vertices are not read. A symmetric matrix stays symmetric. Local;
+/// throws std::invalid_argument if b is shorter than the rows, fixed or
+/// values than the columns.
 template <class MemSpace>
 void apply_dirichlet(const CsrMatrix<MemSpace>& a, const View1<Real, MemSpace>& b,
                      const View1<const std::uint8_t, MemSpace>& fixed, const View1<const Real, MemSpace>& values) {

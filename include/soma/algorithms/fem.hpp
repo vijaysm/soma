@@ -4,19 +4,22 @@
 #ifndef SOMA_ALGORITHMS_FEM_HPP_
 #define SOMA_ALGORITHMS_FEM_HPP_
 
-// Linear finite elements on single cells: P1 triangles and tets, Q1 quads and
-// hexes, with corners in MOAB's canonical order. Reference cells: the unit
-// triangle (0,0) (1,0) (0,1) and tet (0,0,0) (1,0,0) (0,1,0) (0,0,1); [-1, 1]^d
-// for quads and hexes. Cells of dimension 2 lie in a plane z = const.
-//
-//   fem::Cell c = fem::cell_of(view, dim, e);  // view = mesh.view()
-//   Real k[fem::max_nodes][fem::max_nodes];
-//   const Real det = fem::stiffness(c, k);  // !(det > 0): inverted, flat or unsupported
-//
-// Cells must be positively oriented: a cell whose Jacobian determinant is
-// not positive at every corner and Gauss point contributes nothing, and the
-// kernels say so by their return value, for the caller to fail on.
-// Everything here is device-callable and allocation-free.
+/// \file
+/// Linear finite elements on single cells: P1 triangles and tets, Q1 quads and
+/// hexes, with corners in MOAB's canonical order. Reference cells: the unit
+/// triangle (0,0) (1,0) (0,1) and tet (0,0,0) (1,0,0) (0,1,0) (0,0,1); [-1, 1]^d
+/// for quads and hexes. Cells of dimension 2 lie in a plane z = const.
+///
+/// ```
+///   fem::Cell c = fem::cell_of(view, dim, e);  // view = mesh.view()
+///   Real k[fem::max_nodes][fem::max_nodes];
+///   const Real det = fem::stiffness(c, k);  // !(det > 0): inverted, flat or unsupported
+/// ```
+///
+/// Cells must be positively oriented: a cell whose Jacobian determinant is
+/// not positive at every corner and Gauss point contributes nothing, and the
+/// kernels say so by their return value, for the caller to fail on.
+/// Everything here is device-callable and allocation-free.
 
 #include <Kokkos_Core.hpp>
 
@@ -29,8 +32,8 @@ namespace soma::fem {
 inline constexpr int max_nodes = 8;
 inline constexpr int max_points = 27;
 
-// A quadrature rule on a reference cell: n points xi with weights w, which
-// sum to the reference cell's measure.
+/// A quadrature rule on a reference cell: n points xi with weights w, which
+/// sum to the reference cell's measure.
 struct Quadrature {
   int n = 0;
   Real w[max_points] = {};
@@ -47,7 +50,7 @@ KOKKOS_INLINE_FUNCTION void add(Quadrature& q, Real w, Real a, Real b, Real c) {
   ++q.n;
 }
 
-// Gauss-Legendre with m = 1, 2 or 3 points on [-1, 1], exact to degree 2m - 1.
+/// Gauss-Legendre with m = 1, 2 or 3 points on [-1, 1], exact to degree 2m - 1.
 KOKKOS_INLINE_FUNCTION void gauss(int m, Real* x, Real* w) {
   if (m == 1) {
     x[0] = 0;
@@ -69,8 +72,8 @@ KOKKOS_INLINE_FUNCTION void gauss(int m, Real* x, Real* w) {
 
 }  // namespace detail
 
-// The smallest rule here exact for polynomials of `degree` (at most 5 for
-// quads and hexes, 4 for triangles and tets) on the reference cell.
+/// The smallest rule here exact for polynomials of `degree` (at most 5 for
+/// quads and hexes, 4 for triangles and tets) on the reference cell.
 KOKKOS_INLINE_FUNCTION Quadrature quadrature(Topology t, int degree) {
   Quadrature q;
   if (t == Topology::quad || t == Topology::hex) {
@@ -138,8 +141,8 @@ KOKKOS_INLINE_FUNCTION Quadrature quadrature(Topology t, int degree) {
   return q;
 }
 
-// The values N and reference gradients dN (d per node) of the shape
-// functions at xi; the number of nodes, 0 for an unsupported topology.
+/// The values N and reference gradients dN (d per node) of the shape
+/// functions at xi; the number of nodes, 0 for an unsupported topology.
 KOKKOS_INLINE_FUNCTION int shape(Topology t, const Real* xi, Real* n, Real (*dn)[3]) {
   if (t == Topology::tri || t == Topology::tet) {
     const int d = t == Topology::tri ? 2 : 3;
@@ -172,7 +175,7 @@ KOKKOS_INLINE_FUNCTION int shape(Topology t, const Real* xi, Real* n, Real (*dn)
   return 0;
 }
 
-// The corner count of a topology these elements support, else 0.
+/// The corner count of a topology these elements support, else 0.
 KOKKOS_INLINE_FUNCTION constexpr int nodes_of(Topology t) {
   switch (t) {
     case Topology::tri: return 3;
@@ -183,8 +186,8 @@ KOKKOS_INLINE_FUNCTION constexpr int nodes_of(Topology t) {
   }
 }
 
-// A cell's topology, dimension, node count and corner coordinates; n = 0
-// when cell_of reads a cell of a topology without these elements.
+/// A cell's topology, dimension, node count and corner coordinates; n = 0
+/// when cell_of reads a cell of a topology without these elements.
 struct Cell {
   Topology topology = Topology::vertex;
   int dim = 0;
@@ -209,8 +212,8 @@ KOKKOS_INLINE_FUNCTION Cell cell_of(const MeshView<MemSpace>& m, int dim, LO e) 
 
 namespace detail {
 
-// The Jacobian j[i][k] = d x_i / d xi_k at reference point xi, with the
-// shape values n and reference gradients dn there; the node count.
+/// The Jacobian j[i][k] = d x_i / d xi_k at reference point xi, with the
+/// shape values n and reference gradients dn there; the node count.
 KOKKOS_INLINE_FUNCTION int jacobian(const Cell& c, const Real* xi, Real* n, Real (*dn)[3], Real (*j)[3]) {
   const int nodes = shape(c.topology, xi, n, dn);
   const int d = c.dim;
@@ -225,7 +228,7 @@ KOKKOS_INLINE_FUNCTION int jacobian(const Cell& c, const Real* xi, Real* n, Real
   return nodes;
 }
 
-// The determinant of the d x d Jacobian j; 0 (not -0) when it vanishes.
+/// The determinant of the d x d Jacobian j; 0 (not -0) when it vanishes.
 KOKKOS_INLINE_FUNCTION Real determinant(int d, const Real (*j)[3]) {
   Real det = 0;
   if (d == 2) {
@@ -239,7 +242,7 @@ KOKKOS_INLINE_FUNCTION Real determinant(int d, const Real (*j)[3]) {
   return det == 0 ? Real{0} : det;
 }
 
-// The Jacobian's determinant at xi alone, as at_point gives it.
+/// The Jacobian's determinant at xi alone, as at_point gives it.
 KOKKOS_INLINE_FUNCTION Real det_at(const Cell& c, const Real* xi) {
   Real n[max_nodes], dn[max_nodes][3], j[3][3];
   jacobian(c, xi, n, dn, j);
@@ -248,9 +251,9 @@ KOKKOS_INLINE_FUNCTION Real det_at(const Cell& c, const Real* xi) {
 
 }  // namespace detail
 
-// At reference point xi: the shape functions n, their physical gradients g,
-// and the Jacobian's determinant (negative for an inverted cell, 0 for a
-// degenerate one, when g is left unset).
+/// At reference point xi: the shape functions n, their physical gradients g,
+/// and the Jacobian's determinant (negative for an inverted cell, 0 for a
+/// degenerate one, when g is left unset).
 KOKKOS_INLINE_FUNCTION Real at_point(const Cell& c, const Real* xi, Real* n, Real (*g)[3]) {
   Real dn[max_nodes][3], j[3][3];  // j[i][k] = d x_i / d xi_k
   const int nodes = detail::jacobian(c, xi, n, dn, j);
@@ -286,9 +289,9 @@ KOKKOS_INLINE_FUNCTION Real at_point(const Cell& c, const Real* xi, Real* n, Rea
 
 namespace detail {
 
-// Whether least_jacobian(c) is NaN before any determinant: n = 0, a
-// topology without these elements, a coordinate not finite, or a 2D cell off
-// one plane z = const.
+/// Whether least_jacobian(c) is NaN before any determinant: n = 0, a
+/// topology without these elements, a coordinate not finite, or a 2D cell off
+/// one plane z = const.
 KOKKOS_INLINE_FUNCTION bool unusable(const Cell& c) {
   if (c.n == 0 || c.n != nodes_of(c.topology) || c.dim != dimension(c.topology)) return true;
   for (int a = 0; a < c.n; ++a) {
@@ -304,20 +307,20 @@ KOKKOS_INLINE_FUNCTION bool unusable(const Cell& c) {
   return false;
 }
 
-// The lesser of least and det, where a determinant not finite (one that
-// overflowed) counts as NaN and a NaN, once in, stays.
+/// The lesser of least and det, where a determinant not finite (one that
+/// overflowed) counts as NaN and a NaN, once in, stays.
 KOKKOS_INLINE_FUNCTION Real lesser(Real least, Real det) {
   if (!Kokkos::isfinite(det)) return Kokkos::Experimental::quiet_NaN_v<Real>;
   return Kokkos::isnan(least) || det >= least ? least : det;
 }
 
-// The determinant at corner a of a quad or hex. There a shape function's
-// reference gradient along xi_k is +-1/2 for the corner and its neighbour
-// along k and 0 for the others, so column k of the Jacobian is half the
-// edge to that neighbour, signed: the sum at_point forms, bit for bit for
-// finite coordinates (the halves are exact, the zero terms add nothing)
-// where the compiler contracts each expression alike (-ffp-contract=on or
-// off; fast may fuse the determinant differently where it is inlined).
+/// The determinant at corner a of a quad or hex. There a shape function's
+/// reference gradient along xi_k is +-1/2 for the corner and its neighbour
+/// along k and 0 for the others, so column k of the Jacobian is half the
+/// edge to that neighbour, signed: the sum at_point forms, bit for bit for
+/// finite coordinates (the halves are exact, the zero terms add nothing)
+/// where the compiler contracts each expression alike (-ffp-contract=on or
+/// off; fast may fuse the determinant differently where it is inlined).
 KOKKOS_INLINE_FUNCTION Real det_at_corner(const Cell& c, int a) {
   constexpr Real sx[8] = {-1, 1, 1, -1, -1, 1, 1, -1};
   constexpr Real sy[8] = {-1, -1, 1, 1, -1, -1, 1, 1};
@@ -333,7 +336,7 @@ KOKKOS_INLINE_FUNCTION Real det_at_corner(const Cell& c, int a) {
   return determinant(d, j);
 }
 
-// The smallest determinant over a quad's or hex's corners, as lesser folds.
+/// The smallest determinant over a quad's or hex's corners, as lesser folds.
 KOKKOS_INLINE_FUNCTION Real least_at_corners(const Cell& c) {
   Real least = Kokkos::Experimental::infinity_v<Real>;
   for (int a = 0; a < c.n; ++a) least = lesser(least, det_at_corner(c, a));
@@ -342,13 +345,13 @@ KOKKOS_INLINE_FUNCTION Real least_at_corners(const Cell& c) {
 
 }  // namespace detail
 
-// The smallest Jacobian determinant over the cell's corners and the Gauss
-// points of the rules below: positive for a usable cell. NaN for a cell not
-// usable here at all: of n = 0, a topology without these elements, a
-// coordinate not finite, a determinant that overflows, or of dimension 2
-// with corners off one plane z = const. The determinant of a simplex is
-// constant; that of a quad or hex is checked at its corners too, where a
-// folded cell inverts first.
+/// The smallest Jacobian determinant over the cell's corners and the Gauss
+/// points of the rules below: positive for a usable cell. NaN for a cell not
+/// usable here at all: of n = 0, a topology without these elements, a
+/// coordinate not finite, a determinant that overflows, or of dimension 2
+/// with corners off one plane z = const. The determinant of a simplex is
+/// constant; that of a quad or hex is checked at its corners too, where a
+/// folded cell inverts first.
 KOKKOS_INLINE_FUNCTION Real least_jacobian(const Cell& c) {
   if (detail::unusable(c)) return Kokkos::Experimental::quiet_NaN_v<Real>;
   const Real centre[3] = {Real{1} / 4, Real{1} / 4, Real{1} / 4};
@@ -363,11 +366,11 @@ KOKKOS_INLINE_FUNCTION Real least_jacobian(const Cell& c) {
 
 namespace detail {
 
-// Calls body(w, n, g) at each point of the rule of `degree` with w the
-// weight times the Jacobian's determinant, and returns least_jacobian(c).
-// Unless that is > 0, body may have run on some points and what it made is
-// to be discarded. A quad's or hex's degree-2 rule is the one
-// least_jacobian checks: its determinants serve both.
+/// Calls body(w, n, g) at each point of the rule of `degree` with w the
+/// weight times the Jacobian's determinant, and returns least_jacobian(c).
+/// Unless that is > 0, body may have run on some points and what it made is
+/// to be discarded. A quad's or hex's degree-2 rule is the one
+/// least_jacobian checks: its determinants serve both.
 template <class Body>
 KOKKOS_INLINE_FUNCTION Real integrate(const Cell& c, int degree, const Body& body) {
   const Quadrature q = quadrature(c.topology, degree);
@@ -395,9 +398,9 @@ KOKKOS_INLINE_FUNCTION Real integrate(const Cell& c, int degree, const Body& bod
 
 }  // namespace detail
 
-// The stiffness matrix k[a][b] = integral of grad N_a . grad N_b (exact for
-// simplices and for parallelogram-shaped quads and hexes). Returns
-// least_jacobian(c); unless it is > 0, k is zero and not to be used.
+/// The stiffness matrix k[a][b] = integral of grad N_a . grad N_b (exact for
+/// simplices and for parallelogram-shaped quads and hexes). Returns
+/// least_jacobian(c); unless it is > 0, k is zero and not to be used.
 KOKKOS_INLINE_FUNCTION Real stiffness(const Cell& c, Real (*k)[max_nodes]) {
   for (int a = 0; a < c.n; ++a) {
     for (int b = 0; b < c.n; ++b) k[a][b] = 0;
@@ -415,8 +418,8 @@ KOKKOS_INLINE_FUNCTION Real stiffness(const Cell& c, Real (*k)[max_nodes]) {
   return least;
 }
 
-// The mass matrix m[a][b] = integral of N_a N_b, exact on affine cells.
-// Returns least_jacobian(c); unless it is > 0, m is zero.
+/// The mass matrix m[a][b] = integral of N_a N_b, exact on affine cells.
+/// Returns least_jacobian(c); unless it is > 0, m is zero.
 KOKKOS_INLINE_FUNCTION Real mass(const Cell& c, Real (*m)[max_nodes]) {
   for (int a = 0; a < c.n; ++a) {
     for (int b = 0; b < c.n; ++b) m[a][b] = 0;
@@ -434,7 +437,7 @@ KOKKOS_INLINE_FUNCTION Real mass(const Cell& c, Real (*m)[max_nodes]) {
   return least;
 }
 
-// The point x of the cell at reference point xi, given the shape values n.
+/// The point x of the cell at reference point xi, given the shape values n.
 KOKKOS_INLINE_FUNCTION void point(const Cell& c, const Real* n, Real* x) {
   for (int i = 0; i < 3; ++i) {
     x[i] = 0;
@@ -442,8 +445,8 @@ KOKKOS_INLINE_FUNCTION void point(const Cell& c, const Real* n, Real* x) {
   }
 }
 
-// The load vector r[a] = integral of f N_a by the degree-2 rule, f(x, y, z)
-// device-callable. Returns least_jacobian(c); unless it is > 0, r is zero.
+/// The load vector r[a] = integral of f N_a by the degree-2 rule, f(x, y, z)
+/// device-callable. Returns least_jacobian(c); unless it is > 0, r is zero.
 template <class F>
 KOKKOS_INLINE_FUNCTION Real load(const Cell& c, const F& f, Real* r) {
   for (int a = 0; a < c.n; ++a) r[a] = 0;
@@ -459,9 +462,9 @@ KOKKOS_INLINE_FUNCTION Real load(const Cell& c, const F& f, Real* r) {
   return least;
 }
 
-// The integral over the cell of (sum_a u[a] N_a - exact)^2 by a degree-4
-// rule (5 for quads and hexes); NaN unless least_jacobian(c) > 0, so that a
-// sum over cells shows a bad one.
+/// The integral over the cell of (sum_a u[a] N_a - exact)^2 by a degree-4
+/// rule (5 for quads and hexes); NaN unless least_jacobian(c) > 0, so that a
+/// sum over cells shows a bad one.
 template <class F>
 KOKKOS_INLINE_FUNCTION Real squared_error(const Cell& c, const Real* u, const F& exact) {
   if (!(least_jacobian(c) > 0)) return Kokkos::Experimental::quiet_NaN_v<Real>;

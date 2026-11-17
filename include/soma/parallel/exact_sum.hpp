@@ -4,29 +4,32 @@
 #ifndef SOMA_PARALLEL_EXACT_SUM_HPP_
 #define SOMA_PARALLEL_EXACT_SUM_HPP_
 
-// Sums of doubles that do not depend on the order of the terms: each term is
-// added exactly to a fixed-point accumulator spanning every finite double
-// (68 signed 32-bit digits in int64 words), and the total is rounded to the
-// nearest double once, at the end. Integer addition is associative, so the
-// same terms give the same bits on any number of threads and ranks, however
-// they are split. A NaN or infinite term makes its sum NaN.
-//
-//   ExactSums<2> s;                                   // or a kernel's reducer:
-//   Kokkos::parallel_reduce(policy, KOKKOS_LAMBDA(LO i, ExactSums<2>& acc) {
-//     acc.add(0, x(i) * y(i));
-//     acc.add(1, x(i) * x(i));
-//   }, ExactSumReducer<2>(s));
-//   const auto [xy, xx] = allreduce_exact(comm, s);  // one allreduce of integers
-//
-// A term costs a few integer operations; a dot product by these sums the
-// rounded products exactly, so it is at least as accurate as a plain one.
-// One accumulator takes at most 2^28 terms between normalizations
-// (reduce_exact splits longer ranges); a reducer normalizes on every join.
-// The terms themselves must be the same bits wherever they are computed:
-// that holds for one build (each expression contracted alike, as compilers
-// do by default), not under -ffast-math, which also drops the NaN checks.
-// Tested on host execution spaces; on a GPU the 552-byte accumulator per sum
-// is a large reduction value.
+/// \file
+/// Sums of doubles that do not depend on the order of the terms: each term is
+/// added exactly to a fixed-point accumulator spanning every finite double
+/// (68 signed 32-bit digits in int64 words), and the total is rounded to the
+/// nearest double once, at the end. Integer addition is associative, so the
+/// same terms give the same bits on any number of threads and ranks, however
+/// they are split. A NaN or infinite term makes its sum NaN.
+///
+/// ```
+///   ExactSums<2> s;                                   // or a kernel's reducer:
+///   Kokkos::parallel_reduce(policy, KOKKOS_LAMBDA(LO i, ExactSums<2>& acc) {
+///     acc.add(0, x(i) * y(i));
+///     acc.add(1, x(i) * x(i));
+///   }, ExactSumReducer<2>(s));
+///   const auto [xy, xx] = allreduce_exact(comm, s);  // one allreduce of integers
+/// ```
+///
+/// A term costs a few integer operations; a dot product by these sums the
+/// rounded products exactly, so it is at least as accurate as a plain one.
+/// One accumulator takes at most 2^28 terms between normalizations
+/// (reduce_exact splits longer ranges); a reducer normalizes on every join.
+/// The terms themselves must be the same bits wherever they are computed:
+/// that holds for one build (each expression contracted alike, as compilers
+/// do by default), not under -ffast-math, which also drops the NaN checks.
+/// Tested on host execution spaces; on a GPU the 552-byte accumulator per sum
+/// is a large reduction value.
 
 #include <algorithm>
 #include <array>
@@ -43,11 +46,11 @@ namespace soma {
 
 namespace exact {
 
-inline constexpr int digits = 68;      // 32 bits each, from 2^-1074 up
-inline constexpr int radix_bits = 32;  // a word holds 2^31 digits' worth of carries
+inline constexpr int digits = 68;      ///< 32 bits each, from 2^-1074 up
+inline constexpr int radix_bits = 32;  ///< a word holds 2^31 digits' worth of carries
 inline constexpr std::int64_t terms_per_pass = std::int64_t{1} << 28;
 
-// Adds the finite double x to the digits d, exactly.
+/// Adds the finite double x to the digits d, exactly.
 KOKKOS_INLINE_FUNCTION void add(std::int64_t* d, Real x) {
   const auto bits = Kokkos::bit_cast<std::uint64_t>(x);
   const auto field = static_cast<int>((bits >> 52) & 0x7ff);
@@ -67,8 +70,8 @@ KOKKOS_INLINE_FUNCTION void add(std::int64_t* d, Real x) {
   d[i + 2] += sign * static_cast<std::int64_t>(d2);
 }
 
-// Carries so that every digit but the last is in [0, 2^32); the last holds
-// the sign.
+/// Carries so that every digit but the last is in [0, 2^32); the last holds
+/// the sign.
 KOKKOS_INLINE_FUNCTION void normalize(std::int64_t* d) {
   std::int64_t carry = 0;
   for (int i = 0; i + 1 < digits; ++i) {
@@ -79,8 +82,8 @@ KOKKOS_INLINE_FUNCTION void normalize(std::int64_t* d) {
   d[digits - 1] += carry;
 }
 
-// The digits' value rounded to the nearest double, ties to even (a total in
-// the subnormal range is a multiple of 2^-1074 and so exact).
+/// The digits' value rounded to the nearest double, ties to even (a total in
+/// the subnormal range is a multiple of 2^-1074 and so exact).
 KOKKOS_INLINE_FUNCTION Real to_real(const std::int64_t* in) {
   std::int64_t d[digits];
   for (int i = 0; i < digits; ++i) d[i] = in[i];
@@ -114,7 +117,7 @@ KOKKOS_INLINE_FUNCTION Real to_real(const std::int64_t* in) {
 
 }  // namespace exact
 
-// K exact sums, and for each a count of the terms that were not finite.
+/// K exact sums, and for each a count of the terms that were not finite.
 template <int K>
 struct ExactSums {
   std::int64_t d[K][exact::digits] = {};
@@ -130,7 +133,7 @@ struct ExactSums {
   KOKKOS_INLINE_FUNCTION void normalize() {
     for (int k = 0; k < K; ++k) exact::normalize(d[k]);
   }
-  // The sum rounded; NaN if a term was not finite.
+  /// The sum rounded; NaN if a term was not finite.
   KOKKOS_INLINE_FUNCTION Real value(int k) const {
     return nonfinite[k] != 0 ? Kokkos::Experimental::quiet_NaN_v<Real> : exact::to_real(d[k]);
   }
@@ -143,7 +146,7 @@ struct ExactSums {
   }
 };
 
-// A Kokkos reducer of ExactSums<K> into a host value.
+/// A Kokkos reducer of ExactSums<K> into a host value.
 template <int K>
 struct ExactSumReducer {
   using reducer = ExactSumReducer;
@@ -161,9 +164,9 @@ struct ExactSumReducer {
   KOKKOS_INLINE_FUNCTION bool references_scalar() const { return true; }
 };
 
-// ExactSums<K> of body(i, sums) over [first, last), in passes of at most
-// exact::terms_per_pass indices (body adds at most one term per sum per
-// index); normalized.
+/// ExactSums<K> of body(i, sums) over [first, last), in passes of at most
+/// exact::terms_per_pass indices (body adds at most one term per sum per
+/// index); normalized.
 template <int K, class Exec, class Body>
 ExactSums<K> reduce_exact(const char* label, LO first, LO last, const Body& body) {
   ExactSums<K> total;
@@ -178,8 +181,8 @@ ExactSums<K> reduce_exact(const char* label, LO first, LO last, const Body& body
   return total;
 }
 
-// Collective: every rank's sums added (one allreduce of integers) and
-// rounded.
+/// Collective: every rank's sums added (one allreduce of integers) and
+/// rounded.
 template <int K>
 std::array<Real, K> allreduce_exact(const Comm& comm, ExactSums<K> sums) {
   sums.normalize();

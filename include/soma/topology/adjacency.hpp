@@ -4,20 +4,23 @@
 #ifndef SOMA_TOPOLOGY_ADJACENCY_HPP_
 #define SOMA_TOPOLOGY_ADJACENCY_HPP_
 
-// Adjacency graphs between entity dimensions, and the request that names them.
-//
-//   (from, to), from > to   downward; codes = (offset << 1) | reversed, the
-//                           orientation of the stored sub-entity against the
-//                           parent's canonical side (MOAB CN::SideNumber)
-//   (d, 0), d >= 1          the connectivity itself: always present, no codes
-//   (from, to), from < to   upward; codes = local side index in the parent
-//                           (local vertex index for from = 0)
-//   bridge (dim, via)       dim -> dim through shared entities of dimension
-//                           via; no codes
-//
-// Downward rows follow the parent's side order; upward and bridge rows are
-// sorted by (target, code). Every graph is a deterministic function of the
-// topology, whatever the backend or thread count.
+/// \file
+/// Adjacency graphs between entity dimensions, and the request that names them.
+///
+/// ```
+///   (from, to), from > to   downward; codes = (offset << 1) | reversed, the
+///                           orientation of the stored sub-entity against the
+///                           parent's canonical side (MOAB CN::SideNumber)
+///   (d, 0), d >= 1          the connectivity itself: always present, no codes
+///   (from, to), from < to   upward; codes = local side index in the parent
+///                           (local vertex index for from = 0)
+///   bridge (dim, via)       dim -> dim through shared entities of dimension
+///                           via; no codes
+/// ```
+///
+/// Downward rows follow the parent's side order; upward and bridge rows are
+/// sorted by (target, code). Every graph is a deterministic function of the
+/// topology, whatever the backend or thread count.
 
 #include <array>
 #include <cstdint>
@@ -31,7 +34,7 @@
 
 namespace soma {
 
-// A contiguous run of a CSR graph, valid while the owning mesh lives.
+/// A contiguous run of a CSR graph, valid while the owning mesh lives.
 template <class T>
 struct Row {
   T* data = nullptr;
@@ -39,13 +42,13 @@ struct Row {
   KOKKOS_INLINE_FUNCTION T& operator[](LO i) const { return data[i]; }
 };
 
-// Slot of a graph: 4 * from + to for a pair, 16 + 4 * dim + via for a bridge.
-// The diagonal slots of each half are never used.
+/// Slot of a graph: 4 * from + to for a pair, 16 + 4 * dim + via for a bridge.
+/// The diagonal slots of each half are never used.
 inline constexpr int adjacency_slots = 32;
 KOKKOS_INLINE_FUNCTION constexpr int pair_slot(int from, int to) { return 4 * from + to; }
 KOKKOS_INLINE_FUNCTION constexpr int bridge_slot(int dim, int via) { return 16 + 4 * dim + via; }
 
-// A graph was looked up that the mesh does not hold.
+/// A graph was looked up that the mesh does not hold.
 class MissingAdjacency : public std::logic_error {
  public:
   using std::logic_error::logic_error;
@@ -55,7 +58,7 @@ class AdjacencyRequest {
  public:
   constexpr AdjacencyRequest() = default;
 
-  // Throw std::invalid_argument for a dimension outside [0, 3] or from == to.
+  /// Throw std::invalid_argument for a dimension outside [0, 3] or from == to.
   AdjacencyRequest& add(int from, int to) {
     check(from, to, "add");
     bits_ |= bit(pair_slot(from, to));
@@ -78,7 +81,7 @@ class AdjacencyRequest {
   bool empty() const noexcept { return bits_ == 0; }
   std::uint32_t bits() const noexcept { return bits_; }
 
-  // Throws std::invalid_argument if a diagonal slot is set.
+  /// Throws std::invalid_argument if a diagonal slot is set.
   static AdjacencyRequest from_bits(std::uint32_t bits) {
     if ((bits & ~valid_mask()) != 0) {
       throw std::invalid_argument("AdjacencyRequest: bits name a graph from a dimension to itself");
@@ -119,7 +122,7 @@ class AdjacencyRequest {
   std::uint32_t bits_ = 0;
 };
 
-// One CSR graph. codes is empty for bridges.
+/// One CSR graph. codes is empty for bridges.
 template <class MemSpace>
 struct Adjacency {
   View1<Offset, MemSpace> offsets;
@@ -127,7 +130,7 @@ struct Adjacency {
   View1<std::uint8_t, MemSpace> codes;
 };
 
-// What Mesh hands out: the same graph, read-only.
+/// What Mesh hands out: the same graph, read-only.
 template <class MemSpace>
 struct AdjacencyGraph {
   View1<const Offset, MemSpace> offsets;

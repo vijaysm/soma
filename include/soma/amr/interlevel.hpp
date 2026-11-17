@@ -4,34 +4,35 @@
 #ifndef SOMA_AMR_INTERLEVEL_HPP_
 #define SOMA_AMR_INTERLEVEL_HPP_
 
-// Operators between a level and the next coarser one (refinement ratio r).
-//
-// Prolongation fills the ghost points of a fine level that no fine box covers
-// (HaloPlan::uncovered) from the coarse level. Per direction: where points
-// are nodes, linear between the two coarse nodes around the fine one (fine
-// nodes on coarse nodes are copied); where they are cells, the coarse value
-// (piecewise constant) or the coarse value plus a slope limited by the
-// monotonized-central limiter times the offset of the fine cell centre from
-// the coarse one (linear: conservative, and exact for linear data). So cell
-// data are piecewise constant or conservative linear, node data
-// multilinear, and face data linear across the faces and constant or
-// limited-linear along them. The coarse level must cover the coarse points
-// needed, its valid points or its ghosts filled by the caller (one ghost for
-// the linear slopes next to the domain boundary): a fine level properly
-// nested in the coarse one does.
-//
-// Quadratic prolongation (for third-order schemes and Q2 data), per
-// direction over the coarse points q - 1, q, q + 1 around the fine one: where
-// points are nodes, the quadratic through the three nodes at the fine node;
-// where they are cells, the average over the fine cell of the quadratic whose
-// averages over the three coarse cells are theirs (conservative). Tensor
-// products of these are exact for data of degree at most 2 in each
-// direction; they are not limited, so they suit smooth data.
-//
-// Restriction (average_down) sets each coarse point under the fine valid
-// points to the average of the fine points it covers: cell averages
-// (conservative), node injection, face averages over the coincident fine
-// faces. Fine boxes must be aligned to the ratio.
+/// \file
+/// Operators between a level and the next coarser one (refinement ratio r).
+///
+/// Prolongation fills the ghost points of a fine level that no fine box covers
+/// (HaloPlan::uncovered) from the coarse level. Per direction: where points
+/// are nodes, linear between the two coarse nodes around the fine one (fine
+/// nodes on coarse nodes are copied); where they are cells, the coarse value
+/// (piecewise constant) or the coarse value plus a slope limited by the
+/// monotonized-central limiter times the offset of the fine cell centre from
+/// the coarse one (linear: conservative, and exact for linear data). So cell
+/// data are piecewise constant or conservative linear, node data
+/// multilinear, and face data linear across the faces and constant or
+/// limited-linear along them. The coarse level must cover the coarse points
+/// needed, its valid points or its ghosts filled by the caller (one ghost for
+/// the linear slopes next to the domain boundary): a fine level properly
+/// nested in the coarse one does.
+///
+/// Quadratic prolongation (for third-order schemes and Q2 data), per
+/// direction over the coarse points q - 1, q, q + 1 around the fine one: where
+/// points are nodes, the quadratic through the three nodes at the fine node;
+/// where they are cells, the average over the fine cell of the quadratic whose
+/// averages over the three coarse cells are theirs (conservative). Tensor
+/// products of these are exact for data of degree at most 2 in each
+/// direction; they are not limited, so they suit smooth data.
+///
+/// Restriction (average_down) sets each coarse point under the fine valid
+/// points to the average of the fine points it covers: cell averages
+/// (conservative), node injection, face averages over the coincident fine
+/// faces. Fine boxes must be aligned to the ratio.
 
 #include <cstdint>
 #include <stdexcept>
@@ -49,7 +50,7 @@ namespace soma::amr {
 
 enum class Interp { piecewise_constant, linear, quadratic };
 
-// Fill region `region` of fine box `fine` from scratch box `coarse`.
+/// Fill region `region` of fine box `fine` from scratch box `coarse`.
 struct InterpOp {
   int coarse = 0;
   int fine = 0;
@@ -61,17 +62,17 @@ class CoarseFinePlan {
   using DeviceSpace = Kokkos::DefaultExecutionSpace::memory_space;
 
   CoarseFinePlan() = default;
-  // Throws std::invalid_argument naming a fine box whose ghosts the coarse
-  // level (valid points, then coarse_ghosts ghost points) does not cover.
+  /// Throws std::invalid_argument naming a fine box whose ghosts the coarse
+  /// level (valid points, then coarse_ghosts ghost points) does not cover.
   CoarseFinePlan(const BoxArray& fine, const BoxArray& coarse, IndexType type, int fine_ghosts, int ratio,
                  Periodicity periodic, Interp interp, int coarse_ghosts = 1);
-  // Fills points `targets[b]` of fine box b (in the index type, inside its
-  // valid points grown by fine_ghosts) instead, valid points included: the
-  // prolongation of a regrid.
+  /// Fills points `targets[b]` of fine box b (in the index type, inside its
+  /// valid points grown by fine_ghosts) instead, valid points included: the
+  /// prolongation of a regrid.
   CoarseFinePlan(const BoxArray& fine, const std::vector<BoxList>& targets, const BoxArray& coarse, IndexType type,
                  int fine_ghosts, int ratio, Periodicity periodic, Interp interp, int coarse_ghosts = 1);
-  // The same over many ranks, the part of comm.rank(): the scratch box of a
-  // fine box lives with its owner and is filled from the coarse owners.
+  /// The same over many ranks, the part of comm.rank(): the scratch box of a
+  /// fine box lives with its owner and is filled from the coarse owners.
   static constexpr int default_tag = 32622;
   CoarseFinePlan(const Comm& comm, const BoxArray& fine, const Distribution& fine_owner, const BoxArray& coarse,
                  const Distribution& coarse_owner, IndexType type, int fine_ghosts, int ratio, Periodicity periodic,
@@ -87,13 +88,13 @@ class CoarseFinePlan {
   int coarse_ghosts() const { return copy_.src_ghosts(); }
   Interp interp() const { return interp_; }
   const BoxArray& scratch() const { return scratch_; }
-  // The owner of each scratch box: the owner of its fine box.
+  /// The owner of each scratch box: the owner of its fine box.
   const Distribution& scratch_owner() const { return scratch_owner_; }
   const std::vector<int>& fine_owner() const { return fine_owner_; }
   const CopyPlan& copy_plan() const { return copy_; }
-  // Every interpolation, on every rank, boxes by their ids.
+  /// Every interpolation, on every rank, boxes by their ids.
   const std::vector<InterpOp>& ops() const { return ops_; }
-  // This rank's points to interpolate.
+  /// This rank's points to interpolate.
   std::int64_t num_points() const { return start_.back(); }
   Kokkos::View<const InterpOp*, DeviceSpace> device_ops() const { return d_ops_; }
   Kokkos::View<const std::int64_t*, DeviceSpace> device_start() const { return d_start_; }
@@ -129,7 +130,7 @@ KOKKOS_INLINE_FUNCTION double mc_slope(double minus, double plus) {
   return plus > 0 ? m : -m;
 }
 
-// The value at fine point p from the coarse patch s, component c.
+/// The value at fine point p from the coarse patch s, component c.
 template <class T>
 KOKKOS_INLINE_FUNCTION T interpolate(const Patch<T>& s, const IntVect& p, int c, int dim, IndexType type, int r,
                                      bool linear) {
@@ -177,8 +178,8 @@ KOKKOS_INLINE_FUNCTION T interpolate(const Patch<T>& s, const IntVect& p, int c,
   return static_cast<T>(sum);
 }
 
-// The quadratic rule's weights over the coarse offsets -1, 0, 1 in one
-// direction, for fine index p at ratio r.
+/// The quadratic rule's weights over the coarse offsets -1, 0, 1 in one
+/// direction, for fine index p at ratio r.
 KOKKOS_INLINE_FUNCTION void quadratic_weights(int p, int r, bool nodal, double w[3]) {
   const int rem = p - floor_div(p, r) * r;
   if (nodal) {
@@ -199,7 +200,7 @@ KOKKOS_INLINE_FUNCTION void quadratic_weights(int p, int r, bool nodal, double w
   }
 }
 
-// The quadratic rule's value at fine point p from coarse patch s.
+/// The quadratic rule's value at fine point p from coarse patch s.
 template <class T>
 KOKKOS_INLINE_FUNCTION T interpolate_quadratic(const Patch<T>& s, const IntVect& p, int c, int dim, IndexType type, int r) {
   double w[3][3] = {{0, 1, 0}, {0, 1, 0}, {0, 1, 0}};
@@ -224,8 +225,8 @@ KOKKOS_INLINE_FUNCTION T interpolate_quadratic(const Patch<T>& s, const IntVect&
 
 }  // namespace detail
 
-// Fills the fine ghost points no fine box covers from the coarse level along
-// the plan (the coarse level's ghosts filled first by the caller).
+/// Fills the fine ghost points no fine box covers from the coarse level along
+/// the plan (the coarse level's ghosts filled first by the caller).
 template <class T>
 void fill_coarse_fine(const LevelField<T>& fine, const LevelField<T>& coarse, const CoarseFinePlan& plan) {
   using Exec = Kokkos::DefaultExecutionSpace;
@@ -271,10 +272,10 @@ void fill_coarse_fine(const LevelField<T>& fine, const LevelField<T>& coarse, co
   Kokkos::fence("amr::fill_coarse_fine");
 }
 
-// Restriction work: each fine box's coarse points are averaged where the
-// fine box lives, into a scratch box over those points, then copied to the
-// owners of the coarse boxes (with one rank, a local copy). Throws
-// std::invalid_argument for a fine box not aligned to the ratio.
+/// Restriction work: each fine box's coarse points are averaged where the
+/// fine box lives, into a scratch box over those points, then copied to the
+/// owners of the coarse boxes (with one rank, a local copy). Throws
+/// std::invalid_argument for a fine box not aligned to the ratio.
 class AverageDownPlan {
  public:
   using DeviceSpace = Kokkos::DefaultExecutionSpace::memory_space;
@@ -291,7 +292,7 @@ class AverageDownPlan {
   const Distribution& scratch_owner() const { return scratch_owner_; }
   const std::vector<int>& fine_owner() const { return fine_owner_; }
   const CopyPlan& copy_plan() const { return copy_; }
-  // This rank's averages: scratch box (coarse) from fine box, local indices.
+  /// This rank's averages: scratch box (coarse) from fine box, local indices.
   std::int64_t num_points() const { return start_.back(); }
   Kokkos::View<const InterpOp*, DeviceSpace> device_ops() const { return d_ops_; }
   Kokkos::View<const std::int64_t*, DeviceSpace> device_start() const { return d_start_; }
@@ -312,10 +313,10 @@ class AverageDownPlan {
   Kokkos::View<const std::int64_t*, DeviceSpace> d_start_;
 };
 
-// Sets the coarse points under the fine level's valid points to the average
-// of the fine points they cover. Throws std::invalid_argument for fields of
-// different index types or component counts, fields not distributed as the
-// plan's boxes, or (without a plan) a fine box not aligned to the ratio.
+/// Sets the coarse points under the fine level's valid points to the average
+/// of the fine points they cover. Throws std::invalid_argument for fields of
+/// different index types or component counts, fields not distributed as the
+/// plan's boxes, or (without a plan) a fine box not aligned to the ratio.
 template <class T>
 void average_down(const LevelField<T>& fine, const LevelField<T>& coarse, const AverageDownPlan& plan) {
   using Exec = Kokkos::DefaultExecutionSpace;

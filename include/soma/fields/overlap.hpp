@@ -16,11 +16,13 @@ namespace soma::detail {
 
 using HostBlock = DomainBlockView<Kokkos::HostSpace>;
 
-// Smallest local id that two blocks of one dimension share, or invalid_lo.
-//   full vs anything: O(1)
-//   intervals vs intervals: merge-scan, O(k1 + k2)
-//   intervals vs list: one binary search per interval, O(k log n)
-//   list vs list: merge-scan, O(n1 + n2)
+/// Smallest local id that two blocks of one dimension share, or invalid_lo.
+/// ```
+///   full vs anything: O(1)
+///   intervals vs intervals: merge-scan, O(k1 + k2)
+///   intervals vs list: one binary search per interval, O(k log n)
+///   list vs list: merge-scan, O(n1 + n2)
+/// ```
 inline LO first_overlap(const HostBlock& x, const HostBlock& y) {
   if (x.size == 0 || y.size == 0) return invalid_lo;
   if (x.kind == DomainKind::full) return y.entity(0);

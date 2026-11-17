@@ -27,12 +27,12 @@ using FamilyId = std::uint32_t;
 inline constexpr FieldId invalid_field = std::numeric_limits<FieldId>::max();
 inline constexpr FamilyId invalid_family = std::numeric_limits<FamilyId>::max();
 
-// The value of an entity that was never set. default_value (ncomp values) is
-// also the initial fill; without one, fields start zeroed and has_default() is
-// false. global_value is the one value per mesh that MOAB tags can carry. For
-// a variable-length field either may have any length. A handle field holds
-// handles of entities or sets (make_handle; 0 for none) and needs T = GO; it
-// has a family of its own, apart from plain GO fields of the same name.
+/// The value of an entity that was never set. default_value (ncomp values) is
+/// also the initial fill; without one, fields start zeroed and has_default() is
+/// false. global_value is the one value per mesh that MOAB tags can carry. For
+/// a variable-length field either may have any length. A handle field holds
+/// handles of entities or sets (make_handle; 0 for none) and needs T = GO; it
+/// has a family of its own, apart from plain GO fields of the same name.
 template <class T>
 struct FieldOptions {
   std::optional<std::vector<T>> default_value;
@@ -45,19 +45,19 @@ struct FieldInfo {
   FamilyId family = invalid_family;
   std::string name;
   DataType type = DataType::f64;
-  int ncomp = 1;  // 0 for a variable-length field
-  bool variable = false;  // a VarField, fetched with get_var
-  bool handle = false;    // values are handles (FieldOptions::handle)
+  int ncomp = 1;  ///< 0 for a variable-length field
+  bool variable = false;  ///< a VarField, fetched with get_var
+  bool handle = false;    ///< values are handles (FieldOptions::handle)
   Layout layout{};
   LO rows = 0;
-  std::vector<int> dims;  // dimensions the domain has members on
-  std::uint64_t revision = 0;  // advances each time a commit replaces the domain
+  std::vector<int> dims;  ///< dimensions the domain has members on
+  std::uint64_t revision = 0;  ///< advances each time a commit replaces the domain
 };
 
-// Typed handle on one field. It aliases the registry's storage, so it stays
-// valid after the registry changes but not after remove(). Kernels capture
-// view() (a View, not a Field). A moved-from Field is empty: no rows, no
-// components, an empty space, and invalid_field as its id.
+/// Typed handle on one field. It aliases the registry's storage, so it stays
+/// valid after the registry changes but not after remove(). Kernels capture
+/// view() (a View, not a Field). A moved-from Field is empty: no rows, no
+/// components, an empty space, and invalid_field as its id.
 template <class T, class MemSpace>
 class Field {
  public:
@@ -78,8 +78,8 @@ class Field {
 
   Field(const Field&) = default;
   Field& operator=(const Field&) = default;
-  // A moved View still references its data, so move by swapping with an empty
-  // field.
+  /// A moved View still references its data, so move by swapping with an empty
+  /// field.
   Field(Field&& o) noexcept { swap(o); }
   Field& operator=(Field&& o) noexcept {
     Field tmp(std::move(o));
@@ -98,24 +98,24 @@ class Field {
   }
 
   FieldId id() const noexcept { return id_; }
-  // Handles are snapshots: after a commit replaces the domain, fetch the field
-  // again (FieldRegistry::is_current).
+  /// Handles are snapshots: after a commit replaces the domain, fetch the field
+  /// again (FieldRegistry::is_current).
   std::uint64_t revision() const noexcept { return revision_; }
-  // Serial of the registry that produced this handle (0: none). Together with
-  // id() and revision() it identifies the storage the handle belongs to; it
-  // does not depend on the View, whose data pointer can be null when empty and
-  // is shared between a source and an aliasing mirror.
+  /// Serial of the registry that produced this handle (0: none). Together with
+  /// id() and revision() it identifies the storage the handle belongs to; it
+  /// does not depend on the View, whose data pointer can be null when empty and
+  /// is shared between a source and an aliasing mirror.
   std::uint64_t owner() const noexcept { return owner_; }
-  // The reference-returning accessors have an rvalue overload that returns a
-  // copy, so `for (x : reg.get<T>("n").default_value())` does not read a
-  // destroyed temporary. Named fields still get references.
+  /// The reference-returning accessors have an rvalue overload that returns a
+  /// copy, so `for (x : reg.get<T>("n").default_value())` does not read a
+  /// destroyed temporary. Named fields still get references.
   const Space<MemSpace>& space() const& noexcept { return space_; }
   Space<MemSpace> space() && { return space_; }
   const Domain<MemSpace>& domain() const& noexcept { return space_.domain(); }
   Domain<MemSpace> domain() && { return space_.domain(); }
-  // The View of this handle's storage. After a commit replaces the field the
-  // registry holds new storage; writes through a stale handle's view are lost.
-  // FieldRegistry::is_current(field) tells.
+  /// The View of this handle's storage. After a commit replaces the field the
+  /// registry holds new storage; writes through a stale handle's view are lost.
+  /// FieldRegistry::is_current(field) tells.
   ViewType view() const noexcept { return data_; }
   LO rows() const noexcept { return static_cast<LO>(data_.extent(0)); }
   int ncomp() const noexcept { return static_cast<int>(data_.extent(1)); }
@@ -127,9 +127,9 @@ class Field {
   const std::vector<T>& global_value() const& noexcept { return global_; }
   std::vector<T> global_value() && { return global_; }
 
-  // Host read of component `c` at the first value point of entity (dim, lid):
-  // the stored value for a member, the default otherwise (zero without one).
-  // Not available for fields in a device-only memory space.
+  /// Host read of component `c` at the first value point of entity (dim, lid):
+  /// the stored value for a member, the default otherwise (zero without one).
+  /// Not available for fields in a device-only memory space.
   T value_or_default(int dim, LO lid, int c = 0) const {
     static_assert(Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible,
                   "value_or_default reads on the host; mirror the field first");

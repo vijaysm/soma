@@ -4,13 +4,14 @@
 #ifndef SOMA_COMPAT_SCD_HPP_
 #define SOMA_COMPAT_SCD_HPP_
 
-// The structured part of MOAB's API that applications building a box call:
-// ScdInterface::construct_box and ScdBox's ijk lookups, over SOMA's box_mesh.
-// A box of hexes (or of quads when its k extent is flat) is built as
-// explicit entities, with MOAB's ijk numbering of handles (i fastest, from
-// the box's low corner). Without coordinates, vertex (i, j, k) sits at
-// (i, j, k), as in MOAB. Only on an empty instance, without periodicity or
-// parallel data; anything else gives MB_NOT_IMPLEMENTED.
+/// \file
+/// The structured part of MOAB's API that applications building a box call:
+/// ScdInterface::construct_box and ScdBox's ijk lookups, over SOMA's box_mesh.
+/// A box of hexes (or of quads when its k extent is flat) is built as
+/// explicit entities, with MOAB's ijk numbering of handles (i fastest, from
+/// the box's low corner). Without coordinates, vertex (i, j, k) sits at
+/// (i, j, k), as in MOAB. Only on an empty instance, without periodicity or
+/// parallel data; anything else gives MB_NOT_IMPLEMENTED.
 
 #include <vector>
 
@@ -44,7 +45,7 @@ class ScdParData {};
 
 class ScdBox {
  public:
-  // MOAB's arithmetic on the box's first vertex and element handles.
+  /// MOAB's arithmetic on the box's first vertex and element handles.
   EntityHandle get_element(int i, int j = 0, int k = 0) const {
     return start_element_ == 0 ? 0
                                : start_element_ + static_cast<EntityHandle>((k - dims_[2]) * size_ijm1_ +
@@ -57,7 +58,7 @@ class ScdBox {
     return start_vertex_ + static_cast<EntityHandle>(kk * size_[0] * size_[1] + jj * size_[0] + i - dims_[0]);
   }
   EntityHandle get_vertex(const HomCoord& ijk) const { return get_vertex(ijk[0], ijk[1], ijk[2]); }
-  // imin, jmin, kmin, imax, jmax, kmax.
+  /// imin, jmin, kmin, imax, jmax, kmax.
   const int* box_dims() const { return dims_; }
   HomCoord box_min() const { return {dims_[0], dims_[1], dims_[2]}; }
   HomCoord box_max() const { return {dims_[3], dims_[4], dims_[5]}; }
@@ -81,9 +82,9 @@ class ScdBox {
  private:
   friend class ScdInterface;
   int dims_[6] = {0, 0, 0, 0, 0, 0};
-  int size_[3] = {1, 1, 1};  // vertices per direction
-  int size_im1_ = 0;         // elements per i row
-  int size_ijm1_ = 0;        // elements per k layer
+  int size_[3] = {1, 1, 1};  ///< vertices per direction
+  int size_im1_ = 0;         ///< elements per i row
+  int size_ijm1_ = 0;        ///< elements per k layer
   EntityHandle start_vertex_ = 0;
   EntityHandle start_element_ = 0;
 };

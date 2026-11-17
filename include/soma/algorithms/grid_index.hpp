@@ -4,24 +4,27 @@
 #ifndef SOMA_ALGORITHMS_GRID_INDEX_HPP_
 #define SOMA_ALGORITHMS_GRID_INDEX_HPP_
 
-// A uniform grid of bins over a set of axis-aligned boxes, for the boxes a
-// query box meets:
-//
-//   const soma::GridIndex<Mem> index(boxes, tolerance);  // n x 6: lo x, y, z, hi x, y, z
-//   const auto pairs = index.query(queries);              // m x 6
-//   // pairs.boxes(k) for k in [pairs.offsets(q), pairs.offsets(q + 1)): the
-//   // boxes query q meets, ascending
-//
-// Two boxes meet where, on every axis, each one's low end is at most the
-// other's high end plus the tolerance. The grid spans the boxes; a bin's
-// width on each axis is about the boxes' mean extent there (one bin across
-// an axis they do not extend along, as z for a planar mesh), and there are
-// at most twice as many bins as boxes. A box goes into every bin it covers.
-// A query visits the bins its box, widened by the tolerance, covers and
-// reports a box only from the bin that holds the low corner of the two
-// boxes' overlap, so each pair once; the result is the same at any thread
-// count. Built and queried by Kokkos kernels in the memory space's
-// execution space; the boxes are not copied and must outlive the index.
+/// \file
+/// A uniform grid of bins over a set of axis-aligned boxes, for the boxes a
+/// query box meets:
+///
+/// ```
+///   const soma::GridIndex<Mem> index(boxes, tolerance);  // n x 6: lo x, y, z, hi x, y, z
+///   const auto pairs = index.query(queries);              // m x 6
+///   // pairs.boxes(k) for k in [pairs.offsets(q), pairs.offsets(q + 1)): the
+///   // boxes query q meets, ascending
+/// ```
+///
+/// Two boxes meet where, on every axis, each one's low end is at most the
+/// other's high end plus the tolerance. The grid spans the boxes; a bin's
+/// width on each axis is about the boxes' mean extent there (one bin across
+/// an axis they do not extend along, as z for a planar mesh), and there are
+/// at most twice as many bins as boxes. A box goes into every bin it covers.
+/// A query visits the bins its box, widened by the tolerance, covers and
+/// reports a box only from the bin that holds the low corner of the two
+/// boxes' overlap, so each pair once; the result is the same at any thread
+/// count. Built and queried by Kokkos kernels in the memory space's
+/// execution space; the boxes are not copied and must outlive the index.
 
 #include <array>
 #include <cmath>
@@ -41,15 +44,15 @@ class GridIndex {
   using Exec = typename MemSpace::execution_space;
   using Boxes = Kokkos::View<const Real**, Kokkos::LayoutLeft, MemSpace>;
 
-  // The boxes each query meets: CSR, a query's boxes ascending.
+  /// The boxes each query meets: CSR, a query's boxes ascending.
   struct Pairs {
     View1<Offset, MemSpace> offsets;
     View1<LO, MemSpace> boxes;
   };
 
-  // Throws std::invalid_argument unless the boxes have 6 columns, the
-  // tolerance is finite and not negative, and every box is finite with its
-  // low ends at most its high ends.
+  /// Throws std::invalid_argument unless the boxes have 6 columns, the
+  /// tolerance is finite and not negative, and every box is finite with its
+  /// low ends at most its high ends.
   explicit GridIndex(const Boxes& boxes, Real tolerance = 0) : boxes_(boxes), tolerance_(tolerance) {
     if (boxes.extent(1) != 6 && boxes.extent(0) != 0) throw std::invalid_argument("GridIndex: boxes not of 6 columns");
     if (!(tolerance >= 0) || !std::isfinite(tolerance)) throw std::invalid_argument("GridIndex: bad tolerance");
@@ -104,8 +107,8 @@ class GridIndex {
   [[nodiscard]] Real tolerance() const { return tolerance_; }
   [[nodiscard]] std::array<int, 3> bins() const { return {count_[0], count_[1], count_[2]}; }
 
-  // The boxes each of `queries` (m x 6, as the boxes) meets. Throws
-  // std::invalid_argument unless the queries have 6 columns.
+  /// The boxes each of `queries` (m x 6, as the boxes) meets. Throws
+  /// std::invalid_argument unless the queries have 6 columns.
   [[nodiscard]] Pairs query(const Boxes& queries) const {
     if (queries.extent(1) != 6 && queries.extent(0) != 0) {
       throw std::invalid_argument("GridIndex::query: queries not of 6 columns");
@@ -183,11 +186,11 @@ class GridIndex {
   }
 
  private:
-  // The grid, by value, for kernels.
+  /// The grid, by value, for kernels.
   struct Grid {
     Real origin[3], width[3];
     int n[3];
-    // The bin along axis a holding coordinate x, clamped to the grid.
+    /// The bin along axis a holding coordinate x, clamped to the grid.
     KOKKOS_INLINE_FUNCTION int bin(int a, Real x) const {
       const Real f = Kokkos::floor((x - origin[a]) / width[a]);
       if (!(f >= 0)) return 0;  // below, or NaN
@@ -205,7 +208,7 @@ class GridIndex {
     return g;
   }
 
-  // Each box into every bin it covers: count, scan, fill.
+  /// Each box into every bin it covers: count, scan, fill.
   void fill() {
     const Grid g = grid();
     const auto boxes = boxes_;

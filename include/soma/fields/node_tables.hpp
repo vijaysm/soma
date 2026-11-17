@@ -4,21 +4,22 @@
 #ifndef SOMA_FIELDS_NODE_TABLES_HPP_
 #define SOMA_FIELDS_NODE_TABLES_HPP_
 
-// Reference-element node coordinates for high-order layouts.
-//
-// Tables are generated on the host once per key. Simplex GLL nodes use the warp
-// and blend construction of T. Warburton, "An explicit construction of
-// interpolation nodes on the simplex", J. Eng. Math. 56 (2006) 247-262, with
-// the optimized parameters tabulated in Hesthaven and Warburton, Nodal
-// Discontinuous Galerkin Methods (2008), section 6.1. The face warp of a
-// tetrahedron uses the triangle parameter, so every triangular face carries the
-// same node set whichever element it belongs to.
-//
-// Reference elements: edge, quad and hex are [-1,1]^d; triangle has vertices
-// (-1,-1), (1,-1), (-1,1); tet has (-1,-1,-1), (1,-1,-1), (-1,1,-1), (-1,-1,1);
-// prism is the triangle times [-1,1] with vertices 0,1,2 at z=-1 and 3,4,5 at
-// z=+1; pyramid has a quad base at z=0 (vertices 0..3, counter-clockwise from
-// above) and the apex 4 at (0,0,1). Corner i is canonical local vertex i.
+/// \file
+/// Reference-element node coordinates for high-order layouts.
+///
+/// Tables are generated on the host once per key. Simplex GLL nodes use the warp
+/// and blend construction of T. Warburton, "An explicit construction of
+/// interpolation nodes on the simplex", J. Eng. Math. 56 (2006) 247-262, with
+/// the optimized parameters tabulated in Hesthaven and Warburton, Nodal
+/// Discontinuous Galerkin Methods (2008), section 6.1. The face warp of a
+/// tetrahedron uses the triangle parameter, so every triangular face carries the
+/// same node set whichever element it belongs to.
+///
+/// Reference elements: edge, quad and hex are [-1,1]^d; triangle has vertices
+/// (-1,-1), (1,-1), (-1,1); tet has (-1,-1,-1), (1,-1,-1), (-1,1,-1), (-1,-1,1);
+/// prism is the triangle times [-1,1] with vertices 0,1,2 at z=-1 and 3,4,5 at
+/// z=+1; pyramid has a quad base at z=0 (vertices 0..3, counter-clockwise from
+/// above) and the apex 4 at (0,0,1). Corner i is canonical local vertex i.
 
 #include <compare>
 #include <cstdint>
@@ -50,21 +51,21 @@ struct NodeTableKey {
 struct NodeTableHost {
   int dim = 0;
   int count = 0;
-  std::vector<Real> x;  // column-major (count x dim)
+  std::vector<Real> x;  ///< column-major (count x dim)
 
   Real coord(int node, int d) const { return x[static_cast<std::size_t>(d * count + node)]; }
 };
 
-// The p+1 Gauss-Lobatto-Legendre points on [-1,1], ascending, exactly symmetric.
-// Throws std::invalid_argument for p outside [1, max_node_order] and
-// std::runtime_error if Newton's method fails to converge.
+/// The p+1 Gauss-Lobatto-Legendre points on [-1,1], ascending, exactly symmetric.
+/// Throws std::invalid_argument for p outside [1, max_node_order] and
+/// std::runtime_error if Newton's method fails to converge.
 std::vector<Real> gll_points_1d(int p);
 
-// Throws std::invalid_argument naming the combination when it is unsupported.
+/// Throws std::invalid_argument naming the combination when it is unsupported.
 NodeTableHost make_node_table(const NodeTableKey& key);
 
-// perm[i] is the position, in ordering from.ordering, of the node at position i of
-// ordering `to`: coords_to(i) == coords_from(perm[i]).
+/// perm[i] is the position, in ordering from.ordering, of the node at position i of
+/// ordering `to`: coords_to(i) == coords_from(perm[i]).
 std::vector<int> make_node_permutation(const NodeTableKey& from, NodeOrdering to);
 
 template <class MemSpace>
@@ -78,12 +79,12 @@ struct NodeTableView {
   KOKKOS_INLINE_FUNCTION Real operator()(int node, int d) const { return x(node, d); }
 };
 
-// Process-wide cache of node tables and ordering permutations, one per key and
-// memory space, built on first use. The views it returns are unmanaged: they
-// borrow from the cache and are valid until clear() or Kokkos::finalize (a
-// finalize hook empties the cache), whichever comes first. Do not keep them
-// across either, and capture them in kernels only while the cache is alive.
-// Lookups are serialized by a mutex; the views themselves are read-only.
+/// Process-wide cache of node tables and ordering permutations, one per key and
+/// memory space, built on first use. The views it returns are unmanaged: they
+/// borrow from the cache and are valid until clear() or Kokkos::finalize (a
+/// finalize hook empties the cache), whichever comes first. Do not keep them
+/// across either, and capture them in kernels only while the cache is alive.
+/// Lookups are serialized by a mutex; the views themselves are read-only.
 template <class MemSpace>
 class NodeTables {
  public:

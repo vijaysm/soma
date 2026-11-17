@@ -4,25 +4,26 @@
 #ifndef SOMA_ALGORITHMS_CONVEX_CLIP_HPP_
 #define SOMA_ALGORITHMS_CONVEX_CLIP_HPP_
 
-// The overlap of two convex cells (tets, pyramids, prisms, hexes with flat
-// faces), for the remap of volume meshes: one cell, as a polyhedron (its
-// faces as polygons), cut by the face planes of the other, and the volume of
-// what is left. Callable in kernels; fixed capacity, no allocation.
-//
-// A cut keeps each face's part on the plane's inner side and closes the
-// polyhedron with a cap, the polygon of the points where the faces cross the
-// plane. As in tet_clip.hpp, a corner outside by at most eps (the merge
-// tolerance, a length) is moved onto the plane and kept, so that of two cells
-// sharing a face one, not both, takes the band between; a crossing is found
-// from the edge's inner end, so that the two faces that share an edge find
-// the same point. The volume is summed over tets from the polyhedron's
-// corner average to each face's fan of triangles, and the whole overlap is
-// dropped when it is thinner than eps: below eps L^2, L its longest edge.
-//
-// A cell's face planes start at its face's least corner (by x, then y, then
-// z) and go towards the lesser of that corner's two neighbours, so that two
-// cells sharing a face find planes that differ only in sign. Both cells are
-// first moved so that the clipping cell's first corner is the origin.
+/// \file
+/// The overlap of two convex cells (tets, pyramids, prisms, hexes with flat
+/// faces), for the remap of volume meshes: one cell, as a polyhedron (its
+/// faces as polygons), cut by the face planes of the other, and the volume of
+/// what is left. Callable in kernels; fixed capacity, no allocation.
+///
+/// A cut keeps each face's part on the plane's inner side and closes the
+/// polyhedron with a cap, the polygon of the points where the faces cross the
+/// plane. As in tet_clip.hpp, a corner outside by at most eps (the merge
+/// tolerance, a length) is moved onto the plane and kept, so that of two cells
+/// sharing a face one, not both, takes the band between; a crossing is found
+/// from the edge's inner end, so that the two faces that share an edge find
+/// the same point. The volume is summed over tets from the polyhedron's
+/// corner average to each face's fan of triangles, and the whole overlap is
+/// dropped when it is thinner than eps: below eps L^2, L its longest edge.
+///
+/// A cell's face planes start at its face's least corner (by x, then y, then
+/// z) and go towards the lesser of that corner's two neighbours, so that two
+/// cells sharing a face find planes that differ only in sign. Both cells are
+/// first moved so that the clipping cell's first corner is the origin.
 
 #include <Kokkos_Core.hpp>
 
@@ -32,9 +33,9 @@
 
 namespace soma::detail {
 
-// Faces a cut polyhedron may hold, and corners per face: a cell's faces (at
-// most 6) and one cap per cut (at most 6), each cut adding at most one
-// corner to a face.
+/// Faces a cut polyhedron may hold, and corners per face: a cell's faces (at
+/// most 6) and one cap per cut (at most 6), each cut adding at most one
+/// corner to a face.
 inline constexpr int convex_faces = 16;
 inline constexpr int convex_corners = 16;
 
@@ -44,7 +45,7 @@ struct Polyhedron {
   Point3 p[convex_faces][convex_corners];
 };
 
-// The cell with `corners` corners (4 tet, 5 pyramid, 6 prism, 8 hex).
+/// The cell with `corners` corners (4 tet, 5 pyramid, 6 prism, 8 hex).
 KOKKOS_INLINE_FUNCTION Topology convex_topology(int corners) {
   return corners == 4 ? Topology::tet
          : corners == 5 ? Topology::pyramid
@@ -59,9 +60,9 @@ KOKKOS_INLINE_FUNCTION bool point_less(const Point3& a, const Point3& b) {
   return a.z < b.z;
 }
 
-// The plane of a face with n corners (3 or 4) of a cell whose corners average
-// to g, its inside g's: Newell's normal over the corners from the least one
-// towards its lesser neighbour. False for a face of no area.
+/// The plane of a face with n corners (3 or 4) of a cell whose corners average
+/// to g, its inside g's: Newell's normal over the corners from the least one
+/// towards its lesser neighbour. False for a face of no area.
 KOKKOS_INLINE_FUNCTION bool convex_face_plane(const Point3* q, int n, const Point3& g, Plane& out) {
   int k = 0;
   for (int i = 1; i < n; ++i) {
@@ -91,7 +92,7 @@ KOKKOS_INLINE_FUNCTION bool convex_face_plane(const Point3* q, int n, const Poin
   return true;
 }
 
-// The corners of face s of a cell of topology t, given its corners.
+/// The corners of face s of a cell of topology t, given its corners.
 KOKKOS_INLINE_FUNCTION int convex_face(Topology t, int s, const Point3* corner, Point3* out) {
   const canonical::SideDef f = canonical::side(t, 2, s);
   for (int i = 0; i < f.num_vertices; ++i) out[i] = corner[f.v[i]];
@@ -104,7 +105,7 @@ KOKKOS_INLINE_FUNCTION Point3 average(const Point3* p, int n) {
   return {g.x / n, g.y / n, g.z / n};
 }
 
-// The face planes of a convex cell (count returned; 0 for a face of no area).
+/// The face planes of a convex cell (count returned; 0 for a face of no area).
 KOKKOS_INLINE_FUNCTION int convex_planes(const Point3* corner, int corners, Plane* out) {
   const Topology t = convex_topology(corners);
   const Point3 g = average(corner, corners);
@@ -117,8 +118,8 @@ KOKKOS_INLINE_FUNCTION int convex_planes(const Point3* corner, int corners, Plan
   return nf;
 }
 
-// Whether a cell's faces are flat and it is convex: each corner within eps of
-// its faces' planes, and no corner outside a face's plane by more than eps.
+/// Whether a cell's faces are flat and it is convex: each corner within eps of
+/// its faces' planes, and no corner outside a face's plane by more than eps.
 KOKKOS_INLINE_FUNCTION bool is_convex(const Point3* corner, int corners, Real eps) {
   if (convex_topology(corners) == Topology::vertex) return false;
   Point3 q[8];
@@ -139,9 +140,9 @@ KOKKOS_INLINE_FUNCTION bool is_convex(const Point3* corner, int corners, Real ep
   return true;
 }
 
-// p cut by plane h, into out; false where out would overflow. A cut that
-// takes nothing away keeps p's faces (those on the plane would else come
-// back as the cap too).
+/// p cut by plane h, into out; false where out would overflow. A cut that
+/// takes nothing away keeps p's faces (those on the plane would else come
+/// back as the cap too).
 KOKKOS_INLINE_FUNCTION bool cut_convex(const Polyhedron& p, const Plane& h, Real eps, Polyhedron& out) {
   out.faces = 0;
   Point3 cap[convex_corners * 2];
@@ -235,7 +236,7 @@ KOKKOS_INLINE_FUNCTION bool cut_convex(const Polyhedron& p, const Plane& h, Real
   return true;
 }
 
-// The volume of a convex polyhedron and its longest edge.
+/// The volume of a convex polyhedron and its longest edge.
 KOKKOS_INLINE_FUNCTION Real convex_volume(const Polyhedron& p, Real& longest) {
   Point3 g{};
   int count = 0;
@@ -257,9 +258,9 @@ KOKKOS_INLINE_FUNCTION Real convex_volume(const Polyhedron& p, Real& longest) {
   return v;
 }
 
-// The volume convex cells s and c share (corners in the cells' own order;
-// counts 4, 5, 6 or 8): s cut by c's face planes. Negative where a cut
-// overflows the capacity.
+/// The volume convex cells s and c share (corners in the cells' own order;
+/// counts 4, 5, 6 or 8): s cut by c's face planes. Negative where a cut
+/// overflows the capacity.
 KOKKOS_INLINE_FUNCTION Real convex_overlap(const Point3* s_in, int ns, const Point3* c_in, int nc, Real eps) {
   Point3 s[8], c[8];
   for (int i = 0; i < ns; ++i) s[i] = minus(s_in[i], c_in[0]);

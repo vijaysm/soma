@@ -14,22 +14,22 @@
 
 namespace soma {
 
-// Highest supported element order. Node counts at this order fit an int.
+/// Highest supported element order. Node counts at this order fit an int.
 inline constexpr int max_node_order = 32;
 
 enum class NodeFamily : std::uint8_t { lagrange_equispaced, gll, gauss };
 enum class NodeOrdering : std::uint8_t { moab_native, tensor_lexicographic, hierarchical };
 
-// How many value points each entity carries. Only per_entity and element_nodes
-// can back a Space for now; the other kinds are representable so that code
-// written against them compiles, and are rejected where a Space is built.
+/// How many value points each entity carries. Only per_entity and element_nodes
+/// can back a Space for now; the other kinds are representable so that code
+/// written against them compiles, and are rejected where a Space is built.
 struct Layout {
   enum class Kind : std::uint8_t { per_entity, element_nodes, shared_nodes, quadrature } kind =
       Kind::per_entity;
   NodeFamily family = NodeFamily::gll;
   int order = 1;
   NodeOrdering ordering = NodeOrdering::tensor_lexicographic;
-  bool serendipity = false;  // Quad8, Hex20, Prism15, Pyramid13
+  bool serendipity = false;  ///< Quad8, Hex20, Prism15, Pyramid13
   int quad_rule = 0;
 
   static constexpr Layout per_entity() noexcept { return Layout{}; }
@@ -53,7 +53,7 @@ struct Layout {
                   false, rule};
   }
 
-  // Compares only the members that the kind uses.
+  /// Compares only the members that the kind uses.
   friend constexpr bool operator==(const Layout& a, const Layout& b) noexcept {
     if (a.kind != b.kind) return false;
     switch (a.kind) {
@@ -107,11 +107,11 @@ inline std::string describe(const Layout& l) {
          (l.serendipity ? ", serendipity" : "") + ")";
 }
 
-// Value points per entity of one element topology. Returns 0 for a combination
-// that has no node table: an order outside [1, max_node_order], a family the
-// topology does not support, serendipity where no such element exists, knife
-// and polyhedron, and layout kinds that are not element-local. `arity` is the
-// vertex count of a polygon and is ignored otherwise.
+/// Value points per entity of one element topology. Returns 0 for a combination
+/// that has no node table: an order outside [1, max_node_order], a family the
+/// topology does not support, serendipity where no such element exists, knife
+/// and polyhedron, and layout kinds that are not element-local. `arity` is the
+/// vertex count of a polygon and is ignored otherwise.
 KOKKOS_INLINE_FUNCTION constexpr int num_element_nodes(Topology t, const Layout& l,
                                                       int arity = 0) noexcept {
   if (l.kind == Layout::Kind::per_entity) return 1;
@@ -145,8 +145,8 @@ KOKKOS_INLINE_FUNCTION constexpr int num_element_nodes(Topology t, const Layout&
   }
 }
 
-// Throws std::invalid_argument naming the combination when an element_nodes
-// layout has no node table for the topology. Other kinds pass unchecked.
+/// Throws std::invalid_argument naming the combination when an element_nodes
+/// layout has no node table for the topology. Other kinds pass unchecked.
 inline void validate(Topology t, const Layout& l, int arity = 0) {
   if (l.kind != Layout::Kind::element_nodes) return;
   if (num_element_nodes(t, l, arity) > 0) return;

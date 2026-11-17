@@ -4,15 +4,18 @@
 #ifndef SOMA_ALGORITHMS_KOKKOS_SPARSE_HPP_
 #define SOMA_ALGORITHMS_KOKKOS_SPARSE_HPP_
 
-// A CsrMatrix as a KokkosSparse::CrsMatrix, sharing its views: no copy, and
-// writes through either show in both. Rows are the owned vertices, columns
-// all the rank's vertices, as in the CsrMatrix (soma/algorithms/csr.hpp):
-//
-//   auto k = soma::to_kokkos_sparse(a);
-//   KokkosSparse::spmv("N", 1.0, k, x, 0.0, y);  // x: cols() entries, y: rows()
-//
-// On more than one rank x's copies and ghosts must hold their owners' values
-// first (FemSpace::update). Needs SOMA_ENABLE_KOKKOSKERNELS.
+/// \file
+/// A CsrMatrix as a KokkosSparse::CrsMatrix, sharing its views: no copy, and
+/// writes through either show in both. Rows are the owned vertices, columns
+/// all the rank's vertices, as in the CsrMatrix (soma/algorithms/csr.hpp):
+///
+/// ```
+///   auto k = soma::to_kokkos_sparse(a);
+///   KokkosSparse::spmv("N", 1.0, k, x, 0.0, y);  // x: cols() entries, y: rows()
+/// ```
+///
+/// On more than one rank x's copies and ghosts must hold their owners' values
+/// first (FemSpace::update). Needs SOMA_ENABLE_KOKKOSKERNELS.
 
 #include "soma/config.hpp"
 

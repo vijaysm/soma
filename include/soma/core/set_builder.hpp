@@ -19,16 +19,16 @@
 
 namespace soma {
 
-// One member as given to the builder: an entity (slot 0 to 3 and its local id)
-// or a set (set_dim and its gid).
+/// One member as given to the builder: an entity (slot 0 to 3 and its local id)
+/// or a set (set_dim and its gid).
 struct SetItem {
   int slot = 0;
   GO id = 0;
 };
 
-// One set: its gid, MOAB flags (within set_flag_bits), its contents in order
-// and its child and parent sets by gid. An ordered set keeps its contents as
-// given, repeats included; every set also gets sorted, unique rows per slot.
+/// One set: its gid, MOAB flags (within set_flag_bits), its contents in order
+/// and its child and parent sets by gid. An ordered set keeps its contents as
+/// given, repeats included; every set also gets sorted, unique rows per slot.
 struct SetSpec {
   GO gid = 0;
   std::uint8_t flags = set_unique;
@@ -37,24 +37,24 @@ struct SetSpec {
   std::vector<GO> parents;
 };
 
-// count consecutive members from first on: local ids of an entity slot, or
-// gids of sets (set_dim). Rows are built from runs without listing them.
+/// count consecutive members from first on: local ids of an entity slot, or
+/// gids of sets (set_dim). Rows are built from runs without listing them.
 struct SetRun {
   int slot = 0;
   GO first = 0;
   GO count = 0;
 };
 
-// Collects sets on the host and installs them on a mesh at once. install
-// throws std::invalid_argument for a flag outside set_flag_bits, a repeated
-// gid, an entity that is not in the mesh, a member, child or parent that is
-// not one of the sets, a run of no members, or runs on an ordered set;
-// std::logic_error if the mesh has sets already. Nothing changes when it
-// throws.
+/// Collects sets on the host and installs them on a mesh at once. install
+/// throws std::invalid_argument for a flag outside set_flag_bits, a repeated
+/// gid, an entity that is not in the mesh, a member, child or parent that is
+/// not one of the sets, a run of no members, or runs on an ordered set;
+/// std::logic_error if the mesh has sets already. Nothing changes when it
+/// throws.
 class SetBuilder {
  public:
   void add(SetSpec s) { add(std::move(s), {}); }
-  // The set with runs of members besides its contents (unordered sets only).
+  /// The set with runs of members besides its contents (unordered sets only).
   void add(SetSpec s, std::vector<SetRun> runs) { specs_.push_back({std::move(s), std::move(runs)}); }
 
   template <class MemSpace>
@@ -174,7 +174,7 @@ class SetBuilder {
     h.host_gid_ = h.gid_;
 
     EntitySets<MemSpace> built = h.template mirror<MemSpace>({true, true, true, true}, true);
-    // Nothing below throws.
+    /// Nothing below throws.
     mesh.sets_ = std::move(built);
     mesh.fields_.set_entities(set_dim, mesh.sets_.count(), mesh.sets_.gid());
     specs_.clear();
@@ -186,9 +186,9 @@ class SetBuilder {
     std::vector<SetRun> runs;
   };
 
-  // Every row's runs by begin: by one count over the `count` entities
-  // when the rows hold a quarter as many runs or more, as parts' members do,
-  // else row by row (merged).
+  /// Every row's runs by begin: by one count over the `count` entities
+  /// when the rows hold a quarter as many runs or more, as parts' members do,
+  /// else row by row (merged).
   static void sort_rows(std::vector<std::vector<Interval>>& rows, LO count) {
     std::size_t total = 0;
     bool sorted = true;
@@ -212,7 +212,7 @@ class SetBuilder {
 
   static bool by_begin(const Interval& a, const Interval& b) { return a.begin < b.begin; }
 
-  // Sorted runs with overlapping and touching ones joined.
+  /// Sorted runs with overlapping and touching ones joined.
   static std::vector<Interval> merged(std::vector<Interval> r) {
     if (!std::is_sorted(r.begin(), r.end(), by_begin)) std::sort(r.begin(), r.end(), by_begin);
     std::size_t m = 0;

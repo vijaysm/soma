@@ -4,13 +4,14 @@
 #ifndef SOMA_AMR_BOX_HPP_
 #define SOMA_AMR_BOX_HPP_
 
-// The index space of patch-based AMR: integer points, index types and boxes.
-// A box is a closed range [lo, hi] of integer points in 2 or 3 dimensions (in
-// 2D the k range is [0, 0] and is left alone by every operation). Its index
-// type says, per direction, whether its points are cells or nodes: a box of
-// n cells in a direction has n + 1 nodes there. Boxes of different index
-// types or dimensions are never mixed; operations on them return an empty
-// box. Everything here is device-callable.
+/// \file
+/// The index space of patch-based AMR: integer points, index types and boxes.
+/// A box is a closed range [lo, hi] of integer points in 2 or 3 dimensions (in
+/// 2D the k range is [0, 0] and is left alone by every operation). Its index
+/// type says, per direction, whether its points are cells or nodes: a box of
+/// n cells in a direction has n + 1 nodes there. Boxes of different index
+/// types or dimensions are never mixed; operations on them return an empty
+/// box. Everything here is device-callable.
 
 #include <cstdint>
 
@@ -36,10 +37,10 @@ struct IntVect {
   }
 };
 
-// Floor of a / b for b > 0, also for negative a.
+/// Floor of a / b for b > 0, also for negative a.
 KOKKOS_INLINE_FUNCTION constexpr int floor_div(int a, int b) { return a >= 0 ? a / b : -((-a + b - 1) / b); }
 
-// Per direction, nodal (bit d set) or cell-centred.
+/// Per direction, nodal (bit d set) or cell-centred.
 struct IndexType {
   std::uint8_t nodal = 0;
 
@@ -54,7 +55,7 @@ struct IndexType {
 
 class Box {
  public:
-  // The empty box.
+  /// The empty box.
   KOKKOS_INLINE_FUNCTION constexpr Box() : lo_{{1, 1, 1}}, hi_{{0, 0, 0}} {}
   KOKKOS_INLINE_FUNCTION constexpr Box(IntVect lo, IntVect hi, int dim = 3, IndexType type = IndexType::cell())
       : lo_(lo), hi_(hi), dim_(dim), type_(type) {
@@ -88,7 +89,7 @@ class Box {
     return true;
   }
   KOKKOS_INLINE_FUNCTION constexpr bool same_kind(const Box& b) const { return dim_ == b.dim_ && type_ == b.type_; }
-  // b is empty, or of this kind and inside.
+  /// b is empty, or of this kind and inside.
   KOKKOS_INLINE_FUNCTION constexpr bool contains(const Box& b) const {
     return b.empty() || (same_kind(b) && contains(b.lo_) && contains(b.hi_));
   }
@@ -108,8 +109,8 @@ class Box {
     return a.lo_ == b.lo_ && a.hi_ == b.hi_ && a.same_kind(b);
   }
 
-  // Grown by n points on both sides of every direction of the box (shrunk
-  // for n < 0), or of direction d only.
+  /// Grown by n points on both sides of every direction of the box (shrunk
+  /// for n < 0), or of direction d only.
   KOKKOS_INLINE_FUNCTION constexpr Box grow(int n) const {
     Box r = *this;
     for (int d = 0; d < dim_; ++d) r = r.grow(d, n);
@@ -133,8 +134,8 @@ class Box {
     return r;
   }
 
-  // The box on a grid finer by ratio: a cell covers ratio cells per
-  // direction; a node maps to the node at the same place.
+  /// The box on a grid finer by ratio: a cell covers ratio cells per
+  /// direction; a node maps to the node at the same place.
   KOKKOS_INLINE_FUNCTION constexpr Box refine(int ratio) const {
     if (empty()) return *this;
     Box r = *this;
@@ -144,8 +145,8 @@ class Box {
     }
     return r;
   }
-  // The smallest box on a grid coarser by ratio covering this one: cells
-  // that hold any of its cells, nodes bracketing its nodes.
+  /// The smallest box on a grid coarser by ratio covering this one: cells
+  /// that hold any of its cells, nodes bracketing its nodes.
   KOKKOS_INLINE_FUNCTION constexpr Box coarsen(int ratio) const {
     if (empty()) return *this;
     Box r = *this;
@@ -155,8 +156,8 @@ class Box {
     }
     return r;
   }
-  // The same region seen as points of another index type: n cells become
-  // n + 1 nodes in a direction, and back.
+  /// The same region seen as points of another index type: n cells become
+  /// n + 1 nodes in a direction, and back.
   KOKKOS_INLINE_FUNCTION constexpr Box convert(IndexType t) const {
     if (empty()) return Box{};
     Box r = *this;

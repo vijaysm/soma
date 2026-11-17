@@ -4,9 +4,10 @@
 #ifndef SOMA_FIELDS_DOMAIN_MESH_HPP_
 #define SOMA_FIELDS_DOMAIN_MESH_HPP_
 
-// Mesh-aware construction of domains and spaces. The mesh supplies the entity
-// counts, the global ids that feed the fingerprint, the topology of each
-// entity, and its epoch. Slot set_dim is the mesh's entity sets.
+/// \file
+/// Mesh-aware construction of domains and spaces. The mesh supplies the entity
+/// counts, the global ids that feed the fingerprint, the topology of each
+/// entity, and its epoch. Slot set_dim is the mesh's entity sets.
 
 #include <cstdint>
 #include <optional>
@@ -20,7 +21,7 @@
 
 namespace soma {
 
-// Which segments of one dimension a domain takes. Unset members match anything.
+/// Which segments of one dimension a domain takes. Unset members match anything.
 struct SegmentFilter {
   enum class Own : std::uint8_t { any, owned, interior, ghost, shared, shared_copy };
   std::optional<Topology> topology{};
@@ -89,8 +90,8 @@ Domain<MemSpace> Domain<MemSpace>::from_set(const Mesh<MemSpace>& mesh, LO set, 
                         detail::runs_of(mesh.sets().members_of(set, slot)), detail::slot_gid(mesh, slot));
 }
 
-// Per-dimension topology and polygon connectivity offsets of the mesh, the
-// input of element_nodes spaces.
+/// Per-dimension topology and polygon connectivity offsets of the mesh, the
+/// input of element_nodes spaces.
 template <class MemSpace>
 ElementInfo<MemSpace> element_info(const Mesh<MemSpace>& mesh) {
   ElementInfo<MemSpace> info;

@@ -4,11 +4,12 @@
 #ifndef SOMA_FIELDS_SPACE_HPP_
 #define SOMA_FIELDS_SPACE_HPP_
 
-// Space = Domain x Layout: it fixes the row numbering of every field defined
-// on it. per_entity gives one row per member entity. element_nodes gives
-// num_element_nodes() rows per member, member after member in domain order, so
-// the rows of one entity are contiguous. A block whose members all have the
-// same node count uses a constant stride; a mixed block keeps a prefix array.
+/// \file
+/// Space = Domain x Layout: it fixes the row numbering of every field defined
+/// on it. per_entity gives one row per member entity. element_nodes gives
+/// num_element_nodes() rows per member, member after member in domain order, so
+/// the rows of one entity are contiguous. A block whose members all have the
+/// same node count uses a constant stride; a mixed block keeps a prefix array.
 
 #include <array>
 #include <cstdint>
@@ -29,9 +30,9 @@
 
 namespace soma {
 
-// Per-dimension entity data that element_nodes layouts need: the topology of
-// every entity, and for polygons the connectivity offsets (count + 1) that give
-// the arity. Both may be left empty when no entity of the dimension needs them.
+/// Per-dimension entity data that element_nodes layouts need: the topology of
+/// every entity, and for polygons the connectivity offsets (count + 1) that give
+/// the arity. Both may be left empty when no entity of the dimension needs them.
 template <class MemSpace>
 struct ElementInfo {
   std::array<View1<const std::uint8_t, MemSpace>, 4> topology{};
@@ -48,10 +49,10 @@ struct RowRange {
 template <class MemSpace>
 struct SpaceBlockView {
   DomainBlockView<MemSpace> domain{};
-  LO row_begin = 0;  // first row of this block within the space
+  LO row_begin = 0;  ///< first row of this block within the space
   LO rows = 0;
-  LO stride = 0;     // node count per member; 0 when `offsets` is used
-  UView1<LO, MemSpace> offsets{};  // size + 1 prefix of node counts when stride == 0
+  LO stride = 0;     ///< node count per member; 0 when `offsets` is used
+  UView1<LO, MemSpace> offsets{};  ///< size + 1 prefix of node counts when stride == 0
 
   KOKKOS_INLINE_FUNCTION LO first(LO member_row) const {
     return stride != 0 ? stride * member_row : offsets(member_row);
@@ -60,14 +61,14 @@ struct SpaceBlockView {
     return stride != 0 ? stride * (member_row + 1) : offsets(member_row + 1);
   }
 
-  // Rows (within the block) of one entity; invalid when it is not a member.
+  /// Rows (within the block) of one entity; invalid when it is not a member.
   KOKKOS_INLINE_FUNCTION RowRange entity_rows(LO lid) const {
     const LO m = domain.row(lid);
     if (m == invalid_lo) return RowRange{};
     return RowRange{first(m), last(m)};
   }
 
-  // Member row that owns a row of this block; invalid_lo when out of range.
+  /// Member row that owns a row of this block; invalid_lo when out of range.
   KOKKOS_INLINE_FUNCTION LO member_of(LO block_row) const {
     if (block_row < 0 || block_row >= rows) return invalid_lo;
     if (stride != 0) return block_row / stride;
@@ -80,7 +81,7 @@ struct SpaceView {
   struct Location {
     int dim = -1;
     LO lid = invalid_lo;
-    LO node = invalid_lo;  // index of the value point inside its entity
+    LO node = invalid_lo;  ///< index of the value point inside its entity
   };
 
   int num_blocks = 0;
@@ -94,7 +95,7 @@ struct SpaceView {
     return -1;
   }
 
-  // Rows of one entity in the whole space.
+  /// Rows of one entity in the whole space.
   KOKKOS_INLINE_FUNCTION RowRange entity_rows(int dim, LO lid) const {
     const int i = find_block(dim);
     if (i < 0) return RowRange{};
@@ -135,8 +136,8 @@ class Space {
  public:
   using memory_space = MemSpace;
 
-  // The empty space has no rows. All empty spaces share one snapshot, which is
-  // also what a moved-from space refers to afterwards.
+  /// The empty space has no rows. All empty spaces share one snapshot, which is
+  /// also what a moved-from space refers to afterwards.
   Space() : data_(empty_data()) {}
   Space(const Space&) = default;
   Space& operator=(const Space&) = default;
@@ -146,10 +147,10 @@ class Space {
     return *this;
   }
 
-  // `info` is read only for element_nodes layouts. shared_nodes and quadrature
-  // layouts are accepted by Layout but cannot back a Space yet.
-  // The empty snapshot is built here, where throwing is allowed, so that the
-  // noexcept moves never have to allocate it.
+  /// `info` is read only for element_nodes layouts. shared_nodes and quadrature
+  /// layouts are accepted by Layout but cannot back a Space yet.
+  /// The empty snapshot is built here, where throwing is allowed, so that the
+  /// noexcept moves never have to allocate it.
   Space(const Domain<MemSpace>& domain, const Layout& layout,
         const ElementInfo<MemSpace>& info = {})
       : data_(empty_data()) {
@@ -203,7 +204,7 @@ class Space {
     return v;
   }
 
-  // Host lookup of the rows of one entity of dimension `dim`.
+  /// Host lookup of the rows of one entity of dimension `dim`.
   RowRange entity_rows(int dim, LO lid) const {
     const int b = data_->domain.find_block(dim);
     if (b < 0) return RowRange{};
@@ -219,12 +220,12 @@ class Space {
   }
 
   const void* storage_id() const noexcept { return data_.get(); }
-  // Number of handles that share this snapshot; 0 for the empty snapshot, which
-  // has no reference count. A test seam: under concurrent use the value is only
-  // a hint.
+  /// Number of handles that share this snapshot; 0 for the empty snapshot, which
+  /// has no reference count. A test seam: under concurrent use the value is only
+  /// a hint.
   long snapshot_use_count() const noexcept { return data_.use_count(); }
 
-  // `domain` must be the mirror of this space's domain in Dst.
+  /// `domain` must be the mirror of this space's domain in Dst.
   template <class Dst>
   Space<Dst> mirror(const Domain<Dst>& domain) const {
     typename Space<Dst>::Data d;

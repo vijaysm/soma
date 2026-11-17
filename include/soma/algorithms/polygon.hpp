@@ -4,29 +4,30 @@
 #ifndef SOMA_ALGORITHMS_POLYGON_HPP_
 #define SOMA_ALGORITHMS_POLYGON_HPP_
 
-// Plane polygons for intersection: a cell's corners as a counter-clockwise
-// polygon, the overlap of two convex polygons, and a non-convex polygon split
-// into triangles. Callable in kernels; fixed-capacity, no allocation.
-//
-// One tolerance, the merge tolerance eps (a length), governs every decision:
-// a point outside a clipping line by at most eps is moved onto it (one
-// inside is kept, so that of two cells sharing an edge one, not both, takes
-// the band between), consecutive corners closer than eps merge into one, and
-// a piece with fewer than three corners left or an area below eps^2 is no
-// piece. A polygon is convex when no corner turns clockwise by more than eps
-// (as a distance from the line through its neighbours); corners in a line
-// are allowed. A polygon is simple when no two edges but neighbours meet.
-//
-// The overlap of convex polygons is Sutherland and Hodgman's clipping (1974):
-// the subject cut by the half-plane left of each edge of the clip polygon in
-// turn. Its area depends on the corners' order, so callers start each
-// polygon at a fixed corner (soma's remap: the least gid) to get the same
-// bits on every rank.
-//
-// A non-convex polygon is split by ear clipping (Meisters 1975): from its
-// first corner on, the first convex corner whose triangle holds no other
-// corner is cut off, until three are left. The triangles are then clipped as
-// convex polygons and their overlaps summed.
+/// \file
+/// Plane polygons for intersection: a cell's corners as a counter-clockwise
+/// polygon, the overlap of two convex polygons, and a non-convex polygon split
+/// into triangles. Callable in kernels; fixed-capacity, no allocation.
+///
+/// One tolerance, the merge tolerance eps (a length), governs every decision:
+/// a point outside a clipping line by at most eps is moved onto it (one
+/// inside is kept, so that of two cells sharing an edge one, not both, takes
+/// the band between), consecutive corners closer than eps merge into one, and
+/// a piece with fewer than three corners left or an area below eps^2 is no
+/// piece. A polygon is convex when no corner turns clockwise by more than eps
+/// (as a distance from the line through its neighbours); corners in a line
+/// are allowed. A polygon is simple when no two edges but neighbours meet.
+///
+/// The overlap of convex polygons is Sutherland and Hodgman's clipping (1974):
+/// the subject cut by the half-plane left of each edge of the clip polygon in
+/// turn. Its area depends on the corners' order, so callers start each
+/// polygon at a fixed corner (soma's remap: the least gid) to get the same
+/// bits on every rank.
+///
+/// A non-convex polygon is split by ear clipping (Meisters 1975): from its
+/// first corner on, the first convex corner whose triangle holds no other
+/// corner is cut off, until three are left. The triangles are then clipped as
+/// convex polygons and their overlaps summed.
 
 #include <Kokkos_Core.hpp>
 
@@ -34,8 +35,8 @@
 
 namespace soma::detail {
 
-// Corners a cell's polygon may have; an overlap of two has at most the sum,
-// which a Polygon holds.
+/// Corners a cell's polygon may have; an overlap of two has at most the sum,
+/// which a Polygon holds.
 inline constexpr int polygon_capacity = 64;
 inline constexpr int polygon_storage = 2 * polygon_capacity;
 
@@ -52,9 +53,9 @@ struct Polygon {
   }
 };
 
-// Twice the signed area (positive counter-clockwise): the shoelace formula
-// about the first corner, summed from it, so that its rounding is relative
-// to the polygon's size, not to its distance from the origin.
+/// Twice the signed area (positive counter-clockwise): the shoelace formula
+/// about the first corner, summed from it, so that its rounding is relative
+/// to the polygon's size, not to its distance from the origin.
 KOKKOS_INLINE_FUNCTION Real twice_area(const Polygon& p) {
   Real s = 0;
   for (int i = 1; i + 1 < p.n; ++i) {
@@ -64,13 +65,13 @@ KOKKOS_INLINE_FUNCTION Real twice_area(const Polygon& p) {
   return s;
 }
 
-// (b - a) x (c - a): positive where a, b, c turn counter-clockwise.
+/// (b - a) x (c - a): positive where a, b, c turn counter-clockwise.
 KOKKOS_INLINE_FUNCTION Real turn(Real ax, Real ay, Real bx, Real by, Real cx, Real cy) {
   return (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
 }
 
-// Consecutive corners closer than eps merged (the first of a run kept), in
-// place; a last corner within eps of the first goes too.
+/// Consecutive corners closer than eps merged (the first of a run kept), in
+/// place; a last corner within eps of the first goes too.
 KOKKOS_INLINE_FUNCTION void merge_corners(Polygon& p, Real eps) {
   if (p.n > polygon_storage) return;
   int m = 0;
@@ -84,8 +85,8 @@ KOKKOS_INLINE_FUNCTION void merge_corners(Polygon& p, Real eps) {
   p.n = m;
 }
 
-// A counter-clockwise polygon with no corner turning clockwise by more than
-// eps.
+/// A counter-clockwise polygon with no corner turning clockwise by more than
+/// eps.
 KOKKOS_INLINE_FUNCTION bool convex(const Polygon& p, Real eps) {
   if (p.n < 3 || p.n > polygon_capacity) return false;
   for (int i = 0; i < p.n; ++i) {
@@ -97,7 +98,7 @@ KOKKOS_INLINE_FUNCTION bool convex(const Polygon& p, Real eps) {
   return true;
 }
 
-// Segments ab and cd meet: cross, or touch (an end on the other).
+/// Segments ab and cd meet: cross, or touch (an end on the other).
 KOKKOS_INLINE_FUNCTION bool segments_meet(Real ax, Real ay, Real bx, Real by, Real cx, Real cy, Real dx, Real dy) {
   const Real o1 = turn(ax, ay, bx, by, cx, cy), o2 = turn(ax, ay, bx, by, dx, dy);
   const Real o3 = turn(cx, cy, dx, dy, ax, ay), o4 = turn(cx, cy, dx, dy, bx, by);
@@ -111,7 +112,7 @@ KOKKOS_INLINE_FUNCTION bool segments_meet(Real ax, Real ay, Real bx, Real by, Re
          (o3 == 0 && within(cx, cy, ax, ay, dx, dy)) || (o4 == 0 && within(cx, cy, bx, by, dx, dy));
 }
 
-// No two edges of p but neighbours meet (O(n^2)).
+/// No two edges of p but neighbours meet (O(n^2)).
 KOKKOS_INLINE_FUNCTION bool simple(const Polygon& p) {
   if (p.n < 3 || p.n > polygon_capacity) return false;
   for (int i = 0; i < p.n; ++i) {
@@ -125,10 +126,10 @@ KOKKOS_INLINE_FUNCTION bool simple(const Polygon& p) {
   return true;
 }
 
-// The overlap of convex counter-clockwise polygons s and c, into out; its
-// area (0 where none, negative where the overlap overflows polygon_storage,
-// which two polygons of at most polygon_capacity corners never do). out
-// starts where s's clipping leaves it.
+/// The overlap of convex counter-clockwise polygons s and c, into out; its
+/// area (0 where none, negative where the overlap overflows polygon_storage,
+/// which two polygons of at most polygon_capacity corners never do). out
+/// starts where s's clipping leaves it.
 KOKKOS_INLINE_FUNCTION Real clip(const Polygon& s, const Polygon& c_in, Real eps, Polygon& out) {
   // About c's first corner, so that rounding is relative to the polygons'
   // size, not to their distance from the origin; out is moved back.
@@ -188,10 +189,10 @@ KOKKOS_INLINE_FUNCTION Real clip(const Polygon& s, const Polygon& c_in, Real eps
   return area;
 }
 
-// A counter-clockwise simple polygon's triangles by ear clipping, as corner
-// triples into tri (3 per triangle, at most n - 2); their count, or -1 where
-// no ear is found (the polygon crosses itself, or has too many corners). An
-// ear turns strictly counter-clockwise; eps plays no part.
+/// A counter-clockwise simple polygon's triangles by ear clipping, as corner
+/// triples into tri (3 per triangle, at most n - 2); their count, or -1 where
+/// no ear is found (the polygon crosses itself, or has too many corners). An
+/// ear turns strictly counter-clockwise; eps plays no part.
 KOKKOS_INLINE_FUNCTION int triangulate(const Polygon& p, Real eps, int* tri) {
   (void)eps;
   if (p.n < 3 || p.n > polygon_capacity) return -1;

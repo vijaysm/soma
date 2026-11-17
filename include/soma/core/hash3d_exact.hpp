@@ -126,8 +126,8 @@ enum class Norm { L1, L2, Linf };
 // Exact keys
 // ---------------------------------------------------------------------------
 namespace detail {
-// Bit-pattern key of one coordinate: order-preserving, injective, integer ops only.
-// -0.0 -> +0.0.  `is_nan` is set (and the key is meaningless) for NaN inputs.
+/// Bit-pattern key of one coordinate: order-preserving, injective, integer ops only.
+/// -0.0 -> +0.0.  `is_nan` is set (and the key is meaningless) for NaN inputs.
 inline uint64_t key_bits(double v, bool& is_nan) {
     uint64_t b;
     std::memcpy(&b, &v, sizeof b);
@@ -171,18 +171,18 @@ inline Point<D> point_of(const Key<D>& k) {
     return p;
 }
 
-// ---------------------------------------------------------------------------
-// Results
-// ---------------------------------------------------------------------------
+/// ---------------------------------------------------------------------------
+/// Results
+/// ---------------------------------------------------------------------------
 template <std::size_t D>
 struct IdResult {
-    std::vector<Point<D>> unique_points;  // M representatives, key-ordered
-    std::vector<int64_t> ids;             // N entries in [0, M)
+    std::vector<Point<D>> unique_points;  ///< M representatives, key-ordered
+    std::vector<int64_t> ids;             ///< N entries in [0, M)
 };
 
-// ---------------------------------------------------------------------------
-// Exact ids
-// ---------------------------------------------------------------------------
+/// ---------------------------------------------------------------------------
+/// Exact ids
+/// ---------------------------------------------------------------------------
 template <std::size_t D>
 IdResult<D> assign_ids_exact(const std::vector<Point<D>>& pts) {
     static_assert(D >= 1, "dimension must be >= 1");
@@ -251,10 +251,12 @@ inline bool within(const Point<D>& a, const Point<D>& b, double tol, Norm norm) 
     return norm == Norm::Linf ? true : (s <= 1.0);
 }
 
-// One-time check that double arithmetic behaves as strict IEEE-754:
-//  * subnormals are not flushed (-ffast-math links FTZ/DAZ start-up code),
-//  * two L2 tie pairs known to flip under FMA contraction / reassociation
-//    produce the unfused answer.
+/// One-time check that double arithmetic behaves as strict IEEE-754:
+///  * subnormals are not flushed (-ffast-math links FTZ/DAZ start-up code),
+///  * two L2 tie pairs known to flip under FMA contraction / reassociation
+/// ```
+///    produce the unfused answer.
+/// ```
 inline bool fp_environment_compute() {
 #if defined(__FAST_MATH__) || defined(_M_FP_FAST)
     return false;  // translation unit compiled with -ffast-math / /fp:fast: x/tol may become x*(1/tol), etc.
@@ -274,13 +276,13 @@ inline bool fp_environment_compute() {
     return true;
 }
 
-// Grid cell of one coordinate.  Cell width is c = 2^k with tol < c <= 2*tol, so
-// x/c is exact (power-of-two scaling) and two coordinates within tol have
-// quotients differing by < 1, i.e. cell indices differing by at most 1.
-// When |x/c| > 2^53 the spacing of doubles exceeds c > tol, so two such
-// coordinates within tol are identical (and a "near" coordinate can never be
-// within tol of a "far" one).  Far coordinates only need to share a
-// deterministic cell id derived from their bits.
+/// Grid cell of one coordinate.  Cell width is c = 2^k with tol < c <= 2*tol, so
+/// x/c is exact (power-of-two scaling) and two coordinates within tol have
+/// quotients differing by < 1, i.e. cell indices differing by at most 1.
+/// When |x/c| > 2^53 the spacing of doubles exceeds c > tol, so two such
+/// coordinates within tol are identical (and a "near" coordinate can never be
+/// within tol of a "far" one).  Far coordinates only need to share a
+/// deterministic cell id derived from their bits.
 inline int64_t cell_of(double x, int k) {
     const double q = std::ldexp(x, -k);
     if (std::fabs(q) <= 9007199254740992.0 /* 2^53 */) return static_cast<int64_t>(std::floor(q));
@@ -445,9 +447,9 @@ IdResult<D> assign_ids_tol(const std::vector<Point<D>>& pts, double tol, Norm no
     return out;
 }
 
-// ---------------------------------------------------------------------------
-// Fixed-width digest (NOT an identity)
-// ---------------------------------------------------------------------------
+/// ---------------------------------------------------------------------------
+/// Fixed-width digest (NOT an identity)
+/// ---------------------------------------------------------------------------
 inline uint64_t mix64(uint64_t x) {
     x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9ULL;
     x = (x ^ (x >> 27)) * 0x94D049BB133111EBULL;

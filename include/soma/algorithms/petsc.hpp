@@ -4,18 +4,21 @@
 #ifndef SOMA_ALGORITHMS_PETSC_HPP_
 #define SOMA_ALGORITHMS_PETSC_HPP_
 
-// PETSc matrices and vectors from a FemSpace's: rows and entries numbered by
-// FemSpace::numbering (owned vertices rank by rank), each rank's rows its
-// owned vertices. PETSc must be initialized, with real double scalars; the
-// caller destroys what these make. The matrix is MATAIJ whatever the options
-// database says (MatConvert makes another type).
-//
-//   Mat m = soma::to_petsc_matrix(comm, space, a);   // MATAIJ, by COO
-//   Vec b = soma::to_petsc_vector(comm, space, rhs);
-//   ... KSPSolve(ksp, b, x) ...
-//   soma::from_petsc_vector(comm, space, x, u);      // u's copies and ghosts updated
-//
-// Values pass through host memory. Needs SOMA_ENABLE_PETSC.
+/// \file
+/// PETSc matrices and vectors from a FemSpace's: rows and entries numbered by
+/// FemSpace::numbering (owned vertices rank by rank), each rank's rows its
+/// owned vertices. PETSc must be initialized, with real double scalars; the
+/// caller destroys what these make. The matrix is MATAIJ whatever the options
+/// database says (MatConvert makes another type).
+///
+/// ```
+///   Mat m = soma::to_petsc_matrix(comm, space, a);   // MATAIJ, by COO
+///   Vec b = soma::to_petsc_vector(comm, space, rhs);
+///   ... KSPSolve(ksp, b, x) ...
+///   soma::from_petsc_vector(comm, space, x, u);      // u's copies and ghosts updated
+/// ```
+///
+/// Values pass through host memory. Needs SOMA_ENABLE_PETSC.
 
 #include "soma/config.hpp"
 
@@ -49,7 +52,7 @@ inline void petsc_check(PetscErrorCode code, const char* what) {
   if (code != PETSC_SUCCESS) throw std::runtime_error(std::string("PETSc: ") + what + " failed");
 }
 
-// Runs `steps` on the object `made` holds, destroying it if a step throws.
+/// Runs `steps` on the object `made` holds, destroying it if a step throws.
 template <class Object, class Destroy, class Steps>
 Object petsc_make(Object made, Destroy destroy, Steps&& steps) {
   try {
@@ -61,17 +64,17 @@ Object petsc_make(Object made, Destroy destroy, Steps&& steps) {
   return made;
 }
 
-// Throws std::invalid_argument on every rank if any rank's flag is set.
+/// Throws std::invalid_argument on every rank if any rank's flag is set.
 inline void petsc_agree(const Comm& comm, bool bad, const char* what) {
   if (comm.allreduce(bad ? Real{1} : Real{0}, Op::max) != 0) throw std::invalid_argument(what);
 }
 
 }  // namespace detail
 
-// Collective. Throws std::invalid_argument on every rank if any rank's
-// matrix is not of the space's shape (rows, cols, offsets, a column past
-// cols) or the global row count exceeds PetscInt; std::runtime_error where
-// PETSc fails, having destroyed the matrix.
+/// Collective. Throws std::invalid_argument on every rank if any rank's
+/// matrix is not of the space's shape (rows, cols, offsets, a column past
+/// cols) or the global row count exceeds PetscInt; std::runtime_error where
+/// PETSc fails, having destroyed the matrix.
 template <class MemSpace>
 Mat to_petsc_matrix(const Comm& comm, const FemSpace<MemSpace>& space, const CsrMatrix<MemSpace>& a) {
   const Numbering<MemSpace> n = space.numbering(comm);
@@ -111,9 +114,9 @@ Mat to_petsc_matrix(const Comm& comm, const FemSpace<MemSpace>& space, const Csr
   });
 }
 
-// Collective: a vector of the space's owned entries of x. Throws
-// std::invalid_argument on every rank if any rank's x is shorter than the
-// space's rows; std::runtime_error where PETSc fails.
+/// Collective: a vector of the space's owned entries of x. Throws
+/// std::invalid_argument on every rank if any rank's x is shorter than the
+/// space's rows; std::runtime_error where PETSc fails.
 template <class MemSpace>
 Vec to_petsc_vector(const Comm& comm, const FemSpace<MemSpace>& space, const View1<const Real, MemSpace>& x) {
   detail::petsc_agree(comm, x.extent(0) < static_cast<std::size_t>(space.rows()),
@@ -130,10 +133,10 @@ Vec to_petsc_vector(const Comm& comm, const FemSpace<MemSpace>& space, const Vie
   });
 }
 
-// Collective: x's owned entries from v, then its copies and ghosts from
-// their owners. Throws std::invalid_argument on every rank if any rank's v
-// is not a vector or does not hold the space's rows, or x is not of its
-// cols().
+/// Collective: x's owned entries from v, then its copies and ghosts from
+/// their owners. Throws std::invalid_argument on every rank if any rank's v
+/// is not a vector or does not hold the space's rows, or x is not of its
+/// cols().
 template <class MemSpace>
 void from_petsc_vector(const Comm& comm, const FemSpace<MemSpace>& space, Vec v, const View1<Real, MemSpace>& x) {
   PetscInt local = -1;

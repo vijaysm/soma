@@ -4,27 +4,30 @@
 #ifndef SOMA_FIELDS_RESOLVER_HPP_
 #define SOMA_FIELDS_RESOLVER_HPP_
 
-// Entity-to-value lookup across the members of a family. For each dimension
-// the family builds one index, chosen by how its members cover that dimension:
-//   none             no member has entities of the dimension
-//   single_full      one member over every entity: row = entity
-//   single_subset    one member over a subset: that member's inverse map
-//   multi_intervals  several members, all interval or full: binary search on
-//                    one merged table of runs (begin, end, member, first row)
-//   multi_owner      several members, general subsets: owner[lid] names the
-//                    member (255 = none), then that member's inverse map
-// Members of a family are disjoint (checked when they are added), so a lookup
-// has at most one answer.
-//
-// Lifetime. FamilyView is a trivially copyable bundle of unmanaged Views, so a
-// kernel can capture it, but it owns nothing. The registry replaces an index
-// whenever the family or the mesh epoch changes, so a bare FamilyView would
-// dangle after any add, remove, commit, or epoch change. FamilyHandle is the
-// host-side owner: it keeps the indexes it was built from alive (shared
-// ownership) and hands out the FamilyView. Keep the handle alive for as long as
-// any launch that uses its view() can run (view() on a temporary handle does
-// not compile); a handle never sees later changes to the family, it keeps
-// answering from the state it was taken at.
+/// \file
+/// Entity-to-value lookup across the members of a family. For each dimension
+/// the family builds one index, chosen by how its members cover that dimension:
+/// ```
+///   none             no member has entities of the dimension
+///   single_full      one member over every entity: row = entity
+///   single_subset    one member over a subset: that member's inverse map
+///   multi_intervals  several members, all interval or full: binary search on
+///                    one merged table of runs (begin, end, member, first row)
+///   multi_owner      several members, general subsets: owner[lid] names the
+///                    member (255 = none), then that member's inverse map
+/// ```
+/// Members of a family are disjoint (checked when they are added), so a lookup
+/// has at most one answer.
+///
+/// Lifetime. FamilyView is a trivially copyable bundle of unmanaged Views, so a
+/// kernel can capture it, but it owns nothing. The registry replaces an index
+/// whenever the family or the mesh epoch changes, so a bare FamilyView would
+/// dangle after any add, remove, commit, or epoch change. FamilyHandle is the
+/// host-side owner: it keeps the indexes it was built from alive (shared
+/// ownership) and hands out the FamilyView. Keep the handle alive for as long as
+/// any launch that uses its view() can run (view() on a temporary handle does
+/// not compile); a handle never sees later changes to the family, it keeps
+/// answering from the state it was taken at.
 
 #include <algorithm>
 #include <array>
@@ -65,11 +68,11 @@ constexpr const char* name(DimIndexKind k) noexcept {
 
 inline constexpr std::uint8_t no_member = 255;
 
-// The owner map names a member by one byte, 255 meaning none.
+/// The owner map names a member by one byte, 255 meaning none.
 inline constexpr int max_family_members = 255;
 
-// Where an entity's values live: the member (slot in the family's per-dimension
-// member list) and the first row of the entity in that member's field.
+/// Where an entity's values live: the member (slot in the family's per-dimension
+/// member list) and the first row of the entity in that member's field.
 struct FamilyHit {
   int slot = -1;
   LO row = invalid_lo;
@@ -78,7 +81,7 @@ struct FamilyHit {
 
 namespace detail {
 
-// One member's lookup record on one dimension. Offsets index the shared pools.
+/// One member's lookup record on one dimension. Offsets index the shared pools.
 struct MemberRec {
   DomainKind kind = DomainKind::full;
   LO count = 0;
@@ -88,7 +91,7 @@ struct MemberRec {
   LO b_off = 0;
   LO o_off = 0;
   LO row_base = 0;
-  LO stride = 0;  // value points per entity; 0 means the pool_o prefix is used
+  LO stride = 0;  ///< value points per entity; 0 means the pool_o prefix is used
 };
 
 template <class V>
@@ -201,7 +204,7 @@ struct FamilyView {
 
 namespace detail {
 
-// Host description of one member's block on the dimension being indexed.
+/// Host description of one member's block on the dimension being indexed.
 struct MemberBlock {
   DomainBlockView<Kokkos::HostSpace> domain;
   LO row_base = 0;
@@ -222,7 +225,7 @@ struct FamilyDimData {
   View1<const LO, MemSpace> d_pool_a, d_pool_b, d_pool_o, d_tb_begin, d_tb_end, d_tb_mrow0;
   View1<const std::uint8_t, MemSpace> d_tb_slot, d_owner;
 
-  std::vector<FieldId> slots;  // member slot -> field
+  std::vector<FieldId> slots;  ///< member slot -> field
 
   template <class S, class R, class L, class B>
   FamilyDimView<S> make(const R& recs, const L& pa, const L& pb, const L& po, const L& tbb,
@@ -260,8 +263,8 @@ View1<const T, Kokkos::HostSpace> to_host_view(const std::vector<T>& v, const st
   return out;
 }
 
-// Builds the index of one dimension from the members that have entities there
-// (slot order = the order given).
+/// Builds the index of one dimension from the members that have entities there
+/// (slot order = the order given).
 template <class MemSpace>
 FamilyDimData<MemSpace> build_dim_index(const std::vector<MemberBlock>& members) {
   FamilyDimData<MemSpace> d;
@@ -362,9 +365,9 @@ FamilyDimData<MemSpace> build_dim_index(const std::vector<MemberBlock>& members)
 
 }  // namespace detail
 
-// Owner of the indexes behind a FamilyView, one per dimension. Copies share
-// the indexes. The view and the member lists stay valid, and unchanged, for as
-// long as any copy of the handle lives.
+/// Owner of the indexes behind a FamilyView, one per dimension. Copies share
+/// the indexes. The view and the member lists stay valid, and unchanged, for as
+/// long as any copy of the handle lives.
 template <class MemSpace>
 class FamilyHandle {
  public:
@@ -374,20 +377,22 @@ class FamilyHandle {
     for (std::size_t d = 0; d < index_.size(); ++d) view_.dims[d] = index_[d]->view();
   }
 
-  // The view borrows from this handle: it holds unmanaged Views into the
-  // indexes the handle owns and does not extend their lifetime. Copying it is
-  // cheap, but a copy is valid only while a handle (or a copy of the handle)
-  // lives. Asking a temporary handle for a view is deleted, because the index
-  // behind it can be replaced by the next change to the family:
-  //   auto v = registry.family_handle(f).view();   // does not compile
-  //   const auto h = registry.family_handle(f);    // keep the handle
-  //   const auto v = h.view();
+  /// The view borrows from this handle: it holds unmanaged Views into the
+  /// indexes the handle owns and does not extend their lifetime. Copying it is
+  /// cheap, but a copy is valid only while a handle (or a copy of the handle)
+  /// lives. Asking a temporary handle for a view is deleted, because the index
+  /// behind it can be replaced by the next change to the family:
+  /// ```
+  ///   auto v = registry.family_handle(f).view();   // does not compile
+  ///   const auto h = registry.family_handle(f);    // keep the handle
+  ///   const auto v = h.view();
+  /// ```
   FamilyView<MemSpace> view() const& noexcept { return view_; }
   FamilyView<MemSpace> view() const&& = delete;
 
-  // Fields behind the member slots that lookups report on `dim`. On a
-  // temporary handle the list is returned as a copy, so a range-for over
-  // `registry.family_handle(f).members(d)` is safe.
+  /// Fields behind the member slots that lookups report on `dim`. On a
+  /// temporary handle the list is returned as a copy, so a range-for over
+  /// `registry.family_handle(f).members(d)` is safe.
   const std::vector<FieldId>& members(int dim) const& {
     return index_.at(static_cast<std::size_t>(dim))->slots;
   }

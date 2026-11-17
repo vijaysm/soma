@@ -4,12 +4,13 @@
 #ifndef SOMA_COMPAT_PROG_OPTIONS_HPP_
 #define SOMA_COMPAT_PROG_OPTIONS_HPP_
 
-// The part of MOAB's ProgOptions that MOAB's examples use: options with a
-// long name, a short one or both ("dim,d", ",n"), of type int, double,
-// std::string or void (a flag), given as "--dim 2", "--dim=2", "-d 2" or
-// "-d2"; -h and --help print the options and exit. Required positional
-// arguments come in the order they were added. A malformed command line
-// prints a message and exits with status 1, as MOAB's does.
+/// \file
+/// The part of MOAB's ProgOptions that MOAB's examples use: options with a
+/// long name, a short one or both ("dim,d", ",n"), of type int, double,
+/// std::string or void (a flag), given as "--dim 2", "--dim=2", "-d 2" or
+/// "-d2"; -h and --help print the options and exit. Required positional
+/// arguments come in the order they were added. A malformed command line
+/// prints a message and exits with status 1, as MOAB's does.
 
 #include <functional>
 #include <sstream>
@@ -34,7 +35,7 @@ class ProgOptions {
     }
     opts_.push_back(std::move(o));
   }
-  // A flag (no value): addOpt<void>(names, help).
+  /// A flag (no value): addOpt<void>(names, help).
   void addOpt(const std::string& names, const std::string& help) { addOpt<void>(names, help, nullptr); }
 
   template <class T>
@@ -46,7 +47,7 @@ class ProgOptions {
     args_.push_back(std::move(o));
   }
 
-  // Whether the option was given, its value (for valued options) in *value.
+  /// Whether the option was given, its value (for valued options) in *value.
   template <class T>
   bool getOpt(const std::string& name, T* value = nullptr) {
     for (const Opt& o : opts_) {

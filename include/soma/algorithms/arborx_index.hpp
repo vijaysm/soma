@@ -4,19 +4,22 @@
 #ifndef SOMA_ALGORITHMS_ARBORX_INDEX_HPP_
 #define SOMA_ALGORITHMS_ARBORX_INDEX_HPP_
 
-// The boxes a query box meets, as GridIndex finds them, by ArborX's bounding
-// volume hierarchy (SOMA_ENABLE_ARBORX):
-//
-//   const soma::ArborXIndex<Mem> index(boxes, tolerance);  // n x 6
-//   const auto pairs = index.query(queries);               // m x 6
-//
-// The same boxes, pairs and order as GridIndex: two boxes meet where, on
-// every axis, each one's low end is at most the other's high end plus the
-// tolerance, and a query's boxes come ascending. The tree holds the boxes
-// widened by the tolerance and two units in the last place more, so that it
-// finds every pair that meets; the test above then decides. A query box
-// that is not finite meets nothing. Built and queried in the memory space's
-// execution space; the boxes are not copied and must outlive the index.
+/// \file
+/// The boxes a query box meets, as GridIndex finds them, by ArborX's bounding
+/// volume hierarchy (SOMA_ENABLE_ARBORX):
+///
+/// ```
+///   const soma::ArborXIndex<Mem> index(boxes, tolerance);  // n x 6
+///   const auto pairs = index.query(queries);               // m x 6
+/// ```
+///
+/// The same boxes, pairs and order as GridIndex: two boxes meet where, on
+/// every axis, each one's low end is at most the other's high end plus the
+/// tolerance, and a query's boxes come ascending. The tree holds the boxes
+/// widened by the tolerance and two units in the last place more, so that it
+/// finds every pair that meets; the test above then decides. A query box
+/// that is not finite meets nothing. Built and queried in the memory space's
+/// execution space; the boxes are not copied and must outlive the index.
 
 #include "soma/config.hpp"
 
@@ -41,7 +44,7 @@ class ArborXIndex {
   using Boxes = typename GridIndex<MemSpace>::Boxes;
   using Pairs = typename GridIndex<MemSpace>::Pairs;
 
-  // Throws std::invalid_argument as GridIndex does.
+  /// Throws std::invalid_argument as GridIndex does.
   explicit ArborXIndex(const Boxes& boxes, Real tolerance = 0) : boxes_(boxes), tolerance_(tolerance) {
     if (boxes.extent(1) != 6 && boxes.extent(0) != 0) {
       throw std::invalid_argument("ArborXIndex: boxes not of 6 columns");
@@ -77,8 +80,8 @@ class ArborXIndex {
   [[nodiscard]] LO size() const { return static_cast<LO>(boxes_.extent(0)); }
   [[nodiscard]] Real tolerance() const { return tolerance_; }
 
-  // The boxes each of `queries` (m x 6, as the boxes) meets. Throws
-  // std::invalid_argument unless the queries have 6 columns.
+  /// The boxes each of `queries` (m x 6, as the boxes) meets. Throws
+  /// std::invalid_argument unless the queries have 6 columns.
   [[nodiscard]] Pairs query(const Boxes& queries) const {
     if (queries.extent(1) != 6 && queries.extent(0) != 0) {
       throw std::invalid_argument("ArborXIndex::query: queries not of 6 columns");
@@ -153,7 +156,7 @@ class ArborXIndex {
   using Value = ArborX::PairValueIndex<Box, LO>;
   using Tree = ArborX::BoundingVolumeHierarchy<MemSpace, Value>;
 
-  // x moved one unit in the last place towards the sign of `to`.
+  /// x moved one unit in the last place towards the sign of `to`.
   KOKKOS_INLINE_FUNCTION static Real out(Real x, int to) {
     constexpr Real inf = Kokkos::Experimental::infinity_v<Real>;
     return Kokkos::nextafter(x, to > 0 ? inf : -inf);

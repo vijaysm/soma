@@ -16,11 +16,11 @@
 
 namespace soma {
 
-// How far apart in memory the vertices of one element are: max - min of its
-// vertex local ids. Small spans mean an element gathers coordinates from a
-// narrow window. An element without vertices has span 0 and counts towards
-// the mean. Metrics over element-to-element neighbours need adjacency and are
-// not provided yet.
+/// How far apart in memory the vertices of one element are: max - min of its
+/// vertex local ids. Small spans mean an element gathers coordinates from a
+/// narrow window. An element without vertices has span 0 and counts towards
+/// the mean. Metrics over element-to-element neighbours need adjacency and are
+/// not provided yet.
 struct VertexSpanReport {
   LO elements = 0;
   double mean = 0;
@@ -29,7 +29,7 @@ struct VertexSpanReport {
 
 namespace detail {
 
-// The report over `count` elements of a host CSR block.
+/// The report over `count` elements of a host CSR block.
 template <class OffsetView, class ConnView>
 VertexSpanReport vertex_span(LO count, const OffsetView& offsets, const ConnView& conn) {
   VertexSpanReport r;
@@ -53,8 +53,8 @@ VertexSpanReport vertex_span(LO count, const OffsetView& offsets, const ConnView
 
 }  // namespace detail
 
-// Host only; the mesh must be host accessible. Throws std::out_of_range for a
-// dimension outside [1, 3].
+/// Host only; the mesh must be host accessible. Throws std::out_of_range for a
+/// dimension outside [1, 3].
 template <class MemSpace>
 VertexSpanReport vertex_span_report(const Mesh<MemSpace>& mesh, int dim) {
   static_assert(Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible,

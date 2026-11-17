@@ -21,15 +21,15 @@
 
 namespace soma {
 
-// A value of the mesh rather than of its entities: a MOAB tag of class 3, or
-// one declared with values on no entity. Its default and global value, each
-// present or not, are the bytes of ncomp values of `type` (any number of them
-// for a variable-length tag); default_as and global_as read them typed.
+/// A value of the mesh rather than of its entities: a MOAB tag of class 3, or
+/// one declared with values on no entity. Its default and global value, each
+/// present or not, are the bytes of ncomp values of `type` (any number of them
+/// for a variable-length tag); default_as and global_as read them typed.
 struct MeshValue {
   DataType type = DataType::u8;
-  int ncomp = 1;           // 0: variable length
-  bool handle = false;     // values are handles (FieldOptions::handle)
-  TagFormat format{};       // how a legacy file stores it
+  int ncomp = 1;           ///< 0: variable length
+  bool handle = false;     ///< values are handles (FieldOptions::handle)
+  TagFormat format{};       ///< how a legacy file stores it
   std::optional<std::vector<std::byte>> default_value;
   std::optional<std::vector<std::byte>> global_value;
 
@@ -40,7 +40,7 @@ struct MeshValue {
     return out;
   }
 
-  // Throws std::invalid_argument when T is not the stored type.
+  /// Throws std::invalid_argument when T is not the stored type.
   template <class T>
   std::optional<std::vector<T>> default_as() const {
     return typed<T>(default_value);
@@ -67,13 +67,13 @@ struct MeshValue {
   }
 };
 
-// The mesh values by name. Host only; every mirror of a mesh copies them.
+/// The mesh values by name. Host only; every mirror of a mesh copies them.
 class MeshValues {
  public:
-  // Adds the value, or replaces the one of that name.
+  /// Adds the value, or replaces the one of that name.
   void set(std::string name, MeshValue v) { values_.insert_or_assign(std::move(name), std::move(v)); }
   bool contains(std::string_view name) const { return values_.find(name) != values_.end(); }
-  // Throws std::out_of_range when there is none.
+  /// Throws std::out_of_range when there is none.
   const MeshValue& at(std::string_view name) const {
     const auto it = values_.find(name);
     if (it == values_.end()) throw std::out_of_range("no mesh value named '" + std::string(name) + "'");
@@ -87,7 +87,7 @@ class MeshValues {
   }
   std::size_t size() const noexcept { return values_.size(); }
   bool empty() const noexcept { return values_.empty(); }
-  // In name order.
+  /// In name order.
   std::vector<std::string> names() const {
     std::vector<std::string> out;
     out.reserve(values_.size());

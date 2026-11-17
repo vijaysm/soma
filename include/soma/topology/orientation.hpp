@@ -4,10 +4,11 @@
 #ifndef SOMA_TOPOLOGY_ORIENTATION_HPP_
 #define SOMA_TOPOLOGY_ORIENTATION_HPP_
 
-// Relative orientation of two vertex lists naming the same entity, with the
-// semantics of MOAB's CN::ConnectivityMatch(a, b): offset is the position of
-// b[0] in a, and reversed says that b runs through a backwards. For two
-// vertices, b is reversed whenever it is not identical to a.
+/// \file
+/// Relative orientation of two vertex lists naming the same entity, with the
+/// semantics of MOAB's CN::ConnectivityMatch(a, b): offset is the position of
+/// b[0] in a, and reversed says that b runs through a backwards. For two
+/// vertices, b is reversed whenever it is not identical to a.
 
 #include <cstdint>
 
@@ -18,7 +19,7 @@
 namespace soma::topology {
 
 struct Match {
-  bool same = false;  // the lists name the same cycle
+  bool same = false;  ///< the lists name the same cycle
   int offset = 0;
   bool reversed = false;
 };
@@ -55,7 +56,7 @@ KOKKOS_INLINE_FUNCTION constexpr std::uint8_t orientation_code(int offset, bool 
 }
 KOKKOS_INLINE_FUNCTION constexpr int code_offset(std::uint8_t code) { return code >> 1; }
 KOKKOS_INLINE_FUNCTION constexpr bool code_reversed(std::uint8_t code) { return (code & 1) != 0; }
-// +1 when the parent sees the sub-entity as stored, -1 when reversed.
+/// +1 when the parent sees the sub-entity as stored, -1 when reversed.
 KOKKOS_INLINE_FUNCTION constexpr int code_sense(std::uint8_t code) {
   return code_reversed(code) ? -1 : 1;
 }

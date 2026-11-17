@@ -4,8 +4,9 @@
 #ifndef SOMA_ALGORITHMS_TO_SPACE_HPP_
 #define SOMA_ALGORITHMS_TO_SPACE_HPP_
 
-// A host vector copied into a view of a memory space: how the algorithms move
-// the plans they build on the host.
+/// \file
+/// A host vector copied into a view of a memory space: how the algorithms move
+/// the plans they build on the host.
 
 #include <string>
 #include <vector>

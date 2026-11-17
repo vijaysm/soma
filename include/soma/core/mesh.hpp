@@ -39,29 +39,29 @@ struct MeshTestAccess;
 template <class MemSpace>
 struct EntityBlock {
   LO count = 0;
-  View1<Offset, MemSpace> conn_offsets;  // count + 1; empty for vertices
+  View1<Offset, MemSpace> conn_offsets;  ///< count + 1; empty for vertices
   View1<LO, MemSpace> conn;
   View1<std::uint8_t, MemSpace> topology;
   View1<GO, MemSpace> gid;
-  // High-order elements: each element's nodes beyond its corners, as vertex
-  // local ids in MOAB's order; both empty when no element has any.
-  View1<Offset, MemSpace> node_offsets;  // count + 1
+  /// High-order elements: each element's nodes beyond its corners, as vertex
+  /// local ids in MOAB's order; both empty when no element has any.
+  View1<Offset, MemSpace> node_offsets;  ///< count + 1
   View1<LO, MemSpace> nodes;
-  // Edited meshes (MeshEdit): one byte per entity, 0 for a removed one; empty
-  // when every entity is live. The last `tail` entities were added after the
-  // others were ordered, in the order they were added.
+  /// Edited meshes (MeshEdit): one byte per entity, 0 for a removed one; empty
+  /// when every entity is live. The last `tail` entities were added after the
+  /// others were ordered, in the order they were added.
   View1<std::uint8_t, MemSpace> alive;
   LO tail = 0;
   SegmentTable segments;
-  bool derived = false;  // complete: built from the elements, explicit input adopted
-  bool input = false;    // given to MeshBuilder; kept when derivation adopts the entities
+  bool derived = false;  ///< complete: built from the elements, explicit input adopted
+  bool input = false;    ///< given to MeshBuilder; kept when derivation adopts the entities
 };
 
 template <class MemSpace>
 class Mesh;
 
-// Old local id to new local id per dimension (invalid_lo: removed); empty for
-// a dimension compress() left as it was.
+/// Old local id to new local id per dimension (invalid_lo: removed); empty for
+/// a dimension compress() left as it was.
 struct Renumbering {
   std::array<std::vector<LO>, 4> new_lid;
 };
@@ -70,15 +70,15 @@ class Comm;
 struct GhostOptions;
 
 namespace detail {
-// Defined in src/parallel/ghosts.cpp.
+/// Defined in src/parallel/ghosts.cpp.
 void add_ghosts(const Comm& comm, Mesh<Kokkos::HostSpace>& mesh, const GhostOptions& options);
 void remove_ghosts(const Comm& comm, Mesh<Kokkos::HostSpace>& mesh);
-// Defined in src/core/mesh_edit.cpp.
+/// Defined in src/core/mesh_edit.cpp.
 Renumbering compress(Mesh<Kokkos::HostSpace>& mesh);
-// build_adjacencies on a host mesh holding removed entities.
+/// build_adjacencies on a host mesh holding removed entities.
 void build_edited(Mesh<Kokkos::HostSpace>& mesh, AdjacencyRequest req);
 struct TopologyAccess;
-// Defined in soma/topology/build.hpp, which this header includes at its end.
+/// Defined in soma/topology/build.hpp, which this header includes at its end.
 template <class MemSpace>
 void rebuild_adjacencies(Mesh<MemSpace>& mesh, AdjacencyRequest req);
 
@@ -90,41 +90,41 @@ auto deep_mirror(const V& src) {
 }
 }  // namespace detail
 
-// Reorders the entities of dimension `dim` of a host mesh: entity e becomes
-// entity new_of_old[e], a permutation of [0, count(dim)), and `segments` is the
-// segment table of the reordered dimension. Everything follows the entities:
-// gids, topology, connectivity and nodes (for vertices, coordinates move and
-// every other dimension's connectivity and nodes are renamed), held graphs
-// (rows move, targets are renamed; upward and bridge rows sorted again,
-// downward rows keep their side order, codes move with their entries), set
-// members and fields; the epoch advances. Throws std::invalid_argument for
-// `dim` outside [0, mesh.dim()], a new_of_old that is not such a permutation,
-// one that puts a node-only vertex before a corner of its ownership kind, or
-// a table that is not the one make_segments gives for the reordered
-// entities (with the ownership it names; for vertices, split at each kind's
-// corner end, see split_segments); std::logic_error for an edited
-// mesh (compress() it first). With `gids` (one per entity, by old id), the
-// entities take those gids, which must be unique; std::invalid_argument
-// otherwise. A throw leaves the mesh unchanged.
+/// Reorders the entities of dimension `dim` of a host mesh: entity e becomes
+/// entity new_of_old[e], a permutation of [0, count(dim)), and `segments` is the
+/// segment table of the reordered dimension. Everything follows the entities:
+/// gids, topology, connectivity and nodes (for vertices, coordinates move and
+/// every other dimension's connectivity and nodes are renamed), held graphs
+/// (rows move, targets are renamed; upward and bridge rows sorted again,
+/// downward rows keep their side order, codes move with their entries), set
+/// members and fields; the epoch advances. Throws std::invalid_argument for
+/// `dim` outside [0, mesh.dim()], a new_of_old that is not such a permutation,
+/// one that puts a node-only vertex before a corner of its ownership kind, or
+/// a table that is not the one make_segments gives for the reordered
+/// entities (with the ownership it names; for vertices, split at each kind's
+/// corner end, see split_segments); std::logic_error for an edited
+/// mesh (compress() it first). With `gids` (one per entity, by old id), the
+/// entities take those gids, which must be unique; std::invalid_argument
+/// otherwise. A throw leaves the mesh unchanged.
 void permute_entities(Mesh<Kokkos::HostSpace>& mesh, int dim, std::span<const LO> new_of_old,
                       SegmentTable segments, std::span<const GO> gids = {});
 
-// Move-only owner of one rank's mesh in one memory space. Copying is deleted
-// because Kokkos::View copies alias: a silent alias here would make every
-// before/after comparison compare an object with itself. Deep copies are
-// spelled clone() or mirror<Space>().
+/// Move-only owner of one rank's mesh in one memory space. Copying is deleted
+/// because Kokkos::View copies alias: a silent alias here would make every
+/// before/after comparison compare an object with itself. Deep copies are
+/// spelled clone() or mirror<Space>().
 template <class MemSpace>
 class Mesh {
  public:
   using memory_space = MemSpace;
 
-  // An empty mesh has zero entities of every dimension, as a clone of it does.
-  // Handing empty counts to the registry allocates nothing.
+  /// An empty mesh has zero entities of every dimension, as a clone of it does.
+  /// Handing empty counts to the registry allocates nothing.
   Mesh() noexcept { attach_fields(); }
   Mesh(const Mesh&) = delete;
   Mesh& operator=(const Mesh&) = delete;
-  // A View "move" leaves the source referencing the data, so move by swapping
-  // with an empty mesh; the moved-from mesh is genuinely empty.
+  /// A View "move" leaves the source referencing the data, so move by swapping
+  /// with an empty mesh; the moved-from mesh is genuinely empty.
   Mesh(Mesh&& other) noexcept : Mesh() { swap(other); }
   Mesh& operator=(Mesh&& other) noexcept {
     Mesh tmp(std::move(other));
@@ -134,7 +134,7 @@ class Mesh {
   ~Mesh() = default;
 
   int dim() const noexcept { return dim_; }
-  // Per-dimension accessors throw std::out_of_range for d outside [0, 3].
+  /// Per-dimension accessors throw std::out_of_range for d outside [0, 3].
   LO count(int d) const { return block(d).count; }
   const SegmentTable& segment_table(int d) const { return block(d).segments; }
   std::span<const Segment> segments(int d) const { return block(d).segments.segments; }
@@ -143,23 +143,23 @@ class Mesh {
   View1<const LO, MemSpace> conn(int d) const { return block(d).conn; }
   View1<const std::uint8_t, MemSpace> topology(int d) const { return block(d).topology; }
   View1<const GO, MemSpace> gid(int d) const { return block(d).gid; }
-  // The nodes of high-order elements beyond their corners (MeshView::node
-  // gives corners and nodes together). Vertices that are only such nodes
-  // follow the others of their ownership kind: kind k's corners are
-  // [kind begin, corner_end(k)), its node-only vertices [corner_end(k), kind
-  // end), each in segments of their own. corners() is
-  // corner_end(Ownership::interior): with every vertex interior, [0, corners())
-  // are the corner vertices.
+  /// The nodes of high-order elements beyond their corners (MeshView::node
+  /// gives corners and nodes together). Vertices that are only such nodes
+  /// follow the others of their ownership kind: kind k's corners are
+  /// [kind begin, corner_end(k)), its node-only vertices [corner_end(k), kind
+  /// end), each in segments of their own. corners() is
+  /// corner_end(Ownership::interior): with every vertex interior, [0, corners())
+  /// are the corner vertices.
   bool has_nodes(int d) const { return block(d).node_offsets.extent(0) > 0; }
   View1<const Offset, MemSpace> node_offsets(int d) const { return block(d).node_offsets; }
   View1<const LO, MemSpace> nodes(int d) const { return block(d).nodes; }
   LO corners() const noexcept { return corner_ends_[0]; }
   LO corner_end(Ownership k) const noexcept { return corner_ends_[static_cast<std::size_t>(k)]; }
-  // Edits (MeshEdit::apply) leave the mesh edited until compress(): removed
-  // entities stay in place, masked (alive(d) is 0 for them; empty when none
-  // is), and added ones follow the others (tail(d) of them). count(d) counts
-  // every entity, removed ones too; num_live(d) the others. corners() then
-  // counts the corner vertices before the tail.
+  /// Edits (MeshEdit::apply) leave the mesh edited until compress(): removed
+  /// entities stay in place, masked (alive(d) is 0 for them; empty when none
+  /// is), and added ones follow the others (tail(d) of them). count(d) counts
+  /// every entity, removed ones too; num_live(d) the others. corners() then
+  /// counts the corner vertices before the tail.
   View1<const std::uint8_t, MemSpace> alive(int d) const { return block(d).alive; }
   LO tail(int d) const { return block(d).tail; }
   LO num_live(int d) const {
@@ -179,52 +179,52 @@ class Mesh {
     }
     return false;
   }
-  // The ordering MeshBuilder ordered the mesh by, which compress() keeps.
+  /// The ordering MeshBuilder ordered the mesh by, which compress() keeps.
   Ordering ordering() const noexcept { return ordering_; }
 
-  // Drops removed entities and orders the added ones with the others, as
-  // MeshBuilder orders a mesh built from the live entities in ordering():
-  // vertices, elements and explicit sides with their gids, nodes and
-  // coordinates. Fields, sets and held graphs follow (fields stay current; the
-  // epoch advances). Returns the renumbering; does nothing on a mesh that is
-  // not edited. Host meshes only.
+  /// Drops removed entities and orders the added ones with the others, as
+  /// MeshBuilder orders a mesh built from the live entities in ordering():
+  /// vertices, elements and explicit sides with their gids, nodes and
+  /// coordinates. Fields, sets and held graphs follow (fields stay current; the
+  /// epoch advances). Returns the renumbering; does nothing on a mesh that is
+  /// not edited. Host meshes only.
   Renumbering compress() {
     static_assert(std::is_same_v<MemSpace, Kokkos::HostSpace>, "compress: host meshes only");
     return detail::compress(*this);
   }
-  // Ghost layers of a distributed part (options in soma/parallel/ghosts.hpp).
-  // Collective. In place: every entity held other than as a ghost keeps its
-  // local id and gid; ghosts, with their gids, take the ids
-  // after the shared copies of each dimension, ordered by topology, owner,
-  // then the mesh's ordering, and replace any ghosts held before. Ghosts and
-  // shared copies hold their owners' field values; set members on ghosts only
-  // with options.sets. Field handles must be fetched again. Throws on every
-  // rank as migrate does (std::logic_error for an edited mesh) and for bad
-  // options. Host meshes only.
+  /// Ghost layers of a distributed part (options in soma/parallel/ghosts.hpp).
+  /// Collective. In place: every entity held other than as a ghost keeps its
+  /// local id and gid; ghosts, with their gids, take the ids
+  /// after the shared copies of each dimension, ordered by topology, owner,
+  /// then the mesh's ordering, and replace any ghosts held before. Ghosts and
+  /// shared copies hold their owners' field values; set members on ghosts only
+  /// with options.sets. Field handles must be fetched again. Throws on every
+  /// rank as migrate does (std::logic_error for an edited mesh) and for bad
+  /// options. Host meshes only.
   Mesh& add_ghosts(const Comm& comm, const GhostOptions& options) {
     static_assert(std::is_same_v<MemSpace, Kokkos::HostSpace>, "add_ghosts: host meshes only");
     detail::add_ghosts(comm, *this, options);
     return *this;
   }
-  // add_ghosts with no layers. Collective.
+  /// add_ghosts with no layers. Collective.
   Mesh& remove_ghosts(const Comm& comm) {
     static_assert(std::is_same_v<MemSpace, Kokkos::HostSpace>, "remove_ghosts: host meshes only");
     detail::remove_ghosts(comm, *this);
     return *this;
   }
-  // The layers and bridge dimension of the ghosts add_ghosts last placed:
-  // 0 and 0 for a mesh without ghosts. Copies and mirrors keep them.
+  /// The layers and bridge dimension of the ghosts add_ghosts last placed:
+  /// 0 and 0 for a mesh without ghosts. Copies and mirrors keep them.
   int ghost_layers() const noexcept { return ghosts_[0]; }
   int ghost_bridge_dim() const noexcept { return ghosts_[1]; }
-  // True for the dimensions MeshBuilder was given entities of (vertices
-  // always), also after derivation adopts them; false for derived-only ones.
+  /// True for the dimensions MeshBuilder was given entities of (vertices
+  /// always), also after derivation adopts them; false for derived-only ones.
   bool input(int d) const { return block(d).input; }
   CoordView<MemSpace> coords() const noexcept { return coords_; }  // writable geometry
 
-  // has_adjacency(d, 0) is true for 1 <= d <= dim() when the mesh holds that
-  // dimension (a mirror may leave it out): the connectivity. The
-  // lookups throw MissingAdjacency for a graph the mesh does not hold, and
-  // std::invalid_argument for a pair that is not one of distinct dimensions.
+  /// has_adjacency(d, 0) is true for 1 <= d <= dim() when the mesh holds that
+  /// dimension (a mirror may leave it out): the connectivity. The
+  /// lookups throw MissingAdjacency for a graph the mesh does not hold, and
+  /// std::invalid_argument for a pair that is not one of distinct dimensions.
   bool has_adjacency(int from, int to) const {
     AdjacencyRequest{}.add(from, to);
     if (to == 0) return from <= dim_ && block(from).conn_offsets.extent(0) > 0;
@@ -252,30 +252,30 @@ class Mesh {
     }
     return graph(bridge_slot(dim, via));
   }
-  // The graphs held, as a request.
+  /// The graphs held, as a request.
   AdjacencyRequest adjacencies() const { return AdjacencyRequest::from_bits(adj_.present); }
 
-  // Entity sets; none until SetBuilder installs them.
+  /// Entity sets; none until SetBuilder installs them.
   const EntitySets<MemSpace>& sets() const noexcept { return sets_; }
 
   FieldRegistry<MemSpace>& fields() noexcept { return fields_; }
   const FieldRegistry<MemSpace>& fields() const noexcept { return fields_; }
 
-  // Values of the mesh as a whole (MOAB tags of class 3 or without entity
-  // values); every mirror copies them.
+  /// Values of the mesh as a whole (MOAB tags of class 3 or without entity
+  /// values); every mirror copies them.
   MeshValues& values() noexcept { return values_; }
   const MeshValues& values() const noexcept { return values_; }
 
-  // Topology version. MeshBuilder::build starts it at 1, and every operation
-  // that changes topology must call bump_epoch(), the one place that also tells
-  // the field registry. Fields defined at an older epoch are then stale.
+  /// Topology version. MeshBuilder::build starts it at 1, and every operation
+  /// that changes topology must call bump_epoch(), the one place that also tells
+  /// the field registry. Fields defined at an older epoch are then stale.
   std::uint64_t epoch() const noexcept { return epoch_; }
   void bump_epoch() noexcept {
     ++epoch_;
     fields_.set_epoch(epoch_);
   }
 
-  // A view of a temporary mesh would dangle, so that overload is deleted.
+  /// A view of a temporary mesh would dangle, so that overload is deleted.
   MeshView<MemSpace> view() const& {
     MeshView<MemSpace> v;
     v.dim = dim_;
@@ -304,15 +304,15 @@ class Mesh {
   }
   MeshView<MemSpace> view() const&& = delete;
 
-  // Always allocates in Dst, even when Dst == MemSpace.
+  /// Always allocates in Dst, even when Dst == MemSpace.
   template <class Dst>
   Mesh<Dst> mirror(const TransferOptions& opts = {}) const {
     return copy_to<Dst>(opts, false);
   }
 
-  // Aliases storage when Dst is the same memory space; allocates and copies
-  // otherwise, even when Dst can access MemSpace.
-  // The result shares data with *this by design: name it as such.
+  /// Aliases storage when Dst is the same memory space; allocates and copies
+  /// otherwise, even when Dst can access MemSpace.
+  /// The result shares data with *this by design: name it as such.
   template <class Dst>
   Mesh<Dst> mirror_view(const TransferOptions& opts = {}) const {
     return copy_to<Dst>(opts, true);
@@ -364,8 +364,8 @@ class Mesh {
     return ents_[static_cast<std::size_t>(d)];
   }
 
-  // Assigns into a destination of known type, so the aliasing and deep
-  // branches may produce different View types without a deduction conflict.
+  /// Assigns into a destination of known type, so the aliasing and deep
+  /// branches may produce different View types without a deduction conflict.
   template <class DstView, class SrcView>
   static void transfer(DstView& dst, const SrcView& src, bool alias) {
     using Dst = typename DstView::memory_space;
@@ -376,8 +376,8 @@ class Mesh {
     }
   }
 
-  // The registry builds full domains from entity counts and global ids; this
-  // is the one place the mesh hands them over.
+  /// The registry builds full domains from entity counts and global ids; this
+  /// is the one place the mesh hands them over.
   void attach_fields() {
     for (int d = 0; d < 4; ++d) {
       const auto& e = ents_[static_cast<std::size_t>(d)];
@@ -444,7 +444,7 @@ class Mesh {
     return out;
   }
 
-  // A graph needs both of its dimensions; (d, 0) graphs are never stored.
+  /// A graph needs both of its dimensions; (d, 0) graphs are never stored.
   static void check_adjacency_dims(const TransferOptions& o) {
     for (int a = 0; a < 4; ++a) {
       for (int b = 0; b < 4; ++b) {
@@ -460,9 +460,9 @@ class Mesh {
   }
 
   int dim_ = 0;
-  std::array<LO, 4> corner_ends_{};  // by Ownership
+  std::array<LO, 4> corner_ends_{};  ///< by Ownership
   Ordering ordering_ = default_ordering;
-  std::array<int, 2> ghosts_{0, 0};  // add_ghosts' layers and bridge_dim
+  std::array<int, 2> ghosts_{0, 0};  ///< add_ghosts' layers and bridge_dim
   std::array<EntityBlock<MemSpace>, 4> ents_{};
   CoordView<MemSpace> coords_;
   std::uint64_t epoch_ = 1;

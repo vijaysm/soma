@@ -10,8 +10,8 @@
 
 namespace soma {
 
-// Values equal the MOAB .h5m "/tstt/elemtypes" enumeration and moab::EntityType,
-// so the reader maps element groups without a translation table. Never renumber.
+/// Values equal the MOAB .h5m "/tstt/elemtypes" enumeration and moab::EntityType,
+/// so the reader maps element groups without a translation table. Never renumber.
 enum class Topology : std::uint8_t {
   vertex = 0,
   edge = 1,
@@ -45,7 +45,7 @@ KOKKOS_INLINE_FUNCTION constexpr int dimension(Topology t) noexcept {
   return -1;
 }
 
-// Corner vertex count; 0 for variable-arity topologies.
+/// Corner vertex count; 0 for variable-arity topologies.
 KOKKOS_INLINE_FUNCTION constexpr int num_vertices(Topology t) noexcept {
   switch (t) {
     case Topology::vertex: return 1;

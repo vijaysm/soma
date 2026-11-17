@@ -19,11 +19,11 @@
 
 namespace soma {
 
-// Typed handle on one variable-length field: a CSR over a per_entity space.
-// Member r holds values()[offsets()(r) .. offsets()(r + 1)). The values can
-// be written; the lengths are fixed when the field is added. The default and
-// the global value are rows of any length, each present or not. Like Field it
-// aliases the registry's storage, and a moved-from VarField is empty.
+/// Typed handle on one variable-length field: a CSR over a per_entity space.
+/// Member r holds values()[offsets()(r) .. offsets()(r + 1)). The values can
+/// be written; the lengths are fixed when the field is added. The default and
+/// the global value are rows of any length, each present or not. Like Field it
+/// aliases the registry's storage, and a moved-from VarField is empty.
 template <class T, class MemSpace>
 class VarField {
  public:
@@ -72,7 +72,7 @@ class VarField {
   Space<MemSpace> space() && { return space_; }
   const Domain<MemSpace>& domain() const& noexcept { return space_.domain(); }
   Domain<MemSpace> domain() && { return space_.domain(); }
-  // rows() + 1 offsets; empty for an empty handle.
+  /// rows() + 1 offsets; empty for an empty handle.
   OffsetView offsets() const noexcept { return offsets_; }
   ValueView values() const noexcept { return values_; }
   LO rows() const noexcept { return offsets_.extent(0) == 0 ? 0 : static_cast<LO>(offsets_.extent(0) - 1); }
@@ -84,8 +84,8 @@ class VarField {
   const std::optional<std::vector<T>>& global_value() const& noexcept { return global_; }
   std::optional<std::vector<T>> global_value() && { return global_; }
 
-  // Host read of entity (dim, lid): its values for a member, the default
-  // otherwise (no values without one). The span refers to this handle.
+  /// Host read of entity (dim, lid): its values for a member, the default
+  /// otherwise (no values without one). The span refers to this handle.
   std::span<const T> value_or_default(int dim, LO lid) const {
     static_assert(Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible,
                   "value_or_default reads on the host; mirror the field first");

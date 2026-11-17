@@ -4,9 +4,10 @@
 #ifndef SOMA_TOPOLOGY_SIDES_HPP_
 #define SOMA_TOPOLOGY_SIDES_HPP_
 
-// The sides of an entity as mesh vertex ids, in the entity's canonical order:
-// the canonical tables for fixed topologies, the vertex cycle for polygon
-// edges. Device-callable.
+/// \file
+/// The sides of an entity as mesh vertex ids, in the entity's canonical order:
+/// the canonical tables for fixed topologies, the vertex cycle for polygon
+/// edges. Device-callable.
 
 #include <Kokkos_Core.hpp>
 
@@ -23,7 +24,7 @@ struct Side {
   LO v[4] = {0, 0, 0, 0};
 };
 
-// Number of sides of dimension k < d of entity e of dimension d.
+/// Number of sides of dimension k < d of entity e of dimension d.
 template <class M>
 KOKKOS_INLINE_FUNCTION int side_count(const MeshView<M>& m, int d, LO e, int k) {
   const Topology t = m.topology(d, e);
@@ -50,7 +51,7 @@ KOKKOS_INLINE_FUNCTION Side side_of(const MeshView<M>& m, int d, LO e, int k, in
   return out;
 }
 
-// The entity itself as a side: its first n <= 4 vertices.
+/// The entity itself as a side: its first n <= 4 vertices.
 template <class M>
 KOKKOS_INLINE_FUNCTION Side entity_as_side(const MeshView<M>& m, int d, LO e) {
   Side out;
@@ -67,7 +68,7 @@ KOKKOS_INLINE_FUNCTION LO min_vertex(const Side& s) {
   return m;
 }
 
-// Same vertex set, for n <= 4 vertices without repeats.
+/// Same vertex set, for n <= 4 vertices without repeats.
 KOKKOS_INLINE_FUNCTION bool same_set(const LO* a, const LO* b, int n) {
   for (int i = 0; i < n; ++i) {
     bool found = false;

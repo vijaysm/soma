@@ -4,19 +4,22 @@
 #ifndef SOMA_PARALLEL_TRANSPORT_RENDEZVOUS_HPP_
 #define SOMA_PARALLEL_TRANSPORT_RENDEZVOUS_HPP_
 
-// A distributed directory: each record goes to the owner of its key,
-// owner(key, P) = mix(key) % P, which sees every record sent for its keys
-// and answers each one; the answers come back in the order of the keys.
-//
-//   auto answers = transport::rendezvous(exec, comm, gids, payload, sizeof(int),
-//       [](const auto& keys, const auto& arrived) { ... return rows; });
-//
-// answer(keys, arrived) receives the keys that arrived here (a
-// Kokkos::View<std::uint64_t*>) and a RecordBatch of their senders and
-// payloads, grouped by source rank in each source's order, and returns a
-// row of `answer_width` bytes per arrival. mix is the splitmix64 finalizer
-// (Steele, Lea and Flood 2014), so a key's owner depends only on the key
-// and P.
+/// \file
+/// A distributed directory: each record goes to the owner of its key,
+/// owner(key, P) = mix(key) % P, which sees every record sent for its keys
+/// and answers each one; the answers come back in the order of the keys.
+///
+/// ```
+///   auto answers = transport::rendezvous(exec, comm, gids, payload, sizeof(int),
+///       [](const auto& keys, const auto& arrived) { ... return rows; });
+/// ```
+///
+/// answer(keys, arrived) receives the keys that arrived here (a
+/// Kokkos::View<std::uint64_t*>) and a RecordBatch of their senders and
+/// payloads, grouped by source rank in each source's order, and returns a
+/// row of `answer_width` bytes per arrival. mix is the splitmix64 finalizer
+/// (Steele, Lea and Flood 2014), so a key's owner depends only on the key
+/// and P.
 
 #include <cstddef>
 #include <cstdint>
@@ -42,14 +45,14 @@ namespace soma::transport {
   return static_cast<int>(mix(key) % static_cast<std::uint64_t>(size));
 }
 
-// rendezvous_to sends each key to dest_of(key), a rank of comm, instead of
-// its owner: a directory placed by the caller (blocks of ids, say).
-//
-// Collective. Throws std::invalid_argument on every rank if any rank passes
-// a payload without a row per key, names a rank outside comm, or returns
-// answers that are not a row of answer_width bytes per arrival; an exception
-// from answer on one rank is rethrown there and std::runtime_error is thrown
-// on the others.
+/// rendezvous_to sends each key to dest_of(key), a rank of comm, instead of
+/// its owner: a directory placed by the caller (blocks of ids, say).
+///
+/// Collective. Throws std::invalid_argument on every rank if any rank passes
+/// a payload without a row per key, names a rank outside comm, or returns
+/// answers that are not a row of answer_width bytes per arrival; an exception
+/// from answer on one rank is rethrown there and std::runtime_error is thrown
+/// on the others.
 template <class ExecSpace, class Answer, class DestOf>
 Kokkos::View<std::byte**, Kokkos::LayoutRight, typename ExecSpace::memory_space> rendezvous_to(
     const ExecSpace&, const Comm& comm, const Kokkos::View<const std::uint64_t*, typename ExecSpace::memory_space>& keys,
@@ -117,7 +120,7 @@ Kokkos::View<std::byte**, Kokkos::LayoutRight, typename ExecSpace::memory_space>
   return out;
 }
 
-// Collective. Throws as rendezvous_to.
+/// Collective. Throws as rendezvous_to.
 template <class ExecSpace, class Answer>
 Kokkos::View<std::byte**, Kokkos::LayoutRight, typename ExecSpace::memory_space> rendezvous(
     const ExecSpace& exec, const Comm& comm,

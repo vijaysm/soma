@@ -4,29 +4,32 @@
 #ifndef SOMA_PARALLEL_HALO_EXCHANGE_HPP_
 #define SOMA_PARALLEL_HALO_EXCHANGE_HPP_
 
-// Exchange and reduction over the shared entities and ghosts of one
-// dimension of a distributed mesh (soma/parallel/distributed.hpp), built once
-// from its soma:sharing and soma:owner fields:
-//
-//   update(values)       each owner's values overwrite its copies and ghosts;
-//   reduce(values, op)   every holder's values are combined, the result on
-//                        every holder; ghosts take no part.
-//
-// values is a View2 of count(dim) rows by any number of components. Both
-// sides list the entities they share with a neighbour by gid, so the lists
-// match without a handshake. reduce combines in ascending rank order, the
-// holder's own value in its place, so every holder computes the same result
-// bit for bit, whatever the op. Packing and unpacking are kernels over flat
-// index arrays in the mesh's memory space; messages are staged through host
-// memory (device-aware MPI is not used yet) and use tags 32610 and 32611.
-//
-// Each operation also comes split: begin_update and begin_reduce pack the
-// rows sent, post the messages and return a Pending; its end() waits and
-// writes the rows received (reduce reads each holder's own rows then), test()
-// advances the messages and tells whether they are done. The caller must not
-// write the rows exchanged in between. Exchanges begun in the same order on
-// every rank may be in flight together and end in any order. A Pending
-// dropped unfinished completes its messages and writes nothing.
+/// \file
+/// Exchange and reduction over the shared entities and ghosts of one
+/// dimension of a distributed mesh (soma/parallel/distributed.hpp), built once
+/// from its soma:sharing and soma:owner fields:
+///
+/// ```
+///   update(values)       each owner's values overwrite its copies and ghosts;
+///   reduce(values, op)   every holder's values are combined, the result on
+///                        every holder; ghosts take no part.
+/// ```
+///
+/// values is a View2 of count(dim) rows by any number of components. Both
+/// sides list the entities they share with a neighbour by gid, so the lists
+/// match without a handshake. reduce combines in ascending rank order, the
+/// holder's own value in its place, so every holder computes the same result
+/// bit for bit, whatever the op. Packing and unpacking are kernels over flat
+/// index arrays in the mesh's memory space; messages are staged through host
+/// memory (device-aware MPI is not used yet) and use tags 32610 and 32611.
+///
+/// Each operation also comes split: begin_update and begin_reduce pack the
+/// rows sent, post the messages and return a Pending; its end() waits and
+/// writes the rows received (reduce reads each holder's own rows then), test()
+/// advances the messages and tells whether they are done. The caller must not
+/// write the rows exchanged in between. Exchanges begun in the same order on
+/// every rank may be in flight together and end in any order. A Pending
+/// dropped unfinished completes its messages and writes nothing.
 
 #include <algorithm>
 #include <cstring>
@@ -87,10 +90,10 @@ KOKKOS_INLINE_FUNCTION T combine(T a, T b, Op op) {
   return a;
 }
 
-// For shared entity i (entity first + i): the holders' values in ascending
-// rank order, its own (rank me) in its place; holders other than me are
-// rows offsets(i) .. offsets(i + 1) of `ranks`, their values at rows `at` of
-// the receive buffer.
+/// For shared entity i (entity first + i): the holders' values in ascending
+/// rank order, its own (rank me) in its place; holders other than me are
+/// rows offsets(i) .. offsets(i + 1) of `ranks`, their values at rows `at` of
+/// the receive buffer.
 template <class T, class MemSpace>
 void combine_rows(const View2<T, MemSpace>& values, LO first, const View1<const Offset, MemSpace>& offsets,
                   const View1<const int, MemSpace>& ranks, const Kokkos::View<const LO*, MemSpace>& at,
@@ -126,10 +129,10 @@ void combine_rows(const View2<T, MemSpace>& values, LO first, const View1<const 
 template <class MemSpace>
 class HaloExchange {
  public:
-  // Collective: ghost holders tell each owner which of its entities they
-  // hold. Throws std::invalid_argument if the mesh has no sharing fields on
-  // `dim` (it was not built by build_local_part) or `dim` is out of range,
-  // and on every rank if a rank holds a ghost its owner does not own.
+  /// Collective: ghost holders tell each owner which of its entities they
+  /// hold. Throws std::invalid_argument if the mesh has no sharing fields on
+  /// `dim` (it was not built by build_local_part) or `dim` is out of range,
+  /// and on every rank if a rank holds a ghost its owner does not own.
   HaloExchange(const Comm& comm, const Mesh<MemSpace>& mesh, int dim) : dim_(dim), me_(comm.rank()) {
     if (dim < 0 || dim > 3) throw std::invalid_argument("HaloExchange: dimension " + std::to_string(dim));
     const SegmentTable& t = mesh.segment_table(dim);
@@ -320,8 +323,8 @@ class HaloExchange {
   Lids combine_at_;
 };
 
-// An exchange begun and not yet ended. It holds the values' View, its
-// buffers and its messages, so it does not depend on the HaloExchange.
+/// An exchange begun and not yet ended. It holds the values' View, its
+/// buffers and its messages, so it does not depend on the HaloExchange.
 template <class MemSpace>
 template <class T>
 class HaloExchange<MemSpace>::Pending {
@@ -351,17 +354,17 @@ class HaloExchange<MemSpace>::Pending {
   }
   Pending(const Pending&) = delete;
   Pending& operator=(const Pending&) = delete;
-  ~Pending() = default;  // the requests wait for their messages
+  ~Pending() = default;  ///< the requests wait for their messages
 
-  // Advances the messages; true when all are done (or the exchange ended).
+  /// Advances the messages; true when all are done (or the exchange ended).
   bool test() {
     bool done = true;
     for (Request& q : r_) done = q.test() && done;
     return done;
   }
 
-  // Waits, then writes the rows received. Throws std::logic_error if the
-  // exchange has ended or was moved from.
+  /// Waits, then writes the rows received. Throws std::logic_error if the
+  /// exchange has ended or was moved from.
   void end() {
     if (!active_) throw std::logic_error("HaloExchange::Pending::end: the exchange has ended or was moved from");
     active_ = false;
@@ -390,7 +393,7 @@ class HaloExchange<MemSpace>::Pending {
   LO first_ = 0;
   int me_ = 0;
   bool active_ = false;
-  std::vector<Request> r_;  // last, so it is destroyed (and waits) before the buffers
+  std::vector<Request> r_;  ///< last, so it is destroyed (and waits) before the buffers
 };
 
 }  // namespace soma

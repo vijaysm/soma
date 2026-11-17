@@ -4,13 +4,14 @@
 #ifndef SOMA_CORE_SETS_HPP_
 #define SOMA_CORE_SETS_HPP_
 
-// Entity sets: groups of entities and of other sets, as MOAB's meshsets.
-// Membership is one row per set and field slot (dimensions 0 to 3, then the
-// sets): sorted, unique ids held in the smallest of the forms of
-// soma/core/lid_runs.hpp (full, intervals or list), readable on the device
-// through SetsView.
-// Flags, the file order of ordered sets and the parent/child links stay on the
-// host. Sets are made by SetBuilder (soma/core/set_builder.hpp).
+/// \file
+/// Entity sets: groups of entities and of other sets, as MOAB's meshsets.
+/// Membership is one row per set and field slot (dimensions 0 to 3, then the
+/// sets): sorted, unique ids held in the smallest of the forms of
+/// soma/core/lid_runs.hpp (full, intervals or list), readable on the device
+/// through SetsView.
+/// Flags, the file order of ordered sets and the parent/child links stay on the
+/// host. Sets are made by SetBuilder (soma/core/set_builder.hpp).
 
 #include <algorithm>
 #include <array>
@@ -33,15 +34,15 @@
 
 namespace soma {
 
-// MOAB's meshset flags as a set keeps them; the file's ranged-storage bit
-// (0x8) is not kept.
+/// MOAB's meshset flags as a set keeps them; the file's ranged-storage bit
+/// (0x8) is not kept.
 inline constexpr std::uint8_t set_track_owner = 0x1;
 inline constexpr std::uint8_t set_unique = 0x2;
 inline constexpr std::uint8_t set_ordered = 0x4;
 inline constexpr std::uint8_t set_flag_bits = 0x7;
 
-// A member: an entity (slot 0 to 3 and its local id) or a set (set_dim and its
-// index).
+/// A member: an entity (slot 0 to 3 and its local id) or a set (set_dim and its
+/// index).
 struct SetEntry {
   int slot = 0;
   LO lid = invalid_lo;
@@ -49,33 +50,33 @@ struct SetEntry {
   friend auto operator<=>(const SetEntry&, const SetEntry&) = default;
 };
 
-// Members of a dimension a mirror did not take were asked for.
+/// Members of a dimension a mirror did not take were asked for.
 class MissingSetMembers : public std::logic_error {
  public:
   using std::logic_error::logic_error;
 };
 
 namespace detail {
-// Indexes a pointer with operator(), as the run search expects.
+/// Indexes a pointer with operator(), as the run search expects.
 struct PtrAt {
   const LO* p = nullptr;
   KOKKOS_INLINE_FUNCTION LO operator()(LO i) const { return p[i]; }
 };
 }  // namespace detail
 
-// One set's members in one slot, read in place: size sorted, unique ids out of
-// [0, count). r[k] is the k-th member (O(log runs) for intervals), row(lid)
-// its index or invalid_lo; the iterator walks the runs in order. Valid while
-// the EntitySets it came from lives.
+/// One set's members in one slot, read in place: size sorted, unique ids out of
+/// [0, count). r[k] is the k-th member (O(log runs) for intervals), row(lid)
+/// its index or invalid_lo; the iterator walks the runs in order. Valid while
+/// the EntitySets it came from lives.
 struct SetRow {
   DomainKind kind = DomainKind::list;
-  LO count = 0;  // entities of the slot (sets for set_dim)
-  LO size = 0;   // members
+  LO count = 0;  ///< entities of the slot (sets for set_dim)
+  LO size = 0;   ///< members
   LO runs = 0;
   const LO* a = nullptr;
   const LO* b = nullptr;
 
-  // The row whose stored ids, len of them, start at p.
+  /// The row whose stored ids, len of them, start at p.
   KOKKOS_INLINE_FUNCTION static SetRow of(DomainKind kind, LO count, const LO* p, LO len) {
     SetRow r;
     r.kind = kind;
@@ -139,14 +140,14 @@ struct SetRow {
     const LO* a_ = nullptr;
     const LO* b_ = nullptr;
     LO k_ = 0;
-    LO run_ = 0;  // the run of k_ (intervals)
+    LO run_ = 0;  ///< the run of k_ (intervals)
   };
   KOKKOS_INLINE_FUNCTION iterator begin() const { return iterator(kind, runs, a, b, 0); }
   KOKKOS_INLINE_FUNCTION iterator end() const { return iterator(kind, runs, a, b, size); }
 };
 
 namespace detail {
-// The runs of a row, read without listing its members.
+/// The runs of a row, read without listing its members.
 inline std::vector<Interval> runs_of(const SetRow& r) {
   std::vector<Interval> out;
   switch (r.kind) {
@@ -164,8 +165,8 @@ inline std::vector<Interval> runs_of(const SetRow& r) {
 }
 }  // namespace detail
 
-// Kernel handle; valid while the EntitySets it came from lives. Rows exist for
-// the slots the sets hold (EntitySets::has_members).
+/// Kernel handle; valid while the EntitySets it came from lives. Rows exist for
+/// the slots the sets hold (EntitySets::has_members).
 template <class MemSpace>
 struct SetsView {
   LO count = 0;
@@ -218,25 +219,25 @@ class EntitySets {
   }
 
   LO count() const noexcept { return count_; }
-  // Strictly increasing; the file ids of sets read from a file.
+  /// Strictly increasing; the file ids of sets read from a file.
   View1<const GO, MemSpace> gid() const noexcept { return gid_; }
 
-  // False for a dimension that a mirror did not take; the sets slot is always
-  // held.
+  /// False for a dimension that a mirror did not take; the sets slot is always
+  /// held.
   bool has_members(int slot) const {
     check_slot(slot);
     return slots_[static_cast<std::size_t>(slot)].present;
   }
-  // Storage of one slot: the form of each row (a DomainKind), count + 1
-  // offsets into data, and the stored ids of every row; none at all when there
-  // are no sets. entities() is the count the rows are out of. Throws
-  // MissingSetMembers for a slot the sets do not hold.
+  /// Storage of one slot: the form of each row (a DomainKind), count + 1
+  /// offsets into data, and the stored ids of every row; none at all when there
+  /// are no sets. entities() is the count the rows are out of. Throws
+  /// MissingSetMembers for a slot the sets do not hold.
   View1<const std::uint8_t, MemSpace> kinds(int slot) const { return held(slot).kinds; }
   View1<const Offset, MemSpace> offsets(int slot) const { return held(slot).offsets; }
   View1<const LO, MemSpace> data(int slot) const { return held(slot).data; }
   LO entities(int slot) const { return held(slot).entities; }
 
-  // A view of temporary sets would dangle, so that overload is deleted.
+  /// A view of temporary sets would dangle, so that overload is deleted.
   SetsView<MemSpace> view() const& {
     SetsView<MemSpace> v;
     v.count = count_;
@@ -251,12 +252,12 @@ class EntitySets {
   }
   SetsView<MemSpace> view() const&& = delete;
 
-  // Host queries. A set is named by its index, 0 to count() - 1.
+  /// Host queries. A set is named by its index, 0 to count() - 1.
   std::uint8_t flags(LO set) const { return flags_[index(set)]; }
   bool ordered(LO set) const { return (flags(set) & set_ordered) != 0; }
 
-  // Sorted, unique local ids (set indices for set_dim) of one slot, in host
-  // memory; std::vector<LO>(r.begin(), r.end()) lists them.
+  /// Sorted, unique local ids (set indices for set_dim) of one slot, in host
+  /// memory; std::vector<LO>(r.begin(), r.end()) lists them.
   SetRow members_of(LO set, int slot) const {
     const Slot& s = held(slot);
     const std::size_t i = index(set);
@@ -265,9 +266,9 @@ class EntitySets {
                       static_cast<LO>(s.host_offsets(i + 1) - b));
   }
 
-  // Contents of an ordered set in their stored order, repeats included. Throws
-  // std::logic_error for an unordered set, and MissingSetMembers when an entry
-  // is on a dimension the sets do not hold.
+  /// Contents of an ordered set in their stored order, repeats included. Throws
+  /// std::logic_error for an unordered set, and MissingSetMembers when an entry
+  /// is on a dimension the sets do not hold.
   std::span<const SetEntry> sequence(LO set) const {
     const std::size_t i = index(set);
     if (!ordered(set)) {
@@ -292,8 +293,8 @@ class EntitySets {
     return static_cast<LO>(it - first);
   }
 
-  // Local ids of dimension dim in the set and in every set it contains,
-  // directly or not; sorted and unique. Containment cycles are followed once.
+  /// Local ids of dimension dim in the set and in every set it contains,
+  /// directly or not; sorted and unique. Containment cycles are followed once.
   std::vector<LO> members_recursive(LO set, int dim) const {
     if (dim < 0 || dim > 3) {
       throw std::invalid_argument("EntitySets: dimension " + std::to_string(dim) +
@@ -321,10 +322,10 @@ class EntitySets {
     return out;
   }
 
-  // The same sets with the members of one dimension renumbered: lid l becomes
-  // new_lid[l], out of count entities. Rows are sorted and take their form
-  // again; sequences keep their order. A member with no new lid (invalid_lo)
-  // throws std::logic_error, or with drop leaves the set, sequences included.
+  /// The same sets with the members of one dimension renumbered: lid l becomes
+  /// new_lid[l], out of count entities. Rows are sorted and take their form
+  /// again; sequences keep their order. A member with no new lid (invalid_lo)
+  /// throws std::logic_error, or with drop leaves the set, sequences included.
   EntitySets renumbered(int dim, const std::vector<LO>& new_lid, LO count, bool drop = false) const {
     (void)held(dim);
     const auto map = [&](LO l) {
@@ -373,8 +374,8 @@ class EntitySets {
     return out;
   }
 
-  // keep[k] selects the slots to copy; the sets slot is always copied. With
-  // alias the Views are shared where Dst can use them, as for the mesh.
+  /// keep[k] selects the slots to copy; the sets slot is always copied. With
+  /// alias the Views are shared where Dst can use them, as for the mesh.
   template <class Dst>
   EntitySets<Dst> mirror(const std::array<bool, 4>& keep, bool alias) const {
     EntitySets<Dst> out;
@@ -419,8 +420,8 @@ class EntitySets {
     View1<Offset, Kokkos::HostSpace> host_offsets;
     View1<LO, Kokkos::HostSpace> host_data;
 
-    // Rows given as sorted, disjoint, merged runs of ids out of count, each
-    // held in its smallest form.
+    /// Rows given as sorted, disjoint, merged runs of ids out of count, each
+    /// held in its smallest form.
     static Slot packed(const std::vector<std::vector<Interval>>& rows, LO count) {
       const std::size_t n = rows.size();
       std::vector<std::uint8_t> kinds(n);
@@ -503,7 +504,7 @@ class EntitySets {
   View1<GO, Kokkos::HostSpace> host_gid_;
   std::array<Slot, num_field_slots> slots_{};
   std::vector<std::uint8_t> flags_;
-  std::vector<Offset> seq_offsets_;  // count + 1; rows of unordered sets are empty
+  std::vector<Offset> seq_offsets_;  ///< count + 1; rows of unordered sets are empty
   std::vector<SetEntry> seq_;
   std::vector<Offset> child_offsets_;
   std::vector<LO> children_;

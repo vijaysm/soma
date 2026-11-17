@@ -4,14 +4,15 @@
 #ifndef SOMA_CORE_SFC_HPP_
 #define SOMA_CORE_SFC_HPP_
 
-// Hilbert curve keys, used to order entities so that neighbours in space are
-// close in memory. The index of a cell follows Skilling's transpose algorithm
-// (J. Skilling, "Programming the Hilbert curve", AIP Conf. Proc. 707, 2004):
-// the cell coordinates are turned into the transposed Hilbert index by Gray
-// coding in place, and the bits are then interleaved. At the full width of two
-// or three axes, which mesh keys use, the host follows the same curve by state
-// tables instead, several levels a step. Everything is allocation-free, and
-// everything but KeyBox::make, which runs on the host, works in device code.
+/// \file
+/// Hilbert curve keys, used to order entities so that neighbours in space are
+/// close in memory. The index of a cell follows Skilling's transpose algorithm
+/// (J. Skilling, "Programming the Hilbert curve", AIP Conf. Proc. 707, 2004):
+/// the cell coordinates are turned into the transposed Hilbert index by Gray
+/// coding in place, and the bits are then interleaved. At the full width of two
+/// or three axes, which mesh keys use, the host follows the same curve by state
+/// tables instead, several levels a step. Everything is allocation-free, and
+/// everything but KeyBox::make, which runs on the host, works in device code.
 
 #include <array>
 #include <cmath>
@@ -24,18 +25,18 @@
 
 namespace soma::sfc {
 
-// Bits per axis of a curve over n axes: the most that fit both a 64-bit key
-// and a 32-bit cell coordinate, so 32 for one or two axes and 21 for three.
+/// Bits per axis of a curve over n axes: the most that fit both a 64-bit key
+/// and a 32-bit cell coordinate, so 32 for one or two axes and 21 for three.
 KOKKOS_INLINE_FUNCTION constexpr int bits_per_axis(int n) { return n == 3 ? 21 : 32; }
 
-// The last cell along an axis of a curve over n axes.
+/// The last cell along an axis of a curve over n axes.
 KOKKOS_INLINE_FUNCTION constexpr std::uint32_t max_cell(int n) {
   return static_cast<std::uint32_t>((std::uint64_t{1} << bits_per_axis(n)) - 1);
 }
 
 namespace detail {
 
-// Spreads the low 32 (21) bits of v so that bit b lands on bit 2b (3b).
+/// Spreads the low 32 (21) bits of v so that bit b lands on bit 2b (3b).
 KOKKOS_INLINE_FUNCTION std::uint64_t spread2(std::uint64_t v) {
   v &= 0xFFFFFFFFULL;
   v = (v | v << 16) & 0x0000FFFF0000FFFFULL;
@@ -54,9 +55,9 @@ KOKKOS_INLINE_FUNCTION std::uint64_t spread3(std::uint64_t v) {
   return (v | v << 2) & 0x1249249249249249ULL;
 }
 
-// The transpose steps over N axes known at compile time, so that x stays in
-// registers. They select with masks, not branches: the bits of a cell are
-// close to random, so branches on them mispredict.
+/// The transpose steps over N axes known at compile time, so that x stays in
+/// registers. They select with masks, not branches: the bits of a cell are
+/// close to random, so branches on them mispredict.
 template <int N>
 KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_transpose(const std::uint32_t* c, int bits) {
   std::uint32_t x[N];
@@ -89,13 +90,13 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_transpose(const std::uint32_t* c, i
   }
 }
 
-// The curve at full width as a state machine over the levels, coarsest
-// first: in state s, the child cube c of a cube (its bits on the axes, the
-// first axis most significant, as in a Morton key) is digit[s][c] along the
-// curve, and is in state next[s][c]; the whole cube is in state 0. These are
-// the transpose's curve, read off it by visiting each state's cubes, the
-// state being the order in which a cube's children are visited (24 in three
-// dimensions, 4 in two); tests check the two agree.
+/// The curve at full width as a state machine over the levels, coarsest
+/// first: in state s, the child cube c of a cube (its bits on the axes, the
+/// first axis most significant, as in a Morton key) is digit[s][c] along the
+/// curve, and is in state next[s][c]; the whole cube is in state 0. These are
+/// the transpose's curve, read off it by visiting each state's cubes, the
+/// state being the order in which a cube's children are visited (24 in three
+/// dimensions, 4 in two); tests check the two agree.
 inline constexpr std::uint8_t digit3[24][8] = {
     {0, 1, 3, 2, 7, 6, 4, 5}, {0, 7, 1, 6, 3, 4, 2, 5}, {0, 1, 7, 6, 3, 2, 4, 5}, {6, 1, 5, 2, 7, 0, 4, 3},
     {4, 3, 5, 2, 7, 0, 6, 1}, {4, 5, 3, 2, 7, 6, 0, 1}, {0, 7, 3, 4, 1, 6, 2, 5}, {0, 3, 7, 4, 1, 2, 6, 5},
@@ -115,8 +116,8 @@ inline constexpr std::uint8_t next3[24][8] = {
 inline constexpr std::uint8_t digit2[4][4] = {{0, 1, 3, 2}, {0, 3, 1, 2}, {2, 1, 3, 0}, {2, 3, 1, 0}};
 inline constexpr std::uint8_t next2[4][4] = {{1, 0, 2, 0}, {0, 3, 1, 1}, {2, 2, 0, 3}, {3, 1, 3, 2}};
 
-// Several levels a step: in state s, the Morton digits c of `levels` levels
-// give an entry (digits << state bits) | next state, digits `levels` * N wide.
+/// Several levels a step: in state s, the Morton digits c of `levels` levels
+/// give an entry (digits << state bits) | next state, digits `levels` * N wide.
 template <int N, int levels>
 constexpr auto hilbert_steps() {
   constexpr int children = 1 << N, entries = 1 << (N * levels), states = N == 3 ? 24 : 4;
@@ -136,10 +137,10 @@ constexpr auto hilbert_steps() {
   }
   return out;
 }
-inline constexpr auto steps3 = hilbert_steps<3, 3>();  // 21 levels: seven of three
-inline constexpr auto steps2 = hilbert_steps<2, 4>();  // 32 levels: eight of four
+inline constexpr auto steps3 = hilbert_steps<3, 3>();  ///< 21 levels: seven of three
+inline constexpr auto steps2 = hilbert_steps<2, 4>();  ///< 32 levels: eight of four
 
-// The full-width key by the tables, from the cell's Morton key.
+/// The full-width key by the tables, from the cell's Morton key.
 inline std::uint64_t hilbert_by_steps3(const std::uint32_t* c) {
   const std::uint64_t m = spread3(c[0]) << 2 | spread3(c[1]) << 1 | spread3(c[2]);
   std::uint64_t key = 0;
@@ -180,10 +181,10 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int b
 
 }  // namespace detail
 
-// Index along the Hilbert curve of the cell c[0..n), which has `bits` bits per
-// axis (n in 1..3, bits in 1..32, n * bits <= 64; asserted in debug builds).
-// The curve starts at the origin and consecutive indexes are cells that differ
-// by one step along one axis.
+/// Index along the Hilbert curve of the cell c[0..n), which has `bits` bits per
+/// axis (n in 1..3, bits in 1..32, n * bits <= 64; asserted in debug builds).
+/// The curve starts at the origin and consecutive indexes are cells that differ
+/// by one step along one axis.
 KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int n, int bits) {
   KOKKOS_ASSERT(n >= 1 && n <= 3);
   KOKKOS_ASSERT(bits >= 1 && bits <= 32);
@@ -193,23 +194,23 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_index(const std::uint32_t* c, int n
   return detail::hilbert_index<3>(c, bits);
 }
 
-// Maps a point of a bounding box to a cell of a grid with bits_per_axis(n)
-// bits per axis. Only the n axes on which the box has extent take part, so a
-// planar mesh gets a 2D curve and a single point gets key 0. An axis whose
-// extent is at most one cell of the widest axis, on the curve over every axis
-// with extent, is dropped too: it could change no key. Every kept axis is
-// divided by the widest extent, so the grid covers a cube and keeps the shape
-// of the mesh: a thin axis is not stretched over the whole grid. When an
-// extent overflows, every coordinate is halved first (`scale`), which is exact
-// for values that large.
+/// Maps a point of a bounding box to a cell of a grid with bits_per_axis(n)
+/// bits per axis. Only the n axes on which the box has extent take part, so a
+/// planar mesh gets a 2D curve and a single point gets key 0. An axis whose
+/// extent is at most one cell of the widest axis, on the curve over every axis
+/// with extent, is dropped too: it could change no key. Every kept axis is
+/// divided by the widest extent, so the grid covers a cube and keeps the shape
+/// of the mesh: a thin axis is not stretched over the whole grid. When an
+/// extent overflows, every coordinate is halved first (`scale`), which is exact
+/// for values that large.
 struct KeyBox {
   int n = 0;
   int axis[3] = {0, 0, 0};
   Real scale = 1;
-  Real lo[3] = {0, 0, 0};  // scaled
-  Real extent = 0;  // scaled; the widest axis, shared by every kept axis
+  Real lo[3] = {0, 0, 0};  ///< scaled
+  Real extent = 0;  ///< scaled; the widest axis, shared by every kept axis
 
-  // lo and hi are the finite box corners. Host only.
+  /// lo and hi are the finite box corners. Host only.
   static KeyBox make(const Real* lo, const Real* hi) {
     KeyBox b;
     for (int d = 0; d < 3; ++d) {
@@ -239,9 +240,9 @@ struct KeyBox {
   }
 };
 
-// floor(t * last) for t = (v - lo) / extent in [0, 1]; values outside the box
-// (and NaN) clamp. Dividing, rather than multiplying by 1 / extent, keeps
-// subnormal extents, whose reciprocal overflows, usable.
+/// floor(t * last) for t = (v - lo) / extent in [0, 1]; values outside the box
+/// (and NaN) clamp. Dividing, rather than multiplying by 1 / extent, keeps
+/// subnormal extents, whose reciprocal overflows, usable.
 KOKKOS_INLINE_FUNCTION std::uint32_t quantize(Real v, Real lo, Real extent, std::uint32_t last) {
   const Real t = (v - lo) / extent;
   if (!(t > 0)) return 0;
@@ -260,9 +261,9 @@ KOKKOS_INLINE_FUNCTION std::uint64_t hilbert_key(const KeyBox& box, Real x, Real
   return hilbert_index(c, box.n, bits_per_axis(box.n));
 }
 
-// The Morton (Z-order) key of a point in the same grid as hilbert_key: the
-// quantized coordinates of the kept axes interleaved, the first kept axis
-// most significant.
+/// The Morton (Z-order) key of a point in the same grid as hilbert_key: the
+/// quantized coordinates of the kept axes interleaved, the first kept axis
+/// most significant.
 KOKKOS_INLINE_FUNCTION std::uint64_t morton_key(const KeyBox& box, Real x, Real y, Real z) {
   if (box.n == 0) return 0;
   const Real p[3] = {x, y, z};

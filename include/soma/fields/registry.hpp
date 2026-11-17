@@ -4,41 +4,42 @@
 #ifndef SOMA_FIELDS_REGISTRY_HPP_
 #define SOMA_FIELDS_REGISTRY_HPP_
 
-// Host-side owner of fields. Type erasure exists only here; kernels receive
-// concretely typed Views. A field is defined by (name, value type, component
-// count, space); a second definition with all four equal is a FieldClash.
-// FieldIds are indices that are never reused, so a removed field leaves a gap.
-//
-// A family is the set of fields that share a name, a value type, a component
-// count, and a layout (the family key; the domain is not part of it). The
-// layout is in the key so that a per_entity field and a node field of one name
-// can coexist on the same entities, and the component count so that a
-// 1-component and a 3-component field of one name stay apart. A
-// variable-length field (VarField, added with add_var and fetched with
-// get_var) has component count 0 in its key, so it shares a family only with
-// variable-length fields; it takes no pending writes. Whether a field holds
-// handles (FieldOptions::handle) is part of the key too.
-// Members of a family must be disjoint: add() throws FieldOverlap otherwise
-// (the check is exact and only compares members that share a dimension). A
-// family resolves an entity to (member, row) through a per-dimension index that
-// is built on first use and rebuilt after the epoch or the membership changes;
-// see resolver.hpp. Fields of one family on the same dimension may differ in
-// domain only, so a family lookup returns the first value point of the entity.
-//
-// The registry holds the current mesh epoch. Mesh (or a test) sets it with
-// set_epoch(), and fetching a field whose domain was built against another
-// epoch throws StaleField. Kernels get Views and are not checked on the device.
-// The registry needs only entity counts (and optionally global ids) per
-// dimension, supplied through set_entities(); it never includes the mesh.
-//
-// Thread safety: none for mutation, and const members are not read-only. Lazy
-// family-index builds (family_handle(), lookup(), value(), family_members())
-// and the commit that mirror_into performs write to mutable members, so two
-// threads may not call into one registry unless it is only read after every
-// index has been built: take family_handle() for each family (or do one
-// lookup per family and dimension) before spawning threads, make no write,
-// add, remove, commit, mirror_into or set_epoch call meanwhile, and let the
-// threads use the handles' views or the Field Views rather than the registry.
+/// \file
+/// Host-side owner of fields. Type erasure exists only here; kernels receive
+/// concretely typed Views. A field is defined by (name, value type, component
+/// count, space); a second definition with all four equal is a FieldClash.
+/// FieldIds are indices that are never reused, so a removed field leaves a gap.
+///
+/// A family is the set of fields that share a name, a value type, a component
+/// count, and a layout (the family key; the domain is not part of it). The
+/// layout is in the key so that a per_entity field and a node field of one name
+/// can coexist on the same entities, and the component count so that a
+/// 1-component and a 3-component field of one name stay apart. A
+/// variable-length field (VarField, added with add_var and fetched with
+/// get_var) has component count 0 in its key, so it shares a family only with
+/// variable-length fields; it takes no pending writes. Whether a field holds
+/// handles (FieldOptions::handle) is part of the key too.
+/// Members of a family must be disjoint: add() throws FieldOverlap otherwise
+/// (the check is exact and only compares members that share a dimension). A
+/// family resolves an entity to (member, row) through a per-dimension index that
+/// is built on first use and rebuilt after the epoch or the membership changes;
+/// see resolver.hpp. Fields of one family on the same dimension may differ in
+/// domain only, so a family lookup returns the first value point of the entity.
+///
+/// The registry holds the current mesh epoch. Mesh (or a test) sets it with
+/// set_epoch(), and fetching a field whose domain was built against another
+/// epoch throws StaleField. Kernels get Views and are not checked on the device.
+/// The registry needs only entity counts (and optionally global ids) per
+/// dimension, supplied through set_entities(); it never includes the mesh.
+///
+/// Thread safety: none for mutation, and const members are not read-only. Lazy
+/// family-index builds (family_handle(), lookup(), value(), family_members())
+/// and the commit that mirror_into performs write to mutable members, so two
+/// threads may not call into one registry unless it is only read after every
+/// index has been built: take family_handle() for each family (or do one
+/// lookup per family and dimension) before spawning threads, make no write,
+/// add, remove, commit, mirror_into or set_epoch call meanwhile, and let the
+/// threads use the handles' views or the Field Views rather than the registry.
 
 #include <algorithm>
 #include <any>
@@ -81,11 +82,11 @@ struct RowScatter {
   KOKKOS_INLINE_FUNCTION void operator()(const std::size_t c) const { data(row, c) = values(c); }
 };
 
-// Writing one row of a field. Plain HostSpace memory is assigned directly: a
-// per-component deep_copy fences the execution space every time, which costs
-// tens of microseconds with threads. Another host-accessible space (managed or
-// unified memory) may have a kernel in flight on the device, so it gets one
-// fence and then the same direct writes. Anything else is staged.
+/// Writing one row of a field. Plain HostSpace memory is assigned directly: a
+/// per-component deep_copy fences the execution space every time, which costs
+/// tens of microseconds with threads. Another host-accessible space (managed or
+/// unified memory) may have a kernel in flight on the device, so it gets one
+/// fence and then the same direct writes. Anything else is staged.
 enum class RowWritePath { direct, fenced_direct, staged };
 
 template <class MemSpace>
@@ -104,8 +105,8 @@ void write_row_direct(const View2<T, MemSpace>& data, std::size_t row, std::span
   for (std::size_t c = 0; c < values.size(); ++c) data(row, c) = values[c];
 }
 
-// Stages the values in one host View, moves them with one deep_copy, and
-// scatters them into the row with one kernel.
+/// Stages the values in one host View, moves them with one deep_copy, and
+/// scatters them into the row with one kernel.
 template <class T, class MemSpace>
 void write_row_staged(const View2<T, MemSpace>& data, std::size_t row, std::span<const T> values) {
   View1<T, Kokkos::HostSpace> host(
@@ -144,10 +145,10 @@ class FieldRegistry {
   using GidView = View1<const GO, MemSpace>;
 
   FieldRegistry() = default;
-  FieldRegistry(const FieldRegistry&) = delete;  // Views would alias silently
+  FieldRegistry(const FieldRegistry&) = delete;  ///< Views would alias silently
   FieldRegistry& operator=(const FieldRegistry&) = delete;
-  // A View "move" leaves the source referencing the data, so move by swapping
-  // with an empty registry; the moved-from registry is genuinely empty.
+  /// A View "move" leaves the source referencing the data, so move by swapping
+  /// with an empty registry; the moved-from registry is genuinely empty.
   FieldRegistry(FieldRegistry&& other) noexcept { swap(other); }
   FieldRegistry& operator=(FieldRegistry&& other) noexcept {
     FieldRegistry tmp(std::move(other));
@@ -165,17 +166,17 @@ class FieldRegistry {
   }
 
   std::uint64_t epoch() const noexcept { return epoch_; }
-  // Public so that tests can drive it; Mesh::bump_epoch() is the only caller in
-  // production code.
+  /// Public so that tests can drive it; Mesh::bump_epoch() is the only caller in
+  /// production code.
   void set_epoch(std::uint64_t e) noexcept {
     if (e == epoch_) return;
     epoch_ = e;
     for (Family& f : families_) ++f.version;
   }
 
-  // Entity count and optional global ids of one slot (a dimension, or set_dim
-  // for the entity sets); used by add_tag and as the identity behind full
-  // domains the registry builds itself.
+  /// Entity count and optional global ids of one slot (a dimension, or set_dim
+  /// for the entity sets); used by add_tag and as the identity behind full
+  /// domains the registry builds itself.
   void set_entities(int dim, LO count, GidView gids = {}) {
     check_dim(dim);
     entities_[static_cast<std::size_t>(dim)] = Entities{count, gids, true};
@@ -183,7 +184,7 @@ class FieldRegistry {
   bool has_entities(int dim) const noexcept {
     return dim >= 0 && dim < num_field_slots && entities_[static_cast<std::size_t>(dim)].set;
   }
-  // True if a live field's domain has a block on dimension dim.
+  /// True if a live field's domain has a block on dimension dim.
   bool uses_dimension(int dim) const noexcept {
     for (const Entry& e : entries_) {
       if (!e.alive) continue;
@@ -214,10 +215,10 @@ class FieldRegistry {
     return f;
   }
 
-  // A variable-length field over a per_entity space: member r holds
-  // values[offsets[r] .. offsets[r + 1]). offsets has one entry more than the
-  // space has members, starts at 0, never decreases, and ends at
-  // values.size(). The default and the global value may have any length.
+  /// A variable-length field over a per_entity space: member r holds
+  /// values[offsets[r] .. offsets[r + 1]). offsets has one entry more than the
+  /// space has members, starts at 0, never decreases, and ends at
+  /// values.size(). The default and the global value may have any length.
   template <class T>
   VarField<T, MemSpace> add_var(std::string name, const Space<MemSpace>& space, std::span<const Offset> offsets,
                                 std::span<const T> values, FieldOptions<T> options = {}) {
@@ -252,7 +253,7 @@ class FieldRegistry {
     return f;
   }
 
-  // A dense MOAB-style tag: one value per entity of `dim`, on a full domain.
+  /// A dense MOAB-style tag: one value per entity of `dim`, on a full domain.
   template <class T>
   Field<T, MemSpace> add_tag(std::string name, int dim, int ncomp, FieldOptions<T> options = {}) {
     check_dim(dim);
@@ -266,22 +267,22 @@ class FieldRegistry {
                   std::move(options));
   }
 
-  // The field called `name`. Throws std::out_of_range when there is none and
-  // std::invalid_argument when several fields share the name (pick one with
-  // the overloads below) or when T is not the stored value type.
+  /// The field called `name`. Throws std::out_of_range when there is none and
+  /// std::invalid_argument when several fields share the name (pick one with
+  /// the overloads below) or when T is not the stored value type.
   template <class T>
   Field<T, MemSpace> get(std::string_view name) const {
     return fetch<T>(named(name));
   }
 
-  // The field called `name` that has members on dimension `dim`.
+  /// The field called `name` that has members on dimension `dim`.
   template <class T>
   Field<T, MemSpace> get(std::string_view name, int dim) const {
     return fetch<T>(named(name, dim));
   }
 
-  // The fixed-length field called `name` on `space`; std::invalid_argument when
-  // several (of other component counts or handle marks) are there.
+  /// The fixed-length field called `name` on `space`; std::invalid_argument when
+  /// several (of other component counts or handle marks) are there.
   template <class T>
   Field<T, MemSpace> get(std::string_view name, const Space<MemSpace>& space) const {
     const Entry* e = find(name, data_type_of<T>(), space);
@@ -294,8 +295,8 @@ class FieldRegistry {
     return fetch<T>(entry(id));
   }
 
-  // The variable-length fields, selected like get(). get() on one of them, or
-  // get_var() on a fixed-length field, throws std::invalid_argument.
+  /// The variable-length fields, selected like get(). get() on one of them, or
+  /// get_var() on a fixed-length field, throws std::invalid_argument.
   template <class T>
   VarField<T, MemSpace> get_var(std::string_view name) const {
     return fetch_var<T>(named(name));
@@ -316,13 +317,13 @@ class FieldRegistry {
 
   const FieldInfo& info(FieldId id) const { return entry(id).info; }
 
-  // True when `f` still refers to the storage this registry holds for its id.
-  // A commit that merges pending writes replaces the storage, so a handle kept
-  // across it is stale: it stays readable, but writes through it go to storage
-  // the registry no longer uses. Fetch the field again with get(). False for a
-  // removed field, an unknown id, a default-constructed field, and a handle
-  // from another registry (a mirror counts as another registry, aliasing or
-  // not). The mesh epoch is not judged here (get() does that).
+  /// True when `f` still refers to the storage this registry holds for its id.
+  /// A commit that merges pending writes replaces the storage, so a handle kept
+  /// across it is stale: it stays readable, but writes through it go to storage
+  /// the registry no longer uses. Fetch the field again with get(). False for a
+  /// removed field, an unknown id, a default-constructed field, and a handle
+  /// from another registry (a mirror counts as another registry, aliasing or
+  /// not). The mesh epoch is not judged here (get() does that).
   template <class T>
   bool is_current(const Field<T, MemSpace>& f) const noexcept {
     return current(f.id(), f.owner(), f.revision());
@@ -332,9 +333,9 @@ class FieldRegistry {
     return current(f.id(), f.owner(), f.revision());
   }
 
-  // Revision of the field's current storage (the value Field::revision() has
-  // after a fresh get()); empty for a removed or unknown id. A handle whose
-  // revision() differs is stale.
+  /// Revision of the field's current storage (the value Field::revision() has
+  /// after a fresh get()); empty for a removed or unknown id. A handle whose
+  /// revision() differs is stale.
   std::optional<std::uint64_t> current_revision(FieldId id) const noexcept {
     if (id >= entries_.size() || !entries_[id].alive) return std::nullopt;
     return entries_[id].info.revision;
@@ -350,9 +351,9 @@ class FieldRegistry {
 
   // ---- families -----------------------------------------------------------
 
-  // The family of fields called `name` with value type T, `ncomp` components
-  // (0: variable length), `layout`, and handle values or not. Throws
-  // std::out_of_range when no field ever created one.
+  /// The family of fields called `name` with value type T, `ncomp` components
+  /// (0: variable length), `layout`, and handle values or not. Throws
+  /// std::out_of_range when no field ever created one.
   template <class T>
   FamilyId family(std::string_view name, int ncomp, const Layout& layout = Layout::per_entity(),
                   bool handle = false) const {
@@ -364,10 +365,10 @@ class FieldRegistry {
     return id;
   }
 
-  // The legacy file format of a family's tag (TagFormat). set_tag_format
-  // throws std::invalid_argument for a storage class outside [-1, 3], bit or
-  // opaque values that are not u8 (bit: one component, nbits in [1, 8]), or
-  // nbits on a plain tag; both throw std::out_of_range for an unknown family.
+  /// The legacy file format of a family's tag (TagFormat). set_tag_format
+  /// throws std::invalid_argument for a storage class outside [-1, 3], bit or
+  /// opaque values that are not u8 (bit: one component, nbits in [1, 8]), or
+  /// nbits on a plain tag; both throw std::out_of_range for an unknown family.
   const TagFormat& tag_format(FamilyId fam) const { return family_at(fam).format; }
   void set_tag_format(FamilyId fam, TagFormat f) {
     const Family& family = family_at(fam);
@@ -389,37 +390,37 @@ class FieldRegistry {
     families_[fam].format = f;
   }
 
-  // Fields of a family that have members on `dim`, in lookup slot order (the
-  // slot that FamilyHit reports). Builds the index if needed.
+  /// Fields of a family that have members on `dim`, in lookup slot order (the
+  /// slot that FamilyHit reports). Builds the index if needed.
   std::vector<FieldId> family_members(FamilyId fam, int dim) const {
     return dim_index(fam, dim).slots;
   }
 
   DimIndexKind index_kind(FamilyId fam, int dim) const { return dim_index(fam, dim).kind; }
 
-  // Number of dimension indexes built so far (a cache probe for tests).
+  /// Number of dimension indexes built so far (a cache probe for tests).
   std::uint64_t index_builds() const noexcept { return index_builds_; }
 
-  // Handle on the family's current indexes, for kernels: handle.view() is the
-  // device-copyable lookup. The handle keeps those indexes alive and is not
-  // updated by later changes to the family (see FamilyHandle).
+  /// Handle on the family's current indexes, for kernels: handle.view() is the
+  /// device-copyable lookup. The handle keeps those indexes alive and is not
+  /// updated by later changes to the family (see FamilyHandle).
   FamilyHandle<MemSpace> family_handle(FamilyId fam) const {
     std::array<typename FamilyHandle<MemSpace>::Index, num_field_slots> index;
     for (std::size_t d = 0; d < index.size(); ++d) index[d] = dim_index_ptr(fam, static_cast<int>(d));
     return FamilyHandle<MemSpace>(std::move(index));
   }
 
-  // Host lookup of one entity: member slot and first row.
+  /// Host lookup of one entity: member slot and first row.
   FamilyHit lookup(FamilyId fam, int dim, LO lid) const {
     return dim_index(fam, dim).host_view().lookup(lid);
   }
 
-  // Host read of component `comp` at the first value point of (dim, lid): the
-  // stored value, or the family default (the first member's default value, or
-  // zero) when no member has the entity. A convenience path: every call
-  // fetches the field through std::any, tens of nanoseconds against about one
-  // for a raw View read. Bulk or kernel access should take a family_handle()
-  // and read the field Views directly.
+  /// Host read of component `comp` at the first value point of (dim, lid): the
+  /// stored value, or the family default (the first member's default value, or
+  /// zero) when no member has the entity. A convenience path: every call
+  /// fetches the field through std::any, tens of nanoseconds against about one
+  /// for a raw View read. Bulk or kernel access should take a family_handle()
+  /// and read the field Views directly.
   template <class T>
   T value(FamilyId fam, int dim, LO lid, int comp = 0) const {
     static_assert(Kokkos::SpaceAccessibility<Kokkos::HostSpace, MemSpace>::accessible,
@@ -437,7 +438,7 @@ class FieldRegistry {
     return T{};
   }
 
-  // Values of component `comp` for a list of entities (dim, lid), host side.
+  /// Values of component `comp` for a list of entities (dim, lid), host side.
   template <class T>
   void gather(FamilyId fam, std::span<const std::pair<int, LO>> entities, int comp,
               std::span<T> out) const {
@@ -452,16 +453,16 @@ class FieldRegistry {
 
   // ---- sparse growth: pending writes and commit --------------------------
 
-  // Host write of one entity's values (ncomp of them) into a per_entity field
-  // with one block. A member entity is written straight into the data, in the
-  // storage that `id` names now: a Field handle taken before a commit points at
-  // replaced storage, so check is_current() on handles kept across commits.
-  // A non-member of a subset field is recorded in a sorted host buffer and
-  // joins the domain at the next commit, which every mirror of the field
-  // performs first. A field over a full domain has no non-members.
-  // Throws FieldOverlap when the entity is a member of another field of the
-  // same family, or has a pending write in one: such a write could never be
-  // committed. A throw buffers nothing.
+  /// Host write of one entity's values (ncomp of them) into a per_entity field
+  /// with one block. A member entity is written straight into the data, in the
+  /// storage that `id` names now: a Field handle taken before a commit points at
+  /// replaced storage, so check is_current() on handles kept across commits.
+  /// A non-member of a subset field is recorded in a sorted host buffer and
+  /// joins the domain at the next commit, which every mirror of the field
+  /// performs first. A field over a full domain has no non-members.
+  /// Throws FieldOverlap when the entity is a member of another field of the
+  /// same family, or has a pending write in one: such a write could never be
+  /// committed. A throw buffers nothing.
   template <class T>
   void set_pending(FieldId id, LO lid, std::span<const T> values) {
     Entry& e = entry_mut(id);
@@ -493,8 +494,8 @@ class FieldRegistry {
     using Buffer = std::map<LO, std::vector<T>>;
     const Buffer* held = e.pending.has_value() ? std::any_cast<Buffer>(&e.pending) : nullptr;
     if (held == nullptr || held->find(lid) == held->end()) check_free(e, lid);
-    // Everything that allocates happens before the buffer is touched, so a
-    // throw leaves the old buffer and its count as they were.
+    /// Everything that allocates happens before the buffer is touched, so a
+    /// throw leaves the old buffer and its count as they were.
     std::vector<T> value(values.begin(), values.end());
     if (held == nullptr) {
       Buffer fresh;
@@ -512,30 +513,30 @@ class FieldRegistry {
     e.pending_count = std::any_cast<Buffer&>(e.pending).size();
   }
 
-  // Drops the buffered writes of one field. Data already written to member
-  // rows is not affected.
+  /// Drops the buffered writes of one field. Data already written to member
+  /// rows is not affected.
   void discard_pending(FieldId id) {
     Entry& e = entry_mut(id);
     e.pending.reset();
     e.pending_count = 0;
   }
 
-  // Entities waiting to be merged into the field's domain.
+  /// Entities waiting to be merged into the field's domain.
   std::size_t pending_count(FieldId id) const { return entry(id).pending_count; }
 
-  // Merges the pending writes of one field into a new domain and data. The
-  // field keeps its id and its mesh epoch; its revision advances. Field handles
-  // taken earlier then refer to the old storage and report is_current() ==
-  // false; fetch the field again with get(). Idempotent and cheap when nothing
-  // is pending. If the grown domain would overlap another member of the family,
-  // FieldOverlap is thrown and the field keeps its previous domain, data, and
-  // pending buffer.
+  /// Merges the pending writes of one field into a new domain and data. The
+  /// field keeps its id and its mesh epoch; its revision advances. Field handles
+  /// taken earlier then refer to the old storage and report is_current() ==
+  /// false; fetch the field again with get(). Idempotent and cheap when nothing
+  /// is pending. If the grown domain would overlap another member of the family,
+  /// FieldOverlap is thrown and the field keeps its previous domain, data, and
+  /// pending buffer.
   void commit(FieldId id) { commit_entry(entry_mut(id)); }
 
-  // Throws StaleField if any live field is stale, like commit on that field.
+  /// Throws StaleField if any live field is stale, like commit on that field.
   void commit_all() { commit_everything(); }
 
-  // Frees the storage. The id stays retired.
+  /// Frees the storage. The id stays retired.
   void remove(FieldId id) {
     Entry& e = entry_mut(id);
     Family& fam = families_[e.info.family];
@@ -546,28 +547,28 @@ class FieldRegistry {
     e.space = Space<MemSpace>();
   }
 
-  // Copies the selected fields into the empty registry `dst`, keeping their
-  // ids. The entity counts and global ids (set_entities) belong to whoever owns
-  // those arrays, so the caller sets them on `dst`. names: {"*"} = all. A field
-  // is skipped when any dimension it has members on is switched off in `dims`.
-  // Domains and spaces are mirrored once and shared by every field that shares
-  // them. Pending writes of the selected fields are committed first, so the
-  // mirror and the source agree; fields that are not selected are left alone,
-  // stale or with pending writes. A selected stale field throws StaleField.
-  // The selected fields are committed one after the other before anything is
-  // copied, and a commit is not undone: if a later selected field makes the
-  // call throw (for example by running out of memory), the earlier selected
-  // fields stay committed on the source, and `dst` is unchanged and can be used
-  // again. A stale selected field is found first and throws before any commit.
-  // Note that this const member commits on the source: the registry keeps its
-  // storage mutable for that reason. alias = false always allocates and copies
-  // (create_mirror + deep_copy). alias = true reuses storage when Dst can access
-  // it (create_mirror_view_and_copy): from host to host (or any pair of
-  // spaces with the same memory) the mirror then shares the Views of the
-  // source, so writes through either are seen by both, and the destination
-  // does not follow later commits on the source (a commit gives the source new
-  // storage; mirror again to see it). A destination that cannot access the
-  // source always gets its own copy.
+  /// Copies the selected fields into the empty registry `dst`, keeping their
+  /// ids. The entity counts and global ids (set_entities) belong to whoever owns
+  /// those arrays, so the caller sets them on `dst`. names: {"*"} = all. A field
+  /// is skipped when any dimension it has members on is switched off in `dims`.
+  /// Domains and spaces are mirrored once and shared by every field that shares
+  /// them. Pending writes of the selected fields are committed first, so the
+  /// mirror and the source agree; fields that are not selected are left alone,
+  /// stale or with pending writes. A selected stale field throws StaleField.
+  /// The selected fields are committed one after the other before anything is
+  /// copied, and a commit is not undone: if a later selected field makes the
+  /// call throw (for example by running out of memory), the earlier selected
+  /// fields stay committed on the source, and `dst` is unchanged and can be used
+  /// again. A stale selected field is found first and throws before any commit.
+  /// Note that this const member commits on the source: the registry keeps its
+  /// storage mutable for that reason. alias = false always allocates and copies
+  /// (create_mirror + deep_copy). alias = true reuses storage when Dst can access
+  /// it (create_mirror_view_and_copy): from host to host (or any pair of
+  /// spaces with the same memory) the mirror then shares the Views of the
+  /// source, so writes through either are seen by both, and the destination
+  /// does not follow later commits on the source (a commit gives the source new
+  /// storage; mirror again to see it). A destination that cannot access the
+  /// source always gets its own copy.
   template <class Dst>
   void mirror_into(FieldRegistry<Dst>& dst, const std::vector<std::string>& names,
                    const std::array<bool, num_field_slots>& dims, bool alias) const {
@@ -586,7 +587,7 @@ class FieldRegistry {
     for (Entry& e : entries_) {
       if (e.alive && selected(e, all, names, dims)) commit_entry(e);
     }
-    // Built aside and swapped in, so a throw leaves `dst` empty and reusable.
+    /// Built aside and swapped in, so a throw leaves `dst` empty and reusable.
     FieldRegistry<Dst> built;
     built.epoch_ = epoch_;
     for (const Family& f : families_) {
@@ -633,24 +634,24 @@ class FieldRegistry {
     dst.epoch_ = built.epoch_;
   }
 
-  // One slot renumbered: entity l becomes new_lid[l] (invalid_lo: gone) out of
-  // `count` entities; entities past new_lid.size() are new.
+  /// One slot renumbered: entity l becomes new_lid[l] (invalid_lo: gone) out of
+  /// `count` entities; entities past new_lid.size() are new.
   struct SlotRemap {
     std::vector<LO> new_lid;
     LO count = 0;
   };
 
-  // Every live field into the empty registry `dst`, whose entities (counts and
-  // gids, set_entities) the caller has set for the renumbered mesh, at `epoch`.
-  // A block on a renumbered slot keeps the members that survive, at their new
-  // lids; a block that held every entity holds every entity again, the new ones
-  // at the field's default (variable-length: its default, or no values). Other
-  // blocks keep their members; a block left without members stays, empty, so
-  // the field keeps its dimensions. Fields keep their ids and families; their
-  // revision advances, so handles taken earlier are no longer current. Pending
-  // writes are committed first. A stale field (of an earlier epoch) is carried
-  // as it is and stays stale. `info` is the renumbered mesh's (element_nodes
-  // layouts read it). A throw leaves `dst` empty and reusable.
+  /// Every live field into the empty registry `dst`, whose entities (counts and
+  /// gids, set_entities) the caller has set for the renumbered mesh, at `epoch`.
+  /// A block on a renumbered slot keeps the members that survive, at their new
+  /// lids; a block that held every entity holds every entity again, the new ones
+  /// at the field's default (variable-length: its default, or no values). Other
+  /// blocks keep their members; a block left without members stays, empty, so
+  /// the field keeps its dimensions. Fields keep their ids and families; their
+  /// revision advances, so handles taken earlier are no longer current. Pending
+  /// writes are committed first. A stale field (of an earlier epoch) is carried
+  /// as it is and stays stale. `info` is the renumbered mesh's (element_nodes
+  /// layouts read it). A throw leaves `dst` empty and reusable.
   void remap_into(FieldRegistry& dst, const std::array<std::optional<SlotRemap>, num_field_slots>& maps,
                   std::uint64_t epoch, const ElementInfo<MemSpace>& info = {}) const {
     if (!dst.entries_.empty()) throw std::logic_error("remap_into: the destination registry must be empty");
@@ -726,16 +727,16 @@ class FieldRegistry {
   struct Entry {
     FieldInfo info;
     Space<MemSpace> space;
-    std::any field;  // Field<T, MemSpace>
+    std::any field;  ///< Field<T, MemSpace>
     bool alive = false;
-    std::any pending{};  // std::map<LO, std::vector<T>>, sorted by entity
+    std::any pending{};  ///< std::map<LO, std::vector<T>>, sorted by entity
     std::size_t pending_count = 0;
   };
 
   struct FamilyKey {
     std::string name;
     DataType type = DataType::f64;
-    int ncomp = 1;  // 0: variable length
+    int ncomp = 1;  ///< 0: variable length
     bool handle = false;
     Layout layout{};
   };
@@ -744,18 +745,18 @@ class FieldRegistry {
     explicit Family(FamilyKey k) : key(std::move(k)) {}
     FamilyKey key;
     TagFormat format{};
-    std::vector<FieldId> members;  // live fields, in id order
-    std::uint64_t version = 1;     // bumped when the membership or the epoch changes
+    std::vector<FieldId> members;  ///< live fields, in id order
+    std::uint64_t version = 1;     ///< bumped when the membership or the epoch changes
     mutable std::array<std::shared_ptr<const detail::FamilyDimData<MemSpace>>, num_field_slots> index;
     mutable std::array<std::uint64_t, num_field_slots> built{};
   };
 
-  // The rows of every member of the new space, from the old one: new member r
-  // of block b takes the old rows of the entity it came from, or none (-1).
+  /// The rows of every member of the new space, from the old one: new member r
+  /// of block b takes the old rows of the entity it came from, or none (-1).
   struct RowMap {
-    std::vector<LO> old_begin;  // per new member, first old row or -1
-    std::vector<LO> new_begin;  // per new member, first new row
-    std::vector<LO> width;      // rows per new member
+    std::vector<LO> old_begin;  ///< per new member, first old row or -1
+    std::vector<LO> new_begin;  ///< per new member, first new row
+    std::vector<LO> width;      ///< rows per new member
   };
 
   static RowMap row_map(const Space<MemSpace>& from, const Space<MemSpace>& to,
@@ -858,7 +859,7 @@ class FieldRegistry {
     const std::vector<T>& def = old.default_value() ? *old.default_value() : none;
     std::vector<Offset> new_offs(static_cast<std::size_t>(out.space.rows()) + 1, 0);
     std::vector<T> new_vals;
-    // Members are visited in row order (blocks stacked, members sorted).
+    /// Members are visited in row order (blocks stacked, members sorted).
     for (std::size_t m = 0; m < rm.new_begin.size(); ++m) {
       for (LO r = 0; r < rm.width[m]; ++r) {
         const auto to = static_cast<std::size_t>(rm.new_begin[m] + r);
@@ -897,7 +898,7 @@ class FieldRegistry {
     return std::string(name(t)) + "x" + (ncomp == 0 ? std::string("*") : std::to_string(ncomp));
   }
 
-  // A copy of src in Dst, or src itself when alias is set and Dst can use it.
+  /// A copy of src in Dst, or src itself when alias is set and Dst can use it.
   template <class Out, class V>
   static Out copy_of(const V& src, bool alias) {
     if (alias) return Kokkos::create_mirror_view_and_copy(typename Out::memory_space{}, src);
@@ -914,9 +915,9 @@ class FieldRegistry {
     }
   }
 
-  // Throws what add() and add_var() throw for a field that cannot join the
-  // registry: no blocks, a stale domain, a clash, an overlap with its family,
-  // or too many members. Nothing is modified.
+  /// Throws what add() and add_var() throw for a field that cannot join the
+  /// registry: no blocks, a stale domain, a clash, an overlap with its family,
+  /// or too many members. Nothing is modified.
   void check_new(const std::string& name, DataType type, int ncomp, bool handle,
                  const Space<MemSpace>& space) const {
     if (space.domain().empty()) {
@@ -935,8 +936,8 @@ class FieldRegistry {
     check_member_limit(name, type, ncomp, handle, space);
   }
 
-  // Adds the checked field f (a Field or VarField with the next id), joining
-  // or creating its family. Nothing changes when it throws.
+  /// Adds the checked field f (a Field or VarField with the next id), joining
+  /// or creating its family. Nothing changes when it throws.
   void insert(std::string name, DataType type, int ncomp, bool handle, const Space<MemSpace>& space,
               std::any f) {
     const FamilyId existing = find_family(name, type, ncomp, handle, space.layout());
@@ -1053,8 +1054,8 @@ class FieldRegistry {
     return invalid_family;
   }
 
-  // Reserves room for one more element when the vector is full, so that the
-  // push_back that follows cannot throw. Doubles, to keep growth amortized.
+  /// Reserves room for one more element when the vector is full, so that the
+  /// push_back that follows cannot throw. Doubles, to keep growth amortized.
   template <class V>
   static void grow_for_one(V& v) {
     if (v.size() == v.capacity()) v.reserve(v.empty() ? 4 : 2 * v.size());
@@ -1067,8 +1068,8 @@ class FieldRegistry {
            describe(sp.layout()) + "}";
   }
 
-  // Throws FieldOverlap when `space` shares an entity with a live member of the
-  // family it would join. Nothing is modified.
+  /// Throws FieldOverlap when `space` shares an entity with a live member of the
+  /// family it would join. Nothing is modified.
   void check_disjoint(const std::string& name, DataType type, int ncomp, bool handle,
                       const Space<MemSpace>& space, FieldId skip = invalid_field) const {
     const FamilyId fid = find_family(name, type, ncomp, handle, space.layout());
@@ -1092,10 +1093,10 @@ class FieldRegistry {
     }
   }
 
-  // Throws FieldOverlap when `space` contains an entity that a live member of the
-  // family it would join has a pending write for: that write could then never
-  // be committed. Cost: one inverse-map lookup per pending entity. Nothing is
-  // modified.
+  /// Throws FieldOverlap when `space` contains an entity that a live member of the
+  /// family it would join has a pending write for: that write could then never
+  /// be committed. Cost: one inverse-map lookup per pending entity. Nothing is
+  /// modified.
   void check_pending(const std::string& name, DataType type, int ncomp, bool handle,
                      const Space<MemSpace>& space) const {
     const FamilyId fid = find_family(name, type, ncomp, handle, space.layout());
@@ -1121,9 +1122,9 @@ class FieldRegistry {
     }
   }
 
-  // Throws std::length_error when `space` would give its family more members on
-  // one dimension than the resolver can name (max_family_members). Nothing is
-  // modified.
+  /// Throws std::length_error when `space` would give its family more members on
+  /// one dimension than the resolver can name (max_family_members). Nothing is
+  /// modified.
   void check_member_limit(const std::string& name, DataType type, int ncomp, bool handle,
                           const Space<MemSpace>& space) const {
     const FamilyId fid = find_family(name, type, ncomp, handle, space.layout());
@@ -1157,8 +1158,8 @@ class FieldRegistry {
     return *dim_index_ptr(fid, dim);
   }
 
-  // The index is replaced, never modified, so handles that still hold the old
-  // one keep a consistent snapshot.
+  /// The index is replaced, never modified, so handles that still hold the old
+  /// one keep a consistent snapshot.
   const IndexPtr& dim_index_ptr(FamilyId fid, int dim) const {
     check_dim(dim);
     if (fid >= families_.size()) throw std::out_of_range("no family with id " + std::to_string(fid));
@@ -1189,9 +1190,9 @@ class FieldRegistry {
     return fam.index[d];
   }
 
-  // Throws FieldOverlap when another live member of e's family already holds
-  // entity `lid`, as a member row (one lookup in the family index of that
-  // dimension) or as a pending write (one map lookup per sibling).
+  /// Throws FieldOverlap when another live member of e's family already holds
+  /// entity `lid`, as a member row (one lookup in the family index of that
+  /// dimension) or as a pending write (one map lookup per sibling).
   void check_free(const Entry& e, LO lid) const {
     const int dim = e.space.domain().info(0).dim;
     for (const FieldId other : families_[e.info.family].members) {
@@ -1262,7 +1263,7 @@ class FieldRegistry {
     const DomainBlockInfo& bi = old_domain.info(0);
     const int ncomp = e.info.ncomp;
 
-    // Merged member list, sorted by entity; remember where each old row goes.
+    /// Merged member list, sorted by entity; remember where each old row goes.
     const std::vector<LO> old_members = old_domain.members(0);
     std::vector<LO> lids;
     lids.reserve(old_members.size() + buf.size());
@@ -1284,10 +1285,10 @@ class FieldRegistry {
     if (ent.set) gids = ent.gids;
     const auto domain = Domain<MemSpace>::from_list(bi.dim, bi.count, old_domain.epoch(), lids, gids);
     const Space<MemSpace> space(domain, Layout::per_entity());
-    // The checks in add() and set_pending() keep members and buffers disjoint, so
-    // this cannot fire through the public API today. It stays a thrown
-    // FieldOverlap rather than an assert so that a broken family invariant
-    // cannot corrupt a release build silently.
+    /// The checks in add() and set_pending() keep members and buffers disjoint, so
+    /// this cannot fire through the public API today. It stays a thrown
+    /// FieldOverlap rather than an assert so that a broken family invariant
+    /// cannot corrupt a release build silently.
     check_disjoint(e.info.name, e.info.type, ncomp, e.info.handle, space, e.info.id);
 
     const auto old_host = Kokkos::create_mirror_view_and_copy(Kokkos::HostSpace{}, old_field.view());
@@ -1302,9 +1303,9 @@ class FieldRegistry {
     }
     const View2<T, MemSpace> data = Kokkos::create_mirror_view_and_copy(MemSpace{}, merged);
 
-    // Everything that allocates happens before the first change to the entry,
-    // and the changes below cannot throw, so a failure leaves the entry as it
-    // was.
+    /// Everything that allocates happens before the first change to the entry,
+    /// and the changes below cannot throw, so a failure leaves the entry as it
+    /// was.
     Field<T, MemSpace> grown(e.info.id, space, data, old_field.default_value(),
                              old_field.global_value(), e.info.revision + 1, serial_);
     std::any grown_any(grown);
@@ -1328,8 +1329,8 @@ class FieldRegistry {
     return const_cast<Entry&>(std::as_const(*this).entry(id));
   }
 
-  // The fixed-length field of that name and type on the space. Fields that
-  // differ only by component count or handle mark are told apart by id only.
+  /// The fixed-length field of that name and type on the space. Fields that
+  /// differ only by component count or handle mark are told apart by id only.
   const Entry* find(std::string_view name, DataType type, const Space<MemSpace>& space) const {
     const Entry* found = nullptr;
     for (const Entry& e : entries_) {
@@ -1369,14 +1370,14 @@ class FieldRegistry {
     return std::any_cast<VarField<T, MemSpace>>(e.field);
   }
 
-  // Mutable because commit is logically const: it replaces storage by storage
-  // with the same observable content, and mirrors perform it on a const source.
+  /// Mutable because commit is logically const: it replaces storage by storage
+  /// with the same observable content, and mirrors perform it on a const source.
   mutable std::vector<Entry> entries_;
   mutable std::vector<Family> families_;
   mutable std::uint64_t index_builds_ = 0;
   std::uint64_t epoch_ = 1;
-  // Identifies this registry in the handles it hands out; moves carry it along
-  // with the storage. Never 0, which marks a handle that no registry made.
+  /// Identifies this registry in the handles it hands out; moves carry it along
+  /// with the storage. Never 0, which marks a handle that no registry made.
   std::uint64_t serial_ = next_serial();
   std::array<Entities, num_field_slots> entities_{};
 };

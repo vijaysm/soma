@@ -4,14 +4,15 @@
 #ifndef SOMA_TOPOLOGY_CANONICAL_HPP_
 #define SOMA_TOPOLOGY_CANONICAL_HPP_
 
-// Canonical sub-entity ("side") tables for fixed-topology elements.
-//
-// Values mirror moab::CN::SubEntityVertexIndices and are verified
-// positionally against it by tests/reference/test_canonical_moab.cpp. Vertex
-// order encodes the side's sense relative to the parent; never sort it.
-//
-// Written as switch statements returning values (no namespace-scope arrays) so
-// every function is callable from CUDA, HIP, and SYCL kernels.
+/// \file
+/// Canonical sub-entity ("side") tables for fixed-topology elements.
+///
+/// Values mirror moab::CN::SubEntityVertexIndices and are verified
+/// positionally against it by tests/reference/test_canonical_moab.cpp. Vertex
+/// order encodes the side's sense relative to the parent; never sort it.
+///
+/// Written as switch statements returning values (no namespace-scope arrays) so
+/// every function is callable from CUDA, HIP, and SYCL kernels.
 
 #include <cstdint>
 
@@ -69,7 +70,7 @@ KOKKOS_INLINE_FUNCTION constexpr int num_sides(Topology topo, int dim) noexcept 
   return 0;
 }
 
-// Side i of dimension dim. Returns a default SideDef when out of range.
+/// Side i of dimension dim. Returns a default SideDef when out of range.
 KOKKOS_INLINE_FUNCTION constexpr SideDef side(Topology topo, int dim, int i) noexcept {
   using detail::e;
   using detail::q;

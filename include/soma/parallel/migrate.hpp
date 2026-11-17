@@ -4,7 +4,8 @@
 #ifndef SOMA_PARALLEL_MIGRATE_HPP_
 #define SOMA_PARALLEL_MIGRATE_HPP_
 
-// Moving the elements of a distributed mesh between ranks with their closure.
+/// \file
+/// Moving the elements of a distributed mesh between ranks with their closure.
 
 #include <array>
 #include <cstddef>
@@ -19,22 +20,24 @@ namespace soma {
 
 namespace detail {
 
-// Where the entities of a distributed mesh go when each element of its
-// dimension goes to the ranks `to_ranks` lists for it, as rows over its lids
-// (`to_offsets` has count + 1 entries from 0). Each entity is placed by its
-// owner, and the others place nothing:
-//   an element         on the ranks listed for it;
-//   a lower entity     of a dimension given to the builder on any rank: on
-//                      every rank receiving all its corners;
-//   a vertex           on every rank receiving an entity it is a corner or a
-//                      node of.
-// What no rank receives stays with its owner. Collective. Throws
-// std::invalid_argument on every rank if a rank's rows do not cover its
-// elements or name a rank outside comm, or if the mesh has no sharing at
-// P > 1 (build_local_part gives it).
+/// Where the entities of a distributed mesh go when each element of its
+/// dimension goes to the ranks `to_ranks` lists for it, as rows over its lids
+/// (`to_offsets` has count + 1 entries from 0). Each entity is placed by its
+/// owner, and the others place nothing:
+/// ```
+///   an element         on the ranks listed for it;
+///   a lower entity     of a dimension given to the builder on any rank: on
+///                      every rank receiving all its corners;
+///   a vertex           on every rank receiving an entity it is a corner or a
+///                      node of.
+/// ```
+/// What no rank receives stays with its owner. Collective. Throws
+/// std::invalid_argument on every rank if a rank's rows do not cover its
+/// elements or name a rank outside comm, or if the mesh has no sharing at
+/// P > 1 (build_local_part gives it).
 struct Placement {
-  std::array<std::vector<std::size_t>, 4> offsets;  // count(d) + 1 each, empty above the mesh's dimension
-  std::array<std::vector<int>, 4> ranks;            // ascending within an entity
+  std::array<std::vector<std::size_t>, 4> offsets;  ///< count(d) + 1 each, empty above the mesh's dimension
+  std::array<std::vector<int>, 4> ranks;            ///< ascending within an entity
 
   [[nodiscard]] std::span<const int> of(int d, LO e) const {
     const auto& o = offsets[static_cast<std::size_t>(d)];
@@ -48,32 +51,32 @@ struct Placement {
 
 }  // namespace detail
 
-// Moves each element of the mesh's dimension to rank dest[e] (one per
-// element, by lid; a copy of a shared element follows its owner's) with its
-// closure, placed as detail::place_closure places it, and returns the new
-// part. Entities keep their gids, topology, corners and
-// nodes, vertices their coordinates; the dimensions given to the builder on
-// any rank are given again, the others are derived again with the graphs held
-// on any rank (derived gids do not depend on the partition), and
-// build_local_part resolves the sharing. Each entity's set memberships and
-// field values are those its owner held. Sets keep their gids, flags and
-// links, and an ordered set lists the entries of each owner in its order,
-// owners by rank, with its set entries as rank 0 has them. Fields keep their
-// layout, options and tag format; a field's domain on a dimension is full
-// where it was full on every rank, else the entities that had a value, and
-// on sets as before. Mesh values are copied. Collective; the mesh given is
-// not changed. Throws on every rank: std::invalid_argument for a dest
-// without one rank of comm per element, or sets, fields (beyond their values
-// on entities) or mesh values that differ between ranks; std::logic_error
-// for an edited mesh (compress it first).
+/// Moves each element of the mesh's dimension to rank dest[e] (one per
+/// element, by lid; a copy of a shared element follows its owner's) with its
+/// closure, placed as detail::place_closure places it, and returns the new
+/// part. Entities keep their gids, topology, corners and
+/// nodes, vertices their coordinates; the dimensions given to the builder on
+/// any rank are given again, the others are derived again with the graphs held
+/// on any rank (derived gids do not depend on the partition), and
+/// build_local_part resolves the sharing. Each entity's set memberships and
+/// field values are those its owner held. Sets keep their gids, flags and
+/// links, and an ordered set lists the entries of each owner in its order,
+/// owners by rank, with its set entries as rank 0 has them. Fields keep their
+/// layout, options and tag format; a field's domain on a dimension is full
+/// where it was full on every rank, else the entities that had a value, and
+/// on sets as before. Mesh values are copied. Collective; the mesh given is
+/// not changed. Throws on every rank: std::invalid_argument for a dest
+/// without one rank of comm per element, or sets, fields (beyond their values
+/// on entities) or mesh values that differ between ranks; std::logic_error
+/// for an edited mesh (compress it first).
 [[nodiscard]] HostMesh migrate(const Comm& comm, const HostMesh& mesh, std::span<const int> dest,
                                Ordering ordering = default_ordering);
 
-// Moves the owned elements of the mesh's dimension to the ranks
-// partition_by_curve gives them by their centroids (their corners' average),
-// with migrate: parts along the curve whose element counts differ by at most
-// one, whatever the partition given. Collective; throws as migrate and
-// partition_by_curve do.
+/// Moves the owned elements of the mesh's dimension to the ranks
+/// partition_by_curve gives them by their centroids (their corners' average),
+/// with migrate: parts along the curve whose element counts differ by at most
+/// one, whatever the partition given. Collective; throws as migrate and
+/// partition_by_curve do.
 [[nodiscard]] HostMesh rebalance(const Comm& comm, const HostMesh& mesh, Ordering ordering = default_ordering);
 
 }  // namespace soma

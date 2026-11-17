@@ -4,9 +4,10 @@
 #ifndef SOMA_TOPOLOGY_TRANSPOSE_HPP_
 #define SOMA_TOPOLOGY_TRANSPOSE_HPP_
 
-// Upward graphs as the transpose of a downward CSR: count with atomics, scan,
-// fill with atomic cursors, then sort each row. The fill order depends on the
-// threads; the sort by (source, local index) makes the result independent of it.
+/// \file
+/// Upward graphs as the transpose of a downward CSR: count with atomics, scan,
+/// fill with atomic cursors, then sort each row. The fill order depends on the
+/// threads; the sort by (source, local index) makes the result independent of it.
 
 #include <cstdint>
 #include <stdexcept>
@@ -22,7 +23,7 @@ namespace soma::topology {
 
 namespace detail {
 
-// Insertion sort of [b, e) by (target, code); rows are short.
+/// Insertion sort of [b, e) by (target, code); rows are short.
 template <class Targets, class Codes>
 KOKKOS_INLINE_FUNCTION void sort_row(const Targets& t, const Codes& c, Offset b, Offset e) {
   for (Offset i = b + 1; i < e; ++i) {
@@ -39,9 +40,9 @@ KOKKOS_INLINE_FUNCTION void sort_row(const Targets& t, const Codes& c, Offset b,
   }
 }
 
-// Exclusive scan of counts(0 .. n-1) into offsets(0 .. n), returning the total.
-// Sums in 64 bits and throws std::length_error if the total does not fit
-// Offset; offsets then holds truncated values and must not be used.
+/// Exclusive scan of counts(0 .. n-1) into offsets(0 .. n), returning the total.
+/// Sums in 64 bits and throws std::length_error if the total does not fit
+/// Offset; offsets then holds truncated values and must not be used.
 template <class ExecSpace, class Counts, class Offsets>
 Offset exclusive_scan(const ExecSpace& exec, const std::string& label, LO n, const Counts& counts,
                       const Offsets& offsets) {
@@ -62,10 +63,10 @@ Offset exclusive_scan(const ExecSpace& exec, const std::string& label, LO n, con
 
 }  // namespace detail
 
-// Transpose of a graph from rows = offsets.extent(0) - 1 sources to ntargets
-// targets. Row t of the result lists the sources s that list t, sorted by
-// (s, k), and codes holds k, the position of t in row s. Throws
-// std::length_error if a source row is longer than 256 (k must fit the code).
+/// Transpose of a graph from rows = offsets.extent(0) - 1 sources to ntargets
+/// targets. Row t of the result lists the sources s that list t, sorted by
+/// (s, k), and codes holds k, the position of t in row s. Throws
+/// std::length_error if a source row is longer than 256 (k must fit the code).
 template <class ExecSpace>
 Adjacency<typename ExecSpace::memory_space> transpose(
     const ExecSpace& exec, const View1<const Offset, typename ExecSpace::memory_space>& offsets,

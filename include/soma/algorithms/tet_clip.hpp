@@ -4,30 +4,33 @@
 #ifndef SOMA_ALGORITHMS_TET_CLIP_HPP_
 #define SOMA_ALGORITHMS_TET_CLIP_HPP_
 
-// The overlap of two tetrahedra, for the remap of volume meshes: one tet cut
-// by the four planes of the other, each cut keeping the part on the other's
-// inner side as at most three tets, and the volumes summed. Callable in
-// kernels; fixed capacity, no allocation.
-//
-// A cut classifies each corner by its signed distance to the plane: a corner
-// outside by at most eps (the merge tolerance, a length) is moved onto it
-// and kept, one inside is kept as it is, so that of two cells sharing a face
-// one, not both, takes the band between, and no piece thinner than eps is
-// made along a face. Of the corners kept (k of 4):
-//
-//   4  the tet;
-//   3  a prism (the three, and the points where their edges to the fourth
-//      cross the plane): three tets;
-//   2  a wedge (the two, and the four crossings): three tets;
-//   1  a tet (the one and its three crossings);
-//   0  nothing.
-//
-// The pieces are only a way to sum the overlap's volume (a split prism or
-// wedge may hold thin tets of real volume), so the whole overlap, not a
-// piece, is dropped when it is thinner than eps: below eps L^2, L the
-// longest edge of its pieces (its extent). Both tets are first moved so
-// that the clipping tet's first corner is the origin, so that rounding is
-// relative to the tets' size, not to their distance from the origin.
+/// \file
+/// The overlap of two tetrahedra, for the remap of volume meshes: one tet cut
+/// by the four planes of the other, each cut keeping the part on the other's
+/// inner side as at most three tets, and the volumes summed. Callable in
+/// kernels; fixed capacity, no allocation.
+///
+/// A cut classifies each corner by its signed distance to the plane: a corner
+/// outside by at most eps (the merge tolerance, a length) is moved onto it
+/// and kept, one inside is kept as it is, so that of two cells sharing a face
+/// one, not both, takes the band between, and no piece thinner than eps is
+/// made along a face. Of the corners kept (k of 4):
+///
+/// ```
+///   4  the tet;
+///   3  a prism (the three, and the points where their edges to the fourth
+///      cross the plane): three tets;
+///   2  a wedge (the two, and the four crossings): three tets;
+///   1  a tet (the one and its three crossings);
+///   0  nothing.
+/// ```
+///
+/// The pieces are only a way to sum the overlap's volume (a split prism or
+/// wedge may hold thin tets of real volume), so the whole overlap, not a
+/// piece, is dropped when it is thinner than eps: below eps L^2, L the
+/// longest edge of its pieces (its extent). Both tets are first moved so
+/// that the clipping tet's first corner is the origin, so that rounding is
+/// relative to the tets' size, not to their distance from the origin.
 
 #include <Kokkos_Core.hpp>
 
@@ -43,7 +46,7 @@ struct Tet {
   Point3 p[4];
 };
 
-// Pieces a clip may hold: each of four cuts at most triples them.
+/// Pieces a clip may hold: each of four cuts at most triples them.
 inline constexpr int tet_capacity = 81;
 
 KOKKOS_INLINE_FUNCTION Point3 minus(const Point3& a, const Point3& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
@@ -52,8 +55,8 @@ KOKKOS_INLINE_FUNCTION Point3 cross(const Point3& a, const Point3& b) {
   return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
 }
 
-// Six times the signed volume: positive where b - a, c - a, d - a are
-// right-handed.
+/// Six times the signed volume: positive where b - a, c - a, d - a are
+/// right-handed.
 KOKKOS_INLINE_FUNCTION Real six_volume(const Tet& t) {
   return dot(minus(t.p[1], t.p[0]), cross(minus(t.p[2], t.p[0]), minus(t.p[3], t.p[0])));
 }
@@ -69,14 +72,14 @@ KOKKOS_INLINE_FUNCTION Real longest_edge(const Tet& t) {
   return l;
 }
 
-// A plane: n . x = c, n of unit length; inside where n . x - c <= 0.
+/// A plane: n . x = c, n of unit length; inside where n . x - c <= 0.
 struct Plane {
   Point3 n;
   Real c = 0;
 };
 
-// The plane of face (a, b, c) of tet t, its inside the tet's (the face's
-// opposite corner d). False for a face of no area.
+/// The plane of face (a, b, c) of tet t, its inside the tet's (the face's
+/// opposite corner d). False for a face of no area.
 KOKKOS_INLINE_FUNCTION bool face_plane(const Point3& a, const Point3& b, const Point3& c, const Point3& d, Plane& out) {
   Point3 n = cross(minus(b, a), minus(c, a));
   const Real len = Kokkos::sqrt(dot(n, n));
@@ -92,8 +95,8 @@ KOKKOS_INLINE_FUNCTION bool face_plane(const Point3& a, const Point3& b, const P
   return true;
 }
 
-// The part of tet t inside plane h, as up to three tets appended to out
-// (count in, count out); false where out would overflow.
+/// The part of tet t inside plane h, as up to three tets appended to out
+/// (count in, count out); false where out would overflow.
 KOKKOS_INLINE_FUNCTION bool cut(const Tet& t, const Plane& h, Real eps, Tet* out, int& count) {
   Real d[4];
   Point3 q[4];  // the corners, those in the band moved onto the plane
@@ -142,9 +145,9 @@ KOKKOS_INLINE_FUNCTION bool cut(const Tet& t, const Plane& h, Real eps, Tet* out
   return true;
 }
 
-// The volume tets s and c share: s cut by c's four face planes. Negative
-// where the pieces overflow tet_capacity (never for two tets: each cut of a
-// convex piece list keeps the count within 3^4).
+/// The volume tets s and c share: s cut by c's four face planes. Negative
+/// where the pieces overflow tet_capacity (never for two tets: each cut of a
+/// convex piece list keeps the count within 3^4).
 KOKKOS_INLINE_FUNCTION Real overlap(const Tet& s_in, const Tet& c_in, Real eps) {
   // About c's first corner.
   Tet s, c;

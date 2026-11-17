@@ -10,7 +10,7 @@
 
 namespace soma::detail {
 
-// First index i in [0, n) with v(i) >= key, or n.
+/// First index i in [0, n) with v(i) >= key, or n.
 template <class V>
 KOKKOS_INLINE_FUNCTION LO lower_bound(const V& v, LO n, LO key) {
   LO lo = 0;
@@ -26,7 +26,7 @@ KOKKOS_INLINE_FUNCTION LO lower_bound(const V& v, LO n, LO key) {
   return lo;
 }
 
-// First index i in [0, n) with v(i) > key, or n.
+/// First index i in [0, n) with v(i) > key, or n.
 template <class V>
 KOKKOS_INLINE_FUNCTION LO upper_bound(const V& v, LO n, LO key) {
   LO lo = 0;

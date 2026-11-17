@@ -4,38 +4,41 @@
 #ifndef SOMA_ALGORITHMS_FEM_SPACE_HPP_
 #define SOMA_ALGORITHMS_FEM_SPACE_HPP_
 
-// Linear finite elements over a mesh's vertices: one unknown per vertex, P1
-// on triangles and tets, Q1 on quads and hexes (soma/algorithms/fem.hpp).
-//
-//   mesh.add_ghosts(comm, soma::GhostOptions{1, 0});  // on more than one rank
-//   const soma::FemSpace<Mem> space(comm, mesh);
-//   soma::CsrMatrix<Mem> a = space.laplacian(comm);
-//   auto b = space.load(comm, f);                   // f(x, y, z), device-callable
-//   soma::apply_dirichlet(a, b, space.boundary(), g);  // g: a value per vertex
-//
-// A rank's rows are its owned vertices, its columns all its vertices
-// (soma/algorithms/csr.hpp); a vector holds one entry per vertex, of which
-// copies and ghosts hold their owners' values after update(). On more than
-// one rank the mesh must hold a ghost layer through vertices: every cell
-// around an owned vertex is then here, and owners assemble their rows whole,
-// without messages. It must also hold its sharing fields, as a mirror does
-// with TransferOptions::everything().
-//
-// Assembly gathers by default: the element matrices are computed once per
-// cell, then each owned row sums its cells' entries, the cells ascending by
-// gid. The result is the same, bit for bit, on any number of ranks and
-// threads. Atomic and colored assembly (Assembly) compute each element
-// matrix where it is added, storing none. With soma::reproducible() on when
-// a space is made (soma/runtime/options.hpp), it gathers whatever it is
-// asked (assembly() tells) and dot() sums exactly: the same bit for bit on
-// any number of ranks and threads too.
-//
-// A space keeps views into the mesh: it is valid while the mesh is alive and
-// its topology unchanged. Coordinates may move between assemblies, so long
-// as copies and ghosts hold their owners' (laplacian_smooth leaves them so):
-// owned rows read them. Vectors updated hold exactly cols() entries on every
-// rank; a rank whose do not throws std::invalid_argument and leaves the
-// others in the exchange.
+/// \file
+/// Linear finite elements over a mesh's vertices: one unknown per vertex, P1
+/// on triangles and tets, Q1 on quads and hexes (soma/algorithms/fem.hpp).
+///
+/// ```
+///   mesh.add_ghosts(comm, soma::GhostOptions{1, 0});  // on more than one rank
+///   const soma::FemSpace<Mem> space(comm, mesh);
+///   soma::CsrMatrix<Mem> a = space.laplacian(comm);
+///   auto b = space.load(comm, f);                   // f(x, y, z), device-callable
+///   soma::apply_dirichlet(a, b, space.boundary(), g);  // g: a value per vertex
+/// ```
+///
+/// A rank's rows are its owned vertices, its columns all its vertices
+/// (soma/algorithms/csr.hpp); a vector holds one entry per vertex, of which
+/// copies and ghosts hold their owners' values after update(). On more than
+/// one rank the mesh must hold a ghost layer through vertices: every cell
+/// around an owned vertex is then here, and owners assemble their rows whole,
+/// without messages. It must also hold its sharing fields, as a mirror does
+/// with TransferOptions::everything().
+///
+/// Assembly gathers by default: the element matrices are computed once per
+/// cell, then each owned row sums its cells' entries, the cells ascending by
+/// gid. The result is the same, bit for bit, on any number of ranks and
+/// threads. Atomic and colored assembly (Assembly) compute each element
+/// matrix where it is added, storing none. With soma::reproducible() on when
+/// a space is made (soma/runtime/options.hpp), it gathers whatever it is
+/// asked (assembly() tells) and dot() sums exactly: the same bit for bit on
+/// any number of ranks and threads too.
+///
+/// A space keeps views into the mesh: it is valid while the mesh is alive and
+/// its topology unchanged. Coordinates may move between assemblies, so long
+/// as copies and ghosts hold their owners' (laplacian_smooth leaves them so):
+/// owned rows read them. Vectors updated hold exactly cols() entries on every
+/// rank; a rank whose do not throws std::invalid_argument and leaves the
+/// others in the exchange.
 
 #include <cstdint>
 #include <optional>
@@ -61,53 +64,55 @@
 
 namespace soma {
 
-// How a space assembles its matrices:
-//   gather   each owned row sums its cells' entries, the cells by gid: the
-//            same, bit for bit, on any number of ranks and threads;
-//   atomic   each cell with an owned corner adds its entries to the owned
-//            rows with atomic additions: order and so rounding vary;
-//   colored  cells sharing no vertex form a color; the colors take turns,
-//            the cells of one adding without atomics: the same on any number
-//            of threads, not of ranks.
+/// How a space assembles its matrices:
+/// ```
+///   gather   each owned row sums its cells' entries, the cells by gid: the
+///            same, bit for bit, on any number of ranks and threads;
+///   atomic   each cell with an owned corner adds its entries to the owned
+///            rows with atomic additions: order and so rounding vary;
+///   colored  cells sharing no vertex form a color; the colors take turns,
+///            the cells of one adding without atomics: the same on any number
+///            of threads, not of ranks.
+/// ```
 enum class Assembly : std::uint8_t { gather, atomic, colored };
 
 namespace detail {
 
-// What a space works from, built once on the host.
+/// What a space works from, built once on the host.
 struct FemPlan {
-  std::vector<Offset> offsets;  // the pattern: owned rows, columns by gid
+  std::vector<Offset> offsets;  ///< the pattern: owned rows, columns by gid
   std::vector<LO> columns;
-  // The cells around each owned vertex, ascending by gid, the vertex's
-  // corner in each, and where each corner of the cell lands in the row:
-  // entry t's slots are slots[slot_offsets[t], slot_offsets[t + 1]).
+  /// The cells around each owned vertex, ascending by gid, the vertex's
+  /// corner in each, and where each corner of the cell lands in the row:
+  /// entry t's slots are slots[slot_offsets[t], slot_offsets[t + 1]).
   std::vector<Offset> around_offsets;
   std::vector<LO> around_cells;
   std::vector<std::uint8_t> around_corner;
   std::vector<Offset> slot_offsets;
-  std::vector<LO> slots;  // from the row's start
-  std::vector<Offset> matrix_offsets;  // per cell: start of its n x n entries
-  std::vector<Offset> vector_offsets;  // per cell: start of its n entries
-  std::vector<std::uint8_t> skin;      // per vertex, this rank's verdict
-  // atomic and colored: the cells with an owned corner, by color (one
-  // group for atomic); for each of them in that order, where corner b lands
-  // in corner a's row (-1 where a is not an owned row), n x n from
-  // cell_slot_offsets[i].
+  std::vector<LO> slots;  ///< from the row's start
+  std::vector<Offset> matrix_offsets;  ///< per cell: start of its n x n entries
+  std::vector<Offset> vector_offsets;  ///< per cell: start of its n entries
+  std::vector<std::uint8_t> skin;      ///< per vertex, this rank's verdict
+  /// atomic and colored: the cells with an owned corner, by color (one
+  /// group for atomic); for each of them in that order, where corner b lands
+  /// in corner a's row (-1 where a is not an owned row), n x n from
+  /// cell_slot_offsets[i].
   std::vector<Offset> group_offsets;
   std::vector<LO> group_cells;
   std::vector<Offset> cell_slot_offsets;
   std::vector<LO> cell_slots;
-  LO orphans = 0;    // owned vertices no cell here has: their rows are empty
-  bool fits = true;  // false: a size exceeds Offset, and nothing else is set
+  LO orphans = 0;    ///< owned vertices no cell here has: their rows are empty
+  bool fits = true;  ///< false: a size exceeds Offset, and nothing else is set
 };
 
-// The mesh is one of dimension 2 or 3, without high-order nodes, whose
-// cells all have elements here.
+/// The mesh is one of dimension 2 or 3, without high-order nodes, whose
+/// cells all have elements here.
 bool fem_supported(const Mesh<Kokkos::HostSpace>& mesh);
 
-// Host only; the mesh supported.
+/// Host only; the mesh supported.
 FemPlan fem_plan(const Mesh<Kokkos::HostSpace>& mesh, Assembly assembly);
 
-// The number of cells of the mesh whose Jacobian is not positive throughout.
+/// The number of cells of the mesh whose Jacobian is not positive throughout.
 template <class MemSpace>
 LO bad_cells(const MeshView<MemSpace>& view) {
   using Exec = typename MemSpace::execution_space;
@@ -120,8 +125,8 @@ LO bad_cells(const MeshView<MemSpace>& view) {
   return bad;
 }
 
-// The element stiffness matrices of every cell, at matrix_offsets; `bad`
-// counts the cells whose Jacobian is not positive throughout.
+/// The element stiffness matrices of every cell, at matrix_offsets; `bad`
+/// counts the cells whose Jacobian is not positive throughout.
 template <class MemSpace>
 View1<Real, MemSpace> element_matrices(const MeshView<MemSpace>& view, const View1<Offset, MemSpace>& at,
                                        Offset total, const Kokkos::View<LO, MemSpace>& bad) {
@@ -142,8 +147,8 @@ View1<Real, MemSpace> element_matrices(const MeshView<MemSpace>& view, const Vie
   return out;
 }
 
-// The element load vectors of every cell, at vector_offsets; `bad` counts
-// as element_matrices does.
+/// The element load vectors of every cell, at vector_offsets; `bad` counts
+/// as element_matrices does.
 template <class MemSpace, class F>
 View1<Real, MemSpace> element_loads(const MeshView<MemSpace>& view, const View1<Offset, MemSpace>& at, Offset total,
                                     const F& f, const Kokkos::View<LO, MemSpace>& bad) {
@@ -162,7 +167,7 @@ View1<Real, MemSpace> element_loads(const MeshView<MemSpace>& view, const View1<
   return out;
 }
 
-// Each owned row sums its cells' entries, in the order of `around`.
+/// Each owned row sums its cells' entries, in the order of `around`.
 template <class MemSpace>
 void gather_rows(LO rows, const View1<Offset, MemSpace>& offsets, const View1<Offset, MemSpace>& around_offsets,
                  const View1<LO, MemSpace>& around_cells, const View1<std::uint8_t, MemSpace>& around_corner,
@@ -182,7 +187,7 @@ void gather_rows(LO rows, const View1<Offset, MemSpace>& offsets, const View1<Of
   Exec{}.fence();
 }
 
-// Each owned vertex sums its cells' loads, in the order of `around`.
+/// Each owned vertex sums its cells' loads, in the order of `around`.
 template <class MemSpace>
 void gather_load(LO rows, const View1<Offset, MemSpace>& around_offsets, const View1<LO, MemSpace>& around_cells,
                  const View1<std::uint8_t, MemSpace>& around_corner, const View1<Offset, MemSpace>& vector_offsets,
@@ -200,9 +205,9 @@ void gather_load(LO rows, const View1<Offset, MemSpace>& around_offsets, const V
   Exec{}.fence();
 }
 
-// Cells cells[first, last) add their stiffness matrices to the owned rows,
-// atomically or not; `bad` counts as element_matrices does. The caller
-// fences.
+/// Cells cells[first, last) add their stiffness matrices to the owned rows,
+/// atomically or not; `bad` counts as element_matrices does. The caller
+/// fences.
 template <bool Atomic, class MemSpace>
 void scatter_cells(const MeshView<MemSpace>& view, LO rows, const View1<LO, MemSpace>& cells, Offset first,
                    Offset last, const View1<Offset, MemSpace>& offsets, const View1<Offset, MemSpace>& slot_offsets,
@@ -243,7 +248,7 @@ Real local_dot(LO rows, const View1<const Real, MemSpace>& x, const View1<const 
   return s;
 }
 
-// The products x[i] y[i] over the rows, summed exactly.
+/// The products x[i] y[i] over the rows, summed exactly.
 template <class MemSpace>
 ExactSums<1> local_dot_exact(LO rows, const View1<const Real, MemSpace>& x, const View1<const Real, MemSpace>& y) {
   return reduce_exact<1, typename MemSpace::execution_space>(
@@ -252,11 +257,11 @@ ExactSums<1> local_dot_exact(LO rows, const View1<const Real, MemSpace>& x, cons
 
 }  // namespace detail
 
-// A global numbering of the vertices: owned vertices take first, first + 1,
-// ... rank by rank, copies and ghosts their owners' numbers; total over all.
+/// A global numbering of the vertices: owned vertices take first, first + 1,
+/// ... rank by rank, copies and ghosts their owners' numbers; total over all.
 template <class MemSpace>
 struct Numbering {
-  View1<GO, MemSpace> index;  // per vertex here
+  View1<GO, MemSpace> index;  ///< per vertex here
   GO first = 0;
   GO total = 0;
 };
@@ -264,12 +269,12 @@ struct Numbering {
 template <class MemSpace>
 class FemSpace {
  public:
-  // Collective. Throws std::invalid_argument on every rank if any rank's
-  // mesh is not of dimension 2 or 3, has unremoved edits, holds a cell
-  // without elements here (only tri, quad, tet, hex) or one whose Jacobian
-  // is not positive throughout, or, on more than one rank, has no ghost
-  // layer through vertices, or if ranks differ in soma::reproducible().
-  // `assembly` is how laplacian() assembles, gather when reproducible.
+  /// Collective. Throws std::invalid_argument on every rank if any rank's
+  /// mesh is not of dimension 2 or 3, has unremoved edits, holds a cell
+  /// without elements here (only tri, quad, tet, hex) or one whose Jacobian
+  /// is not positive throughout, or, on more than one rank, has no ghost
+  /// layer through vertices, or if ranks differ in soma::reproducible().
+  /// `assembly` is how laplacian() assembles, gather when reproducible.
   FemSpace(const Comm& comm, const Mesh<MemSpace>& mesh, Assembly assembly = Assembly::gather)
       : view_(mesh.view()), reproducible_(soma::reproducible()) {
     assembly_ = reproducible_ ? Assembly::gather : assembly;
@@ -332,22 +337,22 @@ class FemSpace {
   Assembly assembly() const noexcept { return assembly_; }  // as laplacian() assembles
   bool reproducible() const noexcept { return reproducible_; }  // soma::reproducible() when made
 
-  // A vector of zeros, one entry per vertex.
+  /// A vector of zeros, one entry per vertex.
   View1<Real, MemSpace> vector(const char* label = "soma::FemSpace::vector") const {
     return View1<Real, MemSpace>(label, static_cast<std::size_t>(cols_));
   }
 
-  // The rows' sparsity, values zero: each owned vertex with the vertices
-  // that share a cell with it.
+  /// The rows' sparsity, values zero: each owned vertex with the vertices
+  /// that share a cell with it.
   CsrMatrix<MemSpace> pattern() const {
     return CsrMatrix<MemSpace>{rows_, cols_, offsets_, columns_,
                                View1<Real, MemSpace>("soma::FemSpace::values", columns_.extent(0))};
   }
 
-  // Collective: the stiffness matrix of -div grad (no boundary conditions).
-  // Throws std::invalid_argument on every rank if a cell it assembles has
-  // inverted since the space was made (gather assembles every cell here,
-  // atomic and colored those with an owned corner), once assembly is done.
+  /// Collective: the stiffness matrix of -div grad (no boundary conditions).
+  /// Throws std::invalid_argument on every rank if a cell it assembles has
+  /// inverted since the space was made (gather assembles every cell here,
+  /// atomic and colored those with an owned corner), once assembly is done.
   CsrMatrix<MemSpace> laplacian(const Comm& comm) const {
     CsrMatrix<MemSpace> a = pattern();
     const Kokkos::View<LO, MemSpace> bad("soma::FemSpace::bad");
@@ -374,9 +379,9 @@ class FemSpace {
     return a;
   }
 
-  // Collective: b[v] = integral of f N_v for the owned vertices (0 for the
-  // others); f(x, y, z) device-callable. Throws as laplacian() does, f having
-  // been called at the points of cells checked by then.
+  /// Collective: b[v] = integral of f N_v for the owned vertices (0 for the
+  /// others); f(x, y, z) device-callable. Throws as laplacian() does, f having
+  /// been called at the points of cells checked by then.
   template <class F>
   View1<Real, MemSpace> load(const Comm& comm, const F& f) const {
     View1<Real, MemSpace> b = vector("soma::FemSpace::load");
@@ -387,25 +392,25 @@ class FemSpace {
     return b;
   }
 
-  // Per vertex, 1 on the mesh's boundary: a corner of a side of dimension
-  // dim - 1 that only one cell has, as its owner finds it.
+  /// Per vertex, 1 on the mesh's boundary: a corner of a side of dimension
+  /// dim - 1 that only one cell has, as its owner finds it.
   View1<const std::uint8_t, MemSpace> boundary() const { return boundary_; }
 
-  // Collective: each owner's entries of x overwrite its copies and ghosts.
+  /// Collective: each owner's entries of x overwrite its copies and ghosts.
   void update(const Comm& comm, const View1<Real, MemSpace>& x) const {
     if (x.extent(0) != static_cast<std::size_t>(cols_)) throw std::invalid_argument("FemSpace: a vector not of cols()");
     if (halo_) halo_->update(comm, View2<Real, MemSpace>(x.data(), x.extent(0), 1));
   }
 
-  // Collective: y = A x over the owned rows, after updating x.
+  /// Collective: y = A x over the owned rows, after updating x.
   void multiply(const Comm& comm, const CsrMatrix<MemSpace>& a, const View1<Real, MemSpace>& x,
                 const View1<Real, MemSpace>& y) const {
     update(comm, x);
     soma::multiply(a, View1<const Real, MemSpace>(x), y);
   }
 
-  // Collective: the vertices numbered rank by rank, as global matrices and
-  // vectors number their rows (one exscan, one allreduce, one update).
+  /// Collective: the vertices numbered rank by rank, as global matrices and
+  /// vectors number their rows (one exscan, one allreduce, one update).
   Numbering<MemSpace> numbering(const Comm& comm) const {
     using Exec = typename MemSpace::execution_space;
     Numbering<MemSpace> out;
@@ -422,15 +427,15 @@ class FemSpace {
     return out;
   }
 
-  // Collective: the sum of x[i] y[i] over every rank's owned vertices; when
-  // reproducible(), the products' exact sum rounded once. One allreduce.
+  /// Collective: the sum of x[i] y[i] over every rank's owned vertices; when
+  /// reproducible(), the products' exact sum rounded once. One allreduce.
   Real dot(const Comm& comm, const View1<const Real, MemSpace>& x, const View1<const Real, MemSpace>& y) const {
     if (reproducible_) return allreduce_exact(comm, detail::local_dot_exact(rows_, x, y))[0];
     return comm.allreduce(detail::local_dot(rows_, x, y), Op::sum);
   }
 
  private:
-  // Collective, after the kernels that counted `bad` have finished.
+  /// Collective, after the kernels that counted `bad` have finished.
   void check_cells(const Comm& comm, const Kokkos::View<LO, MemSpace>& bad) const {
     LO here = 0;
     Kokkos::deep_copy(here, bad);

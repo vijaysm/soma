@@ -4,26 +4,29 @@
 #ifndef SOMA_ALGORITHMS_CG_HPP_
 #define SOMA_ALGORITHMS_CG_HPP_
 
-// Conjugate gradients, Jacobi-preconditioned, for a symmetric positive
-// definite matrix over a FemSpace's vertices:
-//
-//   soma::CgOptions o;
-//   o.rtol = 1e-10;
-//   const soma::CgReport r = soma::cg(comm, space, a, b, x, o);  // x: the initial guess
-//
-// Each iteration makes one halo update (the product) and two allreduces:
-// (p, A p), then (r, z) and (r, r) together. Once the recurrence's residual
-// meets max(rtol ||b||, atol), the norms over every rank's owned entries,
-// the true residual b - A x is computed (one more update and allreduce): it
-// must meet the target too, or CG restarts from it. On return x's copies and
-// ghosts hold their owners' values.
-//
-// Reproducible (CgOptions::reproducible, by default the space's, which is
-// soma::reproducible() when the space was made), every sum is exact
-// (soma/parallel/exact_sum.hpp), as many allreduces as before, and the space
-// must gather: with its matrix (and b) the same on every partition, as the
-// space's laplacian() and load() are, the iterates and x are the same bit
-// for bit on any number of ranks and threads.
+/// \file
+/// Conjugate gradients, Jacobi-preconditioned, for a symmetric positive
+/// definite matrix over a FemSpace's vertices:
+///
+/// ```
+///   soma::CgOptions o;
+///   o.rtol = 1e-10;
+///   const soma::CgReport r = soma::cg(comm, space, a, b, x, o);  // x: the initial guess
+/// ```
+///
+/// Each iteration makes one halo update (the product) and two allreduces:
+/// (p, A p), then (r, z) and (r, r) together. Once the recurrence's residual
+/// meets max(rtol ||b||, atol), the norms over every rank's owned entries,
+/// the true residual b - A x is computed (one more update and allreduce): it
+/// must meet the target too, or CG restarts from it. On return x's copies and
+/// ghosts hold their owners' values.
+///
+/// Reproducible (CgOptions::reproducible, by default the space's, which is
+/// soma::reproducible() when the space was made), every sum is exact
+/// (soma/parallel/exact_sum.hpp), as many allreduces as before, and the space
+/// must gather: with its matrix (and b) the same on every partition, as the
+/// space's laplacian() and load() are, the iterates and x are the same bit
+/// for bit on any number of ranks and threads.
 
 #include <array>
 #include <cmath>
@@ -44,22 +47,22 @@
 namespace soma {
 
 struct CgOptions {
-  Real rtol = 1e-10;  // relative to ||b||
+  Real rtol = 1e-10;  ///< relative to ||b||
   Real atol = 0;
   int max_iterations = 1000;
-  bool jacobi = true;  // precondition by the diagonal
-  std::optional<bool> reproducible;  // unset: the space's; on, the space must gather
+  bool jacobi = true;  ///< precondition by the diagonal
+  std::optional<bool> reproducible;  ///< unset: the space's; on, the space must gather
 };
 
 struct CgReport {
   int iterations = 0;
-  Real residual = 0;  // ||b - A x||: computed directly when converged
+  Real residual = 0;  ///< ||b - A x||: computed directly when converged
   bool converged = false;
 };
 
 namespace detail {
 
-// z = r / d (or r) over the rows; returns the local (r, z) and (r, r).
+/// z = r / d (or r) over the rows; returns the local (r, z) and (r, r).
 template <class MemSpace>
 std::array<Real, 2> precondition(LO rows, const View1<const Real, MemSpace>& inverse, bool jacobi,
                                  const View1<const Real, MemSpace>& r, const View1<Real, MemSpace>& z) {
@@ -77,8 +80,8 @@ std::array<Real, 2> precondition(LO rows, const View1<const Real, MemSpace>& inv
   return {rz, rr};
 }
 
-// One step: x += alpha p, r -= alpha q, then z = M^-1 r; returns the local
-// (r, z) and (r, r).
+/// One step: x += alpha p, r -= alpha q, then z = M^-1 r; returns the local
+/// (r, z) and (r, r).
 template <class MemSpace>
 std::array<Real, 2> step(LO rows, Real alpha, const View1<const Real, MemSpace>& inverse, bool jacobi,
                          const View1<const Real, MemSpace>& p, const View1<const Real, MemSpace>& q,
@@ -101,8 +104,8 @@ std::array<Real, 2> step(LO rows, Real alpha, const View1<const Real, MemSpace>&
   return {rz, rr};
 }
 
-// precondition and step with the sums exact; precondition adds (b, b)
-// as the third when with_b.
+/// precondition and step with the sums exact; precondition adds (b, b)
+/// as the third when with_b.
 template <class MemSpace>
 ExactSums<3> precondition_exact(LO rows, const View1<const Real, MemSpace>& inverse, bool jacobi,
                                 const View1<const Real, MemSpace>& r, const View1<Real, MemSpace>& z,
@@ -134,8 +137,8 @@ ExactSums<2> step_exact(LO rows, Real alpha, const View1<const Real, MemSpace>& 
       });
 }
 
-// 1 / A[i][i] over the rows; counts the rows where that is not finite and
-// positive.
+/// 1 / A[i][i] over the rows; counts the rows where that is not finite and
+/// positive.
 template <class MemSpace>
 LO inverse_diagonal(const CsrMatrix<MemSpace>& a, const View1<Real, MemSpace>& inverse) {
   using Exec = typename MemSpace::execution_space;
@@ -161,15 +164,15 @@ LO inverse_diagonal(const CsrMatrix<MemSpace>& a, const View1<Real, MemSpace>& i
 
 }  // namespace detail
 
-// Collective. Throws std::invalid_argument on every rank if any rank passes
-// a negative or non-finite tolerance, a negative iteration count, an x not
-// of the space's cols() entries, a b shorter than its rows(), a matrix not
-// the space's shape, or with jacobi a row whose diagonal is not positive (or
-// whose inverse is not finite), or reproducible with a space that does not
-// gather; or if ranks differ in their options. With
-// b = 0, x = 0 at once. Stops without converging when the iterations run
-// out, (p, A p) is not positive (A is not positive definite) or a norm is
-// not finite.
+/// Collective. Throws std::invalid_argument on every rank if any rank passes
+/// a negative or non-finite tolerance, a negative iteration count, an x not
+/// of the space's cols() entries, a b shorter than its rows(), a matrix not
+/// the space's shape, or with jacobi a row whose diagonal is not positive (or
+/// whose inverse is not finite), or reproducible with a space that does not
+/// gather; or if ranks differ in their options. With
+/// b = 0, x = 0 at once. Stops without converging when the iterations run
+/// out, (p, A p) is not positive (A is not positive definite) or a norm is
+/// not finite.
 template <class MemSpace>
 CgReport cg(const Comm& comm, const FemSpace<MemSpace>& space, const CsrMatrix<MemSpace>& a,
             const View1<const Real, MemSpace>& b, const View1<Real, MemSpace>& x, const CgOptions& options = {}) {

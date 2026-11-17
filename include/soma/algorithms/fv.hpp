@@ -4,61 +4,64 @@
 #ifndef SOMA_ALGORITHMS_FV_HPP_
 #define SOMA_ALGORITHMS_FV_HPP_
 
-// Cell-centred finite volumes: advection of a scalar u, du/dt + div(a u) = 0,
-// over a mesh of triangles, quads, tets or hexes, explicit in time, by one of
-// two schemes:
-//
-//   upwind   first order, forward Euler (the default);
-//   bounded  second order where u is smooth, and no new extrema: flux-corrected
-//            transport, two stages (SSP-RK2, Heun) averaged with the start.
-//
-//   mesh.add_ghosts(comm, soma::GhostOptions{1, 0});  // on more than one rank
-//   const soma::FvSpace<Mem> space(comm, mesh);      // or (comm, mesh, FvScheme::bounded)
-//   const auto phi = space.normal_flux(a);           // a(x, y, z), device-callable
-//   auto u = space.vector();                         // one value per cell
-//   const Real dt = 0.5 * space.max_dt(comm, phi);
-//   for (int n = 0; n < steps; ++n) space.step(comm, phi, u, dt, inflow);
-//
-// A face carries phi_f = a(x_f) . A_f, its centroid x_f and area vector A_f
-// (an edge's normal times its length in 2D; half the cross product of a
-// quad's diagonals, exact for a bilinear face), and the flux phi_f u from
-// its upwind side: the cell it leaves, or `inflow` where a enters the domain.
-// Each owned cell sums its faces' fluxes in its side order and divides by its
-// volume, so a face's flux leaves one cell and enters the other with opposite
-// signs, and the result is the same bit for bit on any number of ranks and
-// threads: a face's geometry is computed from its corners in an order fixed
-// by gid (from the least, towards its lesser neighbour), not in the order a
-// rank happens to hold them. A cell's volume is (1/d) sum_f A_f . (x_f - x_0)
-// over its outward faces, x_0 its first corner; a cell whose sides turn
-// inwards (a clockwise polygon) is taken the other way round.
-//
-// A bounded stage (Boris and Book; Zalesak's limiter) takes the upwind result
-// u^L and adds to it, per face, alpha_f times the difference between a
-// second-order flux and the upwind one. The second-order flux carries the
-// upwind cell's value extended linearly to the face centroid, with the cell's
-// least-squares gradient over its face neighbours (zero where those do not
-// span the space, as at a corner cell with one neighbour). alpha_f in [0, 1]
-// is as large as keeps every cell within the least and greatest of u and u^L
-// over itself and its face neighbours. So, where the fluxes of each cell sum
-// to zero (a divergence-free flow: exactly so for a linear a on cells with
-// planar sides) and dt <= max_dt(), no stage makes a new extremum, and the
-// average of the two stages with the start makes none either: u stays within
-// its starting range (and the inflow's), to rounding (a value at an extremum
-// may pass it by a few units in the last place). Each correction leaves one cell and
-// enters the other, so the total is conserved as for upwind. In multiple
-// dimensions no scheme of second order is TVD (Goodman and LeVeque); this one
-// is second order away from extrema and clips them to first order. A stage
-// exchanges ghosts three times (gradients and u^L, the limiter, u); a step,
-// twice that.
-//
-// The space keeps views into the mesh's geometry as it was when made: a mesh
-// whose coordinates move needs a new space. On more than one rank the mesh
-// needs a ghost layer (through any bridge), so that every face of an owned
-// cell is here; a step ends with one halo update of u. Vectors hold one entry
-// per cell here, owned cells first; a rank whose vectors are not of cols()
-// entries throws std::invalid_argument and leaves the others in the
-// exchange. Upwind keeps its results bit for bit; bounded is bit for bit
-// the same on any partition and thread count too.
+/// \file
+/// Cell-centred finite volumes: advection of a scalar u, du/dt + div(a u) = 0,
+/// over a mesh of triangles, quads, tets or hexes, explicit in time, by one of
+/// two schemes:
+///
+/// ```
+///   upwind   first order, forward Euler (the default);
+///   bounded  second order where u is smooth, and no new extrema: flux-corrected
+///            transport, two stages (SSP-RK2, Heun) averaged with the start.
+///
+///   mesh.add_ghosts(comm, soma::GhostOptions{1, 0});  // on more than one rank
+///   const soma::FvSpace<Mem> space(comm, mesh);      // or (comm, mesh, FvScheme::bounded)
+///   const auto phi = space.normal_flux(a);           // a(x, y, z), device-callable
+///   auto u = space.vector();                         // one value per cell
+///   const Real dt = 0.5 * space.max_dt(comm, phi);
+///   for (int n = 0; n < steps; ++n) space.step(comm, phi, u, dt, inflow);
+/// ```
+///
+/// A face carries phi_f = a(x_f) . A_f, its centroid x_f and area vector A_f
+/// (an edge's normal times its length in 2D; half the cross product of a
+/// quad's diagonals, exact for a bilinear face), and the flux phi_f u from
+/// its upwind side: the cell it leaves, or `inflow` where a enters the domain.
+/// Each owned cell sums its faces' fluxes in its side order and divides by its
+/// volume, so a face's flux leaves one cell and enters the other with opposite
+/// signs, and the result is the same bit for bit on any number of ranks and
+/// threads: a face's geometry is computed from its corners in an order fixed
+/// by gid (from the least, towards its lesser neighbour), not in the order a
+/// rank happens to hold them. A cell's volume is (1/d) sum_f A_f . (x_f - x_0)
+/// over its outward faces, x_0 its first corner; a cell whose sides turn
+/// inwards (a clockwise polygon) is taken the other way round.
+///
+/// A bounded stage (Boris and Book; Zalesak's limiter) takes the upwind result
+/// u^L and adds to it, per face, alpha_f times the difference between a
+/// second-order flux and the upwind one. The second-order flux carries the
+/// upwind cell's value extended linearly to the face centroid, with the cell's
+/// least-squares gradient over its face neighbours (zero where those do not
+/// span the space, as at a corner cell with one neighbour). alpha_f in [0, 1]
+/// is as large as keeps every cell within the least and greatest of u and u^L
+/// over itself and its face neighbours. So, where the fluxes of each cell sum
+/// to zero (a divergence-free flow: exactly so for a linear a on cells with
+/// planar sides) and dt <= max_dt(), no stage makes a new extremum, and the
+/// average of the two stages with the start makes none either: u stays within
+/// its starting range (and the inflow's), to rounding (a value at an extremum
+/// may pass it by a few units in the last place). Each correction leaves one cell and
+/// enters the other, so the total is conserved as for upwind. In multiple
+/// dimensions no scheme of second order is TVD (Goodman and LeVeque); this one
+/// is second order away from extrema and clips them to first order. A stage
+/// exchanges ghosts three times (gradients and u^L, the limiter, u); a step,
+/// twice that.
+///
+/// The space keeps views into the mesh's geometry as it was when made: a mesh
+/// whose coordinates move needs a new space. On more than one rank the mesh
+/// needs a ghost layer (through any bridge), so that every face of an owned
+/// cell is here; a step ends with one halo update of u. Vectors hold one entry
+/// per cell here, owned cells first; a rank whose vectors are not of cols()
+/// entries throws std::invalid_argument and leaves the others in the
+/// exchange. Upwind keeps its results bit for bit; bounded is bit for bit
+/// the same on any partition and thread count too.
 
 #include <cstdint>
 #include <optional>
@@ -85,30 +88,30 @@ enum class FvScheme { upwind, bounded };
 
 namespace detail {
 
-// For tests only: bounded steps without the limiter (every alpha_f = 1),
-// which overshoot. Read at each stage; not for use while steps run.
+/// For tests only: bounded steps without the limiter (every alpha_f = 1),
+/// which overshoot. Read at each stage; not for use while steps run.
 inline bool fv_unlimited = false;
 
-// What an FvSpace works from, built once on the host.
+/// What an FvSpace works from, built once on the host.
 struct FvPlan {
-  bool supported = true;  // dimension 2 or 3, tri, quad, tet or hex cells, no nodes
-  LO nonmanifold = 0;     // owned cells' sides that more than two cells have
-  LO bad_cells = 0;       // owned cells of no positive finite volume, or turned
-                          // against a neighbour
-  std::vector<Real> area;      // 3 per face, from the left cell to the right
-  std::vector<Real> centroid;  // 3 per face
-  std::vector<LO> left;        // the cell A_f leaves
-  std::vector<LO> right;       // the cell it enters; -1 on the boundary
-  std::vector<Offset> cell_offsets;    // owned cells + 1
-  std::vector<LO> cell_faces;          // each owned cell's faces in side order
-  std::vector<std::int8_t> cell_sign;  // +1 where the cell is the face's left
-  std::vector<Real> volume;            // per owned cell
-  std::vector<Real> cell_centroid;     // 3 per cell here, owned and ghost: its corners' mean, summed in gid order
-  std::vector<Real> lsq;               // 9 per owned cell: the inverse of sum_n d d^T over its face neighbours n,
-                                       // d = x_n - x_c (2D: the xy block); zero where that is near-singular
+  bool supported = true;  ///< dimension 2 or 3, tri, quad, tet or hex cells, no nodes
+  LO nonmanifold = 0;     ///< owned cells' sides that more than two cells have
+  LO bad_cells = 0;       ///< owned cells of no positive finite volume, or turned
+                          ///< against a neighbour
+  std::vector<Real> area;      ///< 3 per face, from the left cell to the right
+  std::vector<Real> centroid;  ///< 3 per face
+  std::vector<LO> left;        ///< the cell A_f leaves
+  std::vector<LO> right;       ///< the cell it enters; -1 on the boundary
+  std::vector<Offset> cell_offsets;    ///< owned cells + 1
+  std::vector<LO> cell_faces;          ///< each owned cell's faces in side order
+  std::vector<std::int8_t> cell_sign;  ///< +1 where the cell is the face's left
+  std::vector<Real> volume;            ///< per owned cell
+  std::vector<Real> cell_centroid;     ///< 3 per cell here, owned and ghost: its corners' mean, summed in gid order
+  std::vector<Real> lsq;               ///< 9 per owned cell: the inverse of sum_n d d^T over its face neighbours n,
+                                       ///< d = x_n - x_c (2D: the xy block); zero where that is near-singular
 };
 
-// Host only. A mesh not supported gives a plan with supported = false.
+/// Host only. A mesh not supported gives a plan with supported = false.
 FvPlan fv_plan(const Mesh<Kokkos::HostSpace>& mesh);
 
 }  // namespace detail
@@ -118,12 +121,12 @@ class FvSpace {
  public:
   using Exec = typename MemSpace::execution_space;
 
-  // Collective. Throws std::invalid_argument on every rank if any rank's
-  // mesh is not of dimension 2 or 3, has edits or high-order nodes, holds a
-  // cell other than a tri, quad, tet or hex, a side more than two cells
-  // share, or a cell of no positive volume or turned against a neighbour,
-  // or, on more than one rank, has no ghost layer; or if ranks differ in
-  // soma::reproducible() (which makes total() exact).
+  /// Collective. Throws std::invalid_argument on every rank if any rank's
+  /// mesh is not of dimension 2 or 3, has edits or high-order nodes, holds a
+  /// cell other than a tri, quad, tet or hex, a side more than two cells
+  /// share, or a cell of no positive volume or turned against a neighbour,
+  /// or, on more than one rank, has no ghost layer; or if ranks differ in
+  /// soma::reproducible() (which makes total() exact).
   FvSpace(const Comm& comm, const Mesh<MemSpace>& mesh, FvScheme scheme = FvScheme::upwind)
       : scheme_(scheme), reproducible_(soma::reproducible()) {
     std::optional<Mesh<Kokkos::HostSpace>> mirror;
@@ -183,16 +186,16 @@ class FvSpace {
   bool reproducible() const noexcept { return reproducible_; }
   FvScheme scheme() const noexcept { return scheme_; }
 
-  // Per owned cell, its volume (area in 2D).
+  /// Per owned cell, its volume (area in 2D).
   View1<const Real, MemSpace> volume() const { return volume_; }
 
-  // A vector of zeros, one entry per cell here.
+  /// A vector of zeros, one entry per cell here.
   View1<Real, MemSpace> vector(const char* label = "soma::FvSpace::vector") const {
     return View1<Real, MemSpace>(label, static_cast<std::size_t>(cols_));
   }
 
-  // Per face, a(x_f) . A_f, from its left cell to its right; a(x, y, z)
-  // returns a Kokkos::Array<Real, 3> and is device-callable.
+  /// Per face, a(x_f) . A_f, from its left cell to its right; a(x, y, z)
+  /// returns a Kokkos::Array<Real, 3> and is device-callable.
   template <class F>
   View1<Real, MemSpace> normal_flux(const F& a) const {
     View1<Real, MemSpace> phi("soma::FvSpace::normal_flux", static_cast<std::size_t>(faces_));
@@ -208,9 +211,9 @@ class FvSpace {
     return phi;
   }
 
-  // Collective: the largest stable step, min over owned cells of the volume
-  // over the outflow sum_f max(0, +-phi_f); infinite where nothing flows out
-  // anywhere. One allreduce.
+  /// Collective: the largest stable step, min over owned cells of the volume
+  /// over the outflow sum_f max(0, +-phi_f); infinite where nothing flows out
+  /// anywhere. One allreduce.
   Real max_dt(const Comm& comm, const View1<const Real, MemSpace>& phi) const {
     check(phi.extent(0), static_cast<std::size_t>(faces_), "normal fluxes not of faces()");
     const auto offsets = cell_offsets_;
@@ -232,13 +235,13 @@ class FvSpace {
     return comm.allreduce(least, Op::min);
   }
 
-  // Collective: upwind, u += dt * (the net inflow of each owned cell) / its
-  // volume, with `inflow` the value entering through the boundary; then u's
-  // ghosts from their owners (one halo update). Bounded, two such stages with
-  // the corrections above, averaged with u (six halo updates). u's ghosts
-  // must hold their owners' values on entry (fill all cols(), or call
-  // update() first). The scratch is the space's, shared by its copies: one
-  // step at a time.
+  /// Collective: upwind, u += dt * (the net inflow of each owned cell) / its
+  /// volume, with `inflow` the value entering through the boundary; then u's
+  /// ghosts from their owners (one halo update). Bounded, two such stages with
+  /// the corrections above, averaged with u (six halo updates). u's ghosts
+  /// must hold their owners' values on entry (fill all cols(), or call
+  /// update() first). The scratch is the space's, shared by its copies: one
+  /// step at a time.
   void step(const Comm& comm, const View1<const Real, MemSpace>& phi, const View1<Real, MemSpace>& u, Real dt,
             Real inflow = 0) const {
     check(phi.extent(0), static_cast<std::size_t>(faces_), "normal fluxes not of faces()");
@@ -279,14 +282,14 @@ class FvSpace {
     update(comm, u);
   }
 
-  // Collective: each owner's value overwrites its ghosts'.
+  /// Collective: each owner's value overwrites its ghosts'.
   void update(const Comm& comm, const View1<Real, MemSpace>& u) const {
     check(u.extent(0), static_cast<std::size_t>(cols_), "a vector not of cols()");
     if (halo_) halo_->update(comm, View2<Real, MemSpace>(u.data(), u.extent(0), 1));
   }
 
-  // Collective: sum over owned cells of volume * u, the conserved quantity;
-  // exact (rounded once) when reproducible(). One allreduce.
+  /// Collective: sum over owned cells of volume * u, the conserved quantity;
+  /// exact (rounded once) when reproducible(). One allreduce.
   Real total(const Comm& comm, const View1<const Real, MemSpace>& u) const {
     check(u.extent(0), static_cast<std::size_t>(cols_), "a vector not of cols()");
     const auto volume = volume_;
@@ -309,7 +312,7 @@ class FvSpace {
     if (have != want) throw std::invalid_argument(std::string("FvSpace: ") + what);
   }
 
-  // One bounded stage, from `in` (ghosts current) to `out` (ghosts updated).
+  /// One bounded stage, from `in` (ghosts current) to `out` (ghosts updated).
   void bounded_stage(const Comm& comm, const View1<const Real, MemSpace>& phi, const View1<const Real, MemSpace>& in,
                      const View1<Real, MemSpace>& out, Real dt, Real inflow) const {
     const bool unlimited = detail::fv_unlimited;
@@ -425,7 +428,7 @@ class FvSpace {
   View1<std::int8_t, MemSpace> cell_sign_;
   View1<Real, MemSpace> volume_;
   View1<Real, MemSpace> flux_;
-  View1<Real, MemSpace> cell_centroid_;  // bounded only, as the rest below
+  View1<Real, MemSpace> cell_centroid_;  ///< bounded only, as the rest below
   View1<Real, MemSpace> lsq_;
   View2<Real, MemSpace> aux_;
   View2<Real, MemSpace> limit_;

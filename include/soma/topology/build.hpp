@@ -4,18 +4,19 @@
 #ifndef SOMA_TOPOLOGY_BUILD_HPP_
 #define SOMA_TOPOLOGY_BUILD_HPP_
 
-// build_adjacencies: the one entry point. It derives the sub-entity
-// dimensions a request touches, builds every graph the requested ones depend
-// on, and keeps only the requested ones (plus those already held).
-//
-// Epoch: deriving a dimension that held explicit entities renumbers them, and
-// deriving one that a live field is defined on changes that field's domain;
-// either bumps the mesh epoch (every field goes stale). Filling an empty
-// dimension no field uses keeps the epoch, so fields stay current. Entity sets
-// follow the renumbering: their members keep their gids.
-//
-// Strong guarantee: everything is built on an aliasing working copy and
-// installed at the end with non-throwing moves.
+/// \file
+/// build_adjacencies: the one entry point. It derives the sub-entity
+/// dimensions a request touches, builds every graph the requested ones depend
+/// on, and keeps only the requested ones (plus those already held).
+///
+/// Epoch: deriving a dimension that held explicit entities renumbers them, and
+/// deriving one that a live field is defined on changes that field's domain;
+/// either bumps the mesh epoch (every field goes stale). Filling an empty
+/// dimension no field uses keeps the epoch, so fields stay current. Entity sets
+/// follow the renumbering: their members keep their gids.
+///
+/// Strong guarantee: everything is built on an aliasing working copy and
+/// installed at the end with non-throwing moves.
 
 #include <algorithm>
 #include <array>
@@ -75,8 +76,8 @@ struct TopologyAccess {
   static std::array<LO, 4>& corner_ends(Mesh<M>& m) {
     return m.corner_ends_;
   }
-  // An empty mesh given its dimension and ordering, for entities filled in
-  // through block().
+  /// An empty mesh given its dimension and ordering, for entities filled in
+  /// through block().
   template <class M>
   static void shape(Mesh<M>& m, int dim, Ordering ordering) {
     m.dim_ = dim;
@@ -161,21 +162,21 @@ struct DefaultExec {
   using type = std::conditional_t<
       std::is_same_v<typename Kokkos::DefaultExecutionSpace::memory_space, MemSpace>,
       Kokkos::DefaultExecutionSpace, Kokkos::DefaultHostExecutionSpace>;
-  // False for spaces such as CudaUVMSpace or CudaHostPinnedSpace.
+  /// False for spaces such as CudaUVMSpace or CudaHostPinnedSpace.
   static constexpr bool available = std::is_same_v<typename type::memory_space, MemSpace>;
 };
 
 }  // namespace topology::detail
 
-// Builds the requested graphs, and the sub-entity dimensions they touch.
-// On a host mesh holding removed entities (MeshEdit) the graphs are built
-// over the live entities: rows of removed entities are empty and no row names
-// one; sides derived again keep their gids, and sets and fields follow them
-// (the epoch stays). Throws std::invalid_argument for a device mesh holding removed
-// entities, for a dimension above mesh.dim(), for a
-// derivation on a mesh with vertices but no elements of mesh.dim(), and what
-// derive throws for explicit sub-entities it cannot adopt. A second call with
-// the same request does nothing.
+/// Builds the requested graphs, and the sub-entity dimensions they touch.
+/// On a host mesh holding removed entities (MeshEdit) the graphs are built
+/// over the live entities: rows of removed entities are empty and no row names
+/// one; sides derived again keep their gids, and sets and fields follow them
+/// (the epoch stays). Throws std::invalid_argument for a device mesh holding removed
+/// entities, for a dimension above mesh.dim(), for a
+/// derivation on a mesh with vertices but no elements of mesh.dim(), and what
+/// derive throws for explicit sub-entities it cannot adopt. A second call with
+/// the same request does nothing.
 template <class ExecSpace>
 void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRequest req,
                        const ExecSpace& exec) {
@@ -240,8 +241,8 @@ void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRe
     if (req.has_slot(s) && !conn) made[static_cast<std::size_t>(s)] = builder.get(s);
   }
 
-  // Set members are lids: map each renumbered one through its gid, which
-  // adoption keeps.
+  /// Set members are lids: map each renumbered one through its gid, which
+  /// adoption keeps.
   std::optional<EntitySets<M>> sets;
   for (int k = 1; k < D; ++k) {
     if (!derive_k[static_cast<std::size_t>(k)] || mesh.count(k) == 0 || mesh.sets().count() == 0) {
@@ -261,7 +262,7 @@ void build_adjacencies(Mesh<typename ExecSpace::memory_space>& mesh, AdjacencyRe
     sets = (sets ? *sets : mesh.sets()).renumbered(k, new_lid, work.count(k));
   }
 
-  // Install; nothing below throws.
+  /// Install; nothing below throws.
   if (sets) Access::sets(mesh) = std::move(*sets);
   auto& store = Access::store(mesh);
   for (int k = 1; k < D; ++k) {
@@ -290,8 +291,8 @@ void build_adjacencies(Mesh<MemSpace>& mesh, AdjacencyRequest req) {
 }
 
 namespace detail {
-// Every Mesh::mirror instantiates this, so a space without a default execution
-// space must compile; asking it to rebuild is a run-time error.
+/// Every Mesh::mirror instantiates this, so a space without a default execution
+/// space must compile; asking it to rebuild is a run-time error.
 template <class MemSpace>
 void rebuild_adjacencies(Mesh<MemSpace>& mesh, AdjacencyRequest req) {
   if constexpr (topology::detail::DefaultExec<MemSpace>::available) {

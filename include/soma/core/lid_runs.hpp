@@ -4,12 +4,15 @@
 #ifndef SOMA_CORE_LID_RUNS_HPP_
 #define SOMA_CORE_LID_RUNS_HPP_
 
-// A sorted set of size local ids out of [0, count), held in the smallest of
-// three forms (domain blocks and set rows use them alike):
-//   full       every id of [0, count); nothing stored
-//   intervals  runs: a = run begins (runs), b = row prefix (runs + 1, b(0) = 0)
-//   list       a = the sorted ids
-// intervals is chosen when 2 runs + 1 < size, full when size == count.
+/// \file
+/// A sorted set of size local ids out of [0, count), held in the smallest of
+/// three forms (domain blocks and set rows use them alike):
+/// ```
+///   full       every id of [0, count); nothing stored
+///   intervals  runs: a = run begins (runs), b = row prefix (runs + 1, b(0) = 0)
+///   list       a = the sorted ids
+/// ```
+/// intervals is chosen when 2 runs + 1 < size, full when size == count.
 
 #include <cstddef>
 #include <cstdint>
@@ -37,7 +40,7 @@ constexpr const char* name(DomainKind k) noexcept {
   return "unknown";
 }
 
-// Half-open run [begin, end) of local ids.
+/// Half-open run [begin, end) of local ids.
 struct Interval {
   LO begin = 0;
   LO end = 0;
@@ -46,8 +49,8 @@ struct Interval {
 
 namespace detail {
 
-// Size or offset to LO, for counts that come from containers or Views and have
-// no bound that the type system knows. Throws std::length_error naming `what`.
+/// Size or offset to LO, for counts that come from containers or Views and have
+/// no bound that the type system knows. Throws std::length_error naming `what`.
 inline LO to_lo(std::size_t n, const char* what) {
   constexpr auto limit = static_cast<std::size_t>(std::numeric_limits<LO>::max());
   if (n > limit) {
@@ -57,7 +60,7 @@ inline LO to_lo(std::size_t n, const char* what) {
   return static_cast<LO>(n);
 }
 
-// The same check for CSR offsets.
+/// The same check for CSR offsets.
 inline Offset to_offset(std::size_t n, const char* what) {
   constexpr auto limit = static_cast<std::size_t>(std::numeric_limits<Offset>::max());
   if (n > limit) {
@@ -67,7 +70,7 @@ inline Offset to_offset(std::size_t n, const char* what) {
   return static_cast<Offset>(n);
 }
 
-// Canonical runs of a sorted id list.
+/// Canonical runs of a sorted id list.
 inline std::vector<Interval> runs_of(std::span<const LO> lids) {
   std::vector<Interval> runs;
   for (const LO l : lids) {
@@ -80,14 +83,14 @@ inline std::vector<Interval> runs_of(std::span<const LO> lids) {
   return runs;
 }
 
-// The form of size ids in nruns runs out of count.
+/// The form of size ids in nruns runs out of count.
 constexpr DomainKind form_of(LO size, LO count, LO nruns) noexcept {
   if (size == count) return DomainKind::full;
   return 2 * nruns + 1 < size ? DomainKind::intervals : DomainKind::list;
 }
 
-// The stored ids of disjoint, sorted, merged runs in form k: a then b, so
-// intervals take 2 runs + 1 ids, list size ids and full none.
+/// The stored ids of disjoint, sorted, merged runs in form k: a then b, so
+/// intervals take 2 runs + 1 ids, list size ids and full none.
 inline std::vector<LO> pack_runs(std::span<const Interval> runs, DomainKind k) {
   std::vector<LO> out;
   if (k == DomainKind::intervals) {
@@ -107,8 +110,8 @@ inline std::vector<LO> pack_runs(std::span<const Interval> runs, DomainKind k) {
   return out;
 }
 
-// Row in [0, size) to local id; invalid_lo when out of range. A and B index
-// with operator().
+/// Row in [0, size) to local id; invalid_lo when out of range. A and B index
+/// with operator().
 template <class A, class B>
 KOKKOS_INLINE_FUNCTION LO run_entity(DomainKind kind, LO size, LO runs, const A& a, const B& b, LO row) {
   if (row < 0 || row >= size) return invalid_lo;
@@ -123,7 +126,7 @@ KOKKOS_INLINE_FUNCTION LO run_entity(DomainKind kind, LO size, LO runs, const A&
   return invalid_lo;
 }
 
-// Local id to row; invalid_lo when the id is not a member.
+/// Local id to row; invalid_lo when the id is not a member.
 template <class A, class B>
 KOKKOS_INLINE_FUNCTION LO run_row(DomainKind kind, LO count, LO size, LO runs, const A& a, const B& b, LO lid) {
   if (lid < 0 || lid >= count) return invalid_lo;

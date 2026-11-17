@@ -4,31 +4,34 @@
 #ifndef SOMA_ALGORITHMS_SPHERE_CLIP_HPP_
 #define SOMA_ALGORITHMS_SPHERE_CLIP_HPP_
 
-// Polygons on the unit sphere whose edges are great-circle arcs, for the
-// remap of meshes on a sphere: areas, and the overlap of two convex ones by
-// either of two methods. Callable in kernels; fixed capacity, no allocation.
-//
-//   gnomonic      both polygons projected from the centre onto the plane
-//                 touching the sphere at the centre of the cube face that the
-//                 sum of the two polygons' mean directions points into (great circles
-//                 project to straight lines), clipped there as plane polygons
-//                 (polygon.hpp), and the overlap's corners taken back onto the
-//                 sphere; as MOAB's Intx2MeshOnSphere. Polygons that an edge's
-//                 great circle parts overlap by nothing; others reaching the
-//                 face's plane's horizon cannot be projected.
-//   great_circle  the subject cut by the plane through the centre and each
-//                 edge of the clipping polygon in turn (Sutherland and
-//                 Hodgman on the sphere): a point is inside where it is on
-//                 the edge's left, seen from outside the sphere.
-//
-// As in the plane (polygon.hpp), one tolerance eps governs every decision,
-// here as a distance on the unit sphere: a corner outside a clipping great
-// circle by at most eps is moved onto it, consecutive corners closer than
-// eps merge, and an overlap of area below eps^2 is nothing. The area of a
-// polygon is the sum of its fan's triangles' spherical excesses from its
-// first corner (Van Oosterom and Strackee 1983), each
-// 2 atan2(a . (b x c), 1 + a . b + b . c + c . a): positive counter-
-// clockwise seen from outside.
+/// \file
+/// Polygons on the unit sphere whose edges are great-circle arcs, for the
+/// remap of meshes on a sphere: areas, and the overlap of two convex ones by
+/// either of two methods. Callable in kernels; fixed capacity, no allocation.
+///
+/// ```
+///   gnomonic      both polygons projected from the centre onto the plane
+///                 touching the sphere at the centre of the cube face that the
+///                 sum of the two polygons' mean directions points into (great circles
+///                 project to straight lines), clipped there as plane polygons
+///                 (polygon.hpp), and the overlap's corners taken back onto the
+///                 sphere; as MOAB's Intx2MeshOnSphere. Polygons that an edge's
+///                 great circle parts overlap by nothing; others reaching the
+///                 face's plane's horizon cannot be projected.
+///   great_circle  the subject cut by the plane through the centre and each
+///                 edge of the clipping polygon in turn (Sutherland and
+///                 Hodgman on the sphere): a point is inside where it is on
+///                 the edge's left, seen from outside the sphere.
+/// ```
+///
+/// As in the plane (polygon.hpp), one tolerance eps governs every decision,
+/// here as a distance on the unit sphere: a corner outside a clipping great
+/// circle by at most eps is moved onto it, consecutive corners closer than
+/// eps merge, and an overlap of area below eps^2 is nothing. The area of a
+/// polygon is the sum of its fan's triangles' spherical excesses from its
+/// first corner (Van Oosterom and Strackee 1983), each
+/// 2 atan2(a . (b x c), 1 + a . b + b . c + c . a): positive counter-
+/// clockwise seen from outside.
 
 #include <Kokkos_Core.hpp>
 
@@ -53,12 +56,12 @@ KOKKOS_INLINE_FUNCTION Point3 unit(const Point3& a) {
   return {a.x / l, a.y / l, a.z / l};
 }
 
-// The signed area of spherical triangle a, b, c (unit vectors).
+/// The signed area of spherical triangle a, b, c (unit vectors).
 KOKKOS_INLINE_FUNCTION Real sphere_triangle_area(const Point3& a, const Point3& b, const Point3& c) {
   return 2 * Kokkos::atan2(dot(a, cross(b, c)), 1 + dot(a, b) + dot(b, c) + dot(c, a));
 }
 
-// The signed area of a polygon on the unit sphere: its fan from p[0].
+/// The signed area of a polygon on the unit sphere: its fan from p[0].
 KOKKOS_INLINE_FUNCTION Real sphere_area(const SpherePolygon& s) {
   Real a = 0;
   for (int i = 1; i + 1 < s.n; ++i) a += sphere_triangle_area(s.p[0], s.p[i], s.p[i + 1]);
@@ -70,7 +73,7 @@ KOKKOS_INLINE_FUNCTION Real chord(const Point3& a, const Point3& b) {
   return Kokkos::sqrt(dot(d, d));
 }
 
-// Consecutive corners closer than eps merged (the first of a run kept).
+/// Consecutive corners closer than eps merged (the first of a run kept).
 KOKKOS_INLINE_FUNCTION void merge_corners(SpherePolygon& s, Real eps) {
   if (s.n > polygon_storage) return;
   int m = 0;
@@ -82,8 +85,8 @@ KOKKOS_INLINE_FUNCTION void merge_corners(SpherePolygon& s, Real eps) {
   s.n = m;
 }
 
-// The overlap's area, 0 where it is under eps^2 or has fewer than three
-// corners.
+/// The overlap's area, 0 where it is under eps^2 or has fewer than three
+/// corners.
 KOKKOS_INLINE_FUNCTION Real overlap_area(SpherePolygon& out, Real eps) {
   if (out.n < 3) {
     out.n = 0;
@@ -97,9 +100,9 @@ KOKKOS_INLINE_FUNCTION Real overlap_area(SpherePolygon& out, Real eps) {
   return area;
 }
 
-// The overlap of convex polygons s and c (unit corners, counter-clockwise
-// seen from outside) by great circles, into out; its area (negative where
-// it overflows polygon_storage).
+/// The overlap of convex polygons s and c (unit corners, counter-clockwise
+/// seen from outside) by great circles, into out; its area (negative where
+/// it overflows polygon_storage).
 KOKKOS_INLINE_FUNCTION Real clip_great_circle(const SpherePolygon& s, const SpherePolygon& c, Real eps,
                                               SpherePolygon& out) {
   SpherePolygon a = s, b;
@@ -137,8 +140,8 @@ KOKKOS_INLINE_FUNCTION Real clip_great_circle(const SpherePolygon& s, const Sphe
   return overlap_area(out, eps);
 }
 
-// The cube face a direction points into: its normal f and the plane's axes
-// u, v (right-handed: u x v = f).
+/// The cube face a direction points into: its normal f and the plane's axes
+/// u, v (right-handed: u x v = f).
 KOKKOS_INLINE_FUNCTION void cube_face(const Point3& d, Point3& f, Point3& u, Point3& v) {
   const Real ax = Kokkos::fabs(d.x), ay = Kokkos::fabs(d.y), az = Kokkos::fabs(d.z);
   if (ax >= ay && ax >= az) {
@@ -159,8 +162,8 @@ KOKKOS_INLINE_FUNCTION void cube_face(const Point3& d, Point3& f, Point3& u, Poi
   }
 }
 
-// Whether an edge's great circle of a or of b has the other's corners all
-// beyond it by more than eps: the polygons do not overlap.
+/// Whether an edge's great circle of a or of b has the other's corners all
+/// beyond it by more than eps: the polygons do not overlap.
 KOKKOS_INLINE_FUNCTION bool apart(const SpherePolygon& a, const SpherePolygon& b, Real eps) {
   const auto beyond = [&](const SpherePolygon& p, const SpherePolygon& q) {
     for (int e = 0; e < p.n; ++e) {
@@ -176,10 +179,10 @@ KOKKOS_INLINE_FUNCTION bool apart(const SpherePolygon& a, const SpherePolygon& b
   return beyond(a, b) || beyond(b, a);
 }
 
-// The overlap of convex polygons s and c by the gnomonic projection onto
-// their cube face, into out (on the sphere); its area: 0 where an edge's
-// great circle parts them, negative where it overflows or a corner of
-// either is not in front of the face's plane.
+/// The overlap of convex polygons s and c by the gnomonic projection onto
+/// their cube face, into out (on the sphere); its area: 0 where an edge's
+/// great circle parts them, negative where it overflows or a corner of
+/// either is not in front of the face's plane.
 KOKKOS_INLINE_FUNCTION Real clip_gnomonic(const SpherePolygon& s, const SpherePolygon& c, Real eps,
                                           SpherePolygon& out) {
   // The face both polygons' mean directions, summed, point into.

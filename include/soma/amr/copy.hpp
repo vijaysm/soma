@@ -4,27 +4,30 @@
 #ifndef SOMA_AMR_COPY_HPP_
 #define SOMA_AMR_COPY_HPP_
 
-// Copies between two sets of boxes of one index type. A CopyPlan fills given
-// regions of the destination boxes from a source level: from its valid
-// points first (the first source along the curve wins where they share
-// points), then, if asked, from the ghost points of its boxes (which the
-// caller has filled), through periodic images too. What no source covers is
-// left as it is and listed as uncovered. The plan is computed once and
-// replayed by copy(); its copies of one destination box are disjoint, so the
-// result does not depend on the thread count.
-//
-// Over many ranks the source and destination boxes have owners. Every rank
-// computes the same copies from the replicated boxes and keeps its part:
-// copies between boxes it owns, and per other rank the points it sends and
-// receives, in the same order on both sides, so no message sets the plan
-// up. A copy posts the receives, packs and sends (device kernels, staged
-// through host memory), copies locally, then waits and unpacks:
-//
-//   auto pending = amr::begin_copy(src, dst, plan);   // work may go here
-//   pending.end();
-//
-// Fills of one plan that are in flight together must begin in the same
-// order on every rank, as MPI collectives must.
+/// \file
+/// Copies between two sets of boxes of one index type. A CopyPlan fills given
+/// regions of the destination boxes from a source level: from its valid
+/// points first (the first source along the curve wins where they share
+/// points), then, if asked, from the ghost points of its boxes (which the
+/// caller has filled), through periodic images too. What no source covers is
+/// left as it is and listed as uncovered. The plan is computed once and
+/// replayed by copy(); its copies of one destination box are disjoint, so the
+/// result does not depend on the thread count.
+///
+/// Over many ranks the source and destination boxes have owners. Every rank
+/// computes the same copies from the replicated boxes and keeps its part:
+/// copies between boxes it owns, and per other rank the points it sends and
+/// receives, in the same order on both sides, so no message sets the plan
+/// up. A copy posts the receives, packs and sends (device kernels, staged
+/// through host memory), copies locally, then waits and unpacks:
+///
+/// ```
+///   auto pending = amr::begin_copy(src, dst, plan);   // work may go here
+///   pending.end();
+/// ```
+///
+/// Fills of one plan that are in flight together must begin in the same
+/// order on every rank, as MPI collectives must.
 
 #include <cstdint>
 #include <optional>
@@ -48,8 +51,8 @@ struct Periodicity {
   KOKKOS_INLINE_FUNCTION constexpr bool operator[](int d) const { return periodic[d]; }
 };
 
-// Points `region` of destination box dst take the values of points
-// region - shift of source box src.
+/// Points `region` of destination box dst take the values of points
+/// region - shift of source box src.
 struct CopyOp {
   int src = 0;
   int dst = 0;
@@ -63,15 +66,15 @@ class CopyPlan {
   static constexpr int default_tag = 32620;
 
   CopyPlan() = default;
-  // regions[b]: the points of destination box b to fill, in `type`. With
-  // src_ghosts > 0, source ghost points up to that width serve after the
-  // valid ones. Every box on this process.
+  /// regions[b]: the points of destination box b to fill, in `type`. With
+  /// src_ghosts > 0, source ghost points up to that width serve after the
+  /// valid ones. Every box on this process.
   CopyPlan(const BoxArray& src, const std::vector<BoxList>& regions, IndexType type, Periodicity periodic,
            int src_ghosts = 0);
-  // The part of rank comm.rank(), source box i owned by src.owner[i] and
-  // destination box b by dst.owner[b]; messages on `tag`. Throws
-  // std::invalid_argument unless each distribution gives every box an owner
-  // in the communicator.
+  /// The part of rank comm.rank(), source box i owned by src.owner[i] and
+  /// destination box b by dst.owner[b]; messages on `tag`. Throws
+  /// std::invalid_argument unless each distribution gives every box an owner
+  /// in the communicator.
   CopyPlan(const Comm& comm, const BoxArray& src, const Distribution& src_owner, const std::vector<BoxList>& regions,
            const Distribution& dst_owner, IndexType type, Periodicity periodic, int src_ghosts = 0,
            int tag = default_tag);
@@ -79,28 +82,28 @@ class CopyPlan {
   IndexType type() const { return type_; }
   int src_ghosts() const { return src_ghosts_; }
   int tag() const { return tag_; }
-  // Every copy of the plan, on every rank, boxes by their ids.
+  /// Every copy of the plan, on every rank, boxes by their ids.
   const std::vector<CopyOp>& copies() const { return copies_; }
-  // Per destination box, the points of its regions no source covered.
+  /// Per destination box, the points of its regions no source covered.
   const std::vector<BoxList>& uncovered() const { return uncovered_; }
-  // This rank's copies between boxes it owns, by the fields' local indices,
-  // and how many points they, the sends and the receives hold.
+  /// This rank's copies between boxes it owns, by the fields' local indices,
+  /// and how many points they, the sends and the receives hold.
   const std::vector<CopyOp>& local_copies() const { return local_; }
   std::int64_t num_copied() const { return local_start_.back(); }
   std::int64_t num_sent() const { return send_start_.back(); }
   std::int64_t num_received() const { return recv_start_.back(); }
   const std::optional<Comm>& comm() const { return comm_; }
-  // The owner of every source and destination box.
+  /// The owner of every source and destination box.
   const std::vector<int>& src_owner() const { return src_owner_; }
   const std::vector<int>& dst_owner() const { return dst_owner_; }
   const transport::CommPlan& comm_plan() const { return messages_; }
 
   Kokkos::View<const CopyOp*, DeviceSpace> device_copies() const { return d_local_; }
   Kokkos::View<const std::int64_t*, DeviceSpace> device_start() const { return d_local_start_; }
-  // Sends: source box by local index, region in the destination's frame.
+  /// Sends: source box by local index, region in the destination's frame.
   Kokkos::View<const CopyOp*, DeviceSpace> device_sends() const { return d_send_; }
   Kokkos::View<const std::int64_t*, DeviceSpace> device_send_start() const { return d_send_start_; }
-  // Receives: destination box by local index.
+  /// Receives: destination box by local index.
   Kokkos::View<const CopyOp*, DeviceSpace> device_receives() const { return d_recv_; }
   Kokkos::View<const std::int64_t*, DeviceSpace> device_receive_start() const { return d_recv_start_; }
 
@@ -124,7 +127,7 @@ class CopyPlan {
 
 namespace detail {
 
-// The op holding point p of a list whose points start at start(i).
+/// The op holding point p of a list whose points start at start(i).
 template <class Start>
 KOKKOS_INLINE_FUNCTION int op_of(const Start& start, int n, std::int64_t p) {
   int lo = 0, hi = n - 1;
@@ -161,7 +164,7 @@ void run_copies(const LevelView<T, MemSpace>& src, const LevelView<T, MemSpace>&
   Kokkos::fence("amr::copy");
 }
 
-// Point p of the sends into buffer values p * ncomp ... p * ncomp + ncomp - 1.
+/// Point p of the sends into buffer values p * ncomp ... p * ncomp + ncomp - 1.
 template <class T, class MemSpace>
 void pack_sends(const LevelView<T, MemSpace>& src, const CopyPlan& plan, const Kokkos::View<T*, MemSpace>& buffer,
                 int ncomp) {
@@ -203,9 +206,9 @@ void unpack_receives(const LevelView<T, MemSpace>& dst, const Kokkos::View<const
 
 }  // namespace detail
 
-// A copy in flight: end() waits for the messages and unpacks them (a second
-// call does nothing). Destroying one before end() waits and drops what
-// arrived.
+/// A copy in flight: end() waits for the messages and unpacks them (a second
+/// call does nothing). Destroying one before end() waits and drops what
+/// arrived.
 template <class T, class MemSpace = Kokkos::DefaultExecutionSpace::memory_space>
 class PendingCopy {
  public:
@@ -228,7 +231,7 @@ class PendingCopy {
   template <class U, class M>
   friend PendingCopy<U, M> begin_copy_views(const LevelView<U, M>& src, const LevelView<U, M>& dst, const CopyPlan& plan);
 
-  // Finished, or moved from: a moved-from copy has nothing left to end.
+  /// Finished, or moved from: a moved-from copy has nothing left to end.
   struct Done {
     bool value = true;
     Done() = default;
@@ -244,7 +247,7 @@ class PendingCopy {
   LevelView<T, MemSpace> dst_;
   Kokkos::View<const CopyOp*, CopyPlan::DeviceSpace> recvs_;
   Kokkos::View<const std::int64_t*, CopyPlan::DeviceSpace> start_;
-  // The buffers outlive the messages: declared before them, destroyed after.
+  /// The buffers outlive the messages: declared before them, destroyed after.
   Kokkos::View<T*, MemSpace> send_, recv_;
   typename Kokkos::View<T*, MemSpace>::host_mirror_type send_host_, recv_host_;
   transport::CommPlan::Pending messages_;
@@ -279,9 +282,9 @@ PendingCopy<T, MemSpace> begin_copy_views(const LevelView<T, MemSpace>& src, con
   return out;
 }
 
-// Starts a copy along the plan from src into dst (components up to the
-// smaller count); throws std::invalid_argument for fields that do not match
-// the plan's index type, source ghosts, owners or rank.
+/// Starts a copy along the plan from src into dst (components up to the
+/// smaller count); throws std::invalid_argument for fields that do not match
+/// the plan's index type, source ghosts, owners or rank.
 template <class T>
 PendingCopy<T> begin_copy(const LevelField<T>& src, const LevelField<T>& dst, const CopyPlan& plan) {
   if (!(src.type() == plan.type()) || !(dst.type() == plan.type()) || src.ghosts() < plan.src_ghosts()) {

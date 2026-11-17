@@ -10,7 +10,7 @@ namespace soma {
 
 enum class Ordering : std::uint8_t { file, type_major_sfc, tiled };
 
-// Ordering used when the caller does not choose one.
+/// Ordering used when the caller does not choose one.
 inline constexpr Ordering default_ordering = Ordering::type_major_sfc;
 
 }  // namespace soma

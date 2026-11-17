@@ -4,15 +4,18 @@
 #ifndef SOMA_FIELDS_DOMAIN_HPP_
 #define SOMA_FIELDS_DOMAIN_HPP_
 
-// Which entities a field lives on. A Domain is an immutable snapshot of a set
-// of local entity ids, one block per dimension, built from raw counts and ids
-// (it does not depend on Mesh). Three representations, chosen automatically:
-//   full       every entity of the dimension; identity maps, no storage
-//   intervals  few contiguous runs; binary search on the run starts
-//   list       sorted local ids; the inverse map is a binary search
-// There is no rank-bitset representation and no set algebra (union,
-// intersection, difference) yet; blocks of distinct dimensions can be joined by
-// combine().
+/// \file
+/// Which entities a field lives on. A Domain is an immutable snapshot of a set
+/// of local entity ids, one block per dimension, built from raw counts and ids
+/// (it does not depend on Mesh). Three representations, chosen automatically:
+/// ```
+///   full       every entity of the dimension; identity maps, no storage
+///   intervals  few contiguous runs; binary search on the run starts
+///   list       sorted local ids; the inverse map is a binary search
+/// ```
+/// There is no rank-bitset representation and no set algebra (union,
+/// intersection, difference) yet; blocks of distinct dimensions can be joined by
+/// combine().
 
 #include <algorithm>
 #include <cstdint>
@@ -45,10 +48,10 @@ KOKKOS_INLINE_FUNCTION constexpr std::uint64_t splitmix64(std::uint64_t x) noexc
   return x ^ (x >> 31);
 }
 
-// Structural identity of one block. The hash combines splitmix64 of every
-// member's global id with a commutative sum and a xor, so it does not depend
-// on member order or on local numbering. It only rejects: equality of domains
-// is always confirmed on the members themselves.
+/// Structural identity of one block. The hash combines splitmix64 of every
+/// member's global id with a commutative sum and a xor, so it does not depend
+/// on member order or on local numbering. It only rejects: equality of domains
+/// is always confirmed on the members themselves.
 struct Fingerprint {
   std::uint64_t epoch = 0;
   int dim = 0;
@@ -58,22 +61,22 @@ struct Fingerprint {
   friend bool operator==(const Fingerprint&, const Fingerprint&) = default;
 };
 
-// Device-copyable handle on one block. intervals: a = run begins (runs),
-// b = row prefix (runs + 1, b(0) = 0); list: a = sorted lids.
+/// Device-copyable handle on one block. intervals: a = run begins (runs),
+/// b = row prefix (runs + 1, b(0) = 0); list: a = sorted lids.
 template <class MemSpace>
 struct DomainBlockView {
   int dim = 0;
   DomainKind kind = DomainKind::full;
-  LO count = 0;  // entities of this dimension in the mesh
-  LO size = 0;   // members
+  LO count = 0;  ///< entities of this dimension in the mesh
+  LO size = 0;   ///< members
   LO runs = 0;
   UView1<LO, MemSpace> a{};
   UView1<LO, MemSpace> b{};
 
-  // Row in [0, size) to local id; invalid_lo when out of range.
+  /// Row in [0, size) to local id; invalid_lo when out of range.
   KOKKOS_INLINE_FUNCTION LO entity(LO row) const { return detail::run_entity(kind, size, runs, a, b, row); }
 
-  // Local id to row; invalid_lo when the entity is not a member.
+  /// Local id to row; invalid_lo when the entity is not a member.
   KOKKOS_INLINE_FUNCTION LO row(LO lid) const { return detail::run_row(kind, count, size, runs, a, b, lid); }
 };
 
@@ -96,7 +99,7 @@ struct DomainView {
     return -1;
   }
 
-  // Row in the whole domain (blocks are stacked in dimension order).
+  /// Row in the whole domain (blocks are stacked in dimension order).
   KOKKOS_INLINE_FUNCTION LO row(int dim, LO lid) const {
     const int i = find_block(dim);
     if (i < 0) return invalid_lo;
@@ -132,8 +135,8 @@ struct HashPair {
   std::uint64_t xr = 0;
 };
 
-// One parallel reduction over the rows of a block. Without global ids the
-// local ids stand in for them.
+/// One parallel reduction over the rows of a block. Without global ids the
+/// local ids stand in for them.
 template <class MemSpace>
 struct MemberHash {
   using execution_space = typename MemSpace::execution_space;
@@ -200,8 +203,8 @@ class Domain {
   using memory_space = MemSpace;
   using GidView = View1<const GO, MemSpace>;
 
-  // The empty domain: no blocks, epoch 0. All empty domains share one snapshot,
-  // which is also what a moved-from domain refers to afterwards.
+  /// The empty domain: no blocks, epoch 0. All empty domains share one snapshot,
+  /// which is also what a moved-from domain refers to afterwards.
   Domain() : data_(empty_data()) {}
   Domain(const Domain&) = default;
   Domain& operator=(const Domain&) = default;
@@ -211,14 +214,14 @@ class Domain {
     return *this;
   }
 
-  // Every entity of `dim`. `count` is the number of entities of that dimension.
-  // `gids` (one per entity) feed the fingerprint; local ids are used when empty.
+  /// Every entity of `dim`. `count` is the number of entities of that dimension.
+  /// `gids` (one per entity) feed the fingerprint; local ids are used when empty.
   static Domain all(int dim, LO count, std::uint64_t epoch, GidView gids = {}) {
     check_dim(dim, count);
     return single(dim, count, epoch, {Interval{0, count}}, gids);
   }
 
-  // Disjoint, sorted runs; adjacent runs are merged and empty ones dropped.
+  /// Disjoint, sorted runs; adjacent runs are merged and empty ones dropped.
   static Domain from_intervals(int dim, LO count, std::uint64_t epoch,
                                std::span<const Interval> intervals, GidView gids = {}) {
     check_dim(dim, count);
@@ -243,7 +246,7 @@ class Domain {
     return single(dim, count, epoch, std::move(runs), gids);
   }
 
-  // Strictly increasing local ids in [0, count).
+  /// Strictly increasing local ids in [0, count).
   static Domain from_list(int dim, LO count, std::uint64_t epoch,
                           std::span<const LO> sorted_lids, GidView gids = {}) {
     check_dim(dim, count);
@@ -261,12 +264,12 @@ class Domain {
     return single(dim, count, epoch, detail::runs_of(sorted_lids), gids);
   }
 
-  // Mesh-aware factories. Declared here, defined in soma/fields/domain_mesh.hpp,
-  // which is the only field header that includes the mesh: include it to use them.
+  /// Mesh-aware factories. Declared here, defined in soma/fields/domain_mesh.hpp,
+  /// which is the only field header that includes the mesh: include it to use them.
   static Domain all(const Mesh<MemSpace>& mesh, int dim);
   static Domain segments(const Mesh<MemSpace>& mesh, int dim, const SegmentFilter& filter);
   static Domain from_list(const Mesh<MemSpace>& mesh, int dim, std::span<const LO> sorted_lids);
-  // The members of one slot of set `set`: a list domain over that slot.
+  /// The members of one slot of set `set`: a list domain over that slot.
   static Domain from_set(const Mesh<MemSpace>& mesh, LO set, int slot);
 
   int num_blocks() const noexcept { return static_cast<int>(data_->blocks.size()); }
@@ -277,7 +280,7 @@ class Domain {
   const DomainBlockInfo& info(int b) const { return data_->blocks.at(static_cast<std::size_t>(b)).info; }
   const Fingerprint& fingerprint(int b) const { return info(b).fingerprint; }
 
-  // Index of the block of dimension `dim`, or -1.
+  /// Index of the block of dimension `dim`, or -1.
   int find_block(int dim) const noexcept {
     for (int i = 0; i < num_blocks(); ++i) {
       if (info(i).dim == dim) return i;
@@ -289,7 +292,7 @@ class Domain {
   DomainBlockView<MemSpace> block(int b) const {
     return data_->blocks.at(static_cast<std::size_t>(b)).view();
   }
-  // Host copy of the same block; an alias when MemSpace is host-accessible.
+  /// Host copy of the same block; an alias when MemSpace is host-accessible.
   DomainBlockView<Kokkos::HostSpace> host_block(int b) const {
     return data_->blocks.at(static_cast<std::size_t>(b)).host_view();
   }
@@ -305,7 +308,7 @@ class Domain {
     return v;
   }
 
-  // Host lookups. row() returns a row of the whole domain.
+  /// Host lookups. row() returns a row of the whole domain.
   LO row(int dim, LO lid) const {
     const int i = find_block(dim);
     if (i < 0) return invalid_lo;
@@ -320,9 +323,9 @@ class Domain {
     return out;
   }
 
-  // Same epoch, same blocks, same fingerprints, and identical members. The
-  // fingerprint only rejects early; a hash collision cannot make two different
-  // domains equal.
+  /// Same epoch, same blocks, same fingerprints, and identical members. The
+  /// fingerprint only rejects early; a hash collision cannot make two different
+  /// domains equal.
   bool same_fingerprints(const Domain& o) const {
     if (epoch() != o.epoch() || num_blocks() != o.num_blocks()) return false;
     for (int i = 0; i < num_blocks(); ++i) {
@@ -352,15 +355,15 @@ class Domain {
     return a.same_fingerprints(b) && a.same_members(b);
   }
 
-  // True when both handles share one snapshot.
+  /// True when both handles share one snapshot.
   bool shares_storage_with(const Domain& o) const noexcept { return data_ == o.data_; }
   const void* storage_id() const noexcept { return data_.get(); }
-  // Number of handles that share this snapshot; 0 for the empty snapshot, which
-  // has no reference count. A test seam: under concurrent use the value is only
-  // a hint.
+  /// Number of handles that share this snapshot; 0 for the empty snapshot, which
+  /// has no reference count. A test seam: under concurrent use the value is only
+  /// a hint.
   long snapshot_use_count() const noexcept { return data_.use_count(); }
 
-  // Domains are immutable, so the same memory space shares the snapshot.
+  /// Domains are immutable, so the same memory space shares the snapshot.
   template <class Dst>
   Domain<Dst> mirror() const {
     if constexpr (std::is_same_v<Dst, MemSpace>) {
@@ -382,9 +385,9 @@ class Domain {
     }
   }
 
-  // Joins two domains of distinct dimensions built against the same epoch.
-  // General set algebra (union, intersection, difference of overlapping
-  // blocks) is a later addition.
+  /// Joins two domains of distinct dimensions built against the same epoch.
+  /// General set algebra (union, intersection, difference of overlapping
+  /// blocks) is a later addition.
   static Domain combine(const Domain& x, const Domain& y) {
     if (x.empty()) return y;
     if (y.empty()) return x;
@@ -423,9 +426,9 @@ class Domain {
     std::uint64_t epoch = 0;
   };
 
-  // Builds the empty snapshot while construction may still throw: the noexcept
-  // moves hand it to the moved-from object and must never have to allocate it.
-  // Any Domain that exists implies a constructor ran, so the snapshot exists.
+  /// Builds the empty snapshot while construction may still throw: the noexcept
+  /// moves hand it to the moved-from object and must never have to allocate it.
+  /// Any Domain that exists implies a constructor ran, so the snapshot exists.
   explicit Domain(std::shared_ptr<const Data> d) : data_((void(empty_data()), std::move(d))) {}
 
   static const std::shared_ptr<const Data>& empty_data() {
@@ -446,8 +449,8 @@ class Domain {
     if (count < 0) throw std::invalid_argument("Domain: negative entity count");
   }
 
-  // Picks the representation that needs the least storage, builds the block,
-  // and fingerprints it.
+  /// Picks the representation that needs the least storage, builds the block,
+  /// and fingerprints it.
   static Domain single(int dim, LO count, std::uint64_t epoch, std::vector<Interval> runs,
                        const GidView& gids) {
     if (gids.extent(0) != 0 && detail::to_lo(gids.extent(0), "number of global ids") != count) {

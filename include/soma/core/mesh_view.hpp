@@ -16,9 +16,9 @@
 
 namespace soma {
 
-// Kernel handle. Copy it into lambdas; never capture a Mesh. All Views are
-// unmanaged (no refcount traffic per launch). Valid only while the owning Mesh
-// is alive and unmodified in topology.
+/// Kernel handle. Copy it into lambdas; never capture a Mesh. All Views are
+/// unmanaged (no refcount traffic per launch). Valid only while the owning Mesh
+/// is alive and unmodified in topology.
 template <class MemSpace>
 struct MeshView {
   using Traits = Kokkos::MemoryTraits<Kokkos::Unmanaged | Kokkos::RandomAccess>;
@@ -33,17 +33,17 @@ struct MeshView {
   Kokkos::Array<UView1<LO, MemSpace>, 4> conn{};
   Kokkos::Array<UView1<std::uint8_t, MemSpace>, 4> topo{};
   Kokkos::Array<UView1<GO, MemSpace>, 4> gids{};
-  // Empty for a dimension without high-order elements.
+  /// Empty for a dimension without high-order elements.
   Kokkos::Array<UView1<Offset, MemSpace>, 4> node_offsets{};
   Kokkos::Array<UView1<LO, MemSpace>, 4> nodes{};
-  // Empty unless the mesh is edited and holds removed entities.
+  /// Empty unless the mesh is edited and holds removed entities.
   Kokkos::Array<UView1<std::uint8_t, MemSpace>, 4> alive_mask{};
   CoordsU coords{};
-  // By Ownership: kind k's corner vertices end at corner_ends[k], its
-  // node-only vertices follow. corners is corner_ends[0].
+  /// By Ownership: kind k's corner vertices end at corner_ends[k], its
+  /// node-only vertices follow. corners is corner_ends[0].
   Kokkos::Array<LO, 4> corner_ends{};
   LO corners = 0;
-  // Indexed by pair_slot and bridge_slot; empty where the mesh holds no graph.
+  /// Indexed by pair_slot and bridge_slot; empty where the mesh holds no graph.
   Kokkos::Array<UView1<Offset, MemSpace>, adjacency_slots> adj_offsets{};
   Kokkos::Array<UView1<LO, MemSpace>, adjacency_slots> adj_targets{};
   Kokkos::Array<UView1<std::uint8_t, MemSpace>, adjacency_slots> adj_code_values{};
@@ -60,14 +60,14 @@ struct MeshView {
     const auto i = static_cast<std::size_t>(d);
     return d == 0 ? e : conn[i](offsets[i](e) + k);
   }
-  // False for an entity MeshEdit removed and compress() has not dropped yet;
-  // always true on a mesh that was not edited.
+  /// False for an entity MeshEdit removed and compress() has not dropped yet;
+  /// always true on a mesh that was not edited.
   KOKKOS_INLINE_FUNCTION bool alive(int d, LO e) const {
     const auto& m = alive_mask[static_cast<std::size_t>(d)];
     return m.extent(0) == 0 || m(e) != 0;
   }
-  // The corners and then the other nodes of a high-order element, in MOAB's
-  // order (soma/topology/nodes.hpp names the sub-entity each sits on).
+  /// The corners and then the other nodes of a high-order element, in MOAB's
+  /// order (soma/topology/nodes.hpp names the sub-entity each sits on).
   KOKKOS_INLINE_FUNCTION LO num_nodes(int d, LO e) const {
     const auto i = static_cast<std::size_t>(d);
     const LO n = num_vertices(d, e);
@@ -79,8 +79,8 @@ struct MeshView {
     const auto i = static_cast<std::size_t>(d);
     return nodes[i](node_offsets[i](e) + (k - n));
   }
-  // (d, 0) for d >= 1 is the connectivity. Any other graph must be held by the
-  // mesh; under SOMA_DEBUG a missing one aborts.
+  /// (d, 0) for d >= 1 is the connectivity. Any other graph must be held by the
+  /// mesh; under SOMA_DEBUG a missing one aborts.
   KOKKOS_INLINE_FUNCTION Row<const LO> adj(int from, int to, LO e) const {
     if (to == 0 && from > 0) {
       const auto i = static_cast<std::size_t>(from);
@@ -88,7 +88,7 @@ struct MeshView {
     }
     return row(pair_slot(from, to), e);
   }
-  // Empty for (d, 0).
+  /// Empty for (d, 0).
   KOKKOS_INLINE_FUNCTION Row<const std::uint8_t> adj_codes(int from, int to, LO e) const {
     if (to == 0 && from > 0) return {};
     const auto s = static_cast<std::size_t>(pair_slot(from, to));
@@ -107,12 +107,12 @@ struct MeshView {
   KOKKOS_INLINE_FUNCTION bool interior(int d, LO e) const {
     return e < interior_ends[static_cast<std::size_t>(d)];
   }
-  // A corner of some element (or of none), not only a high-order node.
+  /// A corner of some element (or of none), not only a high-order node.
   KOKKOS_INLINE_FUNCTION bool corner(LO v) const {
     const std::size_t k = v < interior_ends[0] ? 0 : v < owned_ends[0] ? 1 : v < shared_ends[0] ? 2 : 3;
     return v < corner_ends[k];
   }
-  // Shared with another rank, whichever owns it.
+  /// Shared with another rank, whichever owns it.
   KOKKOS_INLINE_FUNCTION bool shared(int d, LO e) const {
     const auto k = static_cast<std::size_t>(d);
     return e >= interior_ends[k] && e < shared_ends[k];

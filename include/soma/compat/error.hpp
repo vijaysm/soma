@@ -4,16 +4,19 @@
 #ifndef SOMA_COMPAT_ERROR_HPP_
 #define SOMA_COMPAT_ERROR_HPP_
 
-// MOAB's error macros, under SOMA_ names (the drop-in headers give them
-// MOAB's names). An error is reported on stderr as MOAB reports it:
-//
-//   MOAB ERROR: --------------------- Error Message ------------------------------------
-//   MOAB ERROR: <message>!
-//   MOAB ERROR: <function>() line <n> in <file>
-//
-// and each SOMA_MB_CHK_ERR it passes through adds its own location line.
-// Unlike MOAB's macros, which evaluate a failing expression a second time,
-// these evaluate it once.
+/// \file
+/// MOAB's error macros, under SOMA_ names (the drop-in headers give them
+/// MOAB's names). An error is reported on stderr as MOAB reports it:
+///
+/// ```
+///   MOAB ERROR: --------------------- Error Message ------------------------------------
+///   MOAB ERROR: <message>!
+///   MOAB ERROR: <function>() line <n> in <file>
+/// ```
+///
+/// and each SOMA_MB_CHK_ERR it passes through adds its own location line.
+/// Unlike MOAB's macros, which evaluate a failing expression a second time,
+/// these evaluate it once.
 
 #include <sstream>
 #include <string>
@@ -22,7 +25,7 @@
 
 namespace soma::compat::detail {
 
-// new_error: print the banner and the message, then the location.
+/// new_error: print the banner and the message, then the location.
 void report_error(bool new_error, const std::string& message, const char* function, int line, const char* file);
 
 }  // namespace soma::compat::detail

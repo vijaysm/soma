@@ -4,10 +4,11 @@
 #ifndef SOMA_COMPAT_RANGE_HPP_
 #define SOMA_COMPAT_RANGE_HPP_
 
-// MOAB's Range: a sorted set of handles kept as closed runs [first, second].
-// The runs live in a vector, so inserting in increasing order (the common
-// case) appends, while an insertion in the middle moves the later runs; as in
-// MOAB, iterators are invalidated by any change.
+/// \file
+/// MOAB's Range: a sorted set of handles kept as closed runs [first, second].
+/// The runs live in a vector, so inserting in increasing order (the common
+/// case) appends, while an insertion in the middle moves the later runs; as in
+/// MOAB, iterators are invalidated by any change.
 
 #include <cstddef>
 #include <iosfwd>
@@ -69,7 +70,7 @@ class Range {
     const_iterator& operator-=(EntityID step);
     bool operator==(const const_iterator& o) const { return run_ == o.run_ && value_ == o.value_; }
     bool operator!=(const const_iterator& o) const { return !(*this == o); }
-    // The last and first handles of this iterator's run.
+    /// The last and first handles of this iterator's run.
     const_iterator end_of_block() const { return {runs_, run_, (*runs_)[run_].second}; }
     const_iterator start_of_block() const { return {runs_, run_, (*runs_)[run_].first}; }
 
@@ -84,8 +85,8 @@ class Range {
   };
   using iterator = const_iterator;
 
-  // Keeps the handle it points at, as const_iterator does (std::reverse_iterator
-  // would hand out a reference into a temporary).
+  /// Keeps the handle it points at, as const_iterator does (std::reverse_iterator
+  /// would hand out a reference into a temporary).
   class const_reverse_iterator {
    public:
     using iterator_category = std::bidirectional_iterator_tag;
@@ -124,7 +125,7 @@ class Range {
     const_iterator base() const { return base_; }
 
    private:
-    const_iterator base_;  // one past the handle pointed at
+    const_iterator base_;  ///< one past the handle pointed at
     mutable EntityHandle value_ = 0;
   };
 
@@ -195,7 +196,7 @@ class Range {
   Range subset_by_dimension(int d) const;
   bool contains(const Range& other) const;
 
-  // The handle at position i, and the position of h (-1 if absent).
+  /// The handle at position i, and the position of h (-1 if absent).
   EntityHandle operator[](EntityID i) const;
   int index(EntityHandle h) const;
 
@@ -203,8 +204,8 @@ class Range {
   void swap(Range& o) noexcept { runs_.swap(o.runs_); }
   Range& operator-=(const Range& rhs);
 
-  // MOAB's text: one line per run, "<indent>\t<Type> <id>[ - [<Type> ]<id>]",
-  // "<indent>\tempty" when empty.
+  /// MOAB's text: one line per run, "<indent>\t<Type> <id>[ - [<Type> ]<id>]",
+  /// "<indent>\tempty" when empty.
   std::string str_rep(const char* indent = nullptr) const;
   void print(const char* indent = nullptr) const;
   void print(std::ostream& s, const char* indent = nullptr) const;
