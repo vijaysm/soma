@@ -453,4 +453,19 @@ HostMesh detail::build_local_part_deferred(const Comm& comm, MeshBuilder&& build
   return build_part(comm, std::move(builder), {}, sharing, ordering, std::move(before), &failure, who);
 }
 
+std::vector<int> owner_ranks(const Comm& comm, const HostMesh& mesh, int d) {
+  if (d < 0 || d > mesh.dim()) {
+    throw std::invalid_argument("owner_ranks: dimension " + std::to_string(d) + " is outside [0, " +
+                                std::to_string(mesh.dim()) + "]");
+  }
+  const LO count = mesh.count(d);
+  const LO owned = mesh.segment_table(d).owned_end;
+  std::vector<int> out(static_cast<std::size_t>(count), comm.rank());
+  if (owned < count) {
+    const auto o = mesh.fields().get<int>(owner_field, d);
+    for (LO e = owned; e < count; ++e) out[static_cast<std::size_t>(e)] = o.value_or_default(d, e);
+  }
+  return out;
+}
+
 }  // namespace soma

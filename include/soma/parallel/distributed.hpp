@@ -91,6 +91,13 @@ namespace detail {
 /// soma:owner, as the vertices have. Throws on every rank if any rank fails.
 void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRequest request);
 
+/// The rank owning each entity of dimension `d`, by lid: this rank for the
+/// entities it owns (interior and shared), and the owner recorded in
+/// soma:owner for shared copies and ghosts. A new vector (SOMA keeps ownership
+/// as segment ranges, not per entity). Not collective; throws
+/// std::invalid_argument for `d` outside [0, mesh.dim()].
+[[nodiscard]] std::vector<int> owner_ranks(const Comm& comm, const HostMesh& mesh, int d);
+
 }  // namespace soma
 
 #endif  // SOMA_PARALLEL_DISTRIBUTED_HPP_
