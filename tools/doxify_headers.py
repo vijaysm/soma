@@ -6,14 +6,16 @@
 
     python3 tools/doxify_headers.py [--check] PATHS...
 
-PATHS are headers or directories (searched for *.hpp). The rules:
+PATHS are headers or directories (searched for *.hpp, less the MOAB and MPI
+stand-ins under compat/dropin and compat/serial_mpi). The rules:
 
 - the first comment block after the include guard's #define, before any code
   and followed by a blank or preprocessor line, becomes the file's
   documentation: "/// \\file", then its text as "///" lines;
 - a "//" block directly above a declaration in namespace or class scope
   becomes "///" lines; one followed by a blank line, a preprocessor line, a
-  closing brace or an access specifier stays "//" (a note, not documentation);
+  closing brace, an access specifier, a namespace or a forward declaration
+  stays "//" (a note, not documentation);
 - a trailing comment after a member or enumerator ("int x;  // ...") becomes
   "///<", and so does a comment-only line under it indented further;
 - comments inside function bodies, the SPDX and copyright lines, and "///"
@@ -36,6 +38,9 @@ from pathlib import Path
 
 SCOPE = re.compile(r'\b(namespace|class|struct|union|enum)\b|extern\s+"C"')
 ACCESS = re.compile(r"^(public|protected|private)\s*:")
+# A namespace (documented nowhere per header: Doxygen would merge the texts)
+# or a forward declaration (the class is documented where it is defined).
+NOT_DOCUMENTED = re.compile(r"^(inline\s+)?namespace\b|^(class|struct|union)\s+\w+\s*;")
 
 
 def split_comment(line: str) -> tuple[str, str]:
@@ -124,6 +129,7 @@ def convert(text: str) -> tuple[str, list[int]]:
                 following == ""
                 or following.startswith(("#", "}"))
                 or ACCESS.match(following) is not None
+                or NOT_DOCUMENTED.match(following) is not None
             )
             if in_body or (note and not file_comment):
                 out.extend(block)
@@ -179,10 +185,19 @@ def unconverted(text: str) -> list[int]:
     return convert(text)[1]
 
 
+# Headers that stand in for MOAB's and MPI's at their include paths: they keep
+# those libraries' comment style and are not part of SOMA's API reference.
+SHIMS = ("compat/dropin", "compat/serial_mpi")
+
+
 def headers(paths: list[str]) -> list[Path]:
+    """The headers named, and those under the directories named, less the shims."""
     found: list[Path] = []
     for p in map(Path, paths):
-        found.extend(sorted(p.rglob("*.hpp")) if p.is_dir() else [p])
+        if p.is_dir():
+            found.extend(h for h in sorted(p.rglob("*.hpp")) if not any(s in h.as_posix() for s in SHIMS))
+        else:
+            found.append(p)
     return found
 
 

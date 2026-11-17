@@ -68,6 +68,13 @@ class Doxify(unittest.TestCase):
         src = "\nnamespace a {\n\nint g();\n// Before a close.\n}  // namespace a\n// Before a line.\n#include <y>\n"
         self.check(src, src)
 
+    def test_block_before_namespace_or_forward_declaration_stays(self):
+        src = (
+            "\nint a();\n\n// -----\n// Section\n// -----\nnamespace detail {\n}  // namespace detail\n\n"
+            "// About what comes after.\nclass Later;\nstruct Other;\n"
+        )
+        self.check(src, src)
+
     def test_body_comments_stay(self):
         src = (
             "\ninline int f(int x) {\n  // Inside.\n  int y = x;  // trailing\n  return y;\n}\n\n"
@@ -108,6 +115,15 @@ class Doxify(unittest.TestCase):
         t = header("\n// File.\n\nnamespace a {\n// A.\nint a;\n// Note.\n\n}  // namespace a\n")
         self.assertEqual(dx.unconverted(t), [7, 10])
         self.assertEqual(dx.unconverted(dx.doxify(t)), [])
+
+    def test_directory_walk_skips_the_shims(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d) / "soma"
+            for rel in ("core/a.hpp", "compat/core.hpp", "compat/dropin/moab/Core.hpp", "compat/serial_mpi/mpi.hpp"):
+                (root / rel).parent.mkdir(parents=True, exist_ok=True)
+                (root / rel).write_text("")
+            found = sorted(p.relative_to(root).as_posix() for p in dx.headers([str(root)]))
+            self.assertEqual(found, ["compat/core.hpp", "core/a.hpp"])
 
     def test_check_mode_on_files(self):
         with tempfile.TemporaryDirectory() as d:

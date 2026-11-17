@@ -43,17 +43,38 @@ and run the tests.
 ### Header comments are the API contract
 
 Each public header opens, after its include guard, with a prose comment saying what it provides,
-how to use it (often with a short indented example) and the behaviour a caller relies on: which
-calls are collective, what throws and on which ranks, determinism, tolerances and units, and
-memory spaces. Each declaration has a comment of its own with the same kind of contract.
+how to use it (often with a short example) and the behaviour a caller relies on: which calls are
+collective, what throws and on which ranks, determinism, tolerances and units, and memory spaces.
+Each declaration has a comment of its own with the same kind of contract.
 `include/soma/amr/halo.hpp` is a typical example:
 
 ```cpp
-// Same-level halo exchange. A HaloPlan, computed once for a level's boxes, an
-// index type and a ghost width, lists the copies that fill the ghost points
-// of every box from the valid points of the others (faces, edges and
-// corners), across periodic directions too, ...
+/// \file
+/// Same-level halo exchange. A HaloPlan, computed once for a level's boxes, an
+/// index type and a ghost width, lists the copies that fill the ghost points
+/// of every box from the valid points of the others (faces, edges and
+/// corners), across periodic directions too, ...
 ```
+
+These comments are Doxygen comments, from which the API reference is generated:
+
+- the header's opening comment starts with `/// \file`;
+- a comment directly above a declaration is `///`; a member's or enumerator's trailing comment is
+  `///<`;
+- example code and tables inside a comment go between ```` ``` ```` lines;
+- a comment that is a note rather than documentation (a section banner, a remark before a
+  namespace or a forward declaration) stays `//` and is followed by a blank line where it would
+  otherwise sit above a declaration;
+- comments inside function bodies stay `//`.
+
+`tools/doxify_headers.py` converts plain comments to this form, and `--check` lists any left:
+
+```bash
+python3 tools/doxify_headers.py --check include/soma
+```
+
+It is idempotent, so a branch started before the headers were converted can run it on its own
+headers before merging, and its edits then match the converted ones.
 
 These comments are the authoritative description of the API; the pages under `docs/` summarise
 them. When a change alters behaviour, update the comment in the same change.
