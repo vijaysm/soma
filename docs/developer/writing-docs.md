@@ -59,11 +59,38 @@ anchors in the Sphinx site (`myst_heading_anchors` in `docs/conf.py`).
 Files under `docs/` that git ignores are not pages: Sphinx skips them, so private notes can live
 there without breaking a local build.
 
+## The API reference
+
+The pages under `docs/reference/api/` hold the API reference. Each is one public header's page: its
+name, a line on what it provides, and a `doxygenfile` directive. When Sphinx starts,
+`docs/conf.py` runs Doxygen (`docs/Doxyfile`) into `docs/_build/doxygen`, unless that XML is
+newer than every header, and Breathe renders each page from it. So a local build needs Doxygen on
+the `PATH`; the version the docs are checked with is 1.17.0, which Read the Docs and the workflow
+download and verify. Any Doxygen warning stops the build: in a comment, write code, paths and
+placeholders such as `<NAME>` in backticks.
+
+The text comes from the headers' Doxygen comments (see
+[header comments](contributing.md#header-comments-are-the-api-contract)). When you add a public
+header, add its page `docs/reference/api/<dir>/<name>.md`, list it in the toctree of
+`docs/reference/api/index.md` under its directory, and link it from
+[public headers](../reference/headers.md). An internal header (one that declares only `detail`) is
+marked **internal** there and gets no page. `docs/reference/check_api.py` (ctest `docs.api`)
+fails when a public header has no page, a page names no public header, or a comment is not in
+Doxygen form; `docs.api_checker` tests the checker.
+
+Breathe declares a header's namespaces again on every header's page; `docs/conf.py` drops exactly
+those repeats, so any other duplicate declaration still fails the build.
+
+The wiki does not hold the reference: its toctree entries and links to reference pages become
+links to the same pages on Read the Docs (`build_wiki.py --docs-url`, by default
+`https://soma-library.readthedocs.io/en/latest/`).
+
 ## Publishing
 
 Read the Docs builds the site from `.readthedocs.yaml` on every push. The workflow
-`.github/workflows/wiki.yml` builds the site and converts the wiki on pull requests that touch
-`docs/`, and on a push to `main` also writes the wiki pages and pushes them to the wiki. The wiki
+`.github/workflows/wiki.yml` builds the site, checks the reference and converts the wiki on pull
+requests that touch `docs/`, `include/` or `tools/`, and on a push to `main` also writes the wiki
+pages and pushes them to the wiki. The wiki
 must exist first: enable it in the repository's settings and save any first page in its editor.
 The workflow pushes with its `GITHUB_TOKEN`; if the repository keeps that token read-only, store a
 token that may write the repository as the secret `WIKI_TOKEN`.

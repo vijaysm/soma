@@ -5,6 +5,16 @@ build:
   os: ubuntu-24.04
   tools:
     python: "3.12"
+  jobs:
+    # The API reference needs Doxygen; the release the docs are checked with, verified,
+    # into the virtualenv's bin, which is on PATH when Sphinx runs.
+    post_install:
+      - curl -sSfL --max-time 300 -o /tmp/doxygen.tgz
+        https://github.com/doxygen/doxygen/releases/download/Release_1_17_0/doxygen-1.17.0.linux.bin.tar.gz
+      - echo "75419ef4f446fc1c24ef12514b574e66e898ee6f527c6ae2ad84f91a905823c2  /tmp/doxygen.tgz" | sha256sum -c -
+      - tar -xzf /tmp/doxygen.tgz -C /tmp
+      - cp /tmp/doxygen-1.17.0/bin/doxygen "$READTHEDOCS_VIRTUALENV_PATH/bin/"
+      - doxygen --version
 
 sphinx:
   configuration: docs/conf.py

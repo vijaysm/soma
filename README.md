@@ -18,7 +18,8 @@ Threads when OpenMP is unavailable, and a GPU backend chosen by `SOMA_KOKKOS_GPU
 (`AUTO`, `NONE`, `CUDA`, `HIP`, `SYCL`). Any `Kokkos_*` option you pass wins over these defaults.
 
 Documentation: the site under [docs/](docs/index.md) (Sphinx with MyST Markdown, published on
-Read the Docs through `.readthedocs.yaml`). To build it locally:
+Read the Docs through `.readthedocs.yaml`), with an API reference that Doxygen generates from the
+headers' comments. To build it locally (Doxygen on the `PATH`; 1.17.0 is the version checked):
 
 ```bash
 python3 -m pip install -r docs/requirements.txt
