@@ -271,6 +271,48 @@ int soma_renumbering_new_lids(const soma_renumbering_t* renumbering, int d, cons
 int soma_renumbering_clone(const soma_renumbering_t* renumbering, soma_renumbering_t** out);
 void soma_renumbering_free(soma_renumbering_t* renumbering);
 
+/* ---- Fields ---------------------------------------------------------- */
+
+/// A new field on every entity of dimension dim, of ncomp components and
+/// type dtype (SOMA_F64, ...): *data is its storage, writable, shared,
+/// column-major (rows, ncomp): data[r + rows c].
+int soma_mesh_add_field(soma_mesh_t* mesh, const char* name, int dim, int ncomp, int dtype, void** data,
+                        soma_lo_t* rows);
+/// The field named name (on dimension dim, or -1 when the name is on one
+/// dimension only): its type, storage, rows and components.
+int soma_mesh_field(soma_mesh_t* mesh, const char* name, int dim, int* dtype, void** data, soma_lo_t* rows,
+                    int* ncomp);
+int soma_mesh_field_count(const soma_mesh_t* mesh, int* count);
+/// Field i: its name (copied into name[len], truncated, NUL-terminated), type,
+/// components, rows, the dimensions it has members on (bit d of *dims_mask),
+/// and whether it is of variable length (no array form).
+int soma_mesh_field_info(const soma_mesh_t* mesh, int i, char* name, size_t len, int* dtype, int* ncomp,
+                         soma_lo_t* rows, int* dims_mask, int* variable);
+int soma_mesh_remove_field(soma_mesh_t* mesh, const char* name, int dim);
+/// Copies of the first rows rows of a field (f64, i32 or i64, as dtype says),
+/// interleaved: values[c + ncomp r].
+int soma_mesh_get_field_interleaved(const soma_mesh_t* mesh, const char* name, int dim, int dtype, soma_lo_t rows,
+                                    void* values);
+int soma_mesh_set_field_interleaved(soma_mesh_t* mesh, const char* name, int dim, int dtype, soma_lo_t rows,
+                                    const void* values);
+
+/* ---- Halo exchange ---------------------------------------------------- */
+
+/// Collective: the exchange of the shared copies and ghosts of dimension dim.
+/// It keeps the mesh alive, and fails with SOMA_ERR_STATE once the mesh's
+/// topology changes (build it again then).
+int soma_halo_create(const soma_comm_t* comm, soma_mesh_t* mesh, int dim, soma_halo_t** out);
+/// Collective: owners' values overwrite every copy's, in place. data is
+/// column-major (rows, ncomp), rows = count(dim), of type dtype (f64, i32, i64).
+int soma_halo_update(const soma_halo_t* halo, const soma_comm_t* comm, int dtype, void* data, soma_lo_t rows,
+                     int ncomp);
+/// Collective: every holder gets all holders' values combined by op
+/// (SOMA_SUM, ...), in rank order, in place.
+int soma_halo_reduce(const soma_halo_t* halo, const soma_comm_t* comm, int dtype, void* data, soma_lo_t rows,
+                     int ncomp, int op);
+int soma_halo_clone(const soma_halo_t* halo, soma_halo_t** out);
+void soma_halo_free(soma_halo_t* halo);
+
 #ifdef __cplusplus
 }
 #endif
