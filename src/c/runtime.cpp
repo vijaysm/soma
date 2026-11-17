@@ -102,6 +102,10 @@ size_t soma_last_error(char* buf, size_t len) {
   return m.size();
 }
 
+int soma_set_last_error(int status, const char* message) {
+  return soma::c::fail(status, message == nullptr ? std::string() : std::string(message));
+}
+
 int soma_initialize(void) {
   return call([] {
     if (soma::c::finalized) throw soma::c::StateError("soma_initialize: SOMA was finalized; Kokkos cannot restart");

@@ -139,6 +139,10 @@ enum { SOMA_CHILD_OFFSETS = 0, SOMA_HANGING_OFFSETS = 1 };
 /// NUL-terminated when len > 0); returns the message's full length.
 size_t soma_last_error(char* buf, size_t len);
 
+/// For language bindings: records message (NULL: none) as the calling thread's
+/// last error and returns status, for argument checks made before a C call.
+int soma_set_last_error(int status, const char* message);
+
 /// Initializes Kokkos (host) unless it is initialized; MPI is the caller's.
 int soma_initialize(void);
 /// Finalizes Kokkos when soma_initialize initialized it. Objects still alive

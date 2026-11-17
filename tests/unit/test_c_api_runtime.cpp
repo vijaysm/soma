@@ -40,6 +40,13 @@ TEST(CApiRuntime, ErrorsMapToStatusAndMessage) {
   EXPECT_EQ(soma_last_error(nullptr, 0), full.size());
 }
 
+TEST(CApiRuntime, BindingsSetTheLastError) {
+  EXPECT_EQ(soma_set_last_error(SOMA_ERR_TYPE, "from a binding"), SOMA_ERR_TYPE);
+  EXPECT_EQ(last_error(), "from a binding");
+  EXPECT_EQ(soma_set_last_error(SOMA_ERR_RUNTIME, nullptr), SOMA_ERR_RUNTIME);
+  EXPECT_EQ(last_error(), "");
+}
+
 TEST(CApiRuntime, InitializeIsIdempotent) {
   // The test main initialized Kokkos: soma_initialize leaves it, and soma_finalize
   // does not finalize what it did not initialize.

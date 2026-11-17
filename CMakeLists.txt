@@ -218,6 +218,12 @@ if(SOMA_ENABLE_TESTS)
   add_subdirectory(tests)
 endif()
 
+# After the tests: the Fortran tests register with enable_testing() in force.
+if(SOMA_ENABLE_FORTRAN)
+  enable_language(Fortran)
+  add_subdirectory(fortran)
+endif()
+
 if(SOMA_ENABLE_MOAB_REFERENCE)
   add_subdirectory(bench)
 endif()
