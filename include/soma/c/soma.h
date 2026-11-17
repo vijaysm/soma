@@ -313,6 +313,41 @@ int soma_halo_reduce(const soma_halo_t* halo, const soma_comm_t* comm, int dtype
 int soma_halo_clone(const soma_halo_t* halo, soma_halo_t** out);
 void soma_halo_free(soma_halo_t* halo);
 
+/* ---- File I/O -------------------------------------------------------- */
+
+/// Collective: reads a mesh file (.h5m, .soma, .vtk; by content), partitioned
+/// across the ranks.
+int soma_read_file(const soma_comm_t* comm, const char* path, soma_mesh_t** out);
+/// Collective: writes the mesh by the path's extension (.h5m, .soma, .vtk).
+/// nvtk = -1: a .vtk file holds every field VTK can hold; otherwise the nvtk
+/// fields named in vtk_fields.
+int soma_write_file(const soma_comm_t* comm, const soma_mesh_t* mesh, const char* path, int nvtk,
+                    const char* const* vtk_fields);
+/// The format of a file, by content (SOMA_FORMAT_*).
+int soma_detect_format(const char* path, int* format);
+/// Collective: converts a MOAB .h5m file to a SOMA file or back, by content;
+/// *written is the format written.
+int soma_convert_mesh_file(const soma_comm_t* comm, const char* src, const char* dst, int compression, int* written);
+
+/* ---- Parallel --------------------------------------------------------- */
+
+/// Collective: the destination rank of each of n elements, by its centroid
+/// (xyz[3 n], interleaved) on a space-filling curve; gids[n]; into dest[n].
+int soma_partition_by_curve(const soma_comm_t* comm, soma_lo_t n, const double* xyz, const soma_go_t* gids,
+                            int* dest);
+/// Collective: a new mesh with each element held here moved to dest[lid]
+/// (n = the elements held, owned or not), with its closure, fields and sets.
+/// The input is unchanged.
+int soma_migrate(const soma_comm_t* comm, const soma_mesh_t* mesh, soma_lo_t n, const int* dest, int ordering,
+                 soma_mesh_t** out);
+/// Collective: a new mesh with the elements spread evenly along a curve.
+int soma_rebalance(const soma_comm_t* comm, const soma_mesh_t* mesh, int ordering, soma_mesh_t** out);
+/// Collective, in place: adds layers of ghost elements through entities of
+/// bridge_dim (sets != 0: ghosts join their owners' sets).
+int soma_mesh_add_ghosts(const soma_comm_t* comm, soma_mesh_t* mesh, int layers, int bridge_dim, int sets);
+/// Collective, in place: drops the ghosts.
+int soma_mesh_remove_ghosts(const soma_comm_t* comm, soma_mesh_t* mesh);
+
 #ifdef __cplusplus
 }
 #endif
