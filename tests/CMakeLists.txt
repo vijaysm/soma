@@ -70,6 +70,11 @@ soma_add_test(test_fem_space SOURCES unit/test_fem_space.cpp RANKS 1 2 3 4 5 7 8
 soma_add_test(test_sem_gll SOURCES unit/test_sem_gll.cpp)
 soma_add_test(test_sem_cubed_sphere SOURCES unit/test_sem_cubed_sphere.cpp RANKS 1 2 3 4 8)
 soma_add_test(test_sem_space SOURCES unit/test_sem_space.cpp RANKS 1 2 3 4)
+soma_add_test(test_sem_dss SOURCES unit/test_sem_dss.cpp RANKS 1 2 3 4 8)
+# The direct stiffness summation is the same bit for bit at any number of threads.
+add_test(NAME test_sem_dss.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_sem_dss> -DFILTER=SemDss.Digests
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/unit/compare_threads.cmake)
+set_tests_properties(test_sem_dss.threads PROPERTIES TIMEOUT 300)
 soma_add_test(test_cg SOURCES unit/test_cg.cpp RANKS 1 2 3 4 5 7 8)
 # Reproducible CG is the same bit for bit at any number of threads.
 add_test(NAME test_cg.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_cg> -DFILTER=Cg.SolutionDigests

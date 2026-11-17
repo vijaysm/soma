@@ -3,12 +3,15 @@
 
 #include "soma/sem/sem_space.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 #include "soma/core/topology.hpp"
@@ -167,12 +170,79 @@ SemGeometryData sem_geometry(const Mesh<Kokkos::HostSpace>& mesh, int order, con
   return out;
 }
 
+SemDssPlan sem_dss_plan(const Mesh<Kokkos::HostSpace>& mesh, int order) {
+  SemDssPlan plan;
+  const auto view = mesh.view();
+  const auto gid = mesh.gid(2);
+  const auto vgid = mesh.gid(0);
+  const LO elements = mesh.count(2);
+  const LO p = order, np = order + 1, ppe = np * np;
+  const LO owned_vertices = mesh.segment_table(0).owned_end, owned_edges = mesh.segment_table(1).owned_end;
+  // Side q runs from corner q to corner q + 1: its points in the element are
+  // first[q] + along[q] t for t in 0..p, from that corner.
+  const LO first[4] = {0, p, ppe - 1, p * np};
+  const LO along[4] = {1, np, -1, -np};
+  std::vector<std::vector<std::pair<GO, LO>>> at_vertex(static_cast<std::size_t>(owned_vertices));
+  std::vector<std::vector<std::tuple<GO, LO, LO>>> at_edge(static_cast<std::size_t>(owned_edges));
+  const auto sides = static_cast<std::size_t>(4) * static_cast<std::size_t>(elements);
+  plan.element_vertex.resize(sides);
+  plan.element_edge.resize(sides);
+  plan.element_base.resize(sides);
+  plan.element_step.resize(sides);
+  for (LO e = 0; e < elements; ++e) {
+    const auto edges = view.adj(2, 1, e);
+    if (edges.size != 4) {
+      plan.complete = false;
+      continue;
+    }
+    for (int q = 0; q < 4; ++q) {
+      const LO c0 = view.vertex(2, e, q), c1 = view.vertex(2, e, (q + 1) % 4);
+      LO edge = -1;
+      for (LO s = 0; s < 4; ++s) {
+        const LO a = view.vertex(1, edges[s], 0), b = view.vertex(1, edges[s], 1);
+        if ((a == c0 && b == c1) || (a == c1 && b == c0)) edge = edges[s];
+      }
+      if (edge < 0) {
+        plan.complete = false;
+        continue;
+      }
+      // Points along an edge count from its vertex of smaller gid, which every
+      // rank holding the edge agrees on (the stored vertex order may differ).
+      const LO a = view.vertex(1, edge, 0), b = view.vertex(1, edge, 1);
+      const bool reversed = (vgid(a) < vgid(b) ? a : b) != c0;
+      const LO base = e * ppe + (reversed ? first[q] + along[q] * p : first[q]);
+      const LO step = reversed ? -along[q] : along[q];
+      const auto i = static_cast<std::size_t>(4 * e + q);
+      plan.element_vertex[i] = c0;
+      plan.element_edge[i] = edge;
+      plan.element_base[i] = base;
+      plan.element_step[i] = step;
+      if (c0 < owned_vertices) at_vertex[static_cast<std::size_t>(c0)].emplace_back(gid(e), e * ppe + first[q]);
+      if (edge < owned_edges) at_edge[static_cast<std::size_t>(edge)].emplace_back(gid(e), base, step);
+    }
+  }
+  for (auto& list : at_vertex) {
+    std::sort(list.begin(), list.end());
+    for (const auto& [g, row] : list) plan.vertex_rows.push_back(row);
+    plan.vertex_offsets.push_back(static_cast<Offset>(plan.vertex_rows.size()));
+  }
+  for (auto& list : at_edge) {
+    std::sort(list.begin(), list.end());
+    for (const auto& [g, base, step] : list) {
+      plan.edge_base.push_back(base);
+      plan.edge_step.push_back(step);
+    }
+    plan.edge_offsets.push_back(static_cast<Offset>(plan.edge_base.size()));
+  }
+  return plan;
+}
+
 void check_sem_geometry(const Comm& comm, const SemGeometryData& data, int dim, int order) {
   const auto worst = comm.allreduce(static_cast<std::int32_t>(data.error), Op::max);
   if (worst == 0) return;
   const GO none = std::numeric_limits<GO>::max();
-  const auto gid = comm.allreduce(static_cast<std::int64_t>(static_cast<std::int32_t>(data.error) == worst ? data.gid : none),
-                                  Op::min);
+  const bool mine = static_cast<std::int32_t>(data.error) == worst;
+  const auto gid = comm.allreduce(static_cast<std::int64_t>(mine ? data.gid : none), Op::min);
   using E = SemGeometryData::Error;
   switch (static_cast<E>(worst)) {
     case E::dimension:
@@ -183,6 +253,11 @@ void check_sem_geometry(const Comm& comm, const SemGeometryData& data, int dim, 
     case E::topology:
       throw std::invalid_argument("SemSpace: element gid " + std::to_string(gid) +
                                   " is not a quad of 4, 8 or 9 nodes");
+    case E::ghosts:
+      throw std::invalid_argument(
+          "SemSpace: on more than one rank the mesh needs a ghost layer through vertices and distributed edges: "
+          "call mesh.add_ghosts(comm, GhostOptions{1, 0}), then build_distributed_adjacencies(comm, mesh, "
+          "AdjacencyRequest{}.add(2, 1))");
     default:
       throw std::invalid_argument("SemSpace: element gid " + std::to_string(gid) +
                                   " is inverted or degenerate: its normal does not point along +z (plane) or "

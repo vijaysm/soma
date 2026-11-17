@@ -25,6 +25,7 @@
 #include "soma/sem/cubed_sphere.hpp"
 #include "soma/sem/sem_space.hpp"
 #include "soma/testing/box_mesh.hpp"
+#include "sem_meshes.hpp"
 
 using soma::Comm;
 using soma::GO;
@@ -34,27 +35,12 @@ using soma::Op;
 using soma::Real;
 using soma::sem::SemGeometry;
 using Space = soma::sem::SemSpace<Kokkos::HostSpace>;
+using sem_test::box;
+using sem_test::sphere;
 
 namespace {
 
 constexpr Real pi = std::numbers::pi;
-
-HostMesh box(const Comm& c, int nx, int ny, Real lx, Real ly, soma::Topology t = soma::Topology::quad) {
-  soma::testing::BoxSpec s;
-  s.nx = nx;
-  s.ny = ny;
-  s.element = t;
-  s.lx = lx;
-  s.ly = ly;
-  return soma::testing::box_mesh(c, s);
-}
-
-HostMesh sphere(const Comm& c, int ne, Real r = 1) {
-  soma::sem::CubedSphereSpec s;
-  s.ne = ne;
-  s.radius = r;
-  return soma::sem::cubed_sphere_mesh(c, s);
-}
 
 // The sum over owned elements of the local mass: the area the space integrates.
 Real area(const Comm& c, const Space& s) {
@@ -62,36 +48,6 @@ Real area(const Comm& c, const Space& s) {
   Real sum = 0;
   for (LO r = 0; r < s.owned_elements() * s.points_per_element(); ++r) sum += m(r, 0);
   return c.allreduce(sum, Op::sum);
-}
-
-// A mesh of elements given whole (gids, nodes per element, node gids, node
-// coordinates by gid), each rank building a consecutive block of them.
-HostMesh distribute(const Comm& c, const std::vector<GO>& elements, int nodes_per_element,
-                    const std::vector<GO>& nodes, const std::map<GO, std::array<Real, 3>>& xyz) {
-  const auto n = static_cast<std::int64_t>(elements.size());
-  std::vector<GO> mine, conn, used;
-  for (std::int64_t e = 0; e < n; ++e) {
-    if (e * c.size() / n != c.rank()) continue;
-    mine.push_back(elements[static_cast<std::size_t>(e)]);
-    for (int k = 0; k < nodes_per_element; ++k) {
-      conn.push_back(nodes[static_cast<std::size_t>(e * nodes_per_element + k)]);
-    }
-  }
-  used = conn;
-  std::sort(used.begin(), used.end());
-  used.erase(std::unique(used.begin(), used.end()), used.end());
-  std::vector<Real> coords;
-  for (const GO g : used) {
-    for (const Real x : xyz.at(g)) coords.push_back(x);
-  }
-  soma::MeshBuilder b(2);
-  b.add_vertices(used, coords);
-  if (nodes_per_element == 4) {
-    b.add_elements(soma::Topology::quad, mine, conn);
-  } else {
-    b.add_elements(soma::Topology::quad, mine, conn, nodes_per_element);
-  }
-  return soma::build_local_part(c, std::move(b), soma::default_ordering);
 }
 
 // The annulus 1 <= r <= 2 in n x n quads (radial x angular), counter-clockwise
@@ -117,7 +73,7 @@ HostMesh annulus(const Comm& c, int n, int nodes) {
       conn.insert(conn.end(), all.begin(), all.begin() + nodes);
     }
   }
-  return distribute(c, elements, nodes, conn, xyz);
+  return sem_test::distribute(c, elements, nodes, conn, xyz);
 }
 
 // A plane nx x ny grid of unit quads whose element `reversed` lists its corners clockwise.
@@ -137,7 +93,7 @@ HostMesh grid_with_reversed(const Comm& c, int nx, int ny, GO reversed) {
       conn.insert(conn.end(), q.begin(), q.end());
     }
   }
-  return distribute(c, elements, 4, conn, xyz);
+  return sem_test::distribute(c, elements, 4, conn, xyz);
 }
 
 void expect_dual(const Space& s, const char* what) {
@@ -148,7 +104,8 @@ void expect_dual(const Space& s, const char* what) {
   for (LO r = 0; r < s.num_elements() * s.points_per_element(); ++r) {
     for (int i = 0; i < 2; ++i) {
       for (int j = 0; j < 2; ++j) {
-        const Real dot = d(r, 3 * i) * a(r, 3 * j) + d(r, 3 * i + 1) * a(r, 3 * j + 1) + d(r, 3 * i + 2) * a(r, 3 * j + 2);
+        const Real dot =
+            d(r, 3 * i) * a(r, 3 * j) + d(r, 3 * i + 1) * a(r, 3 * j + 1) + d(r, 3 * i + 2) * a(r, 3 * j + 2);
         EXPECT_LE(std::abs(dot - (i == j ? 1 : 0)), 1e-13) << what << " row " << r << " a^" << i << ".a_" << j;
       }
       // Tangent: no component along the normal (the plane's e_z, the sphere's x).
