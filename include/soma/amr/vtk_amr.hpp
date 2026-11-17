@@ -8,7 +8,7 @@
 /// VTK output of a hierarchy as overlapping AMR, which ParaView and VTK's
 /// XML readers read: `path` (a .vthb file) lists the boxes of every level,
 /// each written as image data (a .vti file) to the directory named like
-/// `path` without its extension, as <stem>/<stem>_<level>_<box>.vti. Each box
+/// `path` without its extension, as `<stem>/<stem>_<level>_<box>.vti`. Each box
 /// holds the valid points of every field (cell fields as cell data, node
 /// fields as point data, components interleaved, ASCII in the shortest form
 /// that reads back bitwise equal) and vtkGhostType, 8 (hidden) on the cells a

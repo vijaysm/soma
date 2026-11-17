@@ -27,8 +27,8 @@
 /// elements or sets becomes, per dimension and on the set slot (set_dim), one
 /// per_entity field named after the tag: over all entities of that dimension
 /// when each has a value, over the listed ones otherwise. Dense rows
-/// (<group>/tags/<NAME>, sets/tags/<NAME>) and sparse ones
-/// (/tstt/tags/<NAME>/id_list and values) of one slot join one field.
+/// (`<group>/tags/<NAME>`, `sets/tags/<NAME>`) and sparse ones
+/// (`/tstt/tags/<NAME>/id_list` and `values`) of one slot join one field.
 /// Values: integers of 8, 32 and 64 bits, signed or not, f32 and f64, arrays
 /// of those (ncomp = the array size), opaque tags as u8 with ncomp = their
 /// byte size, and bit tags as one u8 per entity. The default and global
@@ -150,7 +150,7 @@ HostMesh read_h5m(const Comm& comm, const std::filesystem::path& path, const H5m
 ///
 /// Tags: one per field family (fields of one name), per_entity layouts only.
 /// A block (the vertices, an element group, the sets) whose every entity has
-/// a value holds them dense in <block>/tags/<NAME>; the other values are
+/// a value holds them dense in `<block>/tags/<NAME>`; the other values are
 /// sparse (id_list, values). The HDF5 type follows the value type (an array
 /// for several components) or the family's TagFormat: a bitfield of nbits
 /// for bit tags, opaque of ncomp bytes for opaque ones. The class is the

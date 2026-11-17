@@ -62,12 +62,20 @@ pygments_style = "default"
 
 
 def _run_doxygen():
-    """Doxygen's XML for the reference, made again when a header or the Doxyfile is newer."""
+    """Doxygen's XML for the reference, made again when a header or the Doxyfile is newer.
+    Any Doxygen warning (prose it misreads, as <NAME> outside a code span) is an error."""
     docs = root / "docs"
     index = _doxygen_out / "xml" / "index.xml"
     inputs = [docs / "Doxyfile", *(root / "include" / "soma").rglob("*.hpp")]
-    if index.exists() and index.stat().st_mtime >= max(p.stat().st_mtime for p in inputs):
-        return
+    log = _doxygen_out / "warnings.log"
+    if not (index.exists() and index.stat().st_mtime >= max(p.stat().st_mtime for p in inputs)):
+        _doxygen(docs)
+    warnings = log.read_text().strip() if log.exists() else ""
+    if warnings:
+        raise RuntimeError(f"Doxygen warns about the headers (put code in `backticks`):\n{warnings}")
+
+
+def _doxygen(docs):
     doxygen = shutil.which("doxygen")
     if doxygen is None:
         raise RuntimeError("the API reference needs Doxygen (see docs/developer/writing-docs.md)")

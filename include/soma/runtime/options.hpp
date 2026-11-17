@@ -49,7 +49,7 @@ bool reproducible() noexcept;
 void set_reproducible(bool on) noexcept;
 
 /// Reads SOMA_COMPRESS_THRESHOLD and SOMA_REPRODUCIBLE, then
-/// --soma-compress-threshold=<x> and --soma-reproducible[=0|1] from the
+/// `--soma-compress-threshold=<x>` and `--soma-reproducible[=0|1]` from the
 /// command line, removing them from argv (argc shrinks, argv[argc] stays
 /// null). Throws std::invalid_argument, naming the option, for a threshold
 /// that is not a number in [0, 1] or a switch not 0 or 1; nothing is set then.
