@@ -88,7 +88,7 @@ class Site:
 
     @staticmethod
     def build():
-        return bw.build("https://github.com/o/r", "main")
+        return bw.build("https://github.com/o/r", "main", "https://x.readthedocs.io/en/latest/")
 
 
 class BuildWikiTest(unittest.TestCase):
@@ -195,6 +195,32 @@ class BuildWikiTest(unittest.TestCase):
         files, errors = self.converted({"docs/guide/a.md": A + "\n" + diagram})
         self.assertEqual(errors, [])
         self.assertIn(diagram, files["Page-A.md"])
+
+    def test_link_with_a_code_label(self):
+        a = A + "\nA [`B` page](b.md#details), a [`lib`](../../src/lib.cpp), and `[x](nowhere.md)` kept.\n"
+        files, errors = self.converted({"docs/guide/a.md": a})
+        self.assertEqual(errors, [])
+        page = files["Page-A.md"]
+        self.assertIn("A [`B` page](Page-B-the-second#details), a [`lib`](https://github.com/o/r/blob/main/src/lib.cpp)",
+                      page)
+        self.assertIn("`[x](nowhere.md)` kept.", page)
+
+    def test_api_reference_links_to_read_the_docs(self):
+        index = INDEX.replace("guide/b\n```", "guide/b\nreference/api/index\n```")
+        api_index = "# API reference\n\n```{toctree}\n:maxdepth: 1\n\ncore/mesh\n```\n"
+        api_page = "# `soma/core/mesh.hpp`\n\n```{doxygenfile} soma/core/mesh.hpp\n```\n"
+        a = A + ("\nSee [the mesh](../reference/api/core/mesh.md#details) and "
+                 "[the reference](../reference/api/index.md).\n")
+        files, errors = self.converted({"docs/index.md": index, "docs/guide/a.md": a,
+                                        "docs/reference/api/index.md": api_index,
+                                        "docs/reference/api/core/mesh.md": api_page})
+        self.assertEqual(errors, [])
+        rtd = "https://x.readthedocs.io/en/latest"
+        self.assertEqual(sorted(files), ["Home.md", "Page-A.md", "Page-B-the-second.md", "_Sidebar.md"])
+        self.assertIn(f"- [API reference]({rtd}/reference/api/index.html)", files["Home.md"])
+        self.assertIn(f"- [API reference]({rtd}/reference/api/index.html)", files["_Sidebar.md"])
+        self.assertIn(f"[the mesh]({rtd}/reference/api/core/mesh.html#details)", files["Page-A.md"])
+        self.assertIn(f"[the reference]({rtd}/reference/api/index.html)", files["Page-A.md"])
 
     def test_main_check_and_failure(self):
         Site(self.tmp)
