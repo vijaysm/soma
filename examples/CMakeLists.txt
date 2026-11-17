@@ -18,7 +18,10 @@ target_link_libraries(refine PRIVATE soma soma_warnings)
 # The Fortran pipeline links it too, for its digests and printing.
 add_library(pipeline_arith OBJECT pipeline_arith.cpp)
 target_link_libraries(pipeline_arith PRIVATE soma_warnings)
-target_compile_options(pipeline_arith PRIVATE "$<$<CXX_COMPILER_ID:Clang,AppleClang,GNU>:-ffp-contract=off>")
+target_compile_options(pipeline_arith PRIVATE
+  "$<$<CXX_COMPILER_ID:Clang,AppleClang,GNU,IntelLLVM>:-ffp-contract=off>"
+  "$<$<CXX_COMPILER_ID:Intel>:-fp-model=precise;-no-fma>"
+  "$<$<CXX_COMPILER_ID:NVHPC,PGI>:-Mnofma>")
 add_executable(pipeline pipeline.cpp)
 target_link_libraries(pipeline PRIVATE soma soma_warnings pipeline_arith)
 

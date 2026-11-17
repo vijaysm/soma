@@ -84,18 +84,49 @@ TEST(CApiFields, AddGetListRemove) {
     char name[64];
     int t = -1, nc = -1, dims = 0, variable = -1;
     soma_lo_t nr = -1;
-    ASSERT_EQ(soma_mesh_field_info(m, i, name, sizeof name, &t, &nc, &nr, &dims, &variable), SOMA_OK);
+    ASSERT_EQ(soma_mesh_field_info(m, i, name, sizeof name, nullptr, &t, &nc, &nr, &dims, &variable), SOMA_OK);
     mask[name] = dims;
   }
   EXPECT_EQ(mask.at("u"), 1 << 3);
   EXPECT_EQ(mask.at("k"), 1 << 0);
   int dims = 0, variable = 0;
-  EXPECT_EQ(soma_mesh_field_info(m, nf, nullptr, 0, &dtype, &ncomp, &rows, &dims, &variable), SOMA_ERR_OUT_OF_RANGE);
+  EXPECT_EQ(soma_mesh_field_info(m, nf, nullptr, 0, nullptr, &dtype, &ncomp, &rows, &dims, &variable),
+            SOMA_ERR_OUT_OF_RANGE);
 
   EXPECT_EQ(soma_mesh_field(m, "nope", -1, &dtype, &again, &rows, &ncomp), SOMA_ERR_OUT_OF_RANGE);
   EXPECT_EQ(soma_mesh_add_field(m, "bad", 0, 1, 42, &data, &rows), SOMA_ERR_TYPE);
   ASSERT_EQ(soma_mesh_remove_field(m, "k", 0), SOMA_OK);
   EXPECT_EQ(soma_mesh_field(m, "k", -1, &dtype, &again, &rows, &ncomp), SOMA_ERR_OUT_OF_RANGE);
+  soma_mesh_free(m);
+}
+
+TEST(CApiFields, LongNamesAreNeverTruncated) {
+  // A name is given whole or not at all: its length comes back, and a buffer
+  // too short for it is an error, not a cut-off name.
+  World w;
+  soma_mesh_t* m = box(w, 2, 2, 1);
+  const std::string long_name(1500, 'n');
+  void* data = nullptr;
+  soma_lo_t rows = 0;
+  ASSERT_EQ(soma_mesh_add_field(m, long_name.c_str(), 3, 1, SOMA_F64, &data, &rows), SOMA_OK);
+  int dtype = -1, ncomp = -1, dims = 0, variable = -1, nf = 0, i = 0;
+  size_t length = 0;
+  ASSERT_EQ(soma_mesh_field_count(m, &nf), SOMA_OK);
+  for (i = 0; i < nf; ++i) {  // the new field, by its length
+    ASSERT_EQ(soma_mesh_field_info(m, i, nullptr, 0, &length, &dtype, &ncomp, &rows, &dims, &variable), SOMA_OK);
+    if (length == long_name.size()) break;
+  }
+  ASSERT_LT(i, nf);
+  std::vector<char> small(64, 'x');
+  length = 0;
+  EXPECT_EQ(soma_mesh_field_info(m, i, small.data(), small.size(), &length, &dtype, &ncomp, &rows, &dims, &variable),
+            SOMA_ERR_OUT_OF_RANGE);
+  EXPECT_EQ(length, long_name.size());
+  EXPECT_NE(last_error().find("1500"), std::string::npos) << last_error();
+  std::vector<char> whole(long_name.size() + 1, 'x');
+  ASSERT_EQ(soma_mesh_field_info(m, i, whole.data(), whole.size(), &length, &dtype, &ncomp, &rows, &dims, &variable),
+            SOMA_OK);
+  EXPECT_EQ(std::string(whole.data()), long_name);
   soma_mesh_free(m);
 }
 

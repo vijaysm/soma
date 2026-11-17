@@ -119,6 +119,33 @@ using soma::c::check_array;
 using soma::c::need;
 using soma::c::out;
 
+namespace {
+
+// The checks before an exchange, agreed across the ranks; returns the halo.
+const soma_halo& exchange_args(const soma::Comm& c, const soma_halo_t* halo, int dtype, const void* data,
+                               soma_lo_t rows, int ncomp, const char* what) {
+  const soma_halo* h = nullptr;
+  soma::c::agree(c, what, [&] {
+    h = &need(halo, what);
+    if (h->generation != h->state->generation) {
+      throw soma::c::StateError(std::string(what) +
+                                ": the mesh's topology changed since the exchange was built; build the exchange "
+                                "again");
+    }
+    soma::c::dispatch_array(dtype, what, [](auto) {});
+    if (ncomp < 1) throw std::invalid_argument(std::string(what) + ": ncomp " + std::to_string(ncomp) + " < 1");
+    const soma::LO want = h->state->mesh->count(h->dim);
+    if (rows != want) {
+      throw std::invalid_argument(std::string(what) + ": " + std::to_string(rows) + " rows, but dimension " +
+                                  std::to_string(h->dim) + " has " + std::to_string(want) + " entities here");
+    }
+    check_array(data, static_cast<std::int64_t>(rows) * ncomp, what);
+  });
+  return *h;
+}
+
+}  // namespace
+
 extern "C" {
 
 int soma_mesh_add_field(soma_mesh_t* mesh, const char* name, int dim, int ncomp, int dtype, void** data,
@@ -168,7 +195,8 @@ int soma_mesh_field_count(const soma_mesh_t* mesh, int* count) {
   });
 }
 
-int soma_mesh_field_info(const soma_mesh_t* mesh, int i, char* name, size_t len, int* dtype, int* ncomp,
+int soma_mesh_field_info(const soma_mesh_t* mesh, int i, char* name, size_t len, size_t* name_length, int* dtype,
+                         int* ncomp,
                          soma_lo_t* rows, int* dims_mask, int* variable) {
   return call([&] {
     constexpr const char* what = "soma_mesh_field_info";
@@ -178,11 +206,7 @@ int soma_mesh_field_info(const soma_mesh_t* mesh, int i, char* name, size_t len,
                               std::to_string(all.size()));
     }
     const soma::FieldInfo& f = all[static_cast<std::size_t>(i)];
-    if (name != nullptr && len > 0) {
-      const std::size_t n = std::min(len - 1, f.name.size());
-      std::memcpy(name, f.name.data(), n);
-      name[n] = '\0';
-    }
+    soma::c::copy_name(f.name, name, len, name_length, what);
     out(dtype, what) = static_cast<int>(f.type);
     out(ncomp, what) = f.ncomp;
     out(rows, what) = f.rows;
@@ -261,33 +285,6 @@ int soma_halo_create(const soma_comm_t* comm, soma_mesh_t* mesh, int dim, soma_h
     r = new soma_halo{m->state, soma::c::guarded(HostHalo(c, m->get(), dim)), dim, m->state->generation, {}};
   });
 }
-
-namespace {
-
-// The checks before an exchange, agreed across the ranks; returns the halo.
-const soma_halo& exchange_args(const soma::Comm& c, const soma_halo_t* halo, int dtype, const void* data,
-                               soma_lo_t rows, int ncomp, const char* what) {
-  const soma_halo* h = nullptr;
-  soma::c::agree(c, what, [&] {
-    h = &need(halo, what);
-    if (h->generation != h->state->generation) {
-      throw soma::c::StateError(std::string(what) +
-                                ": the mesh's topology changed since the exchange was built; build the exchange "
-                                "again");
-    }
-    soma::c::dispatch_array(dtype, what, [](auto) {});
-    if (ncomp < 1) throw std::invalid_argument(std::string(what) + ": ncomp " + std::to_string(ncomp) + " < 1");
-    const soma::LO want = h->state->mesh->count(h->dim);
-    if (rows != want) {
-      throw std::invalid_argument(std::string(what) + ": " + std::to_string(rows) + " rows, but dimension " +
-                                  std::to_string(h->dim) + " has " + std::to_string(want) + " entities here");
-    }
-    check_array(data, static_cast<std::int64_t>(rows) * ncomp, what);
-  });
-  return *h;
-}
-
-}  // namespace
 
 int soma_halo_update(const soma_halo_t* halo, const soma_comm_t* comm, int dtype, void* data, soma_lo_t rows,
                      int ncomp) {

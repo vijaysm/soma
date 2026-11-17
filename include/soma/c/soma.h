@@ -151,6 +151,12 @@ int soma_initialize(void);
 /// SOMA_ERR_STATE before initialization and after finalization.
 int soma_finalize(void);
 
+/// Ends the process after a failure the caller cannot handle: flushes stdout,
+/// writes "soma: <message>" to stderr, finalizes Kokkos (whoever initialized
+/// it), then calls MPI_Abort(MPI_COMM_WORLD, 1) when MPI is running, else
+/// _Exit(1). It does not return.
+void soma_abort(const char* message);
+
 /// Test hooks: the number of live handles, and a failure of the given status.
 int soma_testing_live_handles(long* count);
 int soma_testing_raise(int status);
@@ -289,10 +295,14 @@ int soma_mesh_add_field(soma_mesh_t* mesh, const char* name, int dim, int ncomp,
 int soma_mesh_field(soma_mesh_t* mesh, const char* name, int dim, int* dtype, void** data, soma_lo_t* rows,
                     int* ncomp);
 int soma_mesh_field_count(const soma_mesh_t* mesh, int* count);
-/// Field i: its name (copied into name[len], truncated, NUL-terminated), type,
+/// Field i: its name (whole, NUL-terminated, into name[len]; name may be null)
+/// and the name's length (into *name_length, which may be null), type,
 /// components, rows, the dimensions it has members on (bit d of *dims_mask),
-/// and whether it is of variable length (no array form).
-int soma_mesh_field_info(const soma_mesh_t* mesh, int i, char* name, size_t len, int* dtype, int* ncomp,
+/// and whether it is of variable length (no array form). A buffer too short
+/// for the name is SOMA_ERR_OUT_OF_RANGE, with *name_length still set: names
+/// are never cut off.
+int soma_mesh_field_info(const soma_mesh_t* mesh, int i, char* name, size_t len, size_t* name_length, int* dtype,
+                         int* ncomp,
                          soma_lo_t* rows, int* dims_mask, int* variable);
 int soma_mesh_remove_field(soma_mesh_t* mesh, const char* name, int dim);
 /// Copies of the first rows rows of a field (f64, i32 or i64, as dtype says),
@@ -389,9 +399,10 @@ int soma_refine_offsets(const soma_refine_t* refine, int which, const soma_offse
 /// The hanging vertices' masters, by gid, and their weights.
 int soma_refine_masters(const soma_refine_t* refine, const soma_go_t** gids, int64_t* count);
 int soma_refine_weights(const soma_refine_t* refine, const double** weights, int64_t* count);
-/// Fields not carried to the new mesh, by name.
+/// Fields not carried to the new mesh, by name: whole, or SOMA_ERR_OUT_OF_RANGE
+/// with the length in *name_length, as soma_mesh_field_info gives names.
 int soma_refine_dropped_count(const soma_refine_t* refine, int* count);
-int soma_refine_dropped_name(const soma_refine_t* refine, int i, char* name, size_t len);
+int soma_refine_dropped_name(const soma_refine_t* refine, int i, char* name, size_t len, size_t* name_length);
 int soma_refine_clone(const soma_refine_t* refine, soma_refine_t** out);
 void soma_refine_free(soma_refine_t* refine);
 

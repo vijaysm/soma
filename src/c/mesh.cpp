@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -55,6 +56,7 @@ MeshState::MeshState(HostMesh&& m) : mesh(guarded(std::move(m))) {}
 
 void MeshState::changed() {
   ++generation;
+  const std::lock_guard<std::mutex> lock(conn1_mutex);
   for (auto& c : conn1) c.reset();
 }
 
@@ -299,6 +301,7 @@ int soma_mesh_conn1(soma_mesh_t* mesh, int d, const soma_lo_t** conn, const soma
     soma::c::MeshState& s = *need(mesh, what).state;
     const soma::HostMesh& m = *s.mesh;
     check_dim(m, d);
+    const std::lock_guard<std::mutex> lock(s.conn1_mutex);
     auto& cache = s.conn1[static_cast<std::size_t>(d)];
     if (!cache) {
       soma::c::Conn1 c;

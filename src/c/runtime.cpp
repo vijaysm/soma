@@ -4,6 +4,8 @@
 // The C API's runtime: errors, initialization and communicators.
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -128,6 +130,29 @@ int soma_finalize(void) {
       Kokkos::finalize();
     }
   });
+}
+
+void soma_abort(const char* message) {
+  std::fflush(stdout);
+  std::fprintf(stderr, "soma: %s\n", message == nullptr ? "" : message);
+  std::fflush(stderr);
+  // Kokkos goes first, whoever initialized it: MPI_Abort may run exit handlers
+  // (MPICH does on one rank), and those must not meet a running Kokkos. Objects
+  // still alive leak to the ending process.
+  try {
+    if (Kokkos::is_initialized() && !Kokkos::is_finalized()) {
+      soma::c::finalized = true;
+      Kokkos::finalize();
+    }
+  } catch (...) {
+  }
+#if SOMA_C_HAVE_MPI
+  int initialized = 0, finalized = 0;
+  MPI_Initialized(&initialized);
+  MPI_Finalized(&finalized);
+  if (initialized != 0 && finalized == 0) MPI_Abort(MPI_COMM_WORLD, 1);
+#endif
+  std::_Exit(1);
 }
 
 int soma_testing_live_handles(long* count) {

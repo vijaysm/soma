@@ -736,12 +736,21 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   element by element.
 - Calls before initialization or after finalization, and halo exchanges or remap operators used
   after their mesh was renumbered, fail with `SOMA_ERR_STATE` on every rank.
+- A failure without `ierr` ends the process through `soma_abort`: standard output flushed, the
+  message on standard error, Kokkos finalized whoever initialized it, then `MPI_Abort` (or exit
+  status 1 without MPI).
+- Names are never cut off: `soma_mesh_field_info` and `soma_refine_dropped_name` give the name's
+  length and fail with `SOMA_ERR_OUT_OF_RANGE` on a short buffer; Fortran returns names of
+  `soma_name_len` (`SOMA_FORTRAN_NAME_LENGTH`, 1024 by default) and fails beyond it.
+- The 1-based connectivity copy is made under a lock, so queries may run on several threads.
+- The Fortran module is standard Fortran 2008: gfortran builds it with `-std=f2018`.
 - Coordinates are shared as `x(n, 3)`; `get_coords` and `set_coords` copy to and from an
   interleaved `xyz(3, n)`, and `get_field` and `set_field` do the same for fields.
 - `find_package(soma COMPONENTS c fortran)` gives `soma::soma_c` and `soma::soma_fortran`; the
   module files install to `include/soma/fortran` (test `packaging.c_fortran`).
 - `fortran/examples/pipeline.F90` takes the steps of `examples/pipeline.cpp` and prints the same
-  digests, to the last bit (test `fortran.pipeline`).
+  digests, to the last bit, with or without MPI and at one or four threads (tests
+  `fortran.pipeline.*`).
 - The page "From iMOAB" places each iMOAB function of MOAB 5.6.0 on SOMA's. The coupler calls
   (send and receive, communication graphs, coverage, map files) are not in this release.
 

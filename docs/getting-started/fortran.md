@@ -11,8 +11,9 @@ will find each of its calls placed on SOMA's in [From iMOAB](from-imoab.md).
 
 ## Building and installing
 
-The module needs a Fortran 2008 compiler (gfortran 16 is the version tested) and, with MPI, the
-same MPI library as SOMA:
+The module is standard Fortran 2008 and needs a compiler for it (gfortran 16 is the version tested;
+gfortran builds it in its strict mode, `-std=f2018`, and Intel ifort 2021 compiles it under
+`-stand f08` without a warning) and, with MPI, the same MPI library as SOMA:
 
 ```bash
 cmake -S . -B build -DCMAKE_PREFIX_PATH=/path/to/kokkos -DSOMA_ENABLE_MPI=ON -DSOMA_ENABLE_HDF5=ON \
@@ -80,6 +81,13 @@ before `soma_finalize`.
 - **Pointers** stay valid until a call changes the mesh's topology or numbering (an edit's
   `apply`, `compress`, `add_ghosts`, `remove_ghosts`, `build_adjacencies`) or the mesh is freed;
   field pointers also until a field is added or removed. Take them again after such a call.
+- **Threads.** Queries may run on several threads at once (OpenMP or other): the 1-based
+  connectivity copy is made once, under a lock, and shared. Calls that change a mesh must not run
+  alongside other calls on the same mesh.
+- **Names** passed in (fields, paths) may be of any length, and trailing blanks are dropped. Names
+  handed back (`field_names()`, `dropped()`) are `character(len=soma_name_len)`, 1024 unless SOMA
+  is configured with another `-DSOMA_FORTRAN_NAME_LENGTH`; a longer name is an error,
+  `SOMA_ERR_OUT_OF_RANGE`, never a cut-off name.
 - **Kinds.** `soma_lo` (local ids), `soma_offset` (CSR offsets) and `soma_go` (global ids) follow
   the widths SOMA was built with (`SOMA_LO_64`, `SOMA_OFFSET_64`); `soma_go` is always 64 bits.
 - **Handles** (`soma_mesh`, `soma_comm`, `soma_halo`, ...) are reference counted. Assignment shares
@@ -97,8 +105,10 @@ before `soma_finalize`.
 
 Every procedure takes an optional `integer :: ierr`. When it is present it receives `SOMA_OK` or a
 `SOMA_ERR_*` status (`INVALID_ARGUMENT`, `OUT_OF_RANGE`, `TYPE`, `STATE`, `RUNTIME`) and
-`soma_error_message()` gives SOMA's message. When it is absent, a failure writes
-`soma: <message>` to standard error and stops the program with `error stop 1`. Collective calls
+`soma_error_message()` gives SOMA's message, whole. When it is absent, a failure flushes standard
+output, writes `soma: <message>` to standard error, finalizes Kokkos (whoever initialized it) and
+ends the process: `MPI_Abort(MPI_COMM_WORLD, 1)` with MPI running, otherwise exit status 1. The
+same is `soma_abort(message)` in C. Collective calls
 agree on their arguments first, so a bad argument on one rank fails the call on every rank, and
 every rank returns the same status. Calls before `soma_initialize` or after `soma_finalize` fail
 with `SOMA_ERR_STATE`, except those on communicators and errors.
@@ -137,7 +147,10 @@ Fortran module uses, for C codes that index from 1.
 
 ## A complete program
 
-`fortran/examples/pipeline.F90` (built with `SOMA_ENABLE_EXAMPLES` and MPI) builds a box of tets,
-perturbs and smooths it, remaps a linear field to a second box and writes both meshes, the steps of
-`examples/pipeline.cpp`. The test `fortran.pipeline` runs both at one and three ranks and requires
-the same digests of the coordinates and remapped values, to the last bit.
+`fortran/examples/pipeline.F90` (built with `SOMA_ENABLE_EXAMPLES`, with or without MPI) builds a
+box of tets, perturbs and smooths it, remaps a linear field to a second box and writes both meshes,
+the steps of `examples/pipeline.cpp`. The tests `fortran.pipeline.*` run both, at one and three
+ranks with MPI and on one process without it, with one and four threads, and require the same
+digests of the coordinates and remapped values from every run, to the last bit. Both programs are
+compiled without fused multiply-adds, by each compiler's flag (GNU, Flang, Intel and NVHPC are
+known; another compiler gets a configure warning).

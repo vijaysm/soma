@@ -10,6 +10,11 @@ program test_algorithms
   use soma
   use soma_check
   implicit none
+  ! The tolerance of computed values: these tests check that values pass
+  ! through the bindings, not the algorithms' accuracy (the C++ tests pin that,
+  ! to 1e-14). 1e-10 leaves room for other compilers, rank and thread counts,
+  ! and still catches a wrong or missing value (about 1/cells, 1e-3 here).
+  real(c_double), parameter :: tolerance = 1d-10
   integer :: ierr
 
 #if SOMA_TEST_MPI
@@ -59,6 +64,9 @@ contains
     if (size(x) > 0) call check(maxval(abs(x - grid)) <= before, 'smoothing moves the interior toward the grid')
     call soma_laplacian_smooth(comm, m, fixed=fixed(1:max(0, size(fixed) - 1)), ierr=ierr)
     call check(ierr == SOMA_ERR_INVALID_ARGUMENT .or. size(fixed) == 0, 'a short fixed mask fails')
+    ! An empty mask is a mask, not "no mask": on a rank with vertices it fails, on every rank.
+    call soma_laplacian_smooth(comm, m, fixed=fixed(1:0), ierr=ierr)
+    call check(ierr == SOMA_ERR_INVALID_ARGUMENT .or. allsum(int(size(fixed), 8)) == 0, 'an empty fixed mask fails')
   end subroutine
 
   subroutine refine(comm)
@@ -100,7 +108,7 @@ contains
     call check(size(hoff) == size(hanging) + 1, 'hanging offsets')
     call check(size(r%hanging_masters()) == size(w), 'a weight a master')
     do i = 1, size(hanging)
-      call check(abs(sum(w(hoff(i):hoff(i + 1) - 1)) - 1) < 1d-14, 'weights sum to one')
+      call check(abs(sum(w(hoff(i):hoff(i + 1) - 1)) - 1) < tolerance, 'weights sum to one')
     end do
     call check(all(hanging >= 1), 'hanging vertices are 1-based ids')
     call check(allsum(int(size(hanging), 8)) > 0, 'one marked hex leaves hanging vertices')
@@ -123,7 +131,7 @@ contains
     call op%apply(comm, us(:, 1), ut(:, 1))
     si = integral(op_source_volumes(comm, nz), us(:, 1))
     ti = integral(volumes(t), ut(:, 1))
-    call check(abs(si - ti) <= 1d-12 * abs(si), 'remap conserves the integral')
+    call check(abs(si - ti) <= tolerance * abs(si), 'remap conserves the integral')
     call op%apply(comm, us(:, 1), ut(1:max(0, size(ut, 1) - 1), 1), ierr)
     call check(ierr == SOMA_ERR_INVALID_ARGUMENT, 'too few target values fail on every rank')
   end subroutine

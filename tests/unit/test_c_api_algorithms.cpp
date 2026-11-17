@@ -54,6 +54,13 @@ soma_lo_t owned(const soma_mesh_t* m, int d) {
 std::int64_t allsum(std::int64_t v) { return Comm::world().allreduce(v, soma::Op::sum); }
 double allsum(double v) { return Comm::world().allreduce(v, soma::Op::sum); }
 
+// The tolerance of computed values in these tests. They check that values pass
+// through the bindings, not the algorithms' accuracy (test_remap3d and the
+// refinement tests pin that, to 1e-14): 1e-10 leaves room for other compilers,
+// rank and thread counts, and still catches a wrong or missing value, which
+// moves a result by about 1/cells, 1e-3 here.
+constexpr double tolerance = 1e-10;
+
 bool skin(double x) { return std::abs(x) < 1e-12 || std::abs(x - 1.0) < 1e-12; }
 
 // The same offset of the interior vertices, by gid, as the C++ reference gets.
@@ -187,7 +194,7 @@ TEST(CApiRefine, MarkedHanging) {
   for (int64_t i = 0; i < nh; ++i) {
     double sum = 0;
     for (auto k = off[i]; k < off[i + 1]; ++k) sum += weights[k];
-    EXPECT_NEAR(sum, 1.0, 1e-14);  // a hanging vertex interpolates its masters
+    EXPECT_NEAR(sum, 1.0, tolerance);  // a hanging vertex interpolates its masters
   }
   EXPECT_GT(allsum(static_cast<std::int64_t>(nh)), 0);
   soma_mesh_free(fine);
@@ -267,7 +274,7 @@ void remap_case(int nz_source) {
             SOMA_OK)
       << last_error();
   const double si = integral(source, us.data()), ti = integral(target, ut.data());
-  EXPECT_LE(std::abs(si - ti), 1e-12 * std::abs(si));
+  EXPECT_LE(std::abs(si - ti), tolerance * std::abs(si));
   soma_remap_free(op);
   soma_mesh_free(source);
   soma_mesh_free(target);

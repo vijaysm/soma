@@ -3,8 +3,10 @@
 
 // The C API's mesh creation and queries, against the C++ library.
 
+#include <atomic>
 #include <cstdint>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -187,6 +189,45 @@ TEST(CApiMesh, VerticesStoreNoConnectivity) {
   EXPECT_EQ(n, 0);
   EXPECT_EQ(off[0], 1);
   soma_mesh_free(m);
+}
+
+TEST(CApiMesh, Conn1FromManyThreads) {
+  // Threads asking for a fresh mesh's 1-based connectivity at once all get the
+  // one copy, whole: the copy is made once, under a lock.
+  World w;
+  constexpr int threads = 8;
+  for (int round = 0; round < 40; ++round) {
+    soma_mesh_t* m = box(w, 6, 6, 6, SOMA_TET);
+    const soma_lo_t* conn0 = nullptr;
+    const soma_offset_t* off0 = nullptr;
+    soma_lo_t n0 = 0;
+    ASSERT_EQ(soma_mesh_conn(m, 3, &conn0, &off0, &n0), SOMA_OK);
+    std::atomic<int> ready{0};
+    std::vector<const soma_lo_t*> conns(threads, nullptr);
+    std::vector<int> status(threads, -1), wrong(threads, 0);
+    std::vector<std::thread> pool;
+    for (int t = 0; t < threads; ++t) {
+      pool.emplace_back([&, t] {
+        ready.fetch_add(1);
+        while (ready.load() < threads) {
+        }
+        const soma_offset_t* off = nullptr;
+        soma_lo_t n = 0;
+        status[static_cast<std::size_t>(t)] = soma_mesh_conn1(m, 3, &conns[static_cast<std::size_t>(t)], &off, &n);
+        if (status[static_cast<std::size_t>(t)] != SOMA_OK || n != n0) return;
+        for (soma_offset_t k = 0; k < off0[n0]; ++k) {
+          if (conns[static_cast<std::size_t>(t)][k] != conn0[k] + 1) ++wrong[static_cast<std::size_t>(t)];
+        }
+      });
+    }
+    for (auto& th : pool) th.join();
+    for (int t = 0; t < threads; ++t) {
+      ASSERT_EQ(status[static_cast<std::size_t>(t)], SOMA_OK) << "round " << round << ", thread " << t;
+      EXPECT_EQ(conns[static_cast<std::size_t>(t)], conns[0]) << "round " << round << ", thread " << t;
+      EXPECT_EQ(wrong[static_cast<std::size_t>(t)], 0) << "round " << round << ", thread " << t;
+    }
+    soma_mesh_free(m);
+  }
 }
 
 TEST(CApiMesh, Conn1Cache) {

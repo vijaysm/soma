@@ -20,4 +20,12 @@ module soma_kinds
   integer, parameter, public :: soma_go = c_int64_t      !< global ids (never shifted)
   integer, parameter, public :: soma_real = c_double
 
+#ifndef SOMA_FORTRAN_NAME_LENGTH
+#define SOMA_FORTRAN_NAME_LENGTH 1024
+#endif
+  !> The length of the names a list call returns (field_names, refine%dropped):
+  !> CMake's SOMA_FORTRAN_NAME_LENGTH, 1024 by default. A longer name is an
+  !> error, never cut off. Names passed in have no limit.
+  integer, parameter, public :: soma_name_len = SOMA_FORTRAN_NAME_LENGTH
+
 end module soma_kinds

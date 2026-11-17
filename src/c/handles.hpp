@@ -10,8 +10,10 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstring>
 #include <exception>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -72,6 +74,21 @@ int status_of(const std::exception_ptr& e, std::string& message) noexcept;
 /// caller's own Kokkos::initialize) and after finalization, no entry point
 /// that touches a mesh may run.
 void need_runtime();
+
+/// Copies a name, whole and NUL-terminated, into name[len], and its length
+/// (without the terminator) into *length; either may be null. A buffer too
+/// short for the name is out_of_range: a name is never cut off.
+inline void copy_name(const std::string& s, char* name, std::size_t len, std::size_t* length, const char* what) {
+  if (length != nullptr) *length = s.size();
+  if (name == nullptr) return;
+  if (len <= s.size()) {
+    throw std::out_of_range(std::string(what) + ": a name of " + std::to_string(s.size()) +
+                            " characters does not fit in a buffer of " + std::to_string(len) +
+                            " (it needs its length + 1)");
+  }
+  std::memcpy(name, s.data(), s.size());
+  name[s.size()] = '\0';
+}
 
 /// The error boundary of the runtime and communicator entry points: runs f,
 /// mapping exceptions to status codes.
@@ -154,7 +171,11 @@ struct MeshState {
   std::shared_ptr<HostMesh> mesh;
   /// Bumped by every call that changes topology or numbering.
   std::uint64_t generation = 0;
+  /// The 1-based copies, made on first request. Readers on several threads
+  /// share one copy: conn1_mutex guards making it. Calls that change the mesh
+  /// (and so drop the copies) must not run alongside readers, as in C++.
   std::array<std::optional<Conn1>, 4> conn1;
+  std::mutex conn1_mutex;
 
   explicit MeshState(HostMesh&& m);
   /// Records a change of topology or numbering: drops the 1-based copies.

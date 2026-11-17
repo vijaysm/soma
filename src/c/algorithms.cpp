@@ -216,19 +216,14 @@ int soma_refine_dropped_count(const soma_refine_t* refine, int* count) {
   });
 }
 
-int soma_refine_dropped_name(const soma_refine_t* refine, int i, char* name, size_t len) {
+int soma_refine_dropped_name(const soma_refine_t* refine, int i, char* name, size_t len, size_t* name_length) {
   return call([&] {
     constexpr const char* what = "soma_refine_dropped_name";
     const auto& dropped = need(refine, what).refined->dropped;
     if (i < 0 || static_cast<std::size_t>(i) >= dropped.size()) {
       throw std::out_of_range(std::string(what) + ": " + std::to_string(i) + " of " + std::to_string(dropped.size()));
     }
-    const std::string& s = dropped[static_cast<std::size_t>(i)];
-    if (name != nullptr && len > 0) {
-      const std::size_t k = std::min(len - 1, s.size());
-      std::memcpy(name, s.data(), k);
-      name[k] = '\0';
-    }
+    soma::c::copy_name(dropped[static_cast<std::size_t>(i)], name, len, name_length, what);
   });
 }
 

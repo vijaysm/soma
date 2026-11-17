@@ -11,7 +11,8 @@
 !   5. both meshes written to <out_dir> as source and target, .soma and .vtk.
 !
 ! Rank 0 prints the digests of the vertex coordinates and of the remapped
-! values (in gid order) and the integral of the remapped u. The scalar
+! values (in gid order) and the integral of the remapped u. Built without MPI
+! (SOMA_PIPELINE_MPI 0) it runs on one process, threaded as Kokkos is. The scalar
 ! arithmetic is parenthesized as the C++ example's and compiled without fused
 ! multiply-adds; digests and printing are the C++ example's own (pipeline_arith).
 
@@ -33,25 +34,38 @@ module pipeline_report
 end module pipeline_report
 
 program pipeline
+#if SOMA_PIPELINE_MPI
   use mpi
+#endif
   use soma
   use pipeline_report
   implicit none
   integer :: ierr, rank
   character(len=4096) :: out
 
+  rank = 0
+#if SOMA_PIPELINE_MPI
   call MPI_Init(ierr)
   call MPI_Comm_rank(MPI_COMM_WORLD, rank, ierr)
+#endif
   if (command_argument_count() /= 1) then
     if (rank == 0) write (*, '(a)') 'usage: pipeline_f <out_dir>'
+#if SOMA_PIPELINE_MPI
     call MPI_Finalize(ierr)
+#endif
     stop 2
   end if
   call get_command_argument(1, out)
   call soma_initialize()
+#if SOMA_PIPELINE_MPI
   call run(soma_comm(MPI_COMM_WORLD), trim(out))
+#else
+  call run(soma_comm_world(), trim(out))
+#endif
   call soma_finalize()
+#if SOMA_PIPELINE_MPI
   call MPI_Finalize(ierr)
+#endif
 
 contains
 
@@ -147,8 +161,8 @@ contains
     if (comm%rank() == 0) call pipeline_print(dc, dr, integral)
   end subroutine
 
-  ! Rows of `width` values of the owned entities, gathered to every rank and
-  ! ordered by gid.
+  ! Rows of `width` values of the owned entities, gathered to every rank (with
+  ! MPI) and ordered by gid.
   function by_gid(gids, rows, width) result(out)
     integer(soma_go), intent(in) :: gids(:)
     real(c_double), intent(in) :: rows(:)
@@ -156,8 +170,11 @@ contains
     real(c_double), allocatable :: out(:)
     integer(soma_go), allocatable :: all_gids(:)
     real(c_double), allocatable :: all_rows(:)
-    integer, allocatable :: counts(:), displs(:), order(:)
-    integer :: p, n, i, ierr, total
+    integer, allocatable :: order(:)
+    integer :: n, i, total
+#if SOMA_PIPELINE_MPI
+    integer, allocatable :: counts(:), displs(:)
+    integer :: p, ierr
     call MPI_Comm_size(MPI_COMM_WORLD, p, ierr)
     allocate (counts(p), displs(p))
     n = size(gids)
@@ -171,6 +188,12 @@ contains
     call MPI_Allgatherv(gids, n, MPI_INTEGER8, all_gids, counts, displs, MPI_INTEGER8, MPI_COMM_WORLD, ierr)
     call MPI_Allgatherv(rows, width * n, MPI_DOUBLE_PRECISION, all_rows, width * counts, width * displs, &
                         MPI_DOUBLE_PRECISION, MPI_COMM_WORLD, ierr)
+#else
+    n = size(gids)
+    total = n
+    all_gids = gids
+    all_rows = rows
+#endif
     order = sorted(all_gids)
     allocate (out(width * total))
     do i = 1, total

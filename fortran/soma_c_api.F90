@@ -29,6 +29,10 @@ module soma_c_api
     integer(c_int) function c_finalize() bind(C, name='soma_finalize')
       import :: c_int
     end function
+    subroutine c_abort(message) bind(C, name='soma_abort')
+      import :: c_char
+      character(kind=c_char), intent(in) :: message(*)
+    end subroutine
     integer(c_int) function c_testing_live_handles(count) bind(C, name='soma_testing_live_handles')
       import :: c_int, c_long
       integer(c_long), intent(out) :: count
@@ -311,13 +315,14 @@ module soma_c_api
       type(c_ptr), value :: m
       integer(c_int), intent(out) :: n
     end function
-    integer(c_int) function c_mesh_field_info(m, i, name, len, dtype, ncomp, rows, dims, variable) &
+    integer(c_int) function c_mesh_field_info(m, i, name, len, length, dtype, ncomp, rows, dims, variable) &
         bind(C, name='soma_mesh_field_info')
       import :: c_int, c_ptr, c_char, c_size_t, soma_lo
       type(c_ptr), value :: m
       integer(c_int), value :: i
       character(kind=c_char), intent(out) :: name(*)
       integer(c_size_t), value :: len
+      integer(c_size_t), intent(out) :: length
       integer(c_int), intent(out) :: dtype, ncomp, dims, variable
       integer(soma_lo), intent(out) :: rows
     end function
@@ -490,12 +495,13 @@ module soma_c_api
       type(c_ptr), value :: r
       integer(c_int), intent(out) :: n
     end function
-    integer(c_int) function c_refine_dropped_name(r, i, name, len) bind(C, name='soma_refine_dropped_name')
+    integer(c_int) function c_refine_dropped_name(r, i, name, len, length) bind(C, name='soma_refine_dropped_name')
       import :: c_int, c_ptr, c_char, c_size_t
       type(c_ptr), value :: r
       integer(c_int), value :: i
       character(kind=c_char), intent(out) :: name(*)
       integer(c_size_t), value :: len
+      integer(c_size_t), intent(out) :: length
     end function
     integer(c_int) function c_refine_clone(r, out) bind(C, name='soma_refine_clone')
       import :: c_int, c_ptr

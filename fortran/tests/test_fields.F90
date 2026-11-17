@@ -35,7 +35,8 @@ contains
     integer(c_int32_t), pointer :: k(:, :)
     integer(c_int64_t), pointer :: g(:, :)
     character(len=32) :: name
-    character(len=256), allocatable :: names(:)
+    character(len=soma_name_len), allocatable :: names(:)
+    character(len=:), allocatable :: long_name, longer_name, huge_name
     real(c_double), allocatable :: copy(:, :)
     integer(soma_lo) :: r
 
@@ -56,6 +57,26 @@ contains
     call check(ierr == SOMA_ERR_OUT_OF_RANGE, 'no such field')
     names = m%field_names()
     call check(any(names == 'u') .and. any(names == 'k') .and. any(names == 'g'), 'field names')
+
+    ! Names are never cut off: whole up to soma_name_len, an error beyond it.
+    long_name = repeat('a', 300)
+    call m%add_field(long_name, 3, 1, u)
+    names = m%field_names()
+    call check(any(names == long_name), 'a 300-character name comes back whole')
+    call check(soma_name_len >= 1024, 'soma_name_len is 1024 by default')
+    longer_name = repeat('b', soma_name_len + 1)
+    call m%add_field(longer_name, 3, 1, u)
+    names = m%field_names(ierr)
+    call check(ierr == SOMA_ERR_OUT_OF_RANGE, 'a name longer than soma_name_len is an error')
+    call check(index(soma_error_message(), 'SOMA_FORTRAN_NAME_LENGTH') > 0, 'naming the option that sets it')
+    call m%remove_field(longer_name)
+    call m%remove_field(long_name)
+    huge_name = repeat('c', 2000)
+    call m%field(huge_name, u, ierr=ierr)
+    call check(ierr == SOMA_ERR_OUT_OF_RANGE, 'no field of that name')
+    call check(index(soma_error_message(), huge_name) > 0, 'the message is whole, however long')
+    call m%field('u', u)
+    call m%field('u', again)  ! both pointers again: adding and removing fields moved them
 
     allocate (copy(2, m%count(3)))
     call m%get_field(name, copy)

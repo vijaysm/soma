@@ -16,8 +16,13 @@
 !>   numbering (an edit's apply, compress, ghosts, adjacencies) or it is freed;
 !>   field pointers also until a field is added or removed.
 !> - Every procedure takes an optional integer ierr. Present, it receives the
-!>   status (SOMA_OK or SOMA_ERR_*); absent, a failure writes SOMA's message
-!>   to stderr and stops the program.
+!>   status (SOMA_OK or SOMA_ERR_*); absent, a failure flushes stdout, writes
+!>   SOMA's message to stderr and ends the process (soma_abort: Kokkos
+!>   finalized, then MPI_Abort, or exit status 1 without MPI).
+!> - Names passed in may be of any length; names handed back are
+!>   character(len=soma_name_len), and a longer one is an error, never cut off.
+!> - Queries may run on several threads; calls that change a mesh may not run
+!>   alongside other calls on it.
 !> - Handles are reference counted: assignment shares the object, and the
 !>   last handle freed (by free, or when it goes out of scope) frees it.
 !>   Assignment and finalization are elemental, so arrays of handles and
@@ -25,13 +30,13 @@
 !>   allocate(source=) and transfer copy without sharing and must not be used.
 module soma
   use, intrinsic :: iso_c_binding
-  use, intrinsic :: iso_fortran_env, only: error_unit
+  use, intrinsic :: iso_fortran_env, only: error_unit, output_unit
   use soma_kinds
   use soma_c_api
   implicit none
   private
 
-  public :: soma_lo, soma_offset, soma_go, soma_real
+  public :: soma_lo, soma_offset, soma_go, soma_real, soma_name_len
   public :: c_double, c_int, c_long, c_int8_t, c_int32_t, c_int64_t
 
   ! Status codes.
@@ -239,13 +244,15 @@ contains
   !> The calling thread's last error message.
   function soma_error_message() result(msg)
     character(:), allocatable :: msg
-    character(kind=c_char) :: buf(1024)
+    character(kind=c_char) :: probe(1)
+    character(kind=c_char), allocatable :: buf(:)
     integer(c_size_t) :: n
-    integer :: i, k
+    integer :: i
+    n = c_last_error(probe, 0_c_size_t)  ! the length, so the message is whole
+    allocate (buf(n + 1))
     n = c_last_error(buf, int(size(buf), c_size_t))
-    k = int(min(n, int(size(buf) - 1, c_size_t)))
-    allocate (character(k) :: msg)
-    do i = 1, k
+    allocate (character(int(n)) :: msg)
+    do i = 1, int(n)
       msg(i:i) = buf(i)
     end do
   end function
@@ -255,13 +262,15 @@ contains
   subroutine finish(status, ierr)
     integer(c_int), intent(in) :: status
     integer, intent(out), optional :: ierr
-    integer(c_int) :: ignored
     if (present(ierr)) then
       ierr = status
     else if (status /= SOMA_OK) then
-      write (error_unit, '(2a)') 'soma: ', soma_error_message()
-      ignored = c_finalize()
-      error stop 1
+      ! The process ends in C (MPI_Abort, or _Exit without MPI), not by error
+      ! stop: what a compiler runs at error stop, and whether Kokkos is still up
+      ! then, is not SOMA's to know. Output written so far is flushed first.
+      flush (output_unit)
+      flush (error_unit)
+      call c_abort(soma_error_message() // c_null_char)
     end if
   end subroutine
 
@@ -273,11 +282,41 @@ contains
     call finish(c_set_last_error(int(status, c_int), message // c_null_char), ierr)
   end subroutine
 
+  ! The first length characters of a C name.
+  function from_c(buf, length) result(name)
+    character(kind=c_char), intent(in) :: buf(:)
+    integer(c_size_t), intent(in) :: length
+    character(len=int(length)) :: name
+    integer :: k
+    do k = 1, int(length)
+      name(k:k) = buf(k)
+    end do
+  end function
+
+  ! The error for a name longer than soma_name_len.
+  function too_long(what, length) result(message)
+    character(*), intent(in) :: what
+    integer(c_size_t), intent(in) :: length
+    character(:), allocatable :: message
+    character(len=24) :: n, limit
+    write (n, '(i0)') length
+    write (limit, '(i0)') soma_name_len
+    message = what // ': a name of ' // trim(n) // ' characters is longer than soma_name_len (' // trim(limit) // &
+              '); configure SOMA with a larger SOMA_FORTRAN_NAME_LENGTH'
+  end function
+
   ! A NUL-terminated copy of s without its trailing blanks.
+  ! A Fortran string as a C string: its characters without trailing blanks, then
+  ! NUL. An array, not a deferred-length string, so every compiler passes it to
+  ! the C interfaces' name(*) as it is.
   function c_str(s) result(cs)
     character(*), intent(in) :: s
-    character(:, kind=c_char), allocatable :: cs
-    cs = trim(s) // c_null_char
+    character(kind=c_char) :: cs(len_trim(s) + 1)
+    integer :: k
+    do k = 1, len_trim(s)
+      cs(k) = s(k:k)
+    end do
+    cs(len_trim(s) + 1) = c_null_char
   end function
 
   ! ---- Runtime ------------------------------------------------------------
@@ -855,24 +894,25 @@ contains
   function mesh_field_names(self, ierr) result(names)
     class(soma_mesh), intent(in) :: self
     integer, intent(out), optional :: ierr
-    character(len=256), allocatable :: names(:)
-    character(kind=c_char) :: buf(256)
+    character(len=soma_name_len), allocatable :: names(:)
+    character(kind=c_char) :: buf(soma_name_len + 1)
     integer(c_int) :: n, i, t, nc, dims, variable, status
+    integer(c_size_t) :: length
     integer(soma_lo) :: rows
-    integer :: k
     n = 0
     status = c_mesh_field_count(self%ptr, n)
     allocate (names(n))
+    names = ' '
     do i = 1, n
       if (status /= SOMA_OK) exit
-      buf = ' '
-      status = c_mesh_field_info(self%ptr, i - 1, buf, int(size(buf), c_size_t), t, nc, rows, dims, variable)
-      names(i) = ' '
-      do k = 1, size(buf)
-        if (buf(k) == c_null_char) exit
-        names(i)(k:k) = buf(k)
-      end do
+      length = 0
+      status = c_mesh_field_info(self%ptr, i - 1, buf, int(size(buf), c_size_t), length, t, nc, rows, dims, variable)
+      if (status == SOMA_OK) names(i) = from_c(buf, length)
     end do
+    if (status /= SOMA_OK .and. length > soma_name_len) then
+      call fail(SOMA_ERR_OUT_OF_RANGE, too_long('field_names', length), ierr)
+      return
+    end if
     call finish(status, ierr)
   end function
 
@@ -1464,11 +1504,13 @@ contains
     pf = c_null_ptr
     nf = 0
     if (present(fixed)) then
-      allocate (flags(size(fixed)))
-      flags = merge(1_c_int8_t, 0_c_int8_t, fixed)
-      nf = size(flags)
-      pf = c_loc(flags)
-      if (nf == 0) pf = c_loc(empty_i8)
+      ! A mask given, even empty, is a non-null address (C reads null as "no
+      ! mask"): at least one element, as c_loc may not take a zero-size array.
+      allocate (flags(max(size(fixed), 1)))
+      flags = 0
+      flags(1:size(fixed)) = merge(1_c_int8_t, 0_c_int8_t, fixed)
+      nf = size(fixed)
+      pf = c_loc(flags(1))
     end if
     d = 0
     largest = 0
@@ -1648,23 +1690,24 @@ contains
   function refine_dropped(self, ierr) result(names)
     class(soma_refine), intent(in) :: self
     integer, intent(out), optional :: ierr
-    character(len=256), allocatable :: names(:)
-    character(kind=c_char) :: buf(256)
+    character(len=soma_name_len), allocatable :: names(:)
+    character(kind=c_char) :: buf(soma_name_len + 1)
     integer(c_int) :: n, i, status
-    integer :: k
+    integer(c_size_t) :: length
     n = 0
     status = c_refine_dropped_count(self%ptr, n)
     allocate (names(n))
+    names = ' '
     do i = 1, n
       if (status /= SOMA_OK) exit
-      buf = c_null_char
-      status = c_refine_dropped_name(self%ptr, i - 1, buf, int(size(buf), c_size_t))
-      names(i) = ' '
-      do k = 1, size(buf)
-        if (buf(k) == c_null_char) exit
-        names(i)(k:k) = buf(k)
-      end do
+      length = 0
+      status = c_refine_dropped_name(self%ptr, i - 1, buf, int(size(buf), c_size_t), length)
+      if (status == SOMA_OK) names(i) = from_c(buf, length)
     end do
+    if (status /= SOMA_OK .and. length > soma_name_len) then
+      call fail(SOMA_ERR_OUT_OF_RANGE, too_long('dropped', length), ierr)
+      return
+    end if
     call finish(status, ierr)
   end function
 
