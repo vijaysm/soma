@@ -73,6 +73,7 @@
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/exact_sum.hpp"
 #include "soma/parallel/halo_exchange.hpp"
+#include "soma/sem/gll.hpp"
 
 namespace soma::sem {
 
@@ -245,6 +246,16 @@ class SemSpace {
     contravariant_ = Kokkos::create_mirror_view_and_copy(MemSpace{}, g.contravariant);
     jacobian_ = Kokkos::create_mirror_view_and_copy(MemSpace{}, g.jacobian);
     local_mass_ = Kokkos::create_mirror_view_and_copy(MemSpace{}, g.local_mass);
+    if (g.error == detail::SemGeometryData::Error::none) {
+      const std::vector<Real> d = gll_derivative_1d(order), w = gll_weights_1d(order);
+      const auto np = static_cast<std::size_t>(order + 1);
+      View2<Real, Kokkos::HostSpace> dh("soma::sem::SemSpace::derivative", np, np);
+      for (std::size_t i = 0; i < np; ++i) {
+        for (std::size_t j = 0; j < np; ++j) dh(i, j) = d[i * np + j];
+      }
+      derivative_ = Kokkos::create_mirror_view_and_copy(MemSpace{}, dh);
+      weights_ = soma::detail::to_space<Real, MemSpace>(w, "soma::sem::SemSpace::weights");
+    }
 
     k_.vertex_offsets = soma::detail::to_space<Offset, MemSpace>(plan.vertex_offsets, "soma::sem::dss::vertex_offsets");
     k_.vertex_rows = soma::detail::to_space<LO, MemSpace>(plan.vertex_rows, "soma::sem::dss::vertex_rows");
@@ -310,6 +321,11 @@ class SemSpace {
   LO owned_elements() const noexcept { return owned_; }
   const Space<MemSpace>& space() const noexcept { return space_; }
   const SemGeometry& geometry() const noexcept { return geometry_; }
+
+  /// The 1D GLL derivative matrix, D(i, j) = l_j'(xi_i), and weights
+  /// (soma/sem/gll.hpp).
+  View2<const Real, MemSpace> derivative() const { return derivative_; }
+  View1<const Real, MemSpace> weights() const { return weights_; }
 
   /// Per point, num_elements() * points_per_element() rows each.
   View2<const Real, MemSpace> x() const { return x_; }
@@ -379,7 +395,8 @@ class SemSpace {
   SemGeometry geometry_;
   LO elements_ = 0, owned_ = 0, vertices_ = 0, edges_ = 0;
   Space<MemSpace> space_;
-  View2<Real, MemSpace> x_, covariant_, contravariant_, jacobian_, local_mass_, mass_;
+  View2<Real, MemSpace> x_, covariant_, contravariant_, jacobian_, local_mass_, mass_, derivative_;
+  View1<Real, MemSpace> weights_;
   detail::DssKernels<MemSpace> k_;
   std::array<std::optional<HaloExchange<MemSpace>>, 3> halo_;
 };
