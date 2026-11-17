@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -94,7 +95,9 @@ struct PyMesh {
 };
 
 void bind_runtime(nb::module_& m);
-void bind_mesh(nb::module_& m);
+nb::class_<PyMesh> bind_mesh(nb::module_& m);
+void bind_edit(nb::module_& m, nb::class_<PyMesh>& mesh);
+void bind_fields(nb::module_& m, nb::class_<PyMesh>& mesh);
 
 }  // namespace soma_py
 

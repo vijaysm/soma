@@ -13,8 +13,13 @@ find_package(nanobind CONFIG REQUIRED PATHS "${soma_nanobind_dir}" NO_DEFAULT_PA
 
 set(soma_python_dir "${CMAKE_BINARY_DIR}/python/soma")
 nanobind_add_module(_soma NB_STATIC
-  src/module.cpp src/runtime.cpp src/mesh.cpp)
+  src/module.cpp src/runtime.cpp src/mesh.cpp src/edit.cpp src/fields.cpp)
 target_link_libraries(_soma PRIVATE soma::soma)
+# The library keeps fields in std::any and compares types across translation
+# units; with nanobind's hidden visibility the binding sources would see other
+# type_info objects for the same template instances (macOS arm64), and every
+# any_cast across the boundary would fail. The module keeps default visibility.
+set_target_properties(_soma PROPERTIES CXX_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF)
 set_target_properties(_soma PROPERTIES LIBRARY_OUTPUT_DIRECTORY "${soma_python_dir}")
 if(SOMA_ENABLE_MPI)
   execute_process(
@@ -73,4 +78,6 @@ endfunction()
 if(SOMA_ENABLE_TESTS)
   soma_add_python_test(tests/test_runtime.py RANKS 1 2 3 4)
   soma_add_python_test(tests/test_mesh.py RANKS 1 2 3 4)
+  soma_add_python_test(tests/test_edit.py RANKS 1)
+  soma_add_python_test(tests/test_fields.py RANKS 1 2 3 4)
 endif()

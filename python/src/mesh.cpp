@@ -65,7 +65,7 @@ const char* ownership_name(soma::Ownership o) {
 
 }  // namespace
 
-void bind_mesh(nb::module_& m) {
+nb::class_<PyMesh> bind_mesh(nb::module_& m) {
   nb::enum_<soma::Topology>(m, "Topology", "Entity shapes.")
       .value("vertex", soma::Topology::vertex)
       .value("edge", soma::Topology::edge)
@@ -130,7 +130,8 @@ void bind_mesh(nb::module_& m) {
       "Collective: a box of hex, tet, quad or tri elements, split across the ranks in layers along its last "
       "axis (z, or y for quad and tri).");
 
-  nb::class_<PyMesh>(m, "Mesh", "One rank's part of a mesh.")
+  auto mesh = nb::class_<PyMesh>(m, "Mesh", "One rank's part of a mesh.");
+  mesh
       .def_prop_ro("dim", [](const PyMesh& self) { return self.get().dim(); })
       .def(
           "count", [](const PyMesh& self, int d) { check_dim(self.get(), d); return self.get().count(d); },
@@ -209,6 +210,7 @@ void bind_mesh(nb::module_& m) {
           nb::arg("comm"), nb::arg("pairs"), nb::arg("bridges") = std::vector<std::pair<int, int>>{},
           "Collective: builds the graphs (from, to) and bridges (dim, via), deriving edges and faces "
           "with their sharing.");
+  return mesh;
 }
 
 }  // namespace soma_py
