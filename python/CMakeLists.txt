@@ -13,7 +13,7 @@ find_package(nanobind CONFIG REQUIRED PATHS "${soma_nanobind_dir}" NO_DEFAULT_PA
 
 set(soma_python_dir "${CMAKE_BINARY_DIR}/python/soma")
 nanobind_add_module(_soma NB_STATIC
-  src/module.cpp src/runtime.cpp src/mesh.cpp src/edit.cpp src/fields.cpp src/io.cpp src/parallel.cpp)
+  src/module.cpp src/runtime.cpp src/mesh.cpp src/edit.cpp src/fields.cpp src/io.cpp src/parallel.cpp src/algorithms.cpp)
 target_link_libraries(_soma PRIVATE soma::soma)
 # The library keeps fields in std::any and compares types across translation
 # units; with nanobind's hidden visibility the binding sources would see other
@@ -81,6 +81,7 @@ if(SOMA_ENABLE_TESTS)
   soma_add_python_test(tests/test_edit.py RANKS 1)
   soma_add_python_test(tests/test_fields.py RANKS 1 2 3 4)
   soma_add_python_test(tests/test_parallel.py RANKS 1 2 3 4)
+  soma_add_python_test(tests/test_algorithms.py RANKS 1 2 3 4)
   if(SOMA_ENABLE_HDF5)
     soma_add_python_test(tests/test_io.py RANKS 1 2 3 4)
   endif()
