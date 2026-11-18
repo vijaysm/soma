@@ -195,7 +195,7 @@ void project_tangent(const SemSpace<MemSpace>& s, const detail::Out<MemSpace>& v
   typename MemSpace::execution_space{}.fence();
 }
 
-/// Collective. f, lap: 1 component (they may not alias). The weak Laplacian,
+/// Collective. f, lap: 1 component. The weak Laplacian,
 /// assembled: continuous, every element's points written.
 template <class MemSpace>
 void laplacian(const Comm& comm, const SemSpace<MemSpace>& s, const detail::In<MemSpace>& f,

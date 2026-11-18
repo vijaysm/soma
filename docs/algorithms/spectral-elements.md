@@ -23,6 +23,7 @@ soma::build_distributed_adjacencies(comm, mesh, soma::AdjacencyRequest{}.add(2, 
 
 const soma::sem::SemSpace<Mem> space(comm, mesh, 3, soma::sem::SemGeometry::sphere(spec.radius));
 auto h = mesh.fields().add<double>("h", space.space(), 1).view();  // a value per GLL point
+auto lap = mesh.fields().add<double>("lap", space.space(), 1).view();
 soma::sem::laplacian(comm, space, h, lap);                         // continuous
 const double mass = space.integral(comm, h);                       // the same bits on any P
 ```
@@ -64,7 +65,8 @@ in three Cartesian components each:
 
 Every element on the rank has its geometry, ghosts included; the owned ones come first. In the
 plane the area is exact; on the sphere it converges spectrally ($4\pi$ to $3 \times 10^{-10}$ at
-$n_e = 2$, $p = 8$), and quadratic geometry converges as $h^4$ where linear converges as $h^2$.
+$n_e = 2$, $p = 8$), and quadratic geometry converges at about $h^4$ (measured 4.0) where linear converges at about
+$h^2$ (measured 2.0).
 
 The constructor throws `std::invalid_argument` on every rank, naming the smallest offending element
 gid where there is one, when a rank's mesh is not of dimension 2, $p$ is outside [1, 32], an element

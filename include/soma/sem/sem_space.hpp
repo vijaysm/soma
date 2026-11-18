@@ -15,6 +15,8 @@
 ///   spec.ne = 30;
 ///   spec.radius = 6.371e6;
 ///   soma::HostMesh mesh = soma::sem::cubed_sphere_mesh(comm, spec);
+///   mesh.add_ghosts(comm, soma::GhostOptions{1, 0});    // on more than one rank
+///   soma::build_distributed_adjacencies(comm, mesh, soma::AdjacencyRequest{}.add(2, 1));
 ///   const soma::sem::SemSpace<Mem> space(comm, mesh, 3, soma::sem::SemGeometry::sphere(6.371e6));
 ///   auto h = mesh.fields().add<double>("h", space.space(), 1);   // a value per GLL point
 /// ```
@@ -52,6 +54,12 @@
 /// On one rank the space derives the edges itself when the mesh has none.
 /// dss first gives ghost elements their owners' values, so only the owned
 /// elements' values are read; afterwards ghosts hold their owners' results.
+///
+/// dss, integral and the operators are collective: every rank passes
+/// views of its own num_elements() * points_per_element() rows and the same
+/// component count; a rank that does not throws std::invalid_argument and may
+/// leave the others waiting. A space is not safe to use from several threads
+/// at once.
 
 #include <array>
 #include <cstdint>
@@ -305,7 +313,8 @@ class SemSpace {
     Kokkos::deep_copy(mass_, local_mass_);
     View2<Real, MemSpace> one("soma::sem::SemSpace::one", x_.extent(0), 1);
     Kokkos::deep_copy(one, Real{1});
-    sum_and_scatter(comm, one, mass_, View2<const Real, MemSpace>{});
+    const Workspace w = make_workspace(1);
+    sum_and_scatter(comm, one, mass_, View2<const Real, MemSpace>{}, w);
   }
 
   /// Collective: values (num_elements() * points_per_element() rows, any
@@ -314,9 +323,15 @@ class SemSpace {
   /// elements' values are read; every element's are written.
   void dss(const Comm& comm, const View2<Real, MemSpace>& values) const {
     check_rows(values.extent(0), "dss");
-    if (comm.size() > 1) refresh_ghosts(comm, values);
-    sum_and_scatter(comm, values, values, mass_);
+    const Workspace& w = workspace(values.extent(1));
+    if (comm.size() > 1) refresh_ghosts(comm, values, w.block);
+    sum_and_scatter(comm, values, values, mass_, w);
   }
+
+  /// For tests: how many times dss has allocated its workspace. It keeps the
+  /// buffers of the last component count and allocates again when the count
+  /// changes.
+  std::size_t workspace_allocations() const noexcept { return allocations_; }
 
   /// The assembled mass at each point: the sum of the local masses of the
   /// elements holding it.
@@ -375,13 +390,39 @@ class SemSpace {
     }
   }
 
+  /// The buffers of one dss: vertex and edge sums, and the element block
+  /// that refreshes ghosts.
+  struct Workspace {
+    std::size_t components = 0;
+    View2<Real, MemSpace> vertex, edge, block;
+  };
+
+  Workspace make_workspace(std::size_t nc) const {
+    const auto inner = static_cast<std::size_t>(order_ - 1);
+    const auto ppe = static_cast<std::size_t>(points_per_element());
+    Workspace w;
+    w.components = nc;
+    w.vertex = View2<Real, MemSpace>("soma::sem::dss::vertex_sums", static_cast<std::size_t>(vertices_), nc);
+    w.edge = View2<Real, MemSpace>("soma::sem::dss::edge_sums", static_cast<std::size_t>(edges_), inner * nc);
+    w.block = View2<Real, MemSpace>(Kokkos::view_alloc(Kokkos::WithoutInitializing, "soma::sem::dss::elements"),
+                                    static_cast<std::size_t>(elements_), ppe * nc);
+    return w;
+  }
+
+  const Workspace& workspace(std::size_t nc) const {
+    if (allocations_ == 0 || workspace_.components != nc) {
+      workspace_ = make_workspace(nc);
+      ++allocations_;
+    }
+    return workspace_;
+  }
+
   /// Ghost elements take their owners' values.
-  void refresh_ghosts(const Comm& comm, const View2<Real, MemSpace>& values) const {
+  void refresh_ghosts(const Comm& comm, const View2<Real, MemSpace>& values,
+                      const View2<Real, MemSpace>& block) const {
     using Policy = typename detail::DssKernels<MemSpace>::Policy;
     const LO ppe = points_per_element();
     const auto nc = static_cast<LO>(values.extent(1));
-    View2<Real, MemSpace> block(Kokkos::view_alloc(Kokkos::WithoutInitializing, "soma::sem::dss::elements"),
-                                static_cast<std::size_t>(elements_), static_cast<std::size_t>(ppe * nc));
     Kokkos::parallel_for(
         "soma::sem::dss::pack", Policy(0, elements_), KOKKOS_LAMBDA(const LO e) {
           for (LO c = 0; c < nc; ++c) {
@@ -402,11 +443,10 @@ class SemSpace {
   /// the owners' sums, and every element's shared points take sum / mass
   /// (the sums themselves when mass is empty).
   void sum_and_scatter(const Comm& comm, const View2<Real, MemSpace>& in, const View2<Real, MemSpace>& out,
-                       const View2<const Real, MemSpace>& mass) const {
-    const auto nc = static_cast<std::size_t>(in.extent(1));
+                       const View2<const Real, MemSpace>& mass, const Workspace& w) const {
     const auto inner = static_cast<std::size_t>(order_ - 1);
-    View2<Real, MemSpace> vbuf("soma::sem::dss::vertex_sums", static_cast<std::size_t>(vertices_), nc);
-    View2<Real, MemSpace> ebuf("soma::sem::dss::edge_sums", static_cast<std::size_t>(edges_), inner * nc);
+    const auto& vbuf = w.vertex;
+    const auto& ebuf = w.edge;
     k_.sum(local_mass_, in, vbuf, ebuf);
     if (comm.size() > 1) {
       halo_[0]->update(comm, vbuf);
@@ -423,6 +463,8 @@ class SemSpace {
   View1<Real, MemSpace> weights_;
   detail::DssKernels<MemSpace> k_;
   std::array<std::optional<HaloExchange<MemSpace>>, 3> halo_;
+  mutable Workspace workspace_;
+  mutable std::size_t allocations_ = 0;
 };
 
 }  // namespace soma::sem
