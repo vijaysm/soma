@@ -219,3 +219,14 @@ Norms compare(const soma::Comm& comm, const Space& space, const soma::HostMesh& 
 }
 
 }  // namespace swe
+
+namespace swe {
+
+Norms compare_surface(const soma::Comm& comm, const SweModel& model, const Reference& reference) {
+  const ConstValues h = model.h(), hs = model.hs();
+  Values surface("swe::free_surface", h.extent(0), 1);
+  for (std::size_t r = 0; r < h.extent(0); ++r) surface(r, 0) = h(r, 0) + hs(r, 0);
+  return compare(comm, model.space(), model.mesh(), model.options().ne, surface, reference);
+}
+
+}  // namespace swe

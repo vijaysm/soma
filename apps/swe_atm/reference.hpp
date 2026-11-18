@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "diagnostics.hpp"
+#include "model.hpp"
 #include "soma/core/mesh.hpp"
 #include "soma/parallel/comm.hpp"
 
@@ -45,6 +46,10 @@ Reference read_reference(const soma::Comm& comm, const ReferenceSpec& spec);
 // point's share of the latitude and longitude spacing.
 Norms compare(const soma::Comm& comm, const Space& space, const soma::HostMesh& mesh, int ne, const ConstValues& h,
               const Reference& reference);
+
+// Collective: compare of the model's free-surface height h + hs, the field
+// Williamson's norms (and published reference solutions) measure.
+Norms compare_surface(const soma::Comm& comm, const SweModel& model, const Reference& reference);
 
 }  // namespace swe
 

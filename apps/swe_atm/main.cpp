@@ -214,7 +214,7 @@ int run(const soma::Comm& comm, const Options& o) {
   const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   if (o.reference) {
     const swe::Reference ref = swe::read_reference(comm, *o.reference);
-    const swe::Norms n = swe::compare(comm, m.space(), m.mesh(), o.model.ne, m.h(), ref);
+    const swe::Norms n = swe::compare_surface(comm, m, ref);
     if (root) {
       std::printf("reference %s: l1 %.6e  l2 %.6e  linf %.6e\n", o.reference->file.string().c_str(), n.l1, n.l2,
                   n.linf);

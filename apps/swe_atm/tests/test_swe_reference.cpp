@@ -20,6 +20,7 @@
 #include <gtest/gtest.h>
 
 #include "constants.hpp"
+#include "model.hpp"
 #include "reference.hpp"
 #include "sem_meshes.hpp"
 
@@ -167,6 +168,31 @@ TEST(SweReference, ComparesAgainstTheModelField) {
   // A wrong field is seen: 1 m off everywhere is 1e-3 relative.
   for (std::size_t r = 0; r < n; ++r) h(r, 0) += 1;
   EXPECT_NEAR(swe::compare(c, s, m, ne, h, ref).l1, 1.0 / 1000, 1e-4);
+}
+
+// Williamson's norms, and the references they are measured against, are of the
+// free-surface height h + hs: case 5 at t = 0 against its smooth free surface
+// is interpolation error only, where its depth would be off by the mountain.
+TEST(SweReference, ComparesTheFreeSurface) {
+  const Comm c = Comm::world();
+  swe::ModelOptions o;
+  o.ne = 4;
+  o.order = 4;
+  o.test = swe::Case::williamson5;
+  const swe::SweModel m(c, o);
+  const double u0 = 20, h0 = 5960;
+  swe::Reference ref;
+  for (int i = 0; i <= 60; ++i) ref.lat.push_back(-90.0 + 3 * i);
+  for (int j = 0; j < 120; ++j) ref.lon.push_back(3.0 * j);
+  for (const double t : ref.lat) {
+    const double st = std::sin(t * pi / 180);
+    for (std::size_t j = 0; j < ref.lon.size(); ++j) {
+      ref.values.push_back(h0 - (swe::radius * swe::omega * u0 + u0 * u0 / 2) * st * st / swe::gravity);
+    }
+  }
+  const swe::Norms e = swe::compare_surface(c, m, ref);
+  EXPECT_LE(e.l2, 1e-5);
+  EXPECT_LE(e.linf, 1e-4);
 }
 
 TEST(SweReference, ReportsBadFiles) {

@@ -102,7 +102,7 @@ on $10^4$ intervals, with $h_0$ set so that the mean depth is 10 km.
 | `--vtk STEM` | | at the end, `STEM.<rank>.vtk`: each owned element as $p \times p$ quads with point fields `h`, `hs`, `u` |
 | `--soma FILE` | | at the end, the mesh in SOMA's format with fields `h`, `hs`, `u` on the GLL space |
 | `--latlon NLAT,NLON,STEM` | | at the end, `STEM_h.npy`, `STEM_vorticity.npy`, `STEM_lat.npy` and `STEM_lon.npy`: depth and vorticity at latitudes from -90 to 90 inclusive and longitudes from 0 every 360/NLON degrees |
-| `--reference FILE` | | NetCDF-4 reference solution to compare the final depth against |
+| `--reference FILE` | | NetCDF-4 reference solution of the free-surface height $h + h_s$ to compare the final state against |
 | `--ref-var`, `--ref-lat`, `--ref-lon`, `--ref-time` | `h`, `lat`, `lon`, -1 | the reference's variable and coordinate names, and its time index (-1: the last) |
 
 Each report gives the time, the step, and the relative change of mass and total energy since
@@ -121,8 +121,10 @@ l_2 = \frac{\sqrt{I (h - h_t)^2}}{\sqrt{I h_t^2}}, \quad
 l_\infty = \frac{\max|h - h_t|}{\max|h_t|}.
 $$
 
-For case 2, $I$ is the spectral-element integral (exact sums). Against a reference file, the
-model's depth is evaluated at the reference's grid points. Each point is located on the cubed
+Like Williamson's, they measure the free-surface height $h + h_s$ (the depth itself for every
+case but 5, which alone has topography). For case 2, $I$ is the spectral-element integral (exact
+sums). Against a reference file, which must hold the free-surface height, the model's
+$h + h_s$ is evaluated at the reference's grid points. Each point is located on the cubed
 sphere (a point on an element edge goes to the element of smallest gid) and evaluated by its
 element's Lagrange interpolant. $I$ is then a sum weighted by $\cos\phi$ and each point's share
 of the latitude and longitude spacing.
