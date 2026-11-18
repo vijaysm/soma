@@ -3,7 +3,7 @@
 
 # The shallow-water atmosphere: a library of the model's parts (swe_atm_core),
 # its driver (swe_atm) and, with tests on, its tests.
-add_library(swe_atm_core STATIC cases.cpp diagnostics.cpp model.cpp)
+add_library(swe_atm_core STATIC cases.cpp diagnostics.cpp latlon.cpp model.cpp)
 target_include_directories(swe_atm_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(swe_atm_core PUBLIC soma PRIVATE soma_warnings)
 
@@ -31,6 +31,7 @@ if(SOMA_ENABLE_TESTS)
   swe_add_test(test_swe_cases SOURCES tests/test_swe_cases.cpp)
   swe_add_test(test_swe_diagnostics SOURCES tests/test_swe_diagnostics.cpp RANKS 1 2 3 4)
   swe_add_test(test_swe_model SOURCES tests/test_swe_model.cpp RANKS 1 2 3 4 8)
+  swe_add_test(test_swe_latlon SOURCES tests/test_swe_latlon.cpp RANKS 1 2 3 4 8)
   # A run is the same bit for bit at any number of threads.
   add_test(NAME test_swe_model.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_swe_model>
     -DFILTER=SweModel.Digests -P ${PROJECT_SOURCE_DIR}/tests/unit/compare_threads.cmake)
