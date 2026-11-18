@@ -716,12 +716,28 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   bits on any number of ranks and threads: owners sum each shared vertex and edge in element-gid
   order over a ghost layer through vertices.
 - `soma/sem/operators.hpp`: gradient, divergence, vorticity, tangent projection, the weak Laplacian
-  and hyperviscosity.
+  and hyperviscosity; `cross_normal`, and HOMME's vector Laplacian and hyperviscosity, which leave
+  rigid rotation undamped.
+- `dss` keeps its buffers between calls of the same component count.
 - `soma::sem::cubed_sphere_mesh` builds the equiangular cubed sphere (`ne` x `ne` quads per face,
   Quad4 or Quad9), split across the ranks with gids that do not depend on their number.
 - `soma::sem::gll_weights_1d`, `gll_derivative_1d` (`soma/sem/gll.hpp`).
 - A mesh keeps its ghost record (`ghost_layers()`) when `build_distributed_adjacencies` reorders
   its entities.
+
+### Shallow-water atmosphere
+
+- `apps/swe_atm` (`SOMA_ENABLE_APPS=ON`): the shallow-water equations in vector-invariant form on
+  the cubed sphere, with spectral elements of any order, SSP-RK3 and HOMME's hyperviscosity. The
+  same bits on any number of ranks and threads.
+- Williamson's cases 2, 5 and 6 and Galewsky's jet (with and without its perturbation). Reports
+  give normalised height errors, mass and energy conservation, and simulated days per hour.
+- Reference solutions are read from NetCDF-4 files (through HDF5) in any grid orientation and
+  compared on their own grid. Output is VTK sub-quads, SOMA files, and `.npy` latitude-longitude
+  fields.
+- The default time step is the smaller of the CFL step and the hyperviscous limit, computed from
+  the discrete operator's spectral radius.
+- Benchmark scripts for cases 2, 5, 6 and Galewsky are in `apps/swe_atm/bench/`.
 
 ### Python bindings
 

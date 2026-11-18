@@ -6,6 +6,7 @@
 // errors against a reference file, the throughput and the state's digest.
 // See docs/apps/swe-atm.md.
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -134,16 +135,22 @@ Options parse(int argc, char** argv) {
   return o;
 }
 
-// Case 2's exact height at every point.
-swe::Values case2_exact(const swe::SweModel& m) {
-  const auto& s = m.space();
-  const auto n = static_cast<std::size_t>(s.num_elements() * s.points_per_element());
-  swe::Values exact("swe_atm::exact", n, 1);
-  const auto x = s.x();
-  for (std::size_t r = 0; r < n; ++r) {
-    exact(r, 0) = swe::exact(swe::Case::williamson2, {x(r, 0), x(r, 1), x(r, 2)}, m.options().alpha, m.time()).h;
+// A copy of a state view.
+swe::Values copy(const swe::ConstValues& v, const char* label) {
+  swe::Values out(label, v.extent(0), v.extent(1));
+  Kokkos::deep_copy(out, v);
+  return out;
+}
+
+// The largest |u - u0| over owned points and ranks.
+double max_difference(const soma::Comm& comm, const swe::SweModel& m, const swe::ConstValues& u0) {
+  const auto u = m.u();
+  const auto owned = static_cast<std::size_t>(m.space().owned_elements() * m.space().points_per_element());
+  double worst = 0;
+  for (std::size_t r = 0; r < owned; ++r) {
+    worst = std::max(worst, std::hypot(u(r, 0) - u0(r, 0), u(r, 1) - u0(r, 1), u(r, 2) - u0(r, 2)));
   }
-  return exact;
+  return comm.allreduce(worst, soma::Op::max);
 }
 
 void write_latlon(const soma::Comm& comm, const swe::SweModel& m, const LatLon& l) {
@@ -168,6 +175,10 @@ void write_latlon(const soma::Comm& comm, const swe::SweModel& m, const LatLon& 
 int run(const soma::Comm& comm, const Options& o) {
   const bool root = comm.rank() == 0;
   swe::SweModel m(comm, o.model);
+  // The steady cases (case 2, Galewsky's unperturbed jet) report their drift
+  // from the initial state, case 2's exact solution.
+  const bool steady = o.model.test == swe::Case::williamson2 || o.model.test == swe::Case::galewsky_steady;
+  const swe::Values h0 = copy(m.h(), "swe_atm::h0"), u0 = copy(m.u(), "swe_atm::u0");
   const double mass0 = swe::mass(comm, m.space(), m.h());
   const double energy0 = swe::energy(comm, m.space(), m.h(), m.hs(), m.u());
   if (root) {
@@ -179,11 +190,11 @@ int run(const soma::Comm& comm, const Options& o) {
     const double mass = swe::mass(comm, m.space(), m.h());
     const double energy = swe::energy(comm, m.space(), m.h(), m.hs(), m.u());
     std::string errors;
-    if (o.model.test == swe::Case::williamson2) {
-      const swe::Values exact = case2_exact(m);
-      const swe::Norms n = swe::height_errors(comm, m.space(), m.h(), exact);
-      char text[128];
-      std::snprintf(text, sizeof text, "  l1 %.6e  l2 %.6e  linf %.6e", n.l1, n.l2, n.linf);
+    if (steady) {
+      const swe::Norms n = swe::height_errors(comm, m.space(), m.h(), h0);
+      const double du = max_difference(comm, m, u0);
+      char text[160];
+      std::snprintf(text, sizeof text, "  h l1 %.6e  l2 %.6e  linf %.6e  u max %.6e m/s", n.l1, n.l2, n.linf, du);
       errors = text;
     }
     if (root) {

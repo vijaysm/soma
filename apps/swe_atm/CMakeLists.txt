@@ -53,6 +53,10 @@ if(SOMA_ENABLE_TESTS)
   endif()
   add_test(NAME swe_atm.bad_option COMMAND swe_atm --case w7)
   set_tests_properties(swe_atm.bad_option PROPERTIES PASS_REGULAR_EXPRESSION "w2, w5, w6")
+  # A steady case reports its drift from the initial state.
+  add_test(NAME swe_atm.steady_drift COMMAND swe_atm --case galewsky-steady --ne 2 --days 0.1)
+  set_tests_properties(swe_atm.steady_drift PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1"
+    PASS_REGULAR_EXPRESSION "t +0\\.1000 d .* h l1 [0-9.e+-]+  l2 [0-9.e+-]+  linf [0-9.e+-]+  u max [0-9.e+-]+ m/s")
   # A run is the same bit for bit at any number of threads.
   add_test(NAME test_swe_model.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_swe_model>
     -DFILTER=SweModel.Digests -P ${PROJECT_SOURCE_DIR}/tests/unit/compare_threads.cmake)

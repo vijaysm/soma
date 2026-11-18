@@ -82,6 +82,13 @@ amr/block-amr
 
 ```{toctree}
 :maxdepth: 2
+:caption: Applications
+
+apps/swe-atm
+```
+
+```{toctree}
+:maxdepth: 2
 :caption: MOAB compatibility
 
 compat/moab-compat
