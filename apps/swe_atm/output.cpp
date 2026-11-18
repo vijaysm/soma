@@ -3,6 +3,9 @@
 
 #include "output.hpp"
 
+#include <cstdint>
+#include <span>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -15,7 +18,26 @@
 
 namespace swe {
 
-void write_vtk_subquads(const soma::Comm& comm, const SweModel& model, const std::filesystem::path& stem) {
+void collectively(const soma::Comm& comm, const std::function<void()>& write) {
+  std::string message;
+  try {
+    write();
+  } catch (const std::exception& e) {
+    message = e.what();
+    if (message.empty()) message = "swe: an output failed";
+  }
+  const int first = comm.allreduce(message.empty() ? comm.size() : comm.rank(), soma::Op::min);
+  if (first == comm.size()) return;
+  std::uint64_t length = message.size();
+  comm.bcast(std::span<std::uint64_t>(&length, 1), first);
+  message.resize(length);
+  comm.bcast(std::span<char>(message.data(), message.size()), first);
+  throw std::runtime_error(message);
+}
+
+namespace {
+
+void write_vtk_part(const soma::Comm& comm, const SweModel& model, const std::filesystem::path& stem) {
   const Space& space = model.space();
   const int p = space.order(), np = p + 1;
   const soma::LO ppe = space.points_per_element(), owned = space.owned_elements();
@@ -55,6 +77,12 @@ void write_vtk_subquads(const soma::Comm& comm, const SweModel& model, const std
   }
   const std::vector<std::string> names = {"h", "hs", "u"};
   soma::write_vtk(mesh, stem.string() + "." + std::to_string(comm.rank()) + ".vtk", names);
+}
+
+}  // namespace
+
+void write_vtk_subquads(const soma::Comm& comm, const SweModel& model, const std::filesystem::path& stem) {
+  collectively(comm, [&] { write_vtk_part(comm, model, stem); });
 }
 
 void write_soma_state(const soma::Comm& comm, SweModel& model, const std::filesystem::path& path) {

@@ -9,16 +9,23 @@
 // h, hs and u on the GLL space) for restarts and analysis.
 
 #include <filesystem>
+#include <functional>
 
 #include "model.hpp"
 #include "soma/parallel/comm.hpp"
 
 namespace swe {
 
-// Collective in name only (no communication): each rank owning elements writes
-// stem.<rank>.vtk, its owned elements as p x p quads each, the points those
-// elements' GLL points (repeated per element), with point fields h, hs and u
-// (3 components). A rank owning none writes nothing.
+// Collective: runs `write` (a rank's own output, which may do nothing) on every
+// rank, then agrees: when it threw on any rank, every rank throws
+// std::runtime_error with the message of the lowest such rank, so no rank is
+// left waiting in a later collective.
+void collectively(const soma::Comm& comm, const std::function<void()>& write);
+
+// Collective: each rank owning elements writes stem.<rank>.vtk, its owned
+// elements as p x p quads each, the points those elements' GLL points
+// (repeated per element), with point fields h, hs and u (3 components). A rank
+// owning none writes nothing. A failure on any rank throws on every rank.
 void write_vtk_subquads(const soma::Comm& comm, const SweModel& model, const std::filesystem::path& stem);
 
 // Collective: writes the model's mesh to `path` in SOMA's format with fields h,

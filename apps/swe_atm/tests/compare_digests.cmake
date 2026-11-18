@@ -7,8 +7,9 @@ separate_arguments(args UNIX_COMMAND "${ARGS}")
 set(digests "")
 foreach(np IN LISTS RANKS)
   set(ENV{OMP_NUM_THREADS} 1)
+  # Bounded: a hung run is killed here, not left behind when ctest stops cmake.
   execute_process(COMMAND ${MPIEXEC} -n ${np} ${EXE} ${args} OUTPUT_VARIABLE out ERROR_VARIABLE err
-                  RESULT_VARIABLE rc)
+                  RESULT_VARIABLE rc TIMEOUT 100)
   if(NOT rc EQUAL 0)
     message(FATAL_ERROR "swe_atm at ${np} ranks failed (${rc}):\n${out}\n${err}")
   endif()

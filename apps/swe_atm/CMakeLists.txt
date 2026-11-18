@@ -51,6 +51,23 @@ if(SOMA_ENABLE_TESTS)
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_digests.cmake)
     set_tests_properties(swe_atm.case2.digests PROPERTIES TIMEOUT 120 PROCESSORS 4)
   endif()
+  # An output that cannot be written on one rank fails every rank, not a hang.
+  if(SOMA_ENABLE_MPI)
+    foreach(kind latlon vtk)
+      # VTK at 7 ranks of ne = 1's 6 elements: one rank writes nothing.
+      if(kind STREQUAL "latlon")
+        set(output --latlon 10,20,${CMAKE_CURRENT_BINARY_DIR}/no/such/dir/x)
+        set(np 2)
+      else()
+        set(output --vtk ${CMAKE_CURRENT_BINARY_DIR}/no/such/dir/x)
+        set(np 7)
+      endif()
+      add_test(NAME swe_atm.unwritable_${kind} COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${np}
+        $<TARGET_FILE:swe_atm> --case w5 --ne 1 --days 0.01 ${output})
+      set_tests_properties(swe_atm.unwritable_${kind} PROPERTIES TIMEOUT 30 PROCESSORS ${np}
+        ENVIRONMENT "OMP_NUM_THREADS=1" PASS_REGULAR_EXPRESSION "cannot write|cannot open|No such file")
+    endforeach()
+  endif()
   add_test(NAME swe_atm.bad_option COMMAND swe_atm --case w7)
   set_tests_properties(swe_atm.bad_option PROPERTIES PASS_REGULAR_EXPRESSION "w2, w5, w6")
   # A steady case reports its drift from the initial state.

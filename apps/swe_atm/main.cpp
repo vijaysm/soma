@@ -163,13 +163,14 @@ void write_latlon(const soma::Comm& comm, const swe::SweModel& m, const LatLon& 
   s.dss(comm, zeta);
   const std::vector<double> h = swe::sample(comm, s, m.mesh(), m.options().ne, m.h(), 0, lat, lon);
   const std::vector<double> z = swe::sample(comm, s, m.mesh(), m.options().ne, zeta, 0, lat, lon);
-  if (comm.rank() == 0) {
+  swe::collectively(comm, [&] {
+    if (comm.rank() != 0) return;
     const auto rows = static_cast<std::size_t>(l.nlat), cols = static_cast<std::size_t>(l.nlon);
     swe::write_npy(l.stem + "_h.npy", h, rows, cols);
     swe::write_npy(l.stem + "_vorticity.npy", z, rows, cols);
     swe::write_npy(l.stem + "_lat.npy", lat, rows, 1);
     swe::write_npy(l.stem + "_lon.npy", lon, cols, 1);
-  }
+  });
 }
 
 int run(const soma::Comm& comm, const Options& o) {
