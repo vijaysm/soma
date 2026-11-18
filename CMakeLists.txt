@@ -32,6 +32,7 @@ set(SOMA_KOKKOS_GPU "AUTO" CACHE STRING
 set_property(CACHE SOMA_KOKKOS_GPU PROPERTY STRINGS AUTO NONE CUDA HIP SYCL)
 option(SOMA_ENABLE_MOAB_REFERENCE "Build MOAB reference tests and benchmarks" OFF)
 option(SOMA_ENABLE_EXAMPLES "Build the example programs (requires SOMA_ENABLE_HDF5)" OFF)
+option(SOMA_ENABLE_APPS "The applications under apps/ (shallow water)" OFF)
 option(SOMA_ENABLE_PYTHON "Python bindings (nanobind; set Python_EXECUTABLE to the interpreter to build for)" OFF)
 option(SOMA_ENABLE_C_API "The C API (soma_c), for C callers and the Fortran module" OFF)
 option(SOMA_ENABLE_FORTRAN "The Fortran 2008 module over the C API (turns the C API on)" OFF)
@@ -237,6 +238,10 @@ if(SOMA_ENABLE_EXAMPLES)
     message(FATAL_ERROR "SOMA_ENABLE_EXAMPLES needs SOMA_ENABLE_HDF5")
   endif()
   add_subdirectory(examples)
+endif()
+
+if(SOMA_ENABLE_APPS)
+  add_subdirectory(apps)
 endif()
 
 if(SOMA_ENABLE_DOC_FIGURES)
