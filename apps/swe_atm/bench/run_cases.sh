@@ -6,18 +6,20 @@
 #   case 2: convergence in p at ne 4, 8 and 16 (p 2 to 8), 5 days, no viscosity;
 #   cases 5 and 6: ne30 p = 3 for 15 days against REFDIR/case5.nc and
 #   REFDIR/case6.nc, passing when the normalised l2 height error is at most twice
-#   the mark in REFDIR/marks.txt (lines "case5 <l2> <citation>").
+#   the mark in REFDIR/marks.txt (lines "case5 <l2> <citation>"). REFDIR defaults
+#   to apps/swe_atm/reference, which holds the T213 references (README_STSWM.md).
 #
-# usage: run_cases.sh REFDIR NP
+# usage: run_cases.sh NP [REFDIR]
 # environment: SWE_ATM (the executable; default build/apps/swe_atm/swe_atm),
 #              MPIEXEC (default mpiexec), OMP_NUM_THREADS (threads per rank).
 set -euo pipefail
-if [ $# -ne 2 ]; then
-  echo "usage: $0 REFDIR NP" >&2
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+  echo "usage: $0 NP [REFDIR]" >&2
   exit 2
 fi
-refdir=$1
-np=$2
+np=$1
+here=$(cd "$(dirname "$0")" && pwd)
+refdir=${2:-$here/../reference}
 exe=${SWE_ATM:-build/apps/swe_atm/swe_atm}
 mpiexec=${MPIEXEC:-mpiexec}
 run() { "$mpiexec" -n "$np" "$exe" "$@"; }

@@ -156,12 +156,14 @@ Results (2026-11-18, one core of an M2 Max):
 
 ## Conversion to NetCDF-4
 
-`ref2nc.py ref.bin caseN.nc N` (numpy, netCDF4-python) writes `h(time, lat, lon)` in metres,
+`ref2nc.py ref.bin caseN.nc N` (numpy, netCDF4-python) writes `h(time, lat, lon)` in metres
+(single precision, byte shuffle and deflate level 9, one chunk a day),
 `lat` and `lon` in degrees (latitudes run north to south, as STSWM's Gaussian grid; `swe_atm` sorts
 them), `time` in hours. Records are days 0 to 15, so `--ref-time -1` (the default) is day 15. For
 case 5 it checks the first record against Williamson's initial state
 $h_0 - (a\Omega u_0 + u_0^2/2)\sin^2\phi / g$ ($h_0$ = 5960 m, $u_0$ = 20 m/s): agreement to
-9e-13 m, which confirms orientation, units and that `WS3` is the free surface.
+9e-13 m (in double precision, before storing), which confirms orientation, units and that `WS3` is
+the free surface.
 
 The files are NetCDF-4 already; no `nccopy` is needed.
 
@@ -211,7 +213,8 @@ def main(src, dst, case):
         v = nc.createVariable("time", "f8", ("time",)); v[:] = times; v.units = "hours"
         v = nc.createVariable("lat", "f8", ("lat",)); v[:] = lat; v.units = "degrees_north"
         v = nc.createVariable("lon", "f8", ("lon",)); v[:] = lon; v.units = "degrees_east"
-        v = nc.createVariable("h", "f8", ("time", "lat", "lon"))
+        v = nc.createVariable("h", "f4", ("time", "lat", "lon"), zlib=True, complevel=9, shuffle=True,
+                              chunksizes=(1, lat.size, lon.size))
         v[:] = h
         v.units = "m"
         v.long_name = "free-surface height h + hs"
@@ -238,8 +241,11 @@ The pass mark is at ne30 $p = 3$: `apps/swe_atm/bench/run_cases.sh NP`, which re
 
 ## Files
 
-- `case5.nc`, `case6.nc` (26 238 899 bytes each): `h(time = 16, lat = 320, lon = 640)`, days 0 to
-  15, double precision, uncompressed.
+- `case5.nc` (5 290 319 bytes), `case6.nc` (1 604 901 bytes): `h(time = 16, lat = 320, lon = 640)`,
+  days 0 to 15. `h` is single precision, within 0.5 mm (6e-8 relative) of STSWM's doubles, so the
+  errors `swe_atm` reports against it agree with the doubles' to 6 digits; `swe_atm` reads it as
+  double. Deflate is built into HDF5 (with zlib), so any NetCDF-4 or HDF5 reader opens the files
+  without filter plugins, which LZ4 or Zstandard would need.
 
 ## References
 

@@ -6,7 +6,7 @@ outputs and benchmark procedure are in [docs/apps/swe-atm.md](../../docs/apps/sw
 
 ```sh
 mpiexec -n 8 build/apps/swe_atm/swe_atm --case w6 --ne 30 --order 3 --days 15 --report-every 24
-apps/swe_atm/bench/run_cases.sh REFDIR 8     # cases 2, 5, 6
+apps/swe_atm/bench/run_cases.sh 8           # cases 2, 5, 6 (references in reference/)
 apps/swe_atm/bench/galewsky.sh 8             # Galewsky at ne30, ne60, ne120
 ```
 

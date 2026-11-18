@@ -140,9 +140,13 @@ longitudes may be in [0, 360) or [-180, 180).
 
 `apps/swe_atm/bench/` holds the benchmark runs. They are reported rather than run by `ctest`.
 
-- **`run_cases.sh REFDIR NP`**
+- **`run_cases.sh NP [REFDIR]`**
   - Case 2's $l_2$ error after 5 days at $n_e$ = 4, 8, 16 and $p$ = 2 to 8.
   - Cases 5 and 6 at ne30 $p = 3$ for 15 days, against `REFDIR/case5.nc` and `REFDIR/case6.nc`.
+    `REFDIR` defaults to `apps/swe_atm/reference`, which holds T213 reference solutions of the
+    free-surface height, days 0 to 15. They were computed with NCAR's spectral transform model
+    (STSWM 2.0) at the parameters of NCAR's published reference runs (Jakob-Chien, Hack and
+    Williamson 1995); `apps/swe_atm/reference/README_STSWM.md` records the procedure.
   - A case passes when its $l_2$ error is at most twice the mark in `REFDIR/marks.txt`. Each line
     there reads `case5 <l2> <citation>`: HOMME's published $l_2$ error at that resolution, with
     its source.
@@ -176,6 +180,8 @@ on any number of ranks and threads. The tests check this from 1 to 8 ranks (`Swe
 - D. L. Williamson, J. B. Drake, J. J. Hack, R. Jakob and P. N. Swarztrauber (1992). A standard
   test set for numerical approximations to the shallow water equations in spherical geometry.
   *J. Comput. Phys.* 102, 211-224.
+- R. Jakob-Chien, J. J. Hack and D. L. Williamson (1995). Spectral transform solutions to the
+  shallow water test set. *J. Comput. Phys.* 119, 164-187.
 - J. Galewsky, R. K. Scott and L. M. Polvani (2004). An initial-value problem for testing numerical
   models of the global shallow-water equations. *Tellus A* 56, 429-440.
 - C.-W. Shu and S. Osher (1988). Efficient implementation of essentially non-oscillatory
