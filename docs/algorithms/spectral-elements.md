@@ -107,10 +107,17 @@ With $f_\xi, f_\eta$ the reference derivatives:
 | `project_tangent(s, v)` | $v$ less its component along $a_1 \times a_2$ |
 | `laplacian(comm, s, f, lap)` | $-\sum w J\, \nabla\phi \cdot \nabla f$ per element, summed by DSS and divided by the assembled mass |
 | `hyperviscosity(comm, s, f, out)` | the Laplacian applied twice |
+| `cross_normal(s, v, out)` | $\hat n \times v$, $\hat n = a_1 \times a_2 / J$ |
+| `vector_laplacian(comm, s, v, out)` | $\nabla \delta + \hat n \times \nabla \zeta + 2 v / R^2$ with $\delta$, $\zeta$ the divergence and vorticity after DSS; summed by DSS and projected tangent |
+| `vector_hyperviscosity(comm, s, v, out)` | the vector Laplacian applied twice |
 
 GLL quadrature makes the divergence sum by parts: its integral is the net flux through the
 boundary, zero on the sphere to rounding. The Laplacian is the weak form, so on a mesh with a
-boundary it imposes a zero normal derivative there. Spherical harmonics are its eigenfunctions to
+boundary it imposes a zero normal derivative there. The vector Laplacian is HOMME's: the Hodge
+Laplacian plus $2v/R^2$ on a sphere of radius $R$, which puts rigid rotation in its null space so
+hyperviscosity of the velocity does not damp it (in the plane the term is absent). The gradient of
+$Y_3^2$ is its eigenvector of eigenvalue $-10$; at $n_e = 4$ its error falls from $9.6 \times 10^{-6}$
+at $p = 10$ to $2.0 \times 10^{-7}$ at $p = 12$. Spherical harmonics are its eigenfunctions to
 truncation error: for $Y_3^2$ at $n_e = 4$ the error falls from $1.7 \times 10^{-5}$ at $p = 8$ to
 $3.6 \times 10^{-9}$ at $p = 12$. `laplacian` and `hyperviscosity` are collective and, like `dss`,
 the same bit for bit on any number of ranks and threads.

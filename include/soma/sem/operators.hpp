@@ -15,6 +15,7 @@
 ///   soma::sem::vorticity(space, u, zeta);
 ///   soma::sem::laplacian(comm, space, h, lap);     // weak form, assembled
 ///   soma::sem::hyperviscosity(comm, space, h, del4);
+///   soma::sem::vector_hyperviscosity(comm, space, u, del4u);  // HOMME's form
 /// ```
 ///
 /// The strong-form operators differentiate within each element with the GLL
@@ -235,6 +236,72 @@ void hyperviscosity(const Comm& comm, const SemSpace<MemSpace>& s, const detail:
   const auto once = detail::scratch(s, 1, "soma::sem::hyperviscosity::laplacian");
   laplacian(comm, s, f, once);
   laplacian(comm, s, View2<const Real, MemSpace>(once), out);
+}
+
+/// v, out: 3 components; out = n x v, n = a_1 x a_2 / |a_1 x a_2| the unit
+/// normal: a tangent vector turned a quarter turn counterclockwise about n.
+/// Element-local; v and out may be the same view.
+template <class MemSpace>
+void cross_normal(const SemSpace<MemSpace>& s, const detail::In<MemSpace>& v, const detail::Out<MemSpace>& out) {
+  detail::check_values(s, v, 3, "cross_normal", "v");
+  detail::check_values(s, out, 3, "cross_normal", "out");
+  const auto a = s.covariant();
+  Kokkos::parallel_for(
+      "soma::sem::cross_normal", detail::PointPolicy<MemSpace>(0, static_cast<LO>(v.extent(0))),
+      KOKKOS_LAMBDA(const LO r) {
+        Real n[3] = {a(r, 1) * a(r, 5) - a(r, 2) * a(r, 4), a(r, 2) * a(r, 3) - a(r, 0) * a(r, 5),
+                     a(r, 0) * a(r, 4) - a(r, 1) * a(r, 3)};
+        const Real norm = Kokkos::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]);
+        for (Real& c : n) c /= norm;
+        const Real w[3] = {v(r, 0), v(r, 1), v(r, 2)};
+        out(r, 0) = n[1] * w[2] - n[2] * w[1];
+        out(r, 1) = n[2] * w[0] - n[0] * w[2];
+        out(r, 2) = n[0] * w[1] - n[1] * w[0];
+      });
+  typename MemSpace::execution_space{}.fence();
+}
+
+/// Collective. v, out: 3 components (tangent). The vector Laplacian of HOMME's
+/// shallow-water model: with delta = dss(div v) and zeta = dss(vort v),
+/// out = dss(grad delta + n x grad zeta + (2 / R^2) v), projected tangent. The
+/// first two terms are the Hodge Laplacian; the last, on a sphere of radius R
+/// only, puts rigid rotation in its null space so that viscosity does not
+/// damp it. Every element's points written; v and out may be the same view.
+template <class MemSpace>
+void vector_laplacian(const Comm& comm, const SemSpace<MemSpace>& s, const detail::In<MemSpace>& v,
+                      const detail::Out<MemSpace>& out) {
+  detail::check_values(s, v, 3, "vector_laplacian", "v");
+  detail::check_values(s, out, 3, "vector_laplacian", "out");
+  const auto delta = detail::scratch(s, 1, "soma::sem::vector_laplacian::divergence");
+  const auto zeta = detail::scratch(s, 1, "soma::sem::vector_laplacian::vorticity");
+  divergence(s, v, delta);
+  s.dss(comm, delta);
+  vorticity(s, v, zeta);
+  s.dss(comm, zeta);
+  const auto gd = detail::scratch(s, 3, "soma::sem::vector_laplacian::grad_divergence");
+  const auto gz = detail::scratch(s, 3, "soma::sem::vector_laplacian::grad_vorticity");
+  gradient(s, View2<const Real, MemSpace>(delta), gd);
+  gradient(s, View2<const Real, MemSpace>(zeta), gz);
+  cross_normal(s, View2<const Real, MemSpace>(gz), gz);
+  const Real k = s.geometry().kind == SemGeometry::Kind::sphere ? 2 / (s.geometry().radius * s.geometry().radius)
+                                                                : Real{0};
+  Kokkos::parallel_for(
+      "soma::sem::vector_laplacian", detail::PointPolicy<MemSpace>(0, static_cast<LO>(v.extent(0))),
+      KOKKOS_LAMBDA(const LO r) {
+        for (int c = 0; c < 3; ++c) out(r, c) = gd(r, c) + gz(r, c) + k * v(r, c);
+      });
+  typename MemSpace::execution_space{}.fence();
+  s.dss(comm, out);
+  project_tangent(s, out);
+}
+
+/// Collective. vector_laplacian applied twice: v, out 3 components.
+template <class MemSpace>
+void vector_hyperviscosity(const Comm& comm, const SemSpace<MemSpace>& s, const detail::In<MemSpace>& v,
+                           const detail::Out<MemSpace>& out) {
+  const auto once = detail::scratch(s, 3, "soma::sem::vector_hyperviscosity::laplacian");
+  vector_laplacian(comm, s, v, once);
+  vector_laplacian(comm, s, View2<const Real, MemSpace>(once), out);
 }
 
 }  // namespace soma::sem
