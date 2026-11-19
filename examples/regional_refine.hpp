@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <numbers>
@@ -43,7 +44,11 @@ struct Box {
 struct Options {
   int ne = 30, np = 4, passes = 8, sweeps = 20, transition = 3, reruns = 4;
   int grow = -1;  ///< cells of growth per level before measuring; -1: transition
-  std::array<int, 3> optimize{10, 5, 10};  ///< quality_smooth's shape, angle and polish sweeps
+  std::array<int, 3> optimize{50, 5, 10};  ///< quality_smooth's shape, angle and polish sweeps
+  Real angle_threshold = 45;               ///< quality_smooth's angle threshold (degrees)
+  std::string format = "vtk";              ///< vtk, soma (written in parallel) or none
+  bool neighbours = true;                  ///< also smooth by neighbours, for comparison
+  Real max_cells = 0;                      ///< > 0: refuse a pass that would make more cells
   std::string mesh, save, prefix;
   std::optional<Real> radius;
   Real km = 12;
@@ -362,6 +367,8 @@ struct Passes {
   int passes = 0;
   Real marked = 0;
   Real refined = 0;
+  std::vector<Real> cells;    // after each pass
+  std::vector<Real> seconds;  // each pass's time
 };
 
 inline Passes refine_regions(const soma::Comm& comm, soma::HostMesh& mesh, const Options& o,
@@ -391,8 +398,18 @@ inline Passes refine_regions(const soma::Comm& comm, soma::HostMesh& mesh, const
     for (const auto k : marks) p.marked += k;
     p.marked = comm.allreduce(p.marked, soma::Op::sum);
     if (p.marked == 0 || p.passes == o.passes) return p;
+    // Each marked cell becomes 9: at least 8 more cells (transitions add more).
+    const Real cells = comm.allreduce(static_cast<Real>(mesh.segment_table(2).owned_end), soma::Op::sum);
+    if (o.max_cells > 0 && cells + 8 * p.marked > o.max_cells) {
+      throw std::runtime_error("pass " + std::to_string(p.passes + 1) + " would make more than " +
+                               std::to_string(static_cast<long long>(cells + 8 * p.marked)) + " cells (--max-cells " +
+                               std::to_string(static_cast<long long>(o.max_cells)) + ")");
+    }
     p.refined += p.marked;
+    const auto t0 = std::chrono::steady_clock::now();
     mesh = soma::rebalance(comm, soma::refine_quads(comm, mesh, marks, {.sphere_radius = 1}).mesh);
+    p.seconds.push_back(std::chrono::duration<Real>(std::chrono::steady_clock::now() - t0).count());
+    p.cells.push_back(comm.allreduce(static_cast<Real>(mesh.segment_table(2).owned_end), soma::Op::sum));
     ++p.passes;
   }
 }

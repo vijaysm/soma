@@ -137,7 +137,8 @@ See [refinement](../algorithms/refinement.md).
 regional_refine [--ne N | --mesh FILE] [--radius R] [--km K] [--np P]
                 [--box LAT0,LAT1,LON0,LON1]... [--transition N] [--grow G]
                 [--reruns R] [--smooth S] [--optimize SHAPE,ANGLE[,POLISH]]
-                [--max-passes M] [--save FILE] <out-prefix>
+                [--angle-threshold T] [--max-passes M] [--max-cells C]
+                [--format vtk|soma|none] [--no-neighbours] [--save FILE] <out-prefix>
 ```
 
 Builds a regionally refined mesh of the sphere: the cubed sphere `ne N` (default 30), or a quad
@@ -145,26 +146,29 @@ mesh on a sphere read from `FILE` (a mesh refined before, say), refined with
 `soma::refine_quads` until the grid spacing in the lat/lon boxes is about `K` km (default 12),
 with bands of at least `N` cells (default 3) of each level between the next finer and the next
 coarser. It works on the unit sphere and measures lengths as on the Earth, so a mesh of any
-radius refines as the Earth-sized one does. The default box is the contiguous United States;
+radius refines as the Earth-sized one does. The default region is the contiguous United States, as four boxes;
 repeat `--box` for several regions. It then smooths by `S` sweeps (default 20) of each
 `soma::laplacian_smooth` method and optimizes the centroid result with `soma::quality_smooth`
-(default `10,5,10` sweeps; `0,0,0` skips it). It prints the passes, the band widths, the spacing
+(default `50,5,10` sweeps, the angle sweeps on cells under 45 degrees; `0,0,0` skips it). It prints the passes, the band widths, the spacing
 in and out of the boxes, a table of cell quality and the change in the finest cells' size, and
-writes four meshes with quality fields. See
+writes four meshes with quality fields (`--format soma` from every rank, for large runs). See
 [the example in refinement](../algorithms/refinement.md#example-regionally-refined-meshes-of-the-sphere).
 
 ```text
-./regional_refine: passes 2; cells 5400 -> 24436; radius 6.37122e+06
-cells marked: 1849
+./regional_refine: passes 2; cells 5400 -> 23576; radius 6.37122e+06
+cells marked: 1439
+pass 1: 8116 cells, 0.03 s
+pass 2: 23576 cells, 0.08 s
 bands: 5
 reruns: 0
-spacing in the boxes: min 10.40 km, mean 11.04 km over 13895 cells; outside: 10.59 to 111.11 km
+spacing in the boxes: min 10.40 km, mean 10.97 km over 10548 cells; outside: 10.55 to 111.11 km
 mesh        min angle      mean < 45 deg   aspect  jacobian     area
-refined         30.45     79.86      540    3.471     0.507    4.612  conus_refined.vtk
-neighbours      30.49     81.46      349    7.115     0.477    5.472  conus_neighbours.vtk
-centroids       30.05     81.20      369    4.773     0.499    5.632  conus_centroids.vtk
-optimized       43.26     82.27      453    3.158     0.634    7.162  conus_optimized.vtk
-finest cells' mean size: 33.17 km refined, +0.2% after smoothing
+refined         30.45     79.92      528    3.471     0.507    4.612  conus_refined.vtk
+neighbours      30.55     81.56      344    7.115     0.477    5.473  conus_neighbours.vtk
+centroids       30.62     81.29      361    4.773     0.499    5.636  conus_centroids.vtk
+optimized       43.33     84.17      403    3.180     0.656    6.375  conus_optimized.vtk
+time (s) on 1 ranks: refine 0.17, smooth 0.02, optimize 12.14, total 12.46; peak memory 69 MB a rank
+finest cells' mean size: 33.16 km refined, -0.1% after smoothing
 ```
 
 ## soma-convert
@@ -255,7 +259,10 @@ expected results below hold on one and two ranks alike:
 | `example_regional_refine_transition1` | `regional_refine --ne 4 --km 100 --smooth 0 --transition 1 regional_t1` | a band of 1 to 9 cells |
 | `example_regional_refine_rerun` | `regional_refine --ne 4 --km 100 --smooth 0 --grow 0 regional_rerun` | `bands: 3`, `reruns: 1` |
 | `example_regional_refine_bands_capped` | as `_rerun` with `--reruns 0` | `bands: 1`, `reruns: 0` and the warning |
-| `example_regional_refine_conus_r6.37122e6`, `_r1` | `regional_refine --radius R --smooth 0 --optimize 0,0,0 ...` | `passes 2; cells 5400 -> 24436` at either radius |
+| `example_regional_refine_conus_r6.37122e6`, `_r1` | `regional_refine --radius R --smooth 0 --optimize 0,0,0 ...` | `passes 2; cells 5400 -> 23576` at either radius |
+| `example_regional_refine_max_cells` | `regional_refine --ne 4 --km 100 --smooth 0 --max-cells 500 regional_max` | `pass 2 would make more than ... cells (--max-cells 500)` (exit 1) |
+| `example_regional_refine_soma.np2` | two ranks: `--ne 4 --km 100 --smooth 3 --format soma --no-neighbours regional_soma` | per-pass lines, `regional_soma_optimized.soma`, the times and peak memory |
+| `example_regional_refine_soma_again` | `--mesh regional_soma_optimized.soma --km 100 --smooth 0 --optimize 0,0,0 --format none` | `passes 0` |
 | `example_regional_refine_unit_sphere` | `regional_refine --ne 4 --radius 1 --km 300 --smooth 0 regional_unit` | `passes 1; cells 96 -> 252; radius 1 (spacing as on the Earth)` |
 
 Each `refine` test also requires the linear field error to print as `d.de-14` to `d.de-19`, or

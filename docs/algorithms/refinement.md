@@ -364,8 +364,9 @@ for (;;) {
   11 km (two passes) and `--km 25` or `--km 33` at about 33 km (one). Lengths are measured as
   on the Earth (6.37122e6 m), so a mesh on the unit sphere, as TempestRemap and MOAB grids often
   are, refines as the Earth-sized one does.
-- **Boxes** are `--box LAT0,LAT1,LON0,LON1` in degrees (default the contiguous United States,
-  `24,50,-125,-66`). `LON0 > LON1` wraps across the antimeridian, a box 360 degrees wide or
+- **Boxes** are `--box LAT0,LAT1,LON0,LON1` in degrees (default the contiguous United States as
+  four boxes: `31.3,49,-124.8,-103`, `25.8,49.4,-103,-89`, `29,47.5,-89,-67` and
+  `24.5,31,-87.6,-80`, the west, the plains, the east and Florida). `LON0 > LON1` wraps across the antimeridian, a box 360 degrees wide or
   more (`60,90,-180,180`, the Arctic) holds every longitude, and `--box` may be repeated for
   several regions refined together. A cell is in a box when its polygon, in longitude and
   latitude about the box's centre, overlaps the box by more than $10^{-9}$ of its own area (CONUS's
@@ -379,11 +380,18 @@ for (;;) {
   measure.
 - **Reuse:** `--save FILE` writes the result, and `--mesh FILE` starts from such a mesh (or any
   quad mesh on a sphere). A mesh already fine enough takes no further pass.
+- **Large runs:** `--format soma` writes SOMA files from every rank (VTK, the default, gathers the
+  mesh on the first rank), `--no-neighbours` skips the comparison with neighbour smoothing and so
+  keeps one copy of the mesh, and `--max-cells C` stops before a pass that would make more than
+  `C` cells. Each pass prints its cell count and time, and the run its times and the peak memory
+  of any rank.
 
 ```bash
 mpiexec -n 4 ./regional_refine --ne 30 --km 12 conus
 mpiexec -n 4 ./regional_refine --ne 30 --km 33 --box 35,72,-10,40 --box -45,-10,110,155 europe_australia
 ```
+
+The figures below use the single box `24,50,-125,-66` (the red outline).
 
 ```{figure} ../figures/img/regional-levels.png
 :alt: The contiguous United States, seen from above, coloured by refinement level: a red lat/lon box inside a yellow region of the finest cells, ringed by an even teal band, inside purple coarse cells; the yellow region's sides follow the cube's grid lines, with a notch on the west where it crosses a cube face's edge
@@ -403,7 +411,7 @@ box. In the figure, 13895 of the 24436 cells lie in the box.
 The example then smooths copies of the mesh, 20 sweeps of each
 [smoothing](smoothing.md#methods) method by default, projected onto the sphere, then runs
 [`quality_smooth`](smoothing.md#optimization) from the centroid result (`--optimize
-SHAPE,ANGLE[,POLISH]`, default `10,5,10`), and reports a quality table and the change in the
+SHAPE,ANGLE[,POLISH]`, default `50,5,10`; `--angle-threshold`, default 45), and reports a quality table and the change in the
 finest cells' size (a warning past 5%: one more pass in the regions of interest makes up for it).
 It writes `<prefix>_refined.vtk`, `_neighbours.vtk`, `_centroids.vtk` and `_optimized.vtk` with
 the cell fields `refine:level`, `spacing_km`, `min_angle` (degrees), `aspect` (longest over
@@ -418,9 +426,9 @@ South-west of the box, where the 300 km, 100 km and 33 km elements meet, coloure
 refined, after 20 sweeps of `SmoothMethod::centroids`, and after `quality_smooth` from there. Centroid smoothing
 squares up the cells between the transitions but leaves the transition cells' corners of 30 to 40 degrees, which
 their templates set; the optimizer opens them. Over the whole mesh, the least angle goes from 30.5 degrees
-(refined) to 30.1 (centroids) and 43.3 (optimized), the mean least angle from 79.9 to 81.2 and 82.3, the worst
-edge ratio from 3.5 to 4.8 and 3.2, and the cells under 45 degrees from 540 to 369 and 453; the finest cells'
-mean size changes by 0.2%.
+(refined) to 30.1 (centroids) and 43.3 (optimized), the mean least angle from 79.9 to 81.2 and 84.1, the worst
+edge ratio from 3.5 to 4.8 and 3.2, and the cells under 45 degrees from 540 to 369 and 418; the finest cells'
+mean size does not change (0.0%).
 ```
 
 ### Regionally refined meshes from elsewhere

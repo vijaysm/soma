@@ -167,8 +167,13 @@ if(SOMA_ENABLE_TESTS)
     add_test(NAME example_regional_refine_conus_r${r}
       COMMAND regional_refine --radius ${r} --smooth 0 --optimize 0,0,0 ${CMAKE_CURRENT_BINARY_DIR}/regional_conus_${r})
     set_tests_properties(example_regional_refine_conus_r${r} PROPERTIES PASS_REGULAR_EXPRESSION
-                         "passes 2. cells 5400 -> 24436. [^#]*finest cells' mean size")
+                         "passes 2. cells 5400 -> 23576. [^#]*finest cells' mean size")
   endforeach()
+  # --max-cells stops before a pass that would pass it.
+  add_test(NAME example_regional_refine_max_cells
+    COMMAND regional_refine --ne 4 --km 100 --smooth 0 --max-cells 500 ${CMAKE_CURRENT_BINARY_DIR}/regional_max)
+  set_tests_properties(example_regional_refine_max_cells PROPERTIES PASS_REGULAR_EXPRESSION
+                       "pass 2 would make more than [0-9]+ cells [(]--max-cells 500[)]")
   # A box reaching the pole marks the cells round it: one holding the pole (ne5), four meeting at it (ne4).
   add_test(NAME example_regional_refine_pole_cell
     COMMAND regional_refine --ne 5 --km 300 --smooth 0 --box 85,90,-180,180
@@ -198,6 +203,21 @@ if(SOMA_ENABLE_TESTS)
               ${CMAKE_CURRENT_BINARY_DIR}/regional_np2)
     set_tests_properties(example_regional_refine.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
                          PASS_REGULAR_EXPRESSION "${regional}")
+    # Cluster runs: SOMA files written by every rank, one copy of the mesh, the times and memory printed; the
+    # optimized mesh read back needs no pass.
+    add_test(NAME example_regional_refine_soma.np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:regional_refine> ${MPIEXEC_POSTFLAGS} --ne 4 --km 100 --smooth 3 --format soma
+              --no-neighbours ${CMAKE_CURRENT_BINARY_DIR}/regional_soma)
+    string(CONCAT soma_out "pass 2: [0-9]+ cells[^#]*\noptimized [^#]*regional_soma_optimized.soma\n"
+           "time [(]s[)] on 2 ranks: [^#]*peak memory [0-9]+ MB[^#]*finest cells' mean size")
+    set_tests_properties(example_regional_refine_soma.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
+                         FIXTURES_SETUP regional_soma PASS_REGULAR_EXPRESSION "${soma_out}")
+    add_test(NAME example_regional_refine_soma_again
+      COMMAND regional_refine --mesh ${CMAKE_CURRENT_BINARY_DIR}/regional_soma_optimized.soma --km 100 --smooth 0
+              --optimize 0,0,0 --format none ${CMAKE_CURRENT_BINARY_DIR}/regional_soma_again)
+    set_tests_properties(example_regional_refine_soma_again PROPERTIES FIXTURES_REQUIRED regional_soma
+                         PASS_REGULAR_EXPRESSION "passes 0[^#]*finest cells' mean size")
     add_test(NAME example_regional_refine_bands.np2
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
               $<TARGET_FILE:regional_refine> ${MPIEXEC_POSTFLAGS} --ne 4 --km 100 --smooth 0
