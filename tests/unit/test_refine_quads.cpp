@@ -606,4 +606,49 @@ TEST(RefineQuads, BadInputThrowsOnEveryRank) {
     if (c.rank() == c.size() - 1) one.sphere_radius = r;
     throws(mesh, none, one, "a radius on the last rank");
   }
+  // Ranks that differ in the radius, or in giving one at all.
+  if (c.size() > 1) {
+    throws(mesh, none, {.sphere_radius = c.rank() == 0 ? 2.0 : 1.0}, "radii that differ");
+    soma::QuadRefineOptions first;
+    if (c.rank() == 0) first.sphere_radius = 1.0;
+    throws(mesh, none, first, "a radius on the first rank alone");
+  }
+}
+
+// Two calls on cells dealt round robin, the second marking the first's
+// transition cells, with and without ghosts on the input: the serial result,
+// bit for bit, at both calls.
+TEST(RefineQuads, RefiningTwiceAcrossRanksIsTheSerialResult) {
+  const Comm c = Comm::world();
+  const Comm self = Comm::self();
+  const Cells g = plane(7, 6, 0);
+  const std::set<GO> first{cell_gid(7, 2, 2), cell_gid(7, 3, 2)};
+  // The second marks: the first call's transition cells about cell (3, 2).
+  const soma::HostMesh one = build(self, g, 2);
+  const auto serial1 = soma::refine_quads(self, one, marks_by_gid(one, first));
+  const std::set<GO> second = transition_cells(serial1);
+  ASSERT_FALSE(second.empty());
+  const auto serial2 = soma::refine_quads(self, serial1.mesh, marks_by_gid(serial1.mesh, second));
+  const ByGid want1 = by_gid(serial1.mesh), want2 = by_gid(serial2.mesh);
+  const auto differ = [&](const ByGid& got, const ByGid& want) {
+    LO n = 0;
+    for (const auto& [gid, xyz] : got.vertices) {
+      n += want.vertices.contains(gid) && want.vertices.at(gid) == xyz ? 0 : 1;
+    }
+    for (const auto& [gid, cs] : got.cells) n += want.cells.contains(gid) && want.cells.at(gid) == cs ? 0 : 1;
+    return c.allreduce(static_cast<Real>(n), soma::Op::sum);
+  };
+  for (const bool ghosts : {false, true}) {
+    SCOPED_TRACE(testing::Message() << "ghosts " << ghosts);
+    soma::HostMesh mesh = build(c, g, 1);
+    if (ghosts && c.size() > 1) mesh.add_ghosts(c, soma::GhostOptions{1, 0});
+    auto fine1 = soma::refine_quads(c, mesh, marks_by_gid(mesh, first));
+    EXPECT_EQ(differ(by_gid(fine1.mesh), want1), 0);
+    if (ghosts && c.size() > 1) fine1.mesh.add_ghosts(c, soma::GhostOptions{1, 0});
+    const auto fine2 = soma::refine_quads(c, fine1.mesh, marks_by_gid(fine1.mesh, second));
+    EXPECT_EQ(differ(by_gid(fine2.mesh), want2), 0);
+    EXPECT_EQ(owned_count(c, fine2.mesh, 2), static_cast<Real>(want2.cells.size()));
+    EXPECT_EQ(c.allreduce(static_cast<Real>(by_gid(fine2.mesh).level_one), soma::Op::sum),
+              static_cast<Real>(want2.level_one));
+  }
 }

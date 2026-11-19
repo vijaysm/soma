@@ -120,6 +120,13 @@ RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<cons
     if (flags[2] != 0) {
       throw std::invalid_argument(std::string(who) + ": a rank's sphere radius is not positive and finite");
     }
+    // Every rank the same radius, or none: (given, radius) as max and min.
+    std::array<Real, 4> agree{options.sphere_radius ? 1.0 : 0.0, radius, -(options.sphere_radius ? 1.0 : 0.0),
+                              -radius};
+    comm.allreduce(std::span<Real>(agree), Op::max);
+    if (agree[0] != -agree[2] || agree[1] != -agree[3]) {
+      throw std::invalid_argument(std::string(who) + ": the ranks differ in sphere radius");
+    }
   }
 
   const HostMesh work = detail::refine::work_part(comm, mesh);

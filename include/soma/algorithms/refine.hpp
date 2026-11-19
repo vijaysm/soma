@@ -197,7 +197,9 @@ struct QuadRefineOptions {
 /// All-quad conforming refinement: the owned cells with a non-zero mark (one
 /// per owned cell, in local id order) split into nine, and their neighbours
 /// into transition quads, so that the result has quads alone and no hanging
-/// vertex (Schneiders' vertex-based templates, edges split in three).
+/// vertex (Schneiders' vertex-based templates, edges split in three). The
+/// input must be conforming: hanging vertices are not detected, and a mesh
+/// that has them (refine_marked's default output, say) gets more.
 ///
 /// Marks move to corners: a marked cell marks its four. A cell with two
 /// opposite or three marked corners is promoted (all four marked), until no
@@ -243,7 +245,7 @@ struct QuadRefineOptions {
 /// Collective; throws std::invalid_argument on every rank if any rank's mesh
 /// is not of quads alone (dimension 2, no edits, no high-order nodes), if a
 /// rank's marks are not one per owned cell, if a rank's sphere radius is not
-/// positive and finite, if a cell to be split or one of its children would
+/// positive and finite or the ranks differ in it (or in giving one), if a cell to be split or one of its children would
 /// not turn as the cell does at every corner (a non-convex cell, say: on a
 /// sphere, about the cell's area vector), or if a gid of the result would not
 /// fit a GO.

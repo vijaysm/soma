@@ -266,7 +266,9 @@ it leaves hanging vertices. Use `refine_quads` for a regionally refined mesh of 
 of a planar domain; use `refine_marked` for everything else.
 
 A marked cell is split into nine (each edge in three), and its neighbours into transition
-quads (Schneiders' vertex-based templates). Each call splits once; there is no 2:1 balance
+quads (Schneiders' vertex-based templates). The input must be conforming: hanging vertices
+are not detected, and a mesh that has them (such as `refine_marked`'s default output) gets
+more. Each call splits once; there is no 2:1 balance
 across calls. The output is order 1: a later SemSpace maps its elements bilinearly, projected
 onto the sphere.
 
@@ -332,7 +334,8 @@ beginning `refine_quads:`, if:
 - any rank's mesh holds a cell other than a quad, is not of dimension 2, has edits or has
   high-order nodes (Quad9);
 - a rank's marks are not one per owned cell;
-- a rank's sphere radius is not positive and finite;
+- a rank's sphere radius is not positive and finite, or the ranks differ in it (or in giving
+  one);
 - a split cell or one of its children turns against the cell;
 - a gid of the result would not fit a `GO`.
 
