@@ -19,6 +19,7 @@
 
 #include "distributed_fixture.hpp"
 #include "refined_sphere.hpp"
+#include "soma/algorithms/laplacian.hpp"
 #include "soma/algorithms/quality_smooth.hpp"
 #include "soma/testing/box_mesh.hpp"
 
@@ -149,7 +150,7 @@ std::map<GO, std::array<Real, 3>> by_gid(const soma::HostMesh& m) {
 TEST(QualitySmooth, UniformGridIsAFixedPoint) {
   soma::HostMesh m = grid(8);
   const auto before = by_gid(m);
-  (void)soma::quality_smooth(soma::Comm::self(), m, {.angle_sweeps = 0});
+  (void)soma::quality_smooth(soma::Comm::self(), m, {.angle_sweeps = 0, .polish_sweeps = 0});
   EXPECT_LE(largest_move(m, before), 1e-14);
 }
 
@@ -158,7 +159,7 @@ TEST(QualitySmooth, ShapeImprovesAPerturbedGrid) {
   perturb_inner(m, 12, 0.3);
   const soma::Comm self = soma::Comm::self();
   const Real k0 = mean_kappa(m), a0 = least_angle(self, m);
-  const auto r = soma::quality_smooth(self, m, {.angle_sweeps = 0});
+  const auto r = soma::quality_smooth(self, m, {.angle_sweeps = 0, .polish_sweeps = 0});
   const Real k1 = mean_kappa(m), a1 = least_angle(self, m);
   std::printf("shape: mean kappa %.4f -> %.4f, least angle %.2f -> %.2f\n", k0, k1, a0, a1);
   EXPECT_LT(k1, k0);
@@ -176,7 +177,7 @@ TEST(QualitySmooth, NoStepInvertsOrLowersTheLeast) {
   const soma::Comm self = soma::Comm::self();
   soma::HostMesh m = grid(12);
   perturb_inner(m, 12, 0.4);
-  const auto r = soma::quality_smooth(self, m, {.angle_sweeps = 0});
+  const auto r = soma::quality_smooth(self, m, {.angle_sweeps = 0, .polish_sweeps = 0});
   std::printf("near folding: least angle %.2f -> %.2f\n", r.least_angle_before, r.least_angle_after);
   EXPECT_LT(r.least_angle_before, 35);
   EXPECT_TRUE(std::isfinite(mean_kappa(m)));
@@ -296,6 +297,7 @@ TEST(QualitySmooth, OptionsAreChecked) {
   for (const int s : {-1}) {
     expect_refused(c, m, {.shape_sweeps = s, .sphere_radius = kRadius});
     expect_refused(c, m, {.angle_sweeps = s, .sphere_radius = kRadius});
+    expect_refused(c, m, {.polish_sweeps = s, .sphere_radius = kRadius});
   }
   for (const Real t : {Real{0}, Real{91}, nan, -Real{1}}) {
     expect_refused(c, m, {.angle_threshold = t, .sphere_radius = kRadius});
@@ -307,6 +309,7 @@ TEST(QualitySmooth, OptionsAreChecked) {
   if (c.size() > 1) {
     // One rank differs.
     expect_refused(c, m, {.shape_sweeps = c.rank() == 1 ? 3 : 10, .sphere_radius = kRadius});
+    expect_refused(c, m, {.polish_sweeps = c.rank() == 1 ? 3 : 10, .sphere_radius = kRadius});
     expect_refused(c, m, {.angle_threshold = c.rank() == 1 ? Real{50} : Real{60}, .sphere_radius = kRadius});
     soma::QualitySmoothOptions one = ok;
     if (c.rank() == 1) one.sphere_radius.reset();
@@ -324,4 +327,64 @@ TEST(QualitySmooth, OptionsAreChecked) {
   expect_refused(c, g, {});
   // Untouched by refusals: the mesh smooths afterwards.
   EXPECT_NO_THROW((void)soma::quality_smooth(c, m, ok));
+}
+
+// The angle phase alone raises the refined sphere's least angle; the
+// defaults (both phases) never lower it.
+TEST(QualitySmooth, AngleNeverFalls) {
+  const soma::Comm c = soma::Comm::world();
+  {
+    soma::HostMesh m = refined_sphere(c);
+    const auto r = soma::quality_smooth(c, m, {.shape_sweeps = 0, .polish_sweeps = 0, .sphere_radius = kRadius});
+    if (c.rank() == 0) std::printf("angle only: %.3f -> %.3f\n", r.least_angle_before, r.least_angle_after);
+    EXPECT_GT(r.least_angle_after, r.least_angle_before);
+    EXPECT_EQ(r.angle_sweeps, 5);
+  }
+  soma::HostMesh m = refined_sphere(c);
+  const auto r = soma::quality_smooth(c, m, {.sphere_radius = kRadius});
+  if (c.rank() == 0) std::printf("both: %.3f -> %.3f\n", r.least_angle_before, r.least_angle_after);
+  EXPECT_GE(r.least_angle_after, r.least_angle_before);
+  EXPECT_EQ(r.polish_sweeps, 10);
+  // Polishing keeps what the angle phase reached.
+  soma::HostMesh unpolished = refined_sphere(c);
+  const auto u = soma::quality_smooth(c, unpolished, {.polish_sweeps = 0, .sphere_radius = kRadius});
+  EXPECT_GE(r.least_angle_after, u.least_angle_after);
+}
+
+// Against 20 centroid sweeps: a higher least angle and mean least angle, and
+// the level-1 cells' mean spacing within 5% of the unsmoothed mesh's.
+TEST(QualitySmooth, BeatsCentroids) {
+  const soma::Comm c = soma::Comm::world();
+  const auto fine_spacing = [&](const soma::HostMesh& m) {
+    const auto level = m.fields().get<std::int32_t>("refine:level", 2).view();
+    Real s[2] = {0, 0};
+    for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
+      if (level(static_cast<std::size_t>(e), 0) != 1) continue;
+      s[0] += std::sqrt(area(m, e));
+      s[1] += 1;
+    }
+    c.allreduce(std::span<Real>(s), soma::Op::sum);
+    return s[0] / s[1];
+  };
+  const soma::HostMesh start = refined_sphere(c);
+  soma::HostMesh centroids = refined_sphere(c);
+  (void)soma::laplacian_smooth(c, centroids,
+                               {.iterations = 20, .method = soma::SmoothMethod::centroids, .sphere_radius = kRadius});
+  soma::HostMesh optimized = refined_sphere(c);
+  (void)soma::quality_smooth(c, optimized, {.sphere_radius = kRadius});
+  const Real s0 = fine_spacing(start), sc = fine_spacing(centroids), so = fine_spacing(optimized);
+  const Quality qc = quality(c, centroids), qo = quality(c, optimized);
+  const Real lc = least_angle(c, centroids), lo = least_angle(c, optimized);
+  if (c.rank() == 0) {
+    std::printf("least %.2f (centroids) %.2f (optimized); mean %.2f %.2f; fine spacing change %.4f %.4f\n", lc, lo,
+                qc.mean_angle, qo.mean_angle, sc / s0 - 1, so / s0 - 1);
+  }
+  EXPECT_GT(lo, lc);
+  EXPECT_GT(qo.mean_angle, qc.mean_angle);
+  EXPECT_LE(std::abs(so / s0 - 1), 0.05);
+}
+
+TEST(QualitySmooth, AngleSameBitsOnAnyRankCount) {
+  const soma::Comm c = soma::Comm::world();
+  EXPECT_EQ(differ_from_serial(c, {.shape_sweeps = 0, .sphere_radius = kRadius}), 0);
 }

@@ -367,6 +367,7 @@ QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const Quali
   const auto m = mesh.view();
   const bool no_ghosts = comm.size() > 1 && (mesh.ghost_layers() < 1 || mesh.ghost_bridge_dim() != 0);
   bool bad = dim != 2 || mesh.edited() || no_ghosts || options.shape_sweeps < 0 || options.angle_sweeps < 0 ||
+             options.polish_sweeps < 0 ||
              !(options.angle_threshold > 0) || !(options.angle_threshold <= 90) ||
              !std::isfinite(options.tolerance) || options.tolerance < 0 ||
              (!options.fixed.empty() && options.fixed.size() != static_cast<std::size_t>(n));
@@ -380,9 +381,10 @@ QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const Quali
   // Everything but the corners checked before the cells are measured.
   const auto agree = [&](bool flag) {
     const auto num = [](Real r) { return std::isfinite(r) ? r : 0; };
-    const Real s = options.shape_sweeps, a = options.angle_sweeps, t = num(options.angle_threshold),
-               tol = num(options.tolerance), given = options.sphere_radius ? 1 : 0, r = num(radius);
-    std::array<Real, 13> f{flag ? Real{1} : Real{0}, s, -s, a, -a, t, -t, tol, -tol, given, -given, r, -r};
+    const Real s = options.shape_sweeps, a = options.angle_sweeps, p = options.polish_sweeps,
+               t = num(options.angle_threshold), tol = num(options.tolerance), given = options.sphere_radius ? 1 : 0,
+               r = num(radius);
+    std::array<Real, 15> f{flag ? Real{1} : Real{0}, s, -s, a, -a, p, -p, t, -t, tol, -tol, given, -given, r, -r};
     comm.allreduce(std::span<Real>(f), Op::max);
     for (std::size_t i = 1; i < f.size(); i += 2) {
       if (f[i] != -f[i + 1]) return false;
@@ -430,7 +432,6 @@ QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const Quali
 
   QualitySmoothReport report;
   report.least_angle_before = least_angle(comm, mesh);
-  const Real floor = report.least_angle_before;
   // One phase: sweeps of `step` over the colours in turn.
   const auto phase = [&](int sweeps, int& made, auto&& step) {
     for (int sweep = 0; sweep < sweeps; ++sweep) {
@@ -446,8 +447,11 @@ QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const Quali
       if (options.tolerance > 0 && comm.allreduce(most, Op::max) <= options.tolerance) break;
     }
   };
+  const Real floor = report.least_angle_before;
   phase(options.shape_sweeps, report.shape_sweeps, [&] { return smoother.shape(floor); });
-  phase(options.angle_sweeps, report.angle_sweeps, [&] { return Real{0}; });
+  phase(options.angle_sweeps, report.angle_sweeps, [&] { return smoother.angle(options.angle_threshold); });
+  const Real raised = options.polish_sweeps > 0 ? least_angle(comm, mesh) : floor;
+  phase(options.polish_sweeps, report.polish_sweeps, [&] { return smoother.shape(raised); });
   report.least_angle_after = least_angle(comm, mesh);
   return report;
 }

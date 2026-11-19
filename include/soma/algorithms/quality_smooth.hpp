@@ -14,7 +14,7 @@
 /// ```
 ///
 /// Each free vertex moves, in its tangent plane, to improve the cells around
-/// it (its patch), in two phases of sweeps:
+/// it (its patch), in three phases of sweeps:
 ///
 /// - shape: lower the sum over the patch's corners of the corner's condition
 ///   number, kappa = |A|_F^2 / (2 det A), A the corner's Jacobian (its two
@@ -24,13 +24,16 @@
 ///   corner degenerates;
 /// - angle: for the vertices of cells whose least corner angle is below the
 ///   threshold, raise the least angle of the corners the vertex moves
-///   (Freitag and Plassmann: the steepest ascent over the active angles).
+///   (Freitag and Plassmann: the steepest ascent over the active angles);
+/// - polish: shape sweeps again, kept above the least angle the angle phase
+///   reached. Raising the worst corners costs some good ones; these give
+///   most of it back without losing the gain.
 ///
 /// A step is a line search along the direction found, from central
 /// differences in the plane; it is kept only if the objective improves, no
 /// corner of the patch has det A <= 0, and the patch's least angle stays at or
-/// above the mesh's least angle when the call began, so the least angle never
-/// falls. Angles are those of the corners in space, as cells are drawn.
+/// above the mesh's least angle when the phase began, so the least angle
+/// never falls. Angles are those of the corners in space, as cells are drawn.
 ///
 /// The tangent plane: given a sphere radius, normal to the vertex's position
 /// (the vertex is projected back on the sphere after each step); else normal
@@ -70,6 +73,7 @@ std::vector<std::int32_t> vertex_colours(const Comm& comm, const HostMesh& mesh,
 struct QualitySmoothOptions {
   int shape_sweeps = 10;   ///< condition-number sweeps
   int angle_sweeps = 5;    ///< least-angle sweeps
+  int polish_sweeps = 10;  ///< condition-number sweeps after them
   /// Degrees in (0, 90]: the angle phase moves the vertices of cells whose
   /// least angle is below it.
   Real angle_threshold = 60;
@@ -85,6 +89,7 @@ struct QualitySmoothOptions {
 struct QualitySmoothReport {
   int shape_sweeps = 0;          ///< sweeps made
   int angle_sweeps = 0;          ///< sweeps made
+  int polish_sweeps = 0;         ///< sweeps made
   Real least_angle_before = 0;   ///< degrees, over the cells of every rank
   Real least_angle_after = 0;    ///< degrees, over the cells of every rank
 };
