@@ -30,6 +30,7 @@ namespace {
 using detail::refine::Host;
 using detail::refine::NewVertex;
 using detail::refine::Numbers;
+using detail::refine::P3;
 using detail::refine::find_lid;
 using detail::refine::lid_table;
 
@@ -81,6 +82,19 @@ std::pair<Case, int> case_of(unsigned m) {
   throw std::logic_error("refine_quads: a cell is left to promote");
 }
 
+P3 cross(const P3& a, const P3& b) { return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x}; }
+Real dot(const P3& a, const P3& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+
+// Whether a quad turns about n at every corner: a bilinear quad that does
+// has a positive Jacobian everywhere (it is affine in each reference
+// coordinate), at its GLL points too.
+bool turns_about(const std::array<P3, 4>& x, const P3& n) {
+  for (std::size_t i = 0; i < 4; ++i) {
+    if (dot(cross(x[(i + 1) % 4] - x[i], x[(i + 2) % 4] - x[(i + 1) % 4]), n) <= 0) return false;
+  }
+  return true;
+}
+
 // Whether a cell with these marked corners is promoted to all four.
 bool promoted(unsigned m) { return std::popcount(m) == 3 || m == 0b0101 || m == 0b1010; }
 
@@ -89,7 +103,6 @@ bool promoted(unsigned m) { return std::popcount(m) == 3 || m == 0b0101 || m == 
 RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
                           QuadRefineOptions options) {
   detail::refine::check(comm, mesh, 1, who, false);
-  (void)options;
   const int dim = mesh.dim();
   const LO owned = mesh.segment_table(dim).owned_end;
   {
@@ -155,6 +168,8 @@ RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<cons
 
   std::array<std::vector<GO>, 6> kid_gids, kid_conn;
   std::vector<NewVertex> added;
+  const auto wx = work.coords();
+  GO against = std::numeric_limits<GO>::max();  // the least split cell turned against, by gid
   std::vector<Case> case_by_input(static_cast<std::size_t>(owned), whole);
   const auto edges = work.adjacency(2, 1);
   for (LO e = 0; e < cells; ++e) {
@@ -178,12 +193,23 @@ RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<cons
     const auto [kind, k] = case_of(corners_marked(e));
     case_by_input[static_cast<std::size_t>(input[ei])] = kind;
     const GO n = nums.number(wc(e));
-    // A node's gid; new ones go to `added` with their corners and weights.
-    const auto gid_of = [&](Node p) -> GO {
+    std::array<P3, 4> x{};
+    for (std::size_t i = 0; i < 4; ++i) x[i] = {wx(lid[i], 0), wx(lid[i], 1), wx(lid[i], 2)};
+    const auto corner_at = [&](GO cg) {
+      return x[static_cast<std::size_t>(std::find(g.begin(), g.end(), cg) - g.begin())];
+    };
+    // A node's gid and position; new ones go to `added` with their corners
+    // and weights.
+    const auto node = [&](Node p) -> std::pair<GO, P3> {
+      const auto made = [&](NewVertex nv) {
+        const std::pair<GO, P3> out{nv.gid, detail::refine::place(nv, corner_at, options.sphere_radius)};
+        added.push_back(std::move(nv));
+        return out;
+      };
       const bool ea = p.a == 0 || p.a == 3, eb = p.b == 0 || p.b == 3;
       if (ea && eb) {
-        const int i = p.b == 0 ? (p.a == 0 ? 0 : 1) : (p.a == 3 ? 2 : 3);
-        return g[static_cast<std::size_t>(i)];
+        const auto i = static_cast<std::size_t>(p.b == 0 ? (p.a == 0 ? 0 : 1) : (p.a == 3 ? 2 : 3));
+        return {g[i], x[i]};
       }
       if (ea || eb) {
         // On the edge from corner `from`, t thirds along it.
@@ -193,8 +219,7 @@ RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<cons
         const GO lo = std::min(a, b), hi = std::max(a, b);
         const int t_lo = a < b ? t : 3 - t;  // thirds from the lower-gid end
         const GO gid = nums.vmax + 2 * (edge_gid[static_cast<std::size_t>(from)] - 1) + (t_lo - 1) + 1;
-        added.push_back({gid, {lo, hi}, {static_cast<Real>(3 - t_lo) / 3, static_cast<Real>(t_lo) / 3}});
-        return gid;
+        return made({gid, {lo, hi}, {static_cast<Real>(3 - t_lo) / 3, static_cast<Real>(t_lo) / 3}});
       }
       // Inside: numbered by the corner it lies nearest; bilinear weights.
       const int j = p.b == 1 ? (p.a == 1 ? 0 : 1) : (p.a == 2 ? 2 : 3);
@@ -208,18 +233,34 @@ RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<cons
         nv.corners.push_back(cg);
         nv.weights.push_back(cw);
       }
-      added.push_back(std::move(nv));
-      return gid;
+      return made(std::move(nv));
     };
+    // The cell's area vector: a split cell and its children must turn about it.
+    P3 up;
+    for (std::size_t i = 0; i < 4; ++i) up = up + cross(x[i], x[(i + 1) % 4]);
+    bool valid = kind == whole || turns_about(x, up);
     const std::vector<Quad>& kids = templates(kind);
     for (std::size_t c = 0; c < kids.size(); ++c) {
       kid_gids[1].push_back(nums.child(wc(e), static_cast<GO>(c)));
-      for (const Node& p : kids[c]) kid_conn[1].push_back(gid_of(rotated(p, k)));
+      std::array<P3, 4> y{};
+      for (std::size_t i = 0; i < 4; ++i) {
+        const auto [gid, at] = node(rotated(kids[c][i], k));
+        kid_conn[1].push_back(gid);
+        y[i] = at;
+      }
+      valid = valid && (kind == whole || turns_about(y, up));
     }
+    if (!valid) against = std::min(against, wc(e));
+  }
+  against = comm.allreduce(against, Op::min);
+  if (against != std::numeric_limits<GO>::max()) {
+    throw std::invalid_argument(std::string(who) + ": cell " + std::to_string(against) +
+                                " or one of its children turns against it");
   }
 
   detail::refine::Level fine =
-      detail::refine::assemble(comm, mesh, work, kid_gids, kid_conn, added, nums, detail::refine::Polygons{});
+      detail::refine::assemble(comm, mesh, work, kid_gids, kid_conn, added, nums, detail::refine::Polygons{},
+                               options.sphere_radius);
   RefineResult out;
   out.mesh = std::move(fine.mesh);
   out.parent = std::move(fine.parent);
