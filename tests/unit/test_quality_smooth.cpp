@@ -191,6 +191,85 @@ TEST(QualitySmooth, NoStepInvertsOrLowersTheLeast) {
   EXPECT_GE(q.least_angle_after, q.least_angle_before);
 }
 
+// One free vertex in a 2 x 2 patch whose condition-number optimum lowers the
+// least angle (50.8 to 40.1 degrees, found by search): the shape step moves
+// it only as far as the least angle allows.
+TEST(QualitySmooth, ShapeStopsAtTheLeastAngle) {
+  soma::HostMesh m = grid(2);
+  const std::map<std::pair<int, int>, std::array<Real, 2>> at{
+      {{0, 0}, {0.0, 0.0}},     {{1, 0}, {0.883, 0.094}}, {{2, 0}, {2.0, 0.0}},   {{2, 1}, {1.562, 1.304}},
+      {{2, 2}, {2.0, 2.0}},     {{1, 2}, {1.446, 1.973}}, {{0, 2}, {0.0, 2.0}},   {{0, 1}, {0.125, 0.686}},
+      {{1, 1}, {1.081, 1.221}}};
+  const auto x = m.coords();
+  for (LO v = 0; v < m.count(0); ++v) {
+    const auto p = at.at({static_cast<int>(std::lround(2 * x(v, 0))), static_cast<int>(std::lround(2 * x(v, 1)))});
+    x(v, 0) = p[0];
+    x(v, 1) = p[1];
+  }
+  const auto before = by_gid(m);
+  const soma::Comm self = soma::Comm::self();
+  const auto r = soma::quality_smooth(self, m, {.angle_sweeps = 0, .polish_sweeps = 0});
+  std::printf("floor: least angle %.3f -> %.3f, moved %.3g\n", r.least_angle_before, r.least_angle_after,
+              largest_move(m, before));
+  EXPECT_NEAR(r.least_angle_before, 50.80, 0.01);
+  EXPECT_GE(r.least_angle_after, r.least_angle_before);
+  EXPECT_GT(largest_move(m, before), 1e-3);
+}
+
+namespace {
+
+// Mean over the triangles of a planar mesh (z = 0) of their condition number
+// against the equilateral triangle, sum of squared edges / (4 sqrt 3 area):
+// 1 for an equilateral one, the same at each corner; infinite once inverted.
+Real mean_tri_kappa(const soma::HostMesh& m) {
+  const auto mv = m.view();
+  const auto x = m.coords();
+  Real s = 0;
+  for (LO e = 0; e < m.count(2); ++e) {
+    const LO a = mv.vertex(2, e, 0), b = mv.vertex(2, e, 1), c = mv.vertex(2, e, 2);
+    const Real u[2] = {x(b, 0) - x(a, 0), x(b, 1) - x(a, 1)}, w[2] = {x(c, 0) - x(a, 0), x(c, 1) - x(a, 1)};
+    const Real area = (u[0] * w[1] - u[1] * w[0]) / 2;
+    const Real edges = u[0] * u[0] + u[1] * u[1] + w[0] * w[0] + w[1] * w[1] + (w[0] - u[0]) * (w[0] - u[0]) +
+                       (w[1] - u[1]) * (w[1] - u[1]);
+    s += area > 0 ? edges / (4 * std::sqrt(Real{3}) * area) : std::numeric_limits<Real>::infinity();
+  }
+  return s / static_cast<Real>(m.count(2));
+}
+
+soma::HostMesh tri_grid(int n) { return soma::testing::box_mesh({n, n, 1, soma::Topology::tri}); }
+
+}  // namespace
+
+// Triangles are measured against the equilateral one: a lattice of them is
+// a fixed point (its sheared grid's diagonals are the short ones).
+TEST(QualitySmooth, EquilateralLatticeIsAFixedPoint) {
+  soma::HostMesh m = tri_grid(8);
+  const auto x = m.coords();
+  for (LO v = 0; v < m.count(0); ++v) {
+    const Real y = x(v, 1);
+    x(v, 0) -= y / 2;
+    x(v, 1) = y * std::sqrt(Real{3}) / 2;
+  }
+  ASSERT_NEAR(mean_tri_kappa(m), 1, 1e-12);
+  const auto before = by_gid(m);
+  (void)soma::quality_smooth(soma::Comm::self(), m, {.angle_sweeps = 0, .polish_sweeps = 0});
+  EXPECT_LE(largest_move(m, before), 1e-14);
+}
+
+TEST(QualitySmooth, ShapeImprovesPerturbedTriangles) {
+  soma::HostMesh m = tri_grid(12);
+  perturb_inner(m, 12, 0.3);
+  const soma::Comm self = soma::Comm::self();
+  const Real k0 = mean_tri_kappa(m);
+  const auto r = soma::quality_smooth(self, m, {.angle_sweeps = 0, .polish_sweeps = 0});
+  const Real k1 = mean_tri_kappa(m);
+  std::printf("triangles: mean kappa %.4f -> %.4f, least angle %.2f -> %.2f\n", k0, k1, r.least_angle_before,
+              r.least_angle_after);
+  EXPECT_TRUE(std::isfinite(k1));
+  EXPECT_LT(k1, k0);
+  EXPECT_GE(r.least_angle_after, r.least_angle_before);
+}
+
 TEST(QualitySmooth, StaysOnTheSphere) {
   const soma::Comm c = soma::Comm::world();
   soma::HostMesh m = refined_sphere(c);
