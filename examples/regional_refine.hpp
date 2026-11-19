@@ -44,7 +44,6 @@ struct Options {
   std::optional<Real> radius;
   Real km = 12, buffer = 2;
   std::vector<Box> boxes;
-  Real earth_scale = 1;  ///< kEarthRadius over the mesh's radius: lengths as on the Earth
 };
 
 inline Box parse_box(const std::string& s) {
@@ -101,27 +100,139 @@ inline P3 centroid(const std::vector<P3>& p) {
 // radius, whatever the mesh's (a mesh on the unit sphere, say).
 inline constexpr Real kEarthRadius = 6.37122e6;
 
-// Whether lon lies in [a, b] going east from a (degrees, any turn).
-inline bool lon_in(Real lon, Real a, Real b) {
-  const auto wrap = [](Real t) { return t - 360 * std::floor(t / 360); };
-  const Real width = wrap(b - a);
-  return width == 0 ? wrap(lon - a) == 0 : wrap(lon - a) <= width;
+// The mesh is on the unit sphere: lengths in km are as on the Earth.
+inline Real km(Real length) { return length * kEarthRadius / 1000; }
+
+// Degrees in (-180, 180].
+inline Real wrap180(Real t) { return t - 360 * std::ceil((t - 180) / 360); }
+
+// A cell in longitude and latitude (degrees), longitudes unwrapped about a
+// box's centre; a cell round a pole spans every longitude up to it.
+struct Polygon {
+  std::vector<std::array<Real, 2>> lonlat;
+  bool holds_pole = false;
+};
+
+inline Polygon lonlat_polygon(const std::vector<P3>& corners, Real centre_lon) {
+  const std::size_t n = corners.size();
+  std::vector<Real> lat(n), lon(n);
+  std::vector<bool> pole(n);
+  for (std::size_t i = 0; i < n; ++i) {
+    const P3& p = corners[i];
+    const Real r = norm(p);
+    lat[i] = std::asin(std::clamp(p[2] / r, Real{-1}, Real{1})) / kDegree;
+    pole[i] = std::hypot(p[0], p[1]) <= 1e-12 * r;
+    lon[i] = pole[i] ? 0 : std::atan2(p[1], p[0]) / kDegree;
+  }
+  Polygon out;
+  // Unwrapped longitudes, each step taken the short way; a corner at a pole
+  // becomes two, at the longitudes of the corners either side.
+  std::size_t first = 0;
+  while (first < n && pole[first]) ++first;
+  if (first == n) return out;  // degenerate
+  Real prev = centre_lon + wrap180(lon[first] - centre_lon);
+  for (std::size_t k = 0; k < n; ++k) {
+    const std::size_t i = (first + k) % n;
+    if (pole[i]) {
+      std::size_t j = (i + 1) % n;
+      while (pole[j]) j = (j + 1) % n;
+      const Real next = prev + wrap180(lon[j] - prev);
+      out.lonlat.push_back({prev, lat[i]});
+      out.lonlat.push_back({next, lat[i]});
+      prev = next;
+      continue;
+    }
+    const Real here = k == 0 ? prev : prev + wrap180(lon[i] - prev);
+    prev = here;
+    out.lonlat.push_back({here, lat[i]});
+  }
+  // The winding: the steps round the polygon, closed; a full turn holds a pole.
+  Real wind = 0;
+  for (std::size_t i = 0; i < out.lonlat.size(); ++i) {
+    const auto& a = out.lonlat[i];
+    const auto& b = out.lonlat[(i + 1) % out.lonlat.size()];
+    wind += wrap180(b[0] - a[0]);
+  }
+  if (std::abs(wind) > 180) {
+    Real least = 90, z = 0;
+    for (std::size_t i = 0; i < n; ++i) {
+      least = std::min(least, std::abs(lat[i]));
+      z += corners[i][2];
+    }
+    const Real side = z >= 0 ? 90 : -90, edge = side > 0 ? least : -least;
+    out.holds_pole = true;
+    out.lonlat = {{centre_lon - 180, edge}, {centre_lon + 180, edge}, {centre_lon + 180, side},
+                  {centre_lon - 180, side}};
+  }
+  return out;
 }
 
-// Whether a point at (lat, lon) lies in a box widened by the angle w (radians).
-inline bool in_box(const Box& b, Real lat, Real lon, Real w) {
-  const Real wl = w / kDegree;
-  if (lat < b.lat0 - wl || lat > b.lat1 + wl) return false;
-  const Real wlon = wl / std::max(std::cos(lat * kDegree), 0.05);
-  // A box 360 degrees wide or more (-180,180 say) holds every longitude.
+// Sutherland and Hodgman: the part of `p` with sign * (coordinate q - c) >= 0.
+inline std::vector<std::array<Real, 2>> clip(const std::vector<std::array<Real, 2>>& p, std::size_t q, Real c,
+                                             Real sign) {
+  std::vector<std::array<Real, 2>> out;
+  for (std::size_t i = 0; i < p.size(); ++i) {
+    const auto& a = p[i];
+    const auto& b = p[(i + 1) % p.size()];
+    const Real da = sign * (a[q] - c), db = sign * (b[q] - c);
+    if (da >= 0) out.push_back(a);
+    if ((da >= 0) != (db >= 0)) {
+      const Real t = da / (da - db);
+      out.push_back({a[0] + t * (b[0] - a[0]), a[1] + t * (b[1] - a[1])});
+    }
+  }
+  return out;
+}
+
+// The area (degrees squared) of the cell `p` inside the box grown by
+// `grow_km` on every side (longitudes widened at the cell's mean latitude);
+// > 0: they overlap.
+inline Real overlap(const Polygon& p, const Box& b, Real grow_km) {
+  if (p.lonlat.empty()) return 0;
+  const Real g = grow_km * 1000 / kEarthRadius / kDegree;
+  Real mean = 0, lo = 1e300, hi = -1e300;
+  for (const auto& c : p.lonlat) {
+    mean += c[1] / static_cast<Real>(p.lonlat.size());
+    lo = std::min(lo, c[0]);
+    hi = std::max(hi, c[0]);
+  }
+  const Real glon = g / std::max(std::cos(mean * kDegree), Real{0.05});
   const Real raw = b.lon1 - b.lon0;
   const Real span = raw >= 360 ? 360 : raw - 360 * std::floor(raw / 360);
-  if (span + 2 * wlon >= 360) return true;
-  return lon_in(lon, b.lon0 - wlon, b.lon1 + wlon);
+  Real west = b.lon0 - glon, east = b.lon0 + span + glon;
+  if (east - west >= 360) {  // every longitude
+    west = lo - 1;
+    east = hi + 1;
+  }
+  // A cell past the seam opposite the centre may meet a wide box a turn away.
+  Real most = 0;
+  for (const Real shift : {Real{0}, Real{-360}, Real{360}}) {
+    auto q = p.lonlat;
+    for (auto& c : q) c[0] += shift;
+    q = clip(q, 0, west, 1);
+    q = clip(q, 0, east, -1);
+    q = clip(q, 1, b.lat0 - g, 1);
+    q = clip(q, 1, b.lat1 + g, -1);
+    Real a = 0;
+    for (std::size_t i = 0; i < q.size(); ++i) {
+      const auto& u = q[i];
+      const auto& v = q[(i + 1) % q.size()];
+      a += u[0] * v[1] - v[0] * u[1];
+    }
+    most = std::max(most, std::abs(a) / 2);
+  }
+  return most;
 }
 
-// Per owned cell: spacing (km) at np points per edge; whether its centroid is
-// in a box (widened by `widen` cell sizes).
+// The centre longitude of a box (degrees).
+inline Real centre(const Box& b) {
+  const Real raw = b.lon1 - b.lon0;
+  const Real span = raw >= 360 ? 360 : raw - 360 * std::floor(raw / 360);
+  return b.lon0 + span / 2;
+}
+
+// Per owned cell of a mesh on the unit sphere: spacing (km) at np points per
+// edge; whether it overlaps a box grown by `widen` times its size.
 struct Where {
   std::vector<Real> spacing;
   std::vector<std::uint8_t> inside;
@@ -131,13 +242,10 @@ inline Where where(const soma::HostMesh& m, const Options& o, Real widen) {
   Where w;
   for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
     const auto p = corners(m, e);
-    const Real size = std::sqrt(area(p));
-    const P3 g = centroid(p);
-    const Real lat = std::asin(std::clamp(g[2] / norm(g), Real{-1}, Real{1})) / kDegree;
-    const Real lon = std::atan2(g[1], g[0]) / kDegree;
+    const Real size = km(std::sqrt(area(p)));
     bool in = false;
-    for (const Box& b : o.boxes) in = in || in_box(b, lat, lon, widen * size / norm(g));
-    w.spacing.push_back(size * o.earth_scale / (o.np - 1) / 1000);
+    for (const Box& b : o.boxes) in = in || overlap(lonlat_polygon(p, centre(b)), b, widen * size) > 0;
+    w.spacing.push_back(size / (o.np - 1));
     w.inside.push_back(in ? 1 : 0);
   }
   return w;
@@ -193,7 +301,7 @@ inline Row assess(const soma::Comm& comm, soma::HostMesh& m, const Options& o) {
         worst = std::max({worst, areas[c] / areas[ei], areas[ei] / areas[c]});
       }
     }
-    spacing(ei, 0) = std::sqrt(areas[ei]) * o.earth_scale / (o.np - 1) / 1000;
+    spacing(ei, 0) = km(std::sqrt(areas[ei])) / (o.np - 1);
     angle(ei, 0) = least / kDegree;
     aspect(ei, 0) = longest / shortest;
     jacobian(ei, 0) = sine;
@@ -216,16 +324,18 @@ inline Row assess(const soma::Comm& comm, soma::HostMesh& m, const Options& o) {
   return r;
 }
 
-// The passes: mark the cells whose spacing is above 1.5 km and whose centroid
-// lies in a box widened by `buffer` cell sizes, refine them (refine_quads, onto
-// the sphere) and even the ranks out, until none is marked or after
-// `max_passes`. Returns the passes made and the cells still marked.
+// The passes, on the unit sphere: mark the cells whose spacing is above 1.5 km
+// and which overlap a box grown by `buffer` cell sizes, refine them
+// (refine_quads, onto the sphere) and even the ranks out, until none is
+// marked or after `max_passes`. Returns the passes made, the cells still
+// marked and the cells marked over every pass.
 struct Passes {
   int passes = 0;
   Real marked = 0;
+  Real refined = 0;
 };
 
-inline Passes refine_regions(const soma::Comm& comm, soma::HostMesh& mesh, const Options& o, Real radius) {
+inline Passes refine_regions(const soma::Comm& comm, soma::HostMesh& mesh, const Options& o) {
   Passes p;
   for (;;) {
     const Where w = where(mesh, o, o.buffer);
@@ -237,7 +347,8 @@ inline Passes refine_regions(const soma::Comm& comm, soma::HostMesh& mesh, const
     for (const auto k : marks) p.marked += k;
     p.marked = comm.allreduce(p.marked, soma::Op::sum);
     if (p.marked == 0 || p.passes == o.passes) return p;
-    mesh = soma::rebalance(comm, soma::refine_quads(comm, mesh, marks, {.sphere_radius = radius}).mesh);
+    p.refined += p.marked;
+    mesh = soma::rebalance(comm, soma::refine_quads(comm, mesh, marks, {.sphere_radius = 1}).mesh);
     ++p.passes;
   }
 }

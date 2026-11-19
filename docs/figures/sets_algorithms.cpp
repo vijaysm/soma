@@ -848,7 +848,8 @@ void set_readparts(const soma::Comm& comm, const fs::path& out) {
 }
 
 // regional: the cubed sphere ne30 refined to 12 km over the contiguous United
-// States as examples/regional_refine does (2 passes); refined.vtk, and
+// States as examples/regional_refine does (2 passes, on the unit sphere,
+// written at the Earth's radius); refined.vtk, and
 // centroids.vtk after 20 sweeps of centroid smoothing onto the sphere, with
 // min_angle and refine:level, turned so that the box's centre (37 N, 95.5 W)
 // is at +z, north +y and east +x (a view from above is the map there);
@@ -860,10 +861,10 @@ void set_regional(const soma::Comm& comm, const fs::path& out) {
   o.boxes = {{24, 50, -125, -66}};
   soma::sem::CubedSphereSpec spec;
   spec.ne = 30;
-  spec.radius = radius;
+  spec.radius = 1;  // the example works on the unit sphere
   soma::HostMesh mesh = soma::sem::cubed_sphere_mesh(comm, spec);
   const double cells0 = comm.allreduce(static_cast<double>(mesh.segment_table(2).owned_end), soma::Op::sum);
-  const regional::Passes made = regional::refine_regions(comm, mesh, o, radius);
+  const regional::Passes made = regional::refine_regions(comm, mesh, o);
   require(made.passes == 2 && made.marked == 0, "regional: two passes reach 12 km");
   const double cells = comm.allreduce(static_cast<double>(mesh.segment_table(2).owned_end), soma::Op::sum);
   // About z by 95.5 degrees (the centre to longitude 0), about y by 37 - 90
@@ -876,9 +877,9 @@ void set_regional(const soma::Comm& comm, const fs::path& out) {
       const double b = x(v, 0) * std::sin(-lon) + x(v, 1) * std::cos(-lon);
       const double c = x(v, 2);
       const double a2 = a * std::cos(tilt) + c * std::sin(tilt), c2 = -a * std::sin(tilt) + c * std::cos(tilt);
-      x(v, 0) = b;
-      x(v, 1) = -a2;
-      x(v, 2) = c2;
+      x(v, 0) = radius * b;
+      x(v, 1) = -radius * a2;
+      x(v, 2) = radius * c2;
     }
   };
   char head[96];
@@ -889,7 +890,7 @@ void set_regional(const soma::Comm& comm, const fs::path& out) {
     const std::string n = name;
     if (n != "refined") {
       const auto method = n == "neighbours" ? soma::SmoothMethod::neighbours : soma::SmoothMethod::centroids;
-      (void)soma::laplacian_smooth(comm, m, {.iterations = 20, .method = method, .sphere_radius = radius});
+      (void)soma::laplacian_smooth(comm, m, {.iterations = 20, .method = method, .sphere_radius = 1});
     }
     const regional::Row r = regional::assess(comm, m, o);
     if (n != "neighbours") {

@@ -11,15 +11,18 @@
 // refines it with soma::refine_quads, all-quad and conforming, until the grid
 // spacing inside the boxes is about K km (default 12). The spacing of a cell
 // is the spacing of its GLL points at P points per edge (default 4):
-// sqrt(area) / (P - 1), so ne30 is about 102 km; lengths are measured as on
-// the Earth (scaled by 6.37122e6 m over the mesh's radius), so a mesh on the
-// unit sphere refines as the Earth-sized one does. Boxes are in degrees,
+// sqrt(area) / (P - 1), so ne30 is about 102 km. The work is done on the unit
+// sphere (coordinates divided by the radius on input, multiplied back on
+// output) and lengths are measured as on the Earth (6.37122e6 m), so a mesh
+// of any radius refines as the Earth-sized one does. Boxes are in degrees,
 // LON0 > LON1 wrapping across the antimeridian; repeat --box for several
 // regions (default: the contiguous United States, 24,50,-125,-66); a box
 // 360 degrees wide or more (60,90,-180,180, say) holds every longitude.
 //
-// Each pass marks the cells whose spacing is above 1.5 K and whose centroid
-// lies in a box widened by B (default 2) times the cell's size, refines them
+// Each pass marks the cells whose spacing is above 1.5 K and which overlap a
+// box grown by B (default 2) times the cell's size (the cell clipped against
+// the box in longitude and latitude; a cell round a pole spans every
+// longitude), refines them
 // (each edge in three) and evens the ranks out (soma::rebalance); the
 // widening grows with the cells, so each level's transition sits outside the
 // next. Passes stop when no cell is marked, or after M (default 8).
@@ -65,15 +68,26 @@ namespace {
 
 using namespace regional;
 
+// `m` (on the unit sphere) written at `radius`.
+void write_at(const soma::Comm& comm, const soma::HostMesh& m, Real radius, const std::string& path,
+              const soma::WriteFileOptions& options = {}) {
+  soma::HostMesh out = m.clone();
+  const auto x = out.coords();
+  for (LO v = 0; v < out.count(0); ++v) {
+    for (int q = 0; q < 3; ++q) x(v, q) *= radius;
+  }
+  soma::write_file(comm, out, path, options);
+}
+
 // Assesses `m` with a ghost layer (added and removed here), writes it and
 // prints its row.
-Row assess_and_write(const soma::Comm& comm, soma::HostMesh& m, const Options& o, const char* name) {
+Row assess_and_write(const soma::Comm& comm, soma::HostMesh& m, const Options& o, const char* name, Real radius) {
   if (!m.fields().contains("refine:level")) (void)m.fields().add_tag<std::int32_t>("refine:level", 2, 1);
   if (comm.size() > 1) m.add_ghosts(comm, soma::GhostOptions{1, 0});
   const Row r = assess(comm, m, o);
   if (comm.size() > 1) m.remove_ghosts(comm);
   const std::string path = o.prefix + "_" + name + ".vtk";
-  soma::write_file(comm, m, path, {.vtk_fields = kFields});
+  write_at(comm, m, radius, path, {.vtk_fields = kFields});
   if (comm.rank() == 0) {
     std::printf("%-11s %9.2f %9.2f %8.0f %8.3f %9.3f %8.3f  %s\n", name, r.least, r.mean, r.under_45, r.aspect,
                 r.jacobian, r.ratio, path.c_str());
@@ -81,9 +95,9 @@ Row assess_and_write(const soma::Comm& comm, soma::HostMesh& m, const Options& o
   return r;
 }
 
-void smooth(const soma::Comm& comm, soma::HostMesh& m, soma::SmoothMethod method, const Options& o, Real radius) {
+void smooth(const soma::Comm& comm, soma::HostMesh& m, soma::SmoothMethod method, const Options& o) {
   if (comm.size() > 1) m.add_ghosts(comm, soma::GhostOptions{1, 0});
-  (void)soma::laplacian_smooth(comm, m, {.iterations = o.sweeps, .method = method, .sphere_radius = radius});
+  (void)soma::laplacian_smooth(comm, m, {.iterations = o.sweeps, .method = method, .sphere_radius = 1});
   if (comm.size() > 1) m.remove_ghosts(comm);
 }
 
@@ -164,10 +178,16 @@ int main(int argc, char** argv) {
       }
     }
     const Real start_cells = comm.allreduce(static_cast<Real>(mesh.segment_table(2).owned_end), soma::Op::sum);
-
-    // An Earth-sized mesh read back (its radius inferred to rounding) keeps lengths as they are.
-    o.earth_scale = std::abs(radius / kEarthRadius - 1) < 1e-9 ? 1 : kEarthRadius / radius;
-    const Passes made = refine_regions(comm, mesh, o, radius);
+    {  // onto the unit sphere
+      const auto x = mesh.coords();
+      for (LO v = 0; v < mesh.count(0); ++v) {
+        const Real s = 1 / std::hypot(x(v, 0), x(v, 1), x(v, 2));
+        for (int q = 0; q < 3; ++q) x(v, q) *= s;
+      }
+    }
+    // An Earth-sized mesh read back (its radius inferred to rounding) is the Earth's.
+    const bool earth = std::abs(radius / kEarthRadius - 1) < 1e-9;
+    const Passes made = refine_regions(comm, mesh, o);
     const int passes = made.passes;
     const Real marked = made.marked;
 
@@ -192,7 +212,8 @@ int main(int argc, char** argv) {
     const Real cells = comm.allreduce(static_cast<Real>(mesh.segment_table(2).owned_end), soma::Op::sum);
     if (comm.rank() == 0) {
       std::printf("%s: passes %d; cells %.0f -> %.0f; radius %.6g%s\n", argv[0], passes, start_cells, cells, radius,
-                  o.earth_scale == 1 ? "" : " (spacing as on the Earth)");
+                  earth ? "" : " (spacing as on the Earth)");
+      std::printf("cells marked: %.0f\n", made.refined);
       if (marked > 0) std::printf("warning: stopped after %d passes with %.0f cells still marked\n", passes, marked);
       // Cells counted in and out of the boxes: none on one side prints "none".
       const Real outside = cells - sums[1];
@@ -212,15 +233,15 @@ int main(int argc, char** argv) {
     }
 
     soma::HostMesh smoothed = mesh.clone();
-    (void)assess_and_write(comm, mesh, o, "refined");
+    (void)assess_and_write(comm, mesh, o, "refined", radius);
     if (o.sweeps > 0) {
-      smooth(comm, mesh, soma::SmoothMethod::neighbours, o, radius);
-      (void)assess_and_write(comm, mesh, o, "neighbours");
-      smooth(comm, smoothed, soma::SmoothMethod::centroids, o, radius);
-      (void)assess_and_write(comm, smoothed, o, "centroids");
+      smooth(comm, mesh, soma::SmoothMethod::neighbours, o);
+      (void)assess_and_write(comm, mesh, o, "neighbours", radius);
+      smooth(comm, smoothed, soma::SmoothMethod::centroids, o);
+      (void)assess_and_write(comm, smoothed, o, "centroids", radius);
     }
     if (!o.save.empty()) {
-      soma::write_file(comm, smoothed, o.save);
+      write_at(comm, smoothed, radius, o.save);
       if (comm.rank() == 0) std::printf("saved %s\n", o.save.c_str());
     }
     return 0;

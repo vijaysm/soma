@@ -132,15 +132,30 @@ if(SOMA_ENABLE_TESTS)
     COMMAND regional_refine --ne 4 --km 300 --smooth 3 --box -20,20,170,-170
             ${CMAKE_CURRENT_BINARY_DIR}/regional_dateline)
   set_tests_properties(example_regional_refine_antimeridian PROPERTIES PASS_REGULAR_EXPRESSION
-                       "passes 1. cells 96 -> 576")
+                       "passes 1. cells 96 -> 704")
   # Boxes round every longitude: an Arctic cap, and the whole sphere (no cell outside).
   add_test(NAME example_regional_refine_arctic
     COMMAND regional_refine --ne 4 --km 300 --smooth 0 --box 60,90,-180,180 ${CMAKE_CURRENT_BINARY_DIR}/regional_arctic)
-  set_tests_properties(example_regional_refine_arctic PROPERTIES PASS_REGULAR_EXPRESSION "passes 1. cells 96 -> 448")
+  set_tests_properties(example_regional_refine_arctic PROPERTIES PASS_REGULAR_EXPRESSION "passes 1. cells 96 -> 576")
   add_test(NAME example_regional_refine_everywhere
     COMMAND regional_refine --ne 4 --km 300 --smooth 0 --box -90,90,-180,180 ${CMAKE_CURRENT_BINARY_DIR}/regional_all)
   set_tests_properties(example_regional_refine_everywhere PROPERTIES PASS_REGULAR_EXPRESSION
-                       "passes 1. cells 96 -> 864. [^\n]*\n[^\n]*outside: none")
+                       "passes 1. cells 96 -> 864. [^\n]*\ncells marked: 96\n[^\n]*outside: none")
+  # A box reaching the pole marks the cells round it: one holding the pole (ne5), four meeting at it (ne4).
+  add_test(NAME example_regional_refine_pole_cell
+    COMMAND regional_refine --ne 5 --km 300 --smooth 0 --buffer 0 --box 85,90,-180,180
+            ${CMAKE_CURRENT_BINARY_DIR}/regional_pole5)
+  set_tests_properties(example_regional_refine_pole_cell PROPERTIES PASS_REGULAR_EXPRESSION "cells marked: 1\n")
+  add_test(NAME example_regional_refine_pole_vertex
+    COMMAND regional_refine --ne 4 --km 300 --smooth 0 --buffer 0 --box 85,90,-180,180
+            ${CMAKE_CURRENT_BINARY_DIR}/regional_pole4)
+  set_tests_properties(example_regional_refine_pole_vertex PROPERTIES PASS_REGULAR_EXPRESSION "cells marked: 4\n")
+  # The saved mesh is written back at the Earth's radius.
+  add_test(NAME example_regional_refine_earth_radius_out
+    COMMAND regional_refine --mesh ${CMAKE_CURRENT_BINARY_DIR}/regional.soma --km 300 --smooth 0
+            ${CMAKE_CURRENT_BINARY_DIR}/regional_radius)
+  set_tests_properties(example_regional_refine_earth_radius_out PROPERTIES PASS_REGULAR_EXPRESSION
+                       "radius 6.37122e[+]06\ncells marked" FIXTURES_REQUIRED regional_mesh)
   # A mesh on the unit sphere: spacing is measured as on the Earth, so it refines as the Earth-sized one does.
   add_test(NAME example_regional_refine_unit_sphere
     COMMAND regional_refine --ne 4 --radius 1 --km 300 --smooth 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_unit)
