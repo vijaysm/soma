@@ -117,7 +117,7 @@ if(SOMA_ENABLE_TESTS)
   # (No semicolon in a pattern: CMake would split it into several, any of which passes.)
   # A regionally refined cubed sphere: CONUS, one pass at ne4 to 300 km, on one and two ranks alike; a box
   # across the antimeridian; the saved mesh read back needs no further pass.
-  set(regional "passes 1. cells 96 -> 556. radius 6.37122e[+]06\n")
+  set(regional "passes 1. cells 96 -> 252. radius 6.37122e[+]06\n")
   add_test(NAME example_regional_refine
     COMMAND regional_refine --ne 4 --km 300 --smooth 3 --save ${CMAKE_CURRENT_BINARY_DIR}/regional.soma
             ${CMAKE_CURRENT_BINARY_DIR}/regional)
@@ -126,28 +126,43 @@ if(SOMA_ENABLE_TESTS)
   add_test(NAME example_regional_refine_again
     COMMAND regional_refine --mesh ${CMAKE_CURRENT_BINARY_DIR}/regional.soma --km 300 --smooth 0
             ${CMAKE_CURRENT_BINARY_DIR}/regional_again)
-  set_tests_properties(example_regional_refine_again PROPERTIES PASS_REGULAR_EXPRESSION "passes 0. cells 556 -> 556"
+  set_tests_properties(example_regional_refine_again PROPERTIES PASS_REGULAR_EXPRESSION "passes 0. cells 252 -> 252"
                        FIXTURES_REQUIRED regional_mesh)
   add_test(NAME example_regional_refine_antimeridian
     COMMAND regional_refine --ne 4 --km 300 --smooth 3 --box -20,20,170,-170
             ${CMAKE_CURRENT_BINARY_DIR}/regional_dateline)
   set_tests_properties(example_regional_refine_antimeridian PROPERTIES PASS_REGULAR_EXPRESSION
-                       "passes 1. cells 96 -> 704")
+                       "passes 1. cells 96 -> 184")
   # Boxes round every longitude: an Arctic cap, and the whole sphere (no cell outside).
   add_test(NAME example_regional_refine_arctic
     COMMAND regional_refine --ne 4 --km 300 --smooth 0 --box 60,90,-180,180 ${CMAKE_CURRENT_BINARY_DIR}/regional_arctic)
-  set_tests_properties(example_regional_refine_arctic PROPERTIES PASS_REGULAR_EXPRESSION "passes 1. cells 96 -> 576")
+  set_tests_properties(example_regional_refine_arctic PROPERTIES PASS_REGULAR_EXPRESSION "passes 1. cells 96 -> 320")
   add_test(NAME example_regional_refine_everywhere
     COMMAND regional_refine --ne 4 --km 300 --smooth 0 --box -90,90,-180,180 ${CMAKE_CURRENT_BINARY_DIR}/regional_all)
   set_tests_properties(example_regional_refine_everywhere PROPERTIES PASS_REGULAR_EXPRESSION
-                       "passes 1. cells 96 -> 864. [^\n]*\ncells marked: 96\n[^\n]*outside: none")
+                       "passes 1. cells 96 -> 864. [^#]*cells marked: 96[^#]*outside: none")
+  # Two levels (ne4 to 100 km): the band of level-1 cells between them is at least --transition cells wide.
+  add_test(NAME example_regional_refine_bands
+    COMMAND regional_refine --ne 4 --km 100 --smooth 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_bands)
+  set_tests_properties(example_regional_refine_bands PROPERTIES PASS_REGULAR_EXPRESSION "bands: 5\n")
+  add_test(NAME example_regional_refine_transition1
+    COMMAND regional_refine --ne 4 --km 100 --smooth 0 --transition 1 ${CMAKE_CURRENT_BINARY_DIR}/regional_t1)
+  set_tests_properties(example_regional_refine_transition1 PROPERTIES PASS_REGULAR_EXPRESSION "bands: [1-9]\n")
+  # No growth before measuring: the band is one cell, and one rerun widens it; with no reruns, a warning.
+  add_test(NAME example_regional_refine_rerun
+    COMMAND regional_refine --ne 4 --km 100 --smooth 0 --grow 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_rerun)
+  set_tests_properties(example_regional_refine_rerun PROPERTIES PASS_REGULAR_EXPRESSION "bands: 3\nreruns: 1\n")
+  add_test(NAME example_regional_refine_bands_capped
+    COMMAND regional_refine --ne 4 --km 100 --smooth 0 --grow 0 --reruns 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_capped)
+  set_tests_properties(example_regional_refine_bands_capped PROPERTIES PASS_REGULAR_EXPRESSION
+                       "bands: 1\nreruns: 0\nwarning: bands under 3 cells after 0 reruns\n")
   # A box reaching the pole marks the cells round it: one holding the pole (ne5), four meeting at it (ne4).
   add_test(NAME example_regional_refine_pole_cell
-    COMMAND regional_refine --ne 5 --km 300 --smooth 0 --buffer 0 --box 85,90,-180,180
+    COMMAND regional_refine --ne 5 --km 300 --smooth 0 --box 85,90,-180,180
             ${CMAKE_CURRENT_BINARY_DIR}/regional_pole5)
   set_tests_properties(example_regional_refine_pole_cell PROPERTIES PASS_REGULAR_EXPRESSION "cells marked: 1\n")
   add_test(NAME example_regional_refine_pole_vertex
-    COMMAND regional_refine --ne 4 --km 300 --smooth 0 --buffer 0 --box 85,90,-180,180
+    COMMAND regional_refine --ne 4 --km 300 --smooth 0 --box 85,90,-180,180
             ${CMAKE_CURRENT_BINARY_DIR}/regional_pole4)
   set_tests_properties(example_regional_refine_pole_vertex PROPERTIES PASS_REGULAR_EXPRESSION "cells marked: 4\n")
   # The saved mesh is written back at the Earth's radius.
@@ -160,7 +175,7 @@ if(SOMA_ENABLE_TESTS)
   add_test(NAME example_regional_refine_unit_sphere
     COMMAND regional_refine --ne 4 --radius 1 --km 300 --smooth 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_unit)
   set_tests_properties(example_regional_refine_unit_sphere PROPERTIES PASS_REGULAR_EXPRESSION
-                       "passes 1. cells 96 -> 556. radius 1 [(]spacing as on the Earth[)]")
+                       "passes 1. cells 96 -> 252. radius 1 [(]spacing as on the Earth[)]")
   if(SOMA_ENABLE_MPI)
     add_test(NAME example_regional_refine.np2
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
@@ -168,5 +183,11 @@ if(SOMA_ENABLE_TESTS)
               ${CMAKE_CURRENT_BINARY_DIR}/regional_np2)
     set_tests_properties(example_regional_refine.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
                          PASS_REGULAR_EXPRESSION "${regional}")
+    add_test(NAME example_regional_refine_bands.np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:regional_refine> ${MPIEXEC_POSTFLAGS} --ne 4 --km 100 --smooth 0
+              ${CMAKE_CURRENT_BINARY_DIR}/regional_bands_np2)
+    set_tests_properties(example_regional_refine_bands.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
+                         PASS_REGULAR_EXPRESSION "passes 2. cells 96 -> 1000. [^#]*bands: 5\n")
   endif()
 endif()

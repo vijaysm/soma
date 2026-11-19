@@ -2,8 +2,9 @@
 // Copyright (c) 2022-2026, Vijay Mahadevan.
 
 // regional_refine [--ne N | --mesh FILE] [--radius R] [--km K] [--np P]
-//                 [--box LAT0,LAT1,LON0,LON1]... [--buffer B] [--smooth S]
-//                 [--max-passes M] [--save FILE] <out-prefix>
+//                 [--box LAT0,LAT1,LON0,LON1]... [--transition N] [--grow G]
+//                 [--reruns R] [--smooth S] [--max-passes M] [--save FILE]
+//                 <out-prefix>
 //
 // A regionally refined mesh (RRM) of the sphere, as E3SM builds them: starts
 // from the cubed sphere (soma::sem::cubed_sphere_mesh, ne N, default 30) or a
@@ -20,12 +21,16 @@
 // 360 degrees wide or more (60,90,-180,180, say) holds every longitude.
 //
 // Each pass marks the cells whose spacing is above 1.5 K and which overlap a
-// box grown by B (default 2) times the cell's size (the cell clipped against
-// the box in longitude and latitude; a cell round a pole spans every
-// longitude), refines them
-// (each edge in three) and evens the ranks out (soma::rebalance); the
-// widening grows with the cells, so each level's transition sits outside the
-// next. Passes stop when no cell is marked, or after M (default 8).
+// box grown so that about N (default 3) cells of each level lie between the
+// next finer and the next coarser (the cell clipped against the box in
+// longitude and latitude; a cell round a pole spans every longitude), refines
+// them (each edge in three) and evens the ranks out (soma::rebalance). Passes
+// stop when no cell is marked, or after M (default 8). Then the band of each
+// level is measured, in cells through edges; promotion of the transition
+// templates can eat into one, so the refinement reruns from the start with
+// the thin bands grown, at most R times (default 4). --grow G grows each
+// level by G cells (default N) before the first measure: 0 leaves the bands
+// to the reruns.
 //
 // Then S sweeps (default 20) of each soma::laplacian_smooth method, the
 // vertices projected onto the sphere: neighbour averaging and cell
@@ -125,8 +130,13 @@ int main(int argc, char** argv) {
         o.np = std::stoi(argv[++i]);
       } else if (a == "--box" && more) {
         o.boxes.push_back(parse_box(argv[++i]));
-      } else if (a == "--buffer" && more) {
-        o.buffer = std::stod(argv[++i]);
+      } else if (a == "--transition" && more) {
+        o.transition = std::stoi(argv[++i]);
+      } else if (a == "--grow" && more) {
+        o.grow = std::stoi(argv[++i]);
+        bad = bad || o.grow < 0;
+      } else if (a == "--reruns" && more) {
+        o.reruns = std::stoi(argv[++i]);
       } else if (a == "--smooth" && more) {
         o.sweeps = std::stoi(argv[++i]);
       } else if (a == "--max-passes" && more) {
@@ -144,12 +154,13 @@ int main(int argc, char** argv) {
   }
   if (o.boxes.empty()) o.boxes.push_back({24, 50, -125, -66});  // the contiguous United States
   if (bad || o.prefix.empty() || (ne_given && !o.mesh.empty()) || o.ne < 1 || o.np < 2 || !(o.km > 0) ||
-      !(o.buffer >= 0) || o.sweeps < 0 || o.passes < 0 || (o.radius && !(*o.radius > 0))) {
+      o.transition < 1 || o.reruns < 0 || o.sweeps < 0 || o.passes < 0 || (o.radius && !(*o.radius > 0))) {
     if (comm.rank() == 0) {
       std::fprintf(stderr,
                    "usage: regional_refine [--ne N | --mesh FILE] [--radius R] [--km K] [--np P]\n"
-                   "                       [--box LAT0,LAT1,LON0,LON1]... [--buffer B] [--smooth S]\n"
-                   "                       [--max-passes M] [--save FILE] <out-prefix>\n");
+                   "                       [--box LAT0,LAT1,LON0,LON1]... [--transition N] [--grow G]\n"
+                   "                       [--reruns R] [--smooth S] [--max-passes M] [--save FILE]\n"
+                   "                       <out-prefix>\n");
     }
     return 2;
   }
@@ -187,7 +198,9 @@ int main(int argc, char** argv) {
     }
     // An Earth-sized mesh read back (its radius inferred to rounding) is the Earth's.
     const bool earth = std::abs(radius / kEarthRadius - 1) < 1e-9;
-    const Passes made = refine_regions(comm, mesh, o);
+    Graded graded = refine_graded(comm, mesh, o);
+    mesh = std::move(graded.mesh);
+    const Passes made = graded.passes;
     const int passes = made.passes;
     const Real marked = made.marked;
 
@@ -214,6 +227,14 @@ int main(int argc, char** argv) {
       std::printf("%s: passes %d; cells %.0f -> %.0f; radius %.6g%s\n", argv[0], passes, start_cells, cells, radius,
                   earth ? "" : " (spacing as on the Earth)");
       std::printf("cells marked: %.0f\n", made.refined);
+      std::string bands;
+      for (const Real b : graded.widths) {  // a band as wide as the cap measured or wider: "12+"
+        bands += b < 0 ? " -" : " " + std::to_string(static_cast<int>(b)) + (b >= band_cap(o) ? "+" : "");
+      }
+      std::printf("bands:%s\nreruns: %d\n", bands.empty() ? " none" : bands.c_str(), graded.reruns);
+      if (!graded.settled) {
+        std::printf("warning: bands under %d cells after %d reruns\n", o.transition, graded.reruns);
+      }
       if (marked > 0) std::printf("warning: stopped after %d passes with %.0f cells still marked\n", passes, marked);
       // Cells counted in and out of the boxes: none on one side prints "none".
       const Real outside = cells - sums[1];
