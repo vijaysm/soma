@@ -555,6 +555,13 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - It equals MOAB's smoother bit for bit on one rank and within 1e-14 on ghosted partitions of
   one to eight ranks. Ten sweeps of a 64^3 box of hexes, setup included, one thread a rank:
   128 ms against MOAB's 8222 at one rank, 29 against 468 at eight.
+- `SmoothOptions::method = SmoothMethod::centroids` moves each free vertex of a mesh of
+  dimension 2 to the mean of its cells' centroids instead (summed in cell-gid order, so again
+  bit for bit on any number of ranks); `SmoothOptions::sphere_radius` projects moved vertices
+  onto a sphere after each sweep (a closed surface has no skin: unprojected, averaging shrinks
+  it). On a refined cubed sphere centroids raise the mean least angle as neighbour averaging
+  does, stretch cells less (worst edge ratio 5.1 against 8.2) and keep cell sizes (4.5% against
+  87% when weighted by area).
 - `examples/laplacian_smooth.cpp` reads a `.h5m` or SOMA file on any number of ranks, adds a
   ghost layer, smooths and writes a SOMA file (a VTK file on one rank).
 - `soma/algorithms/fem.hpp` holds linear finite element kernels for triangles, quads, tets
@@ -704,6 +711,11 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   or child that would turn against its cell is refused. Levels live in `refine:level`; the
   result is the same, gid for gid and bit for bit, on any number of ranks. E3SM and SQuadGen
   regionally refined meshes are read after `mbconvert` to `.h5m`.
+- `examples/regional_refine.cpp` builds regionally refined meshes of the sphere (E3SM's RRM):
+  the cubed sphere or a quad mesh read from a file, refined with `refine_quads` inside lat/lon
+  boxes (default the contiguous United States; several boxes, across the antimeridian too) to a
+  grid spacing in km at a GLL order, then smoothed by both methods and written with per-cell
+  quality fields and a quality table. `--save` and `--mesh` reuse a refined mesh.
 - `soma::mark_fraction(comm, indicator, fraction)` marks the cells of largest indicator that
   hold the fraction of its total (Doerfler marking), and `soma::mark_threshold` those above a
   value.

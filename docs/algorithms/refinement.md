@@ -339,31 +339,76 @@ beginning `refine_quads:`, if:
 - a split cell or one of its children turns against the cell;
 - a gid of the result would not fit a `GO`.
 
-### Example: refining towards a coastline
+### Example: regionally refined meshes of the sphere
 
-Mark by distance to a curve, refine, and refine again closer in:
+`examples/regional_refine.cpp` builds the regionally refined meshes (RRM) E3SM runs on: a
+cubed sphere, or a quad mesh on a sphere read from a file, refined inside lat/lon boxes to a
+grid spacing in km, then smoothed. Its loop, with `where` the cells' spacing and whether their
+centroid lies in a box widened by `buffer` cell sizes:
 
 ```cpp
-#include "soma/algorithms/refine.hpp"
-#include "soma/sem/cubed_sphere.hpp"
-
-const soma::Real R = 6.37122e6;
-soma::sem::CubedSphereSpec spec;
-spec.ne = 30;
-spec.radius = R;
-soma::HostMesh mesh = soma::sem::cubed_sphere_mesh(comm, spec);
-// distance(mesh, e): a cell's distance to the coastline, from the application's data.
-for (const soma::Real within : {500e3, 150e3}) {
-  std::vector<soma::Real> closeness;
-  for (soma::LO e = 0; e < mesh.segment_table(2).owned_end; ++e) closeness.push_back(-distance(mesh, e));
-  const auto marks = soma::mark_threshold(closeness, -within);
-  mesh = soma::refine_quads(comm, mesh, marks, {.sphere_radius = R}).mesh;
+for (;;) {
+  const Where w = where(mesh, o, o.buffer);
+  std::vector<std::int8_t> marks;
+  for (std::size_t e = 0; e < w.spacing.size(); ++e) {
+    marks.push_back(w.inside[e] != 0 && w.spacing[e] > 1.5 * o.km ? 1 : 0);
+  }
+  ...  // stop when no rank marks a cell
+  mesh = soma::rebalance(comm, soma::refine_quads(comm, mesh, marks, {.sphere_radius = radius}).mesh);
 }
 ```
 
-Each pass leaves the cells it split on their parent's rank; call `soma::rebalance` between
-passes to even the ranks out. Add ghosts and edges before building a SemSpace on the result,
-as for the cubed sphere.
+- **Spacing** is that of the GLL points of spectral elements with `--np` points per edge
+  (default 4): $\sqrt{A}/(n_p - 1)$ for a cell of area $A$. This is E3SM's convention: ne30
+  (elements about 300 km across) is about 100 km. Each pass divides the spacing by 3, and a cell
+  is refined while its spacing is above 1.5 times `--km`: from ne30, `--km 12` stops at about
+  11 km (two passes) and `--km 25` or `--km 33` at about 33 km (one).
+- **Boxes** are `--box LAT0,LAT1,LON0,LON1` in degrees (default the contiguous United States,
+  `24,50,-125,-66`). `LON0 > LON1` wraps across the antimeridian, and `--box` may be repeated
+  for several regions refined together.
+- **The buffer** widens each box by `--buffer` (default 2) times the size of the cell being
+  tested. It grows with the cells, so each level's transition sits outside the next.
+- **Reuse:** `--save FILE` writes the result, and `--mesh FILE` starts from such a mesh (or any
+  quad mesh on a sphere). A mesh already fine enough takes no further pass.
+
+```bash
+mpiexec -n 4 ./regional_refine --ne 30 --km 12 conus
+mpiexec -n 4 ./regional_refine --ne 30 --km 33 --box 35,72,-10,40 --box -45,-10,110,155 europe_australia
+```
+
+```{figure} ../figures/img/regional-levels.png
+:alt: The contiguous United States, seen from above, coloured by refinement level: a red lat/lon box inside a yellow region of the finest cells, ringed by a teal band, inside purple coarse cells; the yellow region's sides follow the cube's grid lines, with a notch on the west and east where it crosses a cube face's edge
+:width: 80%
+
+ne30 refined to 12 km over the contiguous United States (the red box): two passes, 5400 cells to 28096. Level 2
+(yellow, 33 km elements, 11 km spacing) and level 1 (teal, 100 km elements) around level 0 (purple, 300 km). The
+fine region follows the cube's grid lines rather than the box: see the note below.
+```
+
+Each pass promotes the cells with two opposite or three marked corners, and a staircase of
+marked cells along a box edge that crosses the cube's grid diagonally has such a cell at every
+step. Promotion therefore fills the marked region out to a block of the cube's grid around the
+box. In the figure, 13671 of the 28096 cells lie in the box. A region that follows the grid
+(or a buffer of 0) refines fewer cells.
+
+The example then smooths copies of the mesh, 20 sweeps of each
+[smoothing](smoothing.md#methods) method by default, projected onto the sphere, and reports a
+quality table. It writes `<prefix>_refined.vtk`, `_neighbours.vtk` and `_centroids.vtk` with the
+cell fields `refine:level`, `spacing_km`, `min_angle` (degrees), `aspect` (longest over shortest
+edge), `scaled_jacobian` (least over corners of the sine of the corner angle, signed by the
+cell's turn) and `area_ratio` (largest ratio to an edge neighbour's area), for ParaView.
+
+```{figure} ../figures/img/regional-quality.png
+:alt: Two close-ups of the same place south-west of the box, coloured by each cell's least angle from 30 to 90 degrees: on the left as refined, on the right after 20 sweeps of centroid smoothing; large cells on the left of each meet small cells on the right through a strip of dark transition cells, which stay dark after smoothing while the large cells turn lighter
+:width: 90%
+
+South-west of the box, where 100 km elements meet the 33 km ones, coloured by each cell's least angle: as
+refined (left) and after 20 sweeps of `SmoothMethod::centroids` (right). Smoothing squares up the cells on both
+sides; the transition cells keep their corners of 30 to 40 degrees, which their templates set. Over the whole
+mesh, the cells with a least angle under 45 degrees go from 580 to 414 (399 with `neighbours`), the mean least
+angle from 79.7 to 80.9 degrees (81.2), the least from 30.6 to 29.6 (29.2), and the worst edge ratio from 3.6
+to 4.8 (7.1).
+```
 
 ### Regionally refined meshes from elsewhere
 

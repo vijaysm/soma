@@ -87,6 +87,89 @@ def laplacian_smoothing(data, path):
     save_png(pv, view, path, {"position": [1.35, 0.5, 10.0], "focal": [1.35, 0.5, 0.0], **TOP, "parallel_scale": 1.0})
 
 
+REGIONAL_RADIUS = 6.37122e6
+
+
+def regional_turn(lat, lon):
+    """A point (degrees) as set_regional turns the sphere: (37 N, 95.5 W) to +z, north +y, east +x."""
+    import math
+
+    d = math.pi / 180
+    x, y, z = (math.cos(lat * d) * math.cos(lon * d), math.cos(lat * d) * math.sin(lon * d), math.sin(lat * d))
+    t, u = 95.5 * d, (37 - 90) * d
+    a, b = x * math.cos(t) - y * math.sin(t), x * math.sin(t) + y * math.cos(t)
+    a2, c2 = a * math.cos(u) + z * math.sin(u), -a * math.sin(u) + z * math.cos(u)
+    return [REGIONAL_RADIUS * 1.002 * q for q in (b, -a2, c2)]
+
+
+def regional_box(pv, view, lat0, lat1, lon0, lon1):
+    """The box's outline, a little above the sphere."""
+    ring = [(lat0, lon0 + (lon1 - lon0) * k / 40) for k in range(41)] + \
+           [(lat0 + (lat1 - lat0) * k / 20, lon1) for k in range(21)] + \
+           [(lat1, lon1 - (lon1 - lon0) * k / 40) for k in range(41)] + \
+           [(lat1 - (lat1 - lat0) * k / 20, lon0) for k in range(21)]
+    line = pv.PolyLineSource(Points=[c for p in ring for c in regional_turn(*p)])
+    display = pv.Show(line, view)
+    display.DiffuseColor = display.AmbientColor = [0.85, 0.1, 0.1]
+    display.LineWidth = 4.0
+    return line
+
+
+@figure("regional-levels", ["regional"], "png")
+def regional_levels(data, path):
+    pv, view = pv_view()
+    mesh = pv.LegacyVTKReader(FileNames=[str(data / "regional" / "refined.vtk")])
+    # Colour alone: the 33 km cells' edges would fill the picture (the close-up shows the cells).
+    display = flat(pv_surface(pv, view, mesh))
+    display.SetRepresentationType("Surface")
+    pv_color_by(pv, view, display, "refine:level", "refinement level", integer=True)
+    # Three levels: the caption names their colours (an integer bar of three values labels poorly).
+    display.SetScalarBarVisibility(view, False)
+    regional_box(pv, view, 24, 50, -125, -66)
+    # The refined region spans about x in [-3.8, 4.3] Mm, y in [-2.2, 2.4] Mm.
+    save_png(pv, view, path, {"position": [3.0e5, 0.0, 2.0e7], "focal": [3.0e5, 0.0, REGIONAL_RADIUS], **TOP,
+                              "parallel_scale": 3.15e6})
+
+
+@figure("regional-quality", ["regional"], "png")
+def regional_quality(data, path):
+    pv, view = pv_view()
+    left = pv.LegacyVTKReader(FileNames=[str(data / "regional" / "refined.vtk")])
+    right = pv.LegacyVTKReader(FileNames=[str(data / "regional" / "centroids.vtk")])
+    # Each panel a map 900 km across about a transition, the second moved 1150 km to the right.
+    half, shift = 4.5e5, 1.15e6
+    centre = REGIONAL_ZOOM
+    for k, source in enumerate((left, right)):
+        # The cells about the centre (whole cells, near side only), then moved into their panel.
+        window = pv.ExtractCellsByRegion(Input=source)
+        window.IntersectWith = "Box"
+        window.IntersectWith.Position = [centre[0] - half, centre[1] - half, 0.5 * REGIONAL_RADIUS]
+        window.IntersectWith.Length = [2 * half, 2 * half, REGIONAL_RADIUS]
+        window.Extractintersected = 1
+        t = pv.Transform(Input=window)
+        t.Transform.Translate = [-centre[0] + k * shift, -centre[1], 0.0]
+        display = flat(pv_surface(pv, view, t))
+        display.LineWidth = 1.0
+        pv_color_by(pv, view, display, "min_angle", "least angle (°)")
+    lut = pv.GetColorTransferFunction("min_angle")
+    lut.RescaleTransferFunction(30.0, 90.0)
+    lut.AutomaticRescaleRangeMode = "Never"
+    labels(pv, view, "min_angle", [30, 45, 60, 75, 90], "{:.0f}")
+    pv_label(pv, view, "refined", [0.07, 0.86])
+    pv_label(pv, view, "20 sweeps of centroids", [0.45, 0.86])
+    # Whole cells reach past each panel's 900 km: 100 km of margin, and the colour bar's sixth on the right.
+    margin = 1.0e5
+    width = (2 * half + shift + 2 * margin) / (5 / 6)
+    focal = [-half - margin + width / 2, 0.0, REGIONAL_RADIUS]
+    save_png(pv, view, path, {"position": [focal[0], 0.0, 2.0e7], "focal": focal, **TOP,
+                              "parallel_scale": width / 1.4 / 2})
+
+
+# The close-up's centre in set_regional's turned frame (m): south-west of the box, where the 33 km cells (level 2)
+# meet the 100 km band (level 1, one cell wide there) and the 300 km cells.
+REGIONAL_ZOOM = (-3.08e6, -1.0e6)
+
+
 @figure("poisson-solution", ["poisson"], "png")
 def poisson_solution(data, path):
     pv, view = pv_view()
