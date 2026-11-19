@@ -207,8 +207,15 @@ int run(const soma::Comm& comm, const Options& o) {
   const double end = o.days * 86400;
   const auto start = std::chrono::steady_clock::now();
   const double every = o.report_hours ? *o.report_hours * 3600 : end;
+  // Reports on the way land on whole steps (at or just before each report
+  // time), so they leave the run's bits alone; the last lands on the end.
   for (long k = 1; m.time() < end; ++k) {
-    m.advance(comm, std::min(end, static_cast<double>(k) * every));
+    const double t = static_cast<double>(k) * every;
+    if (t < end) {
+      m.advance_whole_steps(comm, t, end);
+    } else {
+      m.advance(comm, end);
+    }
     report();
   }
   const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();

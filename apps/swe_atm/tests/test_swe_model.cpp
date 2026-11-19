@@ -83,6 +83,45 @@ TEST(SweModel, RunsEndExactlyAtTheRequestedTime) {
   EXPECT_EQ(m.steps(), 15);
 }
 
+// Stopping for a report takes whole steps only: the run then has the same bits
+// as one without the stop, and it stops at the last step not past the time.
+TEST(SweModel, WholeStepsLeaveTheBitsAlone) {
+  const Comm c = Comm::world();
+  ModelOptions o;
+  o.ne = 2;
+  o.dt = 70;
+  SweModel straight(c, o), stopped(c, o);
+  straight.advance(c, 1000);
+  stopped.advance_whole_steps(c, 300, 1000);
+  EXPECT_EQ(stopped.time(), 280.0);
+  EXPECT_EQ(stopped.steps(), 4);
+  stopped.advance_whole_steps(c, 350, 1000);  // lands on a step: 5 whole steps
+  EXPECT_EQ(stopped.time(), 350.0);
+  stopped.advance_whole_steps(c, 1000, 1000);  // 980 then 20 s left: that one waits for advance
+  EXPECT_EQ(stopped.time(), 980.0);
+  stopped.advance(c, 1000);
+  EXPECT_EQ(stopped.time(), 1000.0);
+  EXPECT_EQ(stopped.steps(), straight.steps());
+  EXPECT_EQ(stopped.digest(c), straight.digest(c));
+}
+
+// A step that advance would stretch to land on t_end (within its 1e-9 margin)
+// is not taken whole on the way.
+TEST(SweModel, WholeStepsLeaveTheLastStepToAdvance) {
+  const Comm c = Comm::world();
+  ModelOptions o;
+  o.ne = 2;
+  o.dt = 70;
+  const double end = 140 * (1 + 1e-12);
+  SweModel straight(c, o), stopped(c, o);
+  straight.advance(c, end);
+  stopped.advance_whole_steps(c, 140, end);
+  EXPECT_EQ(stopped.time(), 70.0);
+  stopped.advance(c, end);
+  EXPECT_EQ(stopped.steps(), straight.steps());
+  EXPECT_EQ(stopped.digest(c), straight.digest(c));
+}
+
 TEST(SweModel, StopsOnBlowUp) {
   const Comm c = Comm::world();
   ModelOptions o;

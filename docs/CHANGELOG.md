@@ -729,7 +729,7 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 
 - `apps/swe_atm` (`SOMA_ENABLE_APPS=ON`): the shallow-water equations in vector-invariant form on
   the cubed sphere, with spectral elements of any order, SSP-RK3 and HOMME's hyperviscosity. The
-  same bits on any number of ranks and threads.
+  same bits on any number of ranks and threads, and with any report interval.
 - Williamson's cases 2, 5 and 6 and Galewsky's jet (with and without its perturbation). Reports
   give normalised height errors, mass and energy conservation, and simulated days per hour.
 - Reference solutions are read from NetCDF-4 files (through HDF5) in any grid orientation and
@@ -737,7 +737,8 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   fields.
 - The default time step is the smaller of the CFL step and the hyperviscous limit, computed from
   the discrete operator's spectral radius.
-- Benchmark scripts for cases 2, 5, 6 and Galewsky are in `apps/swe_atm/bench/`.
+- Benchmark scripts for cases 2, 5, 6 and Galewsky are in `apps/swe_atm/bench/`; T213 reference
+  solutions of cases 5 and 6, computed with NCAR's STSWM, are in `apps/swe_atm/reference/`.
 
 ### Python bindings
 

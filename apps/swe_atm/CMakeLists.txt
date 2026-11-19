@@ -50,6 +50,12 @@ if(SOMA_ENABLE_TESTS)
       -DMPIEXEC=${MPIEXEC_EXECUTABLE} "-DRANKS=1;2;4" "-DARGS=--case w2 --ne 2 --order 4 --days 0.25 --nu 0"
       -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_digests.cmake)
     set_tests_properties(swe_atm.case2.digests PROPERTIES TIMEOUT 120 PROCESSORS 4)
+    # Reports do not change the run: the same digest with none, every 1 h and every 2.5 h.
+    add_test(NAME swe_atm.case5.report_interval COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_atm>
+      -DMPIEXEC=${MPIEXEC_EXECUTABLE} "-DRANKS=2" "-DARGS=--case w5 --ne 2 --order 4 --days 0.25"
+      "-DVARIANTS=--report-every 6|--report-every 1|--report-every 2.5"
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/compare_digests.cmake)
+    set_tests_properties(swe_atm.case5.report_interval PROPERTIES TIMEOUT 120 PROCESSORS 2)
   endif()
   # An output that cannot be written on one rank fails every rank, not a hang.
   if(SOMA_ENABLE_MPI)

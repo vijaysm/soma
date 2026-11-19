@@ -98,7 +98,7 @@ on $10^4$ intervals, with $h_0$ set so that the mean depth is 10 km.
 | `--days D` | 1 | run length; the last step is shortened to land on it |
 | `--alpha A` | 0 | case 2's rotation angle (radians) |
 | `--cfl C`, `--dt S`, `--nu NU` | 0.4, from the limits, as above | time step and viscosity |
-| `--report-every HOURS` | the run length | report interval (each report lands exactly on its time) |
+| `--report-every HOURS` | the run length | report interval; a report lands on the last whole step at or before its time (the last on the end), so reports leave the run's bits alone |
 | `--vtk STEM` | | at the end, `STEM.<rank>.vtk`: each owned element as $p \times p$ quads with point fields `h`, `hs`, `u` |
 | `--soma FILE` | | at the end, the mesh in SOMA's format with fields `h`, `hs`, `u` on the GLL space |
 | `--latlon NLAT,NLON,STEM` | | at the end, `STEM_h.npy`, `STEM_vorticity.npy`, `STEM_lat.npy` and `STEM_lon.npy`: depth and vorticity at latitudes from -90 to 90 inclusive and longitudes from 0 every 360/NLON degrees |
@@ -171,9 +171,9 @@ hour on 4 ranks of 2 threads.
 
 Every sum that crosses elements or ranks is partition-independent: DSS, integrals (exact sums) and
 the digest's gather. Every other operation is local to a point. A run therefore has the same bits
-on any number of ranks and threads. The tests check this from 1 to 8 ranks (`SweModel.*`, the
-`swe_atm.case2.digests` driver run at 1, 2 and 4 ranks) and at 1, 3 and 4 threads
-(`test_swe_model.threads`).
+on any number of ranks and threads, and with any report interval. The tests check this from 1 to
+8 ranks (`SweModel.*`, the `swe_atm.case2.digests` driver run at 1, 2 and 4 ranks), at 1, 3 and 4
+threads (`test_swe_model.threads`) and at three report intervals (`swe_atm.case5.report_interval`).
 
 ## References
 

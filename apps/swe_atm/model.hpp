@@ -51,6 +51,12 @@ class SweModel {
   // at step N, t = T s"); the state is then that step's.
   void advance(const soma::Comm& comm, double t_end);
 
+  // Collective: whole steps toward t (s), stopping at the last one not past t,
+  // for a report on the way to t_end >= t. A step that advance(t_end) would
+  // shorten or stretch to land on t_end is left to it, so stopping here leaves
+  // the bits of the run unchanged. Throws as advance does.
+  void advance_whole_steps(const soma::Comm& comm, double t, double t_end);
+
   double time() const noexcept;
   double dt() const noexcept;
   double nu() const noexcept;
@@ -69,6 +75,10 @@ class SweModel {
   std::uint64_t digest(const soma::Comm& comm) const;
 
  private:
+  // One step of `length` s, after which the time is `time_after`; the
+  // collective blow-up check.
+  void take_step(const soma::Comm& comm, double length, double time_after);
+
   struct State;
   std::unique_ptr<State> s_;
 };

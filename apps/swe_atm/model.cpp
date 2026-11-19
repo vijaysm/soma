@@ -253,22 +253,41 @@ SweModel::SweModel(const soma::Comm& comm, const ModelOptions& options) {
 
 SweModel::~SweModel() = default;
 
+namespace {
+
+// The step from `time` that lands on t_end: shortened, or a hair longer rather
+// than leaving a sliver of a step.
+bool lands(double time, double t_end, double dt) { return t_end - time <= dt * (1 + 1e-9); }
+
+}  // namespace
+
+void SweModel::take_step(const soma::Comm& comm, double length, double time_after) {
+  State& s = *s_;
+  s.step(comm, length);
+  s.time = time_after;
+  ++s.steps;
+  const int sick = s.healthy() ? 0 : 1;
+  if (comm.allreduce(sick, soma::Op::max) != 0) {
+    std::ostringstream message;
+    message << "swe: blew up at step " << s.steps << ", t = " << s.time << " s";
+    throw std::runtime_error(message.str());
+  }
+}
+
 void SweModel::advance(const soma::Comm& comm, double t_end) {
   State& s = *s_;
   while (s.time < t_end) {
-    // The last step lands on t_end, shortened (or a hair longer, rather than
-    // leaving a sliver of a step).
-    const bool last = t_end - s.time <= s.dt * (1 + 1e-9);
-    s.step(comm, last ? t_end - s.time : s.dt);
-    s.time = last ? t_end : s.time + s.dt;
-    ++s.steps;
-    const int sick = s.healthy() ? 0 : 1;
-    if (comm.allreduce(sick, soma::Op::max) != 0) {
-      std::ostringstream message;
-      message << "swe: blew up at step " << s.steps << ", t = " << s.time << " s";
-      throw std::runtime_error(message.str());
+    if (lands(s.time, t_end, s.dt)) {
+      take_step(comm, t_end - s.time, t_end);
+    } else {
+      take_step(comm, s.dt, s.time + s.dt);
     }
   }
+}
+
+void SweModel::advance_whole_steps(const soma::Comm& comm, double t, double t_end) {
+  State& s = *s_;
+  while (t - s.time >= s.dt && !lands(s.time, t_end, s.dt)) take_step(comm, s.dt, s.time + s.dt);
 }
 
 double SweModel::time() const noexcept { return s_->time; }
