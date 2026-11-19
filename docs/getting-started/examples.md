@@ -143,13 +143,14 @@ Builds a regionally refined mesh of the sphere: the cubed sphere `ne N` (default
 mesh on a sphere read from `FILE` (a mesh refined before, say), refined with
 `soma::refine_quads` until the grid spacing in the lat/lon boxes is about `K` km (default 12),
 then smoothed by `S` sweeps (default 20) of each `soma::laplacian_smooth` method. The default
-box is the contiguous United States; repeat `--box` for several regions. It prints the passes,
+box is the contiguous United States; repeat `--box` for several regions. Spacing is measured as
+on the Earth, so a mesh on the unit sphere refines as the Earth-sized one does. It prints the passes,
 the cell counts, the spacing in and out of the boxes and a table of cell quality, and writes
 three meshes with quality fields. See
 [the example in refinement](../algorithms/refinement.md#example-regionally-refined-meshes-of-the-sphere).
 
 ```text
-./regional_refine: passes 2; cells 5400 -> 28096; radius 6.37122e+06 m
+./regional_refine: passes 2; cells 5400 -> 28096; radius 6.37122e+06
 spacing in the boxes: min 10.40 km, mean 11.04 km over 13671 cells; outside: 10.56 to 111.11 km
 mesh        min angle      mean < 45 deg   aspect  jacobian     area
 refined         30.56     79.69      580    3.589     0.506    4.590  conus_refined.vtk
@@ -236,7 +237,10 @@ expected results below hold on one and two ranks alike:
 | `example_refine_conforming`, `.np2` | `refine --levels 2 --marked 0.4 --conforming 64bricks_1khex.h5m conforming.vtk` | `cells 1728 -> 39998, vertices 2197 -> 29419, 0 hanging` |
 | `example_regional_refine`, `.np2` | `regional_refine --ne 4 --km 300 --smooth 3 --save regional.soma regional` (no `--save` at two ranks) | `passes 1; cells 96 -> 556` |
 | `example_regional_refine_again` | `regional_refine --mesh regional.soma --km 300 --smooth 0 regional_again` | `passes 0; cells 556 -> 556` |
-| `example_regional_refine_antimeridian` | `regional_refine --ne 4 --km 300 --smooth 3 --box -20,20,170,-170 regional_dateline` | `passes 1` |
+| `example_regional_refine_antimeridian` | `regional_refine --ne 4 --km 300 --smooth 3 --box -20,20,170,-170 regional_dateline` | `passes 1; cells 96 -> 576` |
+| `example_regional_refine_arctic` | `regional_refine --ne 4 --km 300 --smooth 0 --box 60,90,-180,180 regional_arctic` | `passes 1; cells 96 -> 448` |
+| `example_regional_refine_everywhere` | `regional_refine --ne 4 --km 300 --smooth 0 --box -90,90,-180,180 regional_all` | `passes 1; cells 96 -> 864` and `outside: none` |
+| `example_regional_refine_unit_sphere` | `regional_refine --ne 4 --radius 1 --km 300 --smooth 0 regional_unit` | `passes 1; cells 96 -> 556; radius 1 (spacing as on the Earth)` |
 
 Each `refine` test also requires the linear field error to print as `d.de-14` to `d.de-19`, or
 `0.0e+00`: below $10^{-13}$.

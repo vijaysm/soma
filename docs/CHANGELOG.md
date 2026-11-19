@@ -713,8 +713,9 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   regionally refined meshes are read after `mbconvert` to `.h5m`.
 - `examples/regional_refine.cpp` builds regionally refined meshes of the sphere (E3SM's RRM):
   the cubed sphere or a quad mesh read from a file, refined with `refine_quads` inside lat/lon
-  boxes (default the contiguous United States; several boxes, across the antimeridian too) to a
-  grid spacing in km at a GLL order, then smoothed by both methods and written with per-cell
+  boxes (default the contiguous United States; several boxes, across the antimeridian or round
+  every longitude too) to a grid spacing in km at a GLL order, measured as on the Earth whatever
+  the mesh's radius, then smoothed by both methods and written with per-cell
   quality fields and a quality table. `--save` and `--mesh` reuse a refined mesh.
 - `soma::mark_fraction(comm, indicator, fraction)` marks the cells of largest indicator that
   hold the fraction of its total (Doerfler marking), and `soma::mark_threshold` those above a

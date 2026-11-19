@@ -44,6 +44,7 @@ struct Options {
   std::optional<Real> radius;
   Real km = 12, buffer = 2;
   std::vector<Box> boxes;
+  Real earth_scale = 1;  ///< kEarthRadius over the mesh's radius: lengths as on the Earth
 };
 
 inline Box parse_box(const std::string& s) {
@@ -96,6 +97,10 @@ inline P3 centroid(const std::vector<P3>& p) {
   return g;
 }
 
+// The Earth's radius (m): spacing is measured in km as on a sphere of this
+// radius, whatever the mesh's (a mesh on the unit sphere, say).
+inline constexpr Real kEarthRadius = 6.37122e6;
+
 // Whether lon lies in [a, b] going east from a (degrees, any turn).
 inline bool lon_in(Real lon, Real a, Real b) {
   const auto wrap = [](Real t) { return t - 360 * std::floor(t / 360); };
@@ -108,7 +113,9 @@ inline bool in_box(const Box& b, Real lat, Real lon, Real w) {
   const Real wl = w / kDegree;
   if (lat < b.lat0 - wl || lat > b.lat1 + wl) return false;
   const Real wlon = wl / std::max(std::cos(lat * kDegree), 0.05);
-  const Real span = b.lon1 - b.lon0 - 360 * std::floor((b.lon1 - b.lon0) / 360);
+  // A box 360 degrees wide or more (-180,180 say) holds every longitude.
+  const Real raw = b.lon1 - b.lon0;
+  const Real span = raw >= 360 ? 360 : raw - 360 * std::floor(raw / 360);
   if (span + 2 * wlon >= 360) return true;
   return lon_in(lon, b.lon0 - wlon, b.lon1 + wlon);
 }
@@ -130,7 +137,7 @@ inline Where where(const soma::HostMesh& m, const Options& o, Real widen) {
     const Real lon = std::atan2(g[1], g[0]) / kDegree;
     bool in = false;
     for (const Box& b : o.boxes) in = in || in_box(b, lat, lon, widen * size / norm(g));
-    w.spacing.push_back(size / (o.np - 1) / 1000);
+    w.spacing.push_back(size * o.earth_scale / (o.np - 1) / 1000);
     w.inside.push_back(in ? 1 : 0);
   }
   return w;
@@ -186,7 +193,7 @@ inline Row assess(const soma::Comm& comm, soma::HostMesh& m, const Options& o) {
         worst = std::max({worst, areas[c] / areas[ei], areas[ei] / areas[c]});
       }
     }
-    spacing(ei, 0) = std::sqrt(areas[ei]) / (o.np - 1) / 1000;
+    spacing(ei, 0) = std::sqrt(areas[ei]) * o.earth_scale / (o.np - 1) / 1000;
     angle(ei, 0) = least / kDegree;
     aspect(ei, 0) = longest / shortest;
     jacobian(ei, 0) = sine;

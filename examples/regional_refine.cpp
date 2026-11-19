@@ -11,9 +11,12 @@
 // refines it with soma::refine_quads, all-quad and conforming, until the grid
 // spacing inside the boxes is about K km (default 12). The spacing of a cell
 // is the spacing of its GLL points at P points per edge (default 4):
-// sqrt(area) / (P - 1), so ne30 is about 102 km. Boxes are in degrees,
+// sqrt(area) / (P - 1), so ne30 is about 102 km; lengths are measured as on
+// the Earth (scaled by 6.37122e6 m over the mesh's radius), so a mesh on the
+// unit sphere refines as the Earth-sized one does. Boxes are in degrees,
 // LON0 > LON1 wrapping across the antimeridian; repeat --box for several
-// regions (default: the contiguous United States, 24,50,-125,-66).
+// regions (default: the contiguous United States, 24,50,-125,-66); a box
+// 360 degrees wide or more (60,90,-180,180, say) holds every longitude.
 //
 // Each pass marks the cells whose spacing is above 1.5 K and whose centroid
 // lies in a box widened by B (default 2) times the cell's size, refines them
@@ -162,6 +165,8 @@ int main(int argc, char** argv) {
     }
     const Real start_cells = comm.allreduce(static_cast<Real>(mesh.segment_table(2).owned_end), soma::Op::sum);
 
+    // An Earth-sized mesh read back (its radius inferred to rounding) keeps lengths as they are.
+    o.earth_scale = std::abs(radius / kEarthRadius - 1) < 1e-9 ? 1 : kEarthRadius / radius;
     const Passes made = refine_regions(comm, mesh, o, radius);
     const int passes = made.passes;
     const Real marked = made.marked;
@@ -186,10 +191,22 @@ int main(int argc, char** argv) {
     comm.allreduce(std::span<Real>(sums), soma::Op::sum);
     const Real cells = comm.allreduce(static_cast<Real>(mesh.segment_table(2).owned_end), soma::Op::sum);
     if (comm.rank() == 0) {
-      std::printf("%s: passes %d; cells %.0f -> %.0f; radius %.6g m\n", argv[0], passes, start_cells, cells, radius);
+      std::printf("%s: passes %d; cells %.0f -> %.0f; radius %.6g%s\n", argv[0], passes, start_cells, cells, radius,
+                  o.earth_scale == 1 ? "" : " (spacing as on the Earth)");
       if (marked > 0) std::printf("warning: stopped after %d passes with %.0f cells still marked\n", passes, marked);
-      std::printf("spacing in the boxes: min %.2f km, mean %.2f km over %.0f cells; outside: %.2f to %.2f km\n",
-                  in[0], sums[1] > 0 ? sums[0] / sums[1] : 0.0, sums[1], out[0], out[1]);
+      // Cells counted in and out of the boxes: none on one side prints "none".
+      const Real outside = cells - sums[1];
+      if (sums[1] > 0) {
+        std::printf("spacing in the boxes: min %.2f km, mean %.2f km over %.0f cells; ", in[0], sums[0] / sums[1],
+                    sums[1]);
+      } else {
+        std::printf("spacing in the boxes: none; ");
+      }
+      if (outside > 0) {
+        std::printf("outside: %.2f to %.2f km\n", out[0], out[1]);
+      } else {
+        std::printf("outside: none\n");
+      }
       std::printf("%-11s %9s %9s %8s %8s %9s %8s\n", "mesh", "min angle", "mean", "< 45 deg", "aspect", "jacobian",
                   "area");
     }

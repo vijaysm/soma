@@ -362,10 +362,13 @@ for (;;) {
   (default 4): $\sqrt{A}/(n_p - 1)$ for a cell of area $A$. This is E3SM's convention: ne30
   (elements about 300 km across) is about 100 km. Each pass divides the spacing by 3, and a cell
   is refined while its spacing is above 1.5 times `--km`: from ne30, `--km 12` stops at about
-  11 km (two passes) and `--km 25` or `--km 33` at about 33 km (one).
+  11 km (two passes) and `--km 25` or `--km 33` at about 33 km (one). Lengths are measured as
+  on the Earth (scaled by 6.37122e6 m over the mesh's radius), so a mesh on the unit sphere, as
+  TempestRemap and MOAB grids often are, refines as the Earth-sized one does.
 - **Boxes** are `--box LAT0,LAT1,LON0,LON1` in degrees (default the contiguous United States,
-  `24,50,-125,-66`). `LON0 > LON1` wraps across the antimeridian, and `--box` may be repeated
-  for several regions refined together.
+  `24,50,-125,-66`). `LON0 > LON1` wraps across the antimeridian, a box 360 degrees wide or
+  more (`60,90,-180,180`, the Arctic) holds every longitude, and `--box` may be repeated for
+  several regions refined together.
 - **The buffer** widens each box by `--buffer` (default 2) times the size of the cell being
   tested. It grows with the cells, so each level's transition sits outside the next.
 - **Reuse:** `--save FILE` writes the result, and `--mesh FILE` starts from such a mesh (or any

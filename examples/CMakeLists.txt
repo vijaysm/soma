@@ -114,9 +114,10 @@ if(SOMA_ENABLE_TESTS)
     set_tests_properties(example_refine_conforming.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
                          PASS_REGULAR_EXPRESSION "${conformed}")
   endif()
+  # (No semicolon in a pattern: CMake would split it into several, any of which passes.)
   # A regionally refined cubed sphere: CONUS, one pass at ne4 to 300 km, on one and two ranks alike; a box
   # across the antimeridian; the saved mesh read back needs no further pass.
-  set(regional "passes 1; cells 96 -> 556; radius 6.37122e[+]06 m")
+  set(regional "passes 1. cells 96 -> 556. radius 6.37122e[+]06\n")
   add_test(NAME example_regional_refine
     COMMAND regional_refine --ne 4 --km 300 --smooth 3 --save ${CMAKE_CURRENT_BINARY_DIR}/regional.soma
             ${CMAKE_CURRENT_BINARY_DIR}/regional)
@@ -125,12 +126,26 @@ if(SOMA_ENABLE_TESTS)
   add_test(NAME example_regional_refine_again
     COMMAND regional_refine --mesh ${CMAKE_CURRENT_BINARY_DIR}/regional.soma --km 300 --smooth 0
             ${CMAKE_CURRENT_BINARY_DIR}/regional_again)
-  set_tests_properties(example_regional_refine_again PROPERTIES PASS_REGULAR_EXPRESSION "passes 0; cells 556 -> 556"
+  set_tests_properties(example_regional_refine_again PROPERTIES PASS_REGULAR_EXPRESSION "passes 0. cells 556 -> 556"
                        FIXTURES_REQUIRED regional_mesh)
   add_test(NAME example_regional_refine_antimeridian
     COMMAND regional_refine --ne 4 --km 300 --smooth 3 --box -20,20,170,-170
             ${CMAKE_CURRENT_BINARY_DIR}/regional_dateline)
-  set_tests_properties(example_regional_refine_antimeridian PROPERTIES PASS_REGULAR_EXPRESSION "passes 1")
+  set_tests_properties(example_regional_refine_antimeridian PROPERTIES PASS_REGULAR_EXPRESSION
+                       "passes 1. cells 96 -> 576")
+  # Boxes round every longitude: an Arctic cap, and the whole sphere (no cell outside).
+  add_test(NAME example_regional_refine_arctic
+    COMMAND regional_refine --ne 4 --km 300 --smooth 0 --box 60,90,-180,180 ${CMAKE_CURRENT_BINARY_DIR}/regional_arctic)
+  set_tests_properties(example_regional_refine_arctic PROPERTIES PASS_REGULAR_EXPRESSION "passes 1. cells 96 -> 448")
+  add_test(NAME example_regional_refine_everywhere
+    COMMAND regional_refine --ne 4 --km 300 --smooth 0 --box -90,90,-180,180 ${CMAKE_CURRENT_BINARY_DIR}/regional_all)
+  set_tests_properties(example_regional_refine_everywhere PROPERTIES PASS_REGULAR_EXPRESSION
+                       "passes 1. cells 96 -> 864. [^\n]*\n[^\n]*outside: none")
+  # A mesh on the unit sphere: spacing is measured as on the Earth, so it refines as the Earth-sized one does.
+  add_test(NAME example_regional_refine_unit_sphere
+    COMMAND regional_refine --ne 4 --radius 1 --km 300 --smooth 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_unit)
+  set_tests_properties(example_regional_refine_unit_sphere PROPERTIES PASS_REGULAR_EXPRESSION
+                       "passes 1. cells 96 -> 556. radius 1 [(]spacing as on the Earth[)]")
   if(SOMA_ENABLE_MPI)
     add_test(NAME example_regional_refine.np2
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
