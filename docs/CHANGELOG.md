@@ -696,6 +696,14 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   VertexMatching::coordinates` (with `MarkedOptions::tol`) does the same inside
   `refine_marked`. The recorded births stay the default: they need no coordinates, so vertices
   may move between calls, and cost about what exact matching does.
+- `soma::refine_quads(comm, mesh, marks, QuadRefineOptions)` refines a quad mesh where marked
+  and keeps it all-quad and conforming, for spectral elements: Schneiders' vertex-based
+  templates split a marked cell into 9 and its neighbours into 7 or 3 by their marked corners
+  (edges split in three), with two opposite or three marked corners promoted to four until no
+  cell changes. On a sphere (`sphere_radius`) new vertices are projected onto it; a split cell
+  or child that would turn against its cell is refused. Levels live in `refine:level`; the
+  result is the same, gid for gid and bit for bit, on any number of ranks. E3SM and SQuadGen
+  regionally refined meshes are read after `mbconvert` to `.h5m`.
 - `soma::mark_fraction(comm, indicator, fraction)` marks the cells of largest indicator that
   hold the fraction of its total (Doerfler marking), and `soma::mark_threshold` those above a
   value.

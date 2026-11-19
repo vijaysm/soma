@@ -2,8 +2,9 @@
 
 SOMA refines unstructured meshes in parallel: uniformly, splitting every cell, or where cells
 are marked, keeping a 2:1 balance and either leaving hanging vertices or closing the mesh with
-transition cells. The refined mesh is the same, gid for gid and bit for bit, on any number of
-ranks. All the functions here are in `soma/algorithms/refine.hpp`, except `rebalance`, which is
+transition cells. Quad meshes for spectral elements can also be refined where marked into
+quads alone, conforming ([all-quad conforming refinement](#all-quad-conforming-refinement)).
+The refined mesh is the same, gid for gid and bit for bit, on any number of ranks. All the functions here are in `soma/algorithms/refine.hpp`, except `rebalance`, which is
 in `soma/parallel/migrate.hpp`.
 
 ## How cells are split
@@ -247,6 +248,135 @@ reuses those vertices and lists them as hanging.
 
 It is collective and throws as `refine_marked` does and as `match_points` does for `tol`.
 
+## All-quad conforming refinement
+
+```cpp
+struct QuadRefineOptions {
+  std::optional<Real> sphere_radius;  // project new vertices onto this sphere about the origin
+};
+[[nodiscard]] RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
+                                        QuadRefineOptions options = {});
+```
+
+`refine_quads` refines a mesh of quads where cells are marked and keeps it a mesh of quads
+with no hanging vertex. This is what [spectral elements](spectral-elements.md) need: their
+elements are quads, and a hanging vertex would need constraints the continuous space does not
+have. `refine_marked` with `conforming` closes a quad mesh with triangles instead, and without
+it leaves hanging vertices. Use `refine_quads` for a regionally refined mesh of the sphere or
+of a planar domain; use `refine_marked` for everything else.
+
+A marked cell is split into nine (each edge in three), and its neighbours into transition
+quads (Schneiders' vertex-based templates). Each call splits once; there is no 2:1 balance
+across calls. The output is order 1: a later SemSpace maps its elements bilinearly, projected
+onto the sphere.
+
+### Templates
+
+Marks move from cells to their corners: a marked cell marks its four. Each cell then splits by
+which of its corners are marked. With reference corners $v_0 = (0,0)$, $v_1 = (1,0)$,
+$v_2 = (1,1)$ and $v_3 = (0,1)$, in the cell's corner order, the four cases are:
+
+| Marked corners | Children | New vertices (reference) | Children, in order |
+| --- | --- | --- | --- |
+| none | 1 | none | $[v_0 v_1 v_2 v_3]$ (the cell, whole) |
+| one ($v_0$) | 3 | $a\,(1/3,0)$, $c\,(0,1/3)$, $p\,(1/3,1/3)$ | $[v_0 a p c]$, $[a v_1 v_2 p]$, $[c p v_2 v_3]$ |
+| two adjacent ($v_0$, $v_1$) | 7 | $a\,(1/3,0)$, $b\,(2/3,0)$, $d\,(1,1/3)$, $c\,(0,1/3)$, $p\,(1/3,1/3)$, $q\,(2/3,1/3)$, $r\,(1/3,2/3)$, $s\,(2/3,2/3)$ | $[v_0 a p c]$, $[a b q p]$, $[b v_1 d q]$, $[c p r v_3]$, $[p q s r]$, $[q d v_2 s]$, $[r s v_2 v_3]$ |
+| all four | 9 | the $3 \times 3$ grid $(i/3, j/3)$ | row by row from $v_0$ |
+
+The other marked corners are these cases turned about the cell. A cell with two opposite
+corners or three corners marked has no template: it is **promoted**, all four of its corners
+marked. That can change its neighbours' cases, so promotion repeats until no cell on any rank
+changes. Marks only grow, and a promoted cell's marks stay promoted as more are added, so the
+result does not depend on the order cells are visited in, or on the ranks.
+
+An edge's new vertices depend on its two ends alone: both marked, vertices at 1/3 and 2/3;
+one marked, a vertex at 1/3 from it; none, none. The two cells on an edge therefore split it
+alike, and the result is conforming.
+
+### Positions, gids and levels
+
+- **Positions.** A vertex on an edge is $(2/3)\,lo + (1/3)\,hi$ or $(1/3)\,lo + (2/3)\,hi$,
+  with $lo$ and $hi$ the edge's ends by gid. A vertex inside a cell is the bilinear map of the
+  cell's corners at its reference position, with the weights summed in the corners' gid order.
+  Every rank holding a vertex therefore computes the same bits.
+- **Gids.** Let $V$ and $E$ be the largest vertex and edge gids on any rank (edges derived as
+  `build_distributed_adjacencies` derives them), and number the cells $n = \mathrm{gid} - G + 1$,
+  with $G$ the least cell gid.
+  - The vertex on edge $e$ nearer its lower-gid end is $V + 2(e - 1) + 1$; the other is
+    $V + 2(e - 1) + 2$.
+  - The new vertex nearest corner $j$ inside cell $n$ is $V + 2E + 4(n - 1) + j + 1$.
+  - Child $c$ (0-based, in the template's order) is $9(n - 1) + c + 1$. A whole cell is its
+    own child 0, so every cell is renumbered, even with no marks.
+- **Levels.** The cell field `refine:level` (0 where missing) goes up by one for the nine
+  children of a cell split fully; transition children and whole cells keep their parent's
+  level. No other state is kept, so a later call takes the result as a mesh like any other.
+- **Fields** carry over as `refine_uniform` carries them. A new vertex's value is weighted as
+  its position is, before projection, so linear fields come through exactly in the plane.
+
+### The sphere and validity
+
+With `options.sphere_radius = R`, each new vertex $x$ is projected onto the sphere,
+$x \leftarrow R\,x/|x|$; the input's vertices stay where they are.
+
+Each split cell, and each of its children (projected), must turn as the cell does at every
+corner, about the cell's area vector $\sum_i x_i \times x_{i+1}$. A bilinear quad that turns
+positively at all four corners has a positive Jacobian everywhere, so at its GLL points too.
+A cell that fails, such as a dart (one corner reflex), throws on every rank, naming the least
+such cell gid. Cells left whole are not checked.
+
+### Errors
+
+`refine_quads` is collective. It throws `std::invalid_argument` on every rank, with a message
+beginning `refine_quads:`, if:
+
+- any rank's mesh holds a cell other than a quad, is not of dimension 2, has edits or has
+  high-order nodes (Quad9);
+- a rank's marks are not one per owned cell;
+- a rank's sphere radius is not positive and finite;
+- a split cell or one of its children turns against the cell;
+- a gid of the result would not fit a `GO`.
+
+### Example: refining towards a coastline
+
+Mark by distance to a curve, refine, and refine again closer in:
+
+```cpp
+#include "soma/algorithms/refine.hpp"
+#include "soma/sem/cubed_sphere.hpp"
+
+const soma::Real R = 6.37122e6;
+soma::sem::CubedSphereSpec spec;
+spec.ne = 30;
+spec.radius = R;
+soma::HostMesh mesh = soma::sem::cubed_sphere_mesh(comm, spec);
+// distance(mesh, e): a cell's distance to the coastline, from the application's data.
+for (const soma::Real within : {500e3, 150e3}) {
+  std::vector<soma::Real> closeness;
+  for (soma::LO e = 0; e < mesh.segment_table(2).owned_end; ++e) closeness.push_back(-distance(mesh, e));
+  const auto marks = soma::mark_threshold(closeness, -within);
+  mesh = soma::refine_quads(comm, mesh, marks, {.sphere_radius = R}).mesh;
+}
+```
+
+Each pass leaves the cells it split on their parent's rank; call `soma::rebalance` between
+passes to even the ranks out. Add ghosts and edges before building a SemSpace on the result,
+as for the cubed sphere.
+
+### Regionally refined meshes from elsewhere
+
+E3SM's regionally refined meshes (RRM) and SQuadGen's are Exodus files (`.g`). Convert one
+with MOAB's `mbconvert` and read the result:
+
+```bash
+mbconvert ne30x4_rrm.g ne30x4_rrm.h5m
+```
+
+```cpp
+soma::HostMesh mesh = soma::read_h5m(comm, "ne30x4_rrm.h5m");
+```
+
+SOMA has no Exodus reader of its own.
+
 ## Marking
 
 ```cpp
@@ -254,7 +384,8 @@ It is collective and throws as `refine_marked` does and as `match_points` does f
 [[nodiscard]] std::vector<std::int8_t> mark_fraction(const Comm& comm, std::span<const Real> indicator, Real fraction);
 ```
 
-Both take an indicator per owned cell, in local id order, and return marks for `refine_marked`.
+Both take an indicator per owned cell, in local id order, and return marks for `refine_marked`
+or `refine_quads`.
 
 - `mark_threshold` marks the cells whose indicator exceeds `threshold`. It is local.
 - `mark_fraction` is Doerfler marking: it marks the cells of largest indicator whose indicators

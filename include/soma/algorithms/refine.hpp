@@ -74,6 +74,10 @@
 /// against it: plane cells are checked and refused (refine_marked: those it
 /// splits), volume cells are not.
 ///
+/// refine_quads (below) refines a quad mesh where marked and keeps it all-quad
+/// and conforming, edges split in three: for spectral elements, in the plane
+/// or on a sphere.
+///
 /// The refinement runs on the host (a HostMesh in, built with
 /// build_local_part); a device mesh is mirrored to the host and back.
 
