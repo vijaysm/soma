@@ -116,6 +116,7 @@ add_test(NAME test_fv.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_
   -P ${CMAKE_CURRENT_SOURCE_DIR}/unit/compare_threads.cmake)
 set_tests_properties(test_fv.threads PROPERTIES TIMEOUT 300)
 soma_add_test(test_laplacian SOURCES unit/test_laplacian.cpp RANKS 1 2 3 4 5 7 8)
+soma_add_test(test_quality_smooth SOURCES unit/test_quality_smooth.cpp RANKS 1 2 3 4 5 7 8)
 if(SOMA_ENABLE_HDF5)
   target_compile_definitions(test_laplacian PRIVATE SOMA_TEST_HDF5=1)
 endif()

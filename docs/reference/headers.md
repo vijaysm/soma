@@ -118,6 +118,7 @@ Files. See [input and output](../io/overview.md).
 | Header | Provides |
 | --- | --- |
 | [`soma/algorithms/laplacian.hpp`](api/algorithms/laplacian.md) | `laplacian_smooth`, `SmoothOptions`, `SmoothReport`: Laplacian smoothing of vertex coordinates. See [smoothing](../algorithms/smoothing.md) |
+| [`soma/algorithms/quality_smooth.hpp`](api/algorithms/quality_smooth.md) | `quality_smooth`, `QualitySmoothOptions`, `QualitySmoothReport`: optimization-based smoothing of surface meshes. See [smoothing](../algorithms/smoothing.md) |
 | [`soma/algorithms/fem.hpp`](api/algorithms/fem.md) | `soma::fem`: P1 and Q1 elements on single cells (`cell_of`, `stiffness`, `mass`, `load`, `Quadrature`). See [finite elements](../algorithms/fem.md) |
 | [`soma/algorithms/fem_space.hpp`](api/algorithms/fem_space.md) | `FemSpace`: linear finite elements over a mesh's vertices (`laplacian`, `load`, `boundary`, `update`). See [finite elements](../algorithms/fem.md) |
 | [`soma/algorithms/fv.hpp`](api/algorithms/fv.md) | `FvSpace`, `FvScheme`: cell-centred finite volumes, first-order upwind or bounded second order (`normal_flux`, `max_dt`, `step`). See [finite volumes](../algorithms/finite-volumes.md) |
