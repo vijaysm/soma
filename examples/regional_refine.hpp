@@ -228,6 +228,12 @@ inline Real overlap(const Polygon& p, const Box& b, Real grow_km) {
   return most;
 }
 
+// Whether the cell with corners `p` overlaps the box grown by `grow_km`: by
+// more than 1e-9 of its own area, so a cell whose side lies on the box's edge
+// (the cubed sphere's lines are meridians on its equatorial faces) is not in
+// it by a rounding sliver.
+inline bool overlaps(const std::vector<P3>& p, const Box& b, Real grow_km);
+
 // The centre longitude of a box (degrees).
 inline Real centre(const Box& b) {
   const Real raw = b.lon1 - b.lon0;
@@ -242,13 +248,19 @@ struct Where {
   std::vector<std::uint8_t> inside;
 };
 
+inline bool overlaps(const std::vector<P3>& p, const Box& b, Real grow_km) {
+  const Polygon poly = lonlat_polygon(p, centre(b));
+  const Real a = overlap(poly, b, grow_km);
+  return a > 0 && a > 1e-9 * overlap(poly, Box{-90, 90, -180, 180}, 0);
+}
+
 inline Where where(const soma::HostMesh& m, const Options& o, Real widen) {
   Where w;
   for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
     const auto p = corners(m, e);
     const Real size = km(std::sqrt(area(p)));
     bool in = false;
-    for (const Box& b : o.boxes) in = in || overlap(lonlat_polygon(p, centre(b)), b, widen * size) > 0;
+    for (const Box& b : o.boxes) in = in || overlaps(p, b, widen * size);
     w.spacing.push_back(size / (o.np - 1));
     w.inside.push_back(in ? 1 : 0);
   }
@@ -371,7 +383,7 @@ inline Passes refine_regions(const soma::Comm& comm, soma::HostMesh& mesh, const
         for (std::size_t j = static_cast<std::size_t>(level[static_cast<std::size_t>(e)]) + 1; j < widen.size(); ++j) {
           grow += widen[j];
         }
-        for (const Box& b : o.boxes) in = in || overlap(lonlat_polygon(pts, centre(b)), b, grow) > 0;
+        for (const Box& b : o.boxes) in = in || overlaps(pts, b, grow);
       }
       marks.push_back(in ? 1 : 0);
     }

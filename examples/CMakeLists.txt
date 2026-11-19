@@ -156,6 +156,14 @@ if(SOMA_ENABLE_TESTS)
     COMMAND regional_refine --ne 4 --km 100 --smooth 0 --grow 0 --reruns 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_capped)
   set_tests_properties(example_regional_refine_bands_capped PROPERTIES PASS_REGULAR_EXPRESSION
                        "bands: 1\nreruns: 0\nwarning: bands under 3 cells after 0 reruns\n")
+  # CONUS: its edges (-125 and -66) lie on grid meridians of the cubed sphere, so cells touch them; the input
+  # radius must not decide which (rounding slivers are no overlap).
+  foreach(r 6.37122e6 1)
+    add_test(NAME example_regional_refine_conus_r${r}
+      COMMAND regional_refine --radius ${r} --smooth 0 --optimize 0,0,0 ${CMAKE_CURRENT_BINARY_DIR}/regional_conus_${r})
+    set_tests_properties(example_regional_refine_conus_r${r} PROPERTIES PASS_REGULAR_EXPRESSION
+                         "passes 2. cells 5400 -> 24436. ")
+  endforeach()
   # A box reaching the pole marks the cells round it: one holding the pole (ne5), four meeting at it (ne4).
   add_test(NAME example_regional_refine_pole_cell
     COMMAND regional_refine --ne 5 --km 300 --smooth 0 --box 85,90,-180,180
