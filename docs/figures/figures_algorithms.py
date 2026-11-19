@@ -134,12 +134,12 @@ def regional_levels(data, path):
 @figure("regional-quality", ["regional"], "png")
 def regional_quality(data, path):
     pv, view = pv_view()
-    left = pv.LegacyVTKReader(FileNames=[str(data / "regional" / "refined.vtk")])
-    right = pv.LegacyVTKReader(FileNames=[str(data / "regional" / "centroids.vtk")])
-    # Each panel a map 900 km across about a transition, the second moved 1150 km to the right.
+    sources = [pv.LegacyVTKReader(FileNames=[str(data / "regional" / f"{n}.vtk")])
+               for n in ("refined", "centroids", "optimized")]
+    # Each panel a map 900 km across about a transition, each moved 1150 km right of the one before.
     half, shift = 4.5e5, 1.15e6
     centre = REGIONAL_ZOOM
-    for k, source in enumerate((left, right)):
+    for k, source in enumerate(sources):
         # The cells about the centre (whole cells, near side only), then moved into their panel.
         window = pv.ExtractCellsByRegion(Input=source)
         window.IntersectWith = "Box"
@@ -155,18 +155,20 @@ def regional_quality(data, path):
     lut.RescaleTransferFunction(30.0, 90.0)
     lut.AutomaticRescaleRangeMode = "Never"
     labels(pv, view, "min_angle", [30, 45, 60, 75, 90], "{:.0f}")
-    pv_label(pv, view, "refined", [0.07, 0.86])
-    pv_label(pv, view, "20 sweeps of centroids", [0.45, 0.86])
-    # Whole cells reach past each panel's 900 km: 100 km of margin, and the colour bar's sixth on the right.
-    margin = 1.0e5
-    width = (2 * half + shift + 2 * margin) / (5 / 6)
-    focal = [-half - margin + width / 2, 0.0, REGIONAL_RADIUS]
+    pv_label(pv, view, "refined", [0.05, 0.80])
+    pv_label(pv, view, "centroids", [0.32, 0.80])
+    pv_label(pv, view, "optimized", [0.59, 0.80])
+    # Whole cells reach past each panel's 900 km (the 300 km ones most, on the left): 250 km of margin there, 100
+    # km on the right, and the colour bar's sixth.
+    left_margin, margin = 2.5e5, 1.0e5
+    width = (2 * half + 2 * shift + left_margin + margin) / (5 / 6)
+    focal = [-half - left_margin + width / 2, 0.0, REGIONAL_RADIUS]
     save_png(pv, view, path, {"position": [focal[0], 0.0, 2.0e7], "focal": focal, **TOP,
                               "parallel_scale": width / 1.4 / 2})
 
 
 # The close-up's centre in set_regional's turned frame (m): south-west of the box, where the 33 km cells (level 2)
-# meet the 100 km band (level 1, one cell wide there) and the 300 km cells.
+# meet the band of 100 km cells (level 1) and the 300 km cells.
 REGIONAL_ZOOM = (-3.08e6, -1.0e6)
 
 
