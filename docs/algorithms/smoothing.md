@@ -95,7 +95,7 @@ Neither method raises the single least angle of a refined mesh, and both can low
 two-region run of the [regional refinement example](refinement.md#example-regionally-refined-meshes-of-the-sphere)
 (31.7 degrees to 26.1 with `neighbours`, 25.1 with `centroids`). The worst cells are transition
 cells, whose corners their templates set; smoothing improves the many cells around them, not
-those.
+those. [Optimization](#optimization) does.
 
 ## On a sphere
 
@@ -103,6 +103,64 @@ A closed surface has no skin, so every vertex moves, and the mean of points on a
 inside it: without projection each sweep shrinks a sphere. With `sphere_radius = R`, every
 moved vertex is set to $R\,x/|x|$ after each sweep. The vertices that do not move stay where
 they are.
+
+## Optimization
+
+`quality_smooth` (`soma/algorithms/quality_smooth.hpp`, host meshes of triangles and quads)
+moves each free vertex to improve the cells around it rather than to an average:
+
+```cpp
+soma::QualitySmoothOptions o;
+o.sphere_radius = 6.37122e6;  // move on the sphere
+const soma::QualitySmoothReport r = soma::quality_smooth(comm, mesh, o);
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `shape_sweeps` | 10 | Sweeps lowering the sum of the cells' corner condition numbers. |
+| `angle_sweeps` | 5 | Sweeps raising the least corner angle of the cells below `angle_threshold`. |
+| `polish_sweeps` | 10 | Shape sweeps again, kept above the least angle the angle sweeps reached. |
+| `angle_threshold` | 60 | Degrees in (0, 90]. |
+| `tolerance` | 0 | > 0: a phase ends once no vertex moves farther than this times its shortest edge. |
+| `fixed` | empty | As for `laplacian_smooth`: the skin stays when empty. |
+| `sphere_radius` | none | Move in the sphere's tangent plane and project back onto it. |
+
+- **Shape:** each corner's condition number $\kappa = |A|_F^2 / (2 \det A)$, $A$ its two edges
+  (in the vertex's tangent plane) against the ideal corner, a square's or an equilateral
+  triangle's (Knupp). $\kappa$ is 1 for the ideal corner, does not depend on the cell's size,
+  and grows without bound as the corner degenerates; steps that make any $\det A \le 0$ are
+  refused.
+- **Angle:** the steepest ascent of the least angle over the active angles (Freitag and
+  Plassmann). Angles alone bound neither a quad's aspect nor its largest angle (a step can make
+  a long thin rectangle, or a corner near 180 degrees), so a step must also leave no corner of
+  the patch with a condition number above the patch's worst.
+- **Never worse:** every step is a line search kept only if its objective improves, and the
+  least angle of the mesh never falls during a phase.
+- **Order:** vertices are coloured so that no two of one colour share a cell (Jones and
+  Plassmann, priorities hashed from gids); a sweep moves one colour at a time with a halo update
+  after each, and sums each patch in cell-gid order. The result is the same bit for bit on any
+  number of ranks and threads.
+
+On `refine_quads`' cubed sphere (ne 4, refined about a face's middle), against 20 sweeps of
+`centroids`:
+
+| | `centroids` | `quality_smooth` |
+| --- | --- | --- |
+| least angle | 33.1° | 40.1° |
+| mean of each cell's least angle | 79.1° | 79.4° |
+| worst ratio of longest to shortest edge | 5.1 | 3.3 |
+| change in the refined cells' mean spacing | +2.0% | +1.6% |
+
+On ne30 refined to 12 km over the United States (the
+[example](refinement.md#example-regionally-refined-meshes-of-the-sphere)), from the centroid
+result, the least angle goes from 30.1 to 43.3 degrees and the worst edge ratio from 4.8 to 3.2,
+at about 15 s on one core for 24436 cells. Its condition number does not see sizes, so the
+largest area ratio between neighbours grows (5.6 to 7.2 there).
+
+It throws `std::invalid_argument` on every rank, as `laplacian_smooth` does, for a mesh not of
+dimension 2, a cell neither a triangle nor a quad, an inverted corner, an edited mesh, a missing
+ghost layer on more than one rank, negative sweeps, a threshold outside (0, 90], a bad tolerance,
+mask or radius, or ranks differing in their options.
 
 ## Usage
 

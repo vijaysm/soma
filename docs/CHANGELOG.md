@@ -716,7 +716,20 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   boxes (default the contiguous United States; several boxes, across the antimeridian or round
   every longitude too) to a grid spacing in km at a GLL order, measured as on the Earth whatever
   the mesh's radius, then smoothed by both methods and written with per-cell
-  quality fields and a quality table. `--save` and `--mesh` reuse a refined mesh.
+  quality fields and a quality table. `--save` and `--mesh` reuse a refined mesh. It works on
+  the unit sphere, marks the cells that overlap a box (clipped in longitude and latitude; cells
+  round a pole span every longitude), grades the refinement into bands of at least
+  `--transition` cells per level (measured, and rerun wider where promotion thinned one) and
+  writes the mesh `quality_smooth` makes from the centroid result.
+- `soma::quality_smooth(comm, mesh, options)` (`soma/algorithms/quality_smooth.hpp`) moves each
+  free vertex of a surface mesh of triangles and quads to lower its cells' corner condition
+  numbers (Knupp), then to raise the least corner angle of the cells below a threshold (Freitag
+  and Plassmann, no corner left worse than the patch's worst), then polishes shapes above the
+  angle reached; the least angle never falls. Vertices move in their tangent plane (on a
+  sphere, projected back) one colour at a time, colours from gid-hashed independent sets, so the
+  result is the same bit for bit on any number of ranks. On ne30 refined to 12 km over the
+  United States it raises the least angle from 30.1 to 43.3 degrees (centroid smoothing: 30.5 to
+  30.1) and the worst edge ratio from 4.8 to 3.2.
 - `soma::mark_fraction(comm, indicator, fraction)` marks the cells of largest indicator that
   hold the fraction of its total (Doerfler marking), and `soma::mark_threshold` those above a
   value.
