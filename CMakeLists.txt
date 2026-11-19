@@ -124,7 +124,7 @@ set(SOMA_SOURCES src/runtime/scope_guard.cpp src/runtime/options.cpp src/core/se
                  src/algorithms/smoothing_graph.cpp src/algorithms/vertex_graph.cpp
                  src/algorithms/fem_space.cpp src/algorithms/fv_space.cpp src/sem/gll.cpp src/sem/cubed_sphere.cpp src/sem/sem_space.cpp
                  src/algorithms/remap.cpp src/algorithms/refine.cpp
-                 src/algorithms/refine_marked.cpp)
+                 src/algorithms/refine_marked.cpp src/algorithms/refine_quads.cpp)
 if(SOMA_ENABLE_MPI)
   list(APPEND SOMA_SOURCES src/parallel/comm_mpi.cpp)
 else()

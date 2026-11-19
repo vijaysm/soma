@@ -163,7 +163,7 @@ const Pattern& pattern(Topology t) {
 
 // Carries a dense field of dimension d from `in` to `out`: a cell's children
 // take its value; a vertex keeps its value, a new one takes its corners'
-// average.
+// weighted sum (or average).
 template <class T>
 void carry(const HostMesh& in, HostMesh& out, const FieldInfo& info, int d, const std::vector<LO>& parent,
            const std::vector<std::pair<GO, LO>>& in_vertex, const std::vector<NewVertex>& added) {
@@ -197,10 +197,11 @@ void carry(const HostMesh& in, HostMesh& out, const FieldInfo& info, int d, cons
     }
     for (std::size_t k = 0; k < ncomp; ++k) {
       Real s = 0;
-      for (const GO cg : it->corners) {
-        s += static_cast<Real>(from(static_cast<std::size_t>(find_lid(in_vertex, cg)), k));
+      for (std::size_t j = 0; j < it->corners.size(); ++j) {
+        const auto value = static_cast<Real>(from(static_cast<std::size_t>(find_lid(in_vertex, it->corners[j])), k));
+        s += it->weights.empty() ? value : it->weights[j] * value;
       }
-      to(vi, k) = static_cast<T>(s / static_cast<Real>(it->corners.size()));
+      to(vi, k) = static_cast<T>(it->weights.empty() ? s / static_cast<Real>(it->corners.size()) : s);
     }
   }
 }
@@ -263,11 +264,12 @@ HostMesh work_part(const Comm& comm, const HostMesh& mesh, std::span<const GO> e
 
 
 // The refined part from the children (by pattern slot: tri, quad, tet,
-// prism, pyramid, hex) and the vertices added; parents and fields from
-// `mesh`, whose owned cells `work` holds.
+// prism, pyramid, hex) and the vertices added (projected onto a sphere when
+// a radius is given); parents and fields from `mesh`, whose owned cells
+// `work` holds.
 Level assemble(const Comm& comm, const HostMesh& mesh, const HostMesh& work, std::array<std::vector<GO>, 6>& kid_gids,
                std::array<std::vector<GO>, 6>& kid_conn, std::vector<NewVertex>& added, const Numbers& nums,
-               const Polygons& polygons) {
+               const Polygons& polygons, std::optional<Real> sphere_radius) {
   const int dim = mesh.dim();
   const LO owned = mesh.segment_table(dim).owned_end;
   const auto wv = work.gid(0);
@@ -298,12 +300,13 @@ Level assemble(const Comm& comm, const HostMesh& mesh, const HostMesh& work, std
       const auto held = std::lower_bound(work_vertex.begin(), work_vertex.end(),
                                          std::pair<GO, LO>{nv.gid, std::numeric_limits<LO>::min()});
       if ((held != work_vertex.end() && held->first == nv.gid) || !in_use(nv.gid)) continue;
-      std::vector<P3> p;
-      for (const GO g : nv.corners) {
-        const LO v = find_lid(work_vertex, g);
-        p.push_back({wx(v, 0), wx(v, 1), wx(v, 2)});
-      }
-      const P3 c = average(p);
+      const P3 c = place(
+          nv,
+          [&](GO g) {
+            const LO v = find_lid(work_vertex, g);
+            return P3{wx(v, 0), wx(v, 1), wx(v, 2)};
+          },
+          sphere_radius);
       gids.push_back(nv.gid);
       xyz.insert(xyz.end(), {c.x, c.y, c.z});
     }
@@ -364,7 +367,7 @@ void split_cell(const HostMesh& work, LO e, GO base, const NodeGids& ids, std::a
   };
   const auto add = [&](GO gid, std::vector<LO> corners) {
     std::sort(corners.begin(), corners.end(), by_gid);
-    NewVertex nv{gid, {}};
+    NewVertex nv{gid, {}, {}};
     for (const LO v : corners) nv.corners.push_back(wv(v));
     added.push_back(std::move(nv));
   };

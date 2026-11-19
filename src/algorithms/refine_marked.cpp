@@ -611,7 +611,7 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
   };
   const auto reuse = [&](std::span<const GO> corners) -> std::optional<GO> {
     const auto gid = find(corners);
-    if (gid) added.push_back({*gid, by_gid({corners.begin(), corners.end()})});
+    if (gid) added.push_back({*gid, by_gid({corners.begin(), corners.end()}), {}});
     return gid;
   };
   std::vector<std::vector<Planned>> plan(static_cast<std::size_t>(cells));
@@ -751,14 +751,14 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
         if (g >= 0) return g;
         if (g == cell_centre) {
           const GO gid = centre_base + nums.number(wc(e));
-          added.push_back({gid, by_gid(corners)});
+          added.push_back({gid, by_gid(corners), {}});
           return gid;
         }
         if (g == edge_midpoint) {
           const topology::Side side = topology::side_of(w, dim, e, 1, bisected[ei]);
           const GO ends[2] = {wv(side.v[0]), wv(side.v[1])};
           const GO gid = nums.vmax + we(edges.targets(static_cast<std::size_t>(e0 + bisected[ei])));
-          added.push_back({gid, by_gid({ends[0], ends[1]})});
+          added.push_back({gid, by_gid({ends[0], ends[1]}), {}});
           born_here.emplace_back(gid, key_of(ends));
           return gid;
         }
@@ -768,7 +768,7 @@ Pass pass(const Comm& comm, const HostMesh& mesh, Mode mode, std::span<const std
         std::vector<GO> c;
         for (int i = 0; i < side.n; ++i) c.push_back(wv(side.v[i]));
         const GO gid = face_base + work.gid(2)(faces.targets(static_cast<std::size_t>(faces.offsets(ei) + s)));
-        added.push_back({gid, by_gid(c)});
+        added.push_back({gid, by_gid(c), {}});
         born_here.emplace_back(gid, key_of(c));
         return gid;
       };
