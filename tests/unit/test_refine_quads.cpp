@@ -7,17 +7,21 @@
 // marks keep the mesh; fields carry over; the result is the serial one on any
 // number of ranks, bit for bit; on the cubed sphere new vertices lie on the
 // sphere, cells stay valid near the cube's corners and spectral elements work
-// on the result; a cell that would turn against itself is refused.
+// on the result; a cell that would turn against itself is refused; refining
+// twice stays conforming, valid and graded, with levels counted; bad input
+// throws on every rank.
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <limits>
 #include <map>
 #include <numbers>
 #include <stdexcept>
 #include <set>
+#include <span>
 #include <string>
 #include <utility>
 #include <vector>
@@ -195,6 +199,60 @@ LO turned_wrong(const soma::HostMesh& m, bool sphere) {
   }
   return bad;
 }
+
+// A cell's area: half its area vector's length (exact for a planar quad).
+Real area(const soma::HostMesh& m, LO e) {
+  Real n[3] = {0, 0, 0};
+  for (LO i = 0; i < 4; ++i) {
+    const auto a = point(m, m.view().vertex(2, e, i)), b = point(m, m.view().vertex(2, e, (i + 1) % 4));
+    n[0] += a[1] * b[2] - a[2] * b[1];
+    n[1] += a[2] * b[0] - a[0] * b[2];
+    n[2] += a[0] * b[1] - a[1] * b[0];
+  }
+  return std::sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]) / 2;
+}
+
+// The largest ratio of the areas of two cells sharing an edge, serially.
+Real worst_grading(const Comm& self, soma::HostMesh& m) {
+  soma::build_distributed_adjacencies(self, m, soma::AdjacencyRequest{}.add(1, 2));
+  const auto up = m.adjacency(1, 2);
+  Real worst = 1;
+  for (LO f = 0; f < m.count(1); ++f) {
+    const auto k = up.offsets(static_cast<std::size_t>(f));
+    if (up.offsets(static_cast<std::size_t>(f) + 1) - k != 2) continue;
+    const Real a = area(m, up.targets(k)), b = area(m, up.targets(k + 1));
+    worst = std::max(worst, std::max(a, b) / std::min(a, b));
+  }
+  return worst;
+}
+
+// The cells of `m` whose corners' average lies within r of the point o.
+std::set<GO> within(const soma::HostMesh& m, std::array<Real, 3> o, Real r) {
+  std::set<GO> out;
+  for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
+    const auto c = centre(m, e);
+    if (std::hypot(c[0] - o[0], c[1] - o[1], c[2] - o[2]) < r) out.insert(m.gid(2)(e));
+  }
+  return out;
+}
+
+// The cells of a refined mesh that are transition cells: children of a parent
+// split into 3 or 7.
+std::set<GO> transition_cells(const soma::RefineResult& r) {
+  std::set<GO> out;
+  for (std::size_t p = 0; p + 1 < r.child_offsets.size(); ++p) {
+    const auto n = r.child_offsets[p + 1] - r.child_offsets[p];
+    if (n != 3 && n != 7) continue;
+    for (auto k = r.child_offsets[p]; k < r.child_offsets[p + 1]; ++k) {
+      out.insert(r.mesh.gid(2)(r.children[static_cast<std::size_t>(k)]));
+    }
+  }
+  return out;
+}
+
+// One transition level is 9 in area (a cell trisected both ways); a
+// transition child is up to 4 times its template siblings.
+constexpr Real kGraded = 9 * 4;
 
 const std::array<Real, 3> kFaceMiddle{1, 0.3, 0.2};
 const std::array<Real, 3> kCubeCorner{1, 1, 1};
@@ -428,4 +486,124 @@ TEST(RefineQuads, ACellTurnedAgainstItselfIsRefused) {
   }
   const auto far = soma::refine_quads(c, mesh, marks_by_gid(mesh, {cell_gid(5, 4, 4)}));
   EXPECT_EQ(owned_count(c, far.mesh, 2), 25 - 4 + 9 + 2 * 7 + 3);
+}
+
+// Refined twice, the second time about a point off the first region's centre
+// so that its marks take transition cells too: conforming, valid, graded, and
+// levels 0 to 2 on the plane; the same on the cubed sphere.
+TEST(RefineQuads, RefiningTwiceStaysValidAndGraded) {
+  const Comm self = Comm::self();
+  {
+    SCOPED_TRACE("plane");
+    const soma::HostMesh mesh = build(self, plane(9, 9, 0), 0);
+    const auto s = skew(0.5, 0.5, 0);
+    const std::array<Real, 3> o{s[0], s[1], 0};  // the plane lies at z = 0
+    auto once = soma::refine_quads(self, mesh, marks_by_gid(mesh, within(mesh, o, 0.25)));
+    const std::array<Real, 3> o2{o[0] + 0.2, o[1], 0};
+    const std::set<GO> second = within(once.mesh, o2, 0.2);
+    const std::set<GO> transition = transition_cells(once);
+    ASSERT_TRUE(std::any_of(second.begin(), second.end(), [&](GO g) { return transition.contains(g); }));
+    auto twice = soma::refine_quads(self, once.mesh, marks_by_gid(once.mesh, second));
+    for (soma::HostMesh* m : {&once.mesh, &twice.mesh}) {
+      EXPECT_EQ(edge_census(self, *m), std::make_pair(LO{0}, LO{36}));
+      EXPECT_EQ(turned_wrong(*m, false), 0);
+      const Real worst = worst_grading(self, *m);
+      std::printf("plane: worst neighbour area ratio %.3f\n", worst);
+      EXPECT_LE(worst, kGraded);
+    }
+    std::set<std::int32_t> levels;
+    for (LO e = 0; e < twice.mesh.count(2); ++e) levels.insert(level(twice.mesh, e));
+    EXPECT_EQ(levels, (std::set<std::int32_t>{0, 1, 2}));
+  }
+  {
+    SCOPED_TRACE("sphere");
+    const soma::HostMesh mesh = build(self, sphere_cells(4), 0);
+    const soma::QuadRefineOptions on{.sphere_radius = kRadius};
+    auto once = soma::refine_quads(self, mesh, marks_by_gid(mesh, near(mesh, kFaceMiddle, 0.6)), on);
+    auto twice = soma::refine_quads(self, once.mesh, marks_by_gid(once.mesh, near(once.mesh, kFaceMiddle, 0.3)), on);
+    for (soma::HostMesh* m : {&once.mesh, &twice.mesh}) {
+      EXPECT_EQ(edge_census(self, *m), std::make_pair(LO{0}, LO{0}));
+      EXPECT_EQ(turned_wrong(*m, true), 0);
+      const Real worst = worst_grading(self, *m);
+      std::printf("sphere: worst neighbour area ratio %.3f\n", worst);
+      EXPECT_LE(worst, kGraded);
+    }
+  }
+}
+
+// A cell's level counts the full splits of its ancestors: the cell at the
+// centre of the square, marked twice, is at level 2.
+TEST(RefineQuads, LevelsCount) {
+  const Comm self = Comm::self();
+  const soma::HostMesh mesh = build(self, plane(9, 9, 0), 0);
+  const auto s = skew(0.5, 0.5, 0);
+  const std::array<Real, 3> o{s[0], s[1], 0};  // the plane lies at z = 0
+  const auto once = soma::refine_quads(self, mesh, marks_by_gid(mesh, within(mesh, o, 0.25)));
+  const auto twice = soma::refine_quads(self, once.mesh, marks_by_gid(once.mesh, within(once.mesh, o, 0.12)));
+  LO nearest = 0;
+  Real best = 1e300;
+  for (LO e = 0; e < twice.mesh.count(2); ++e) {
+    const auto c = centre(twice.mesh, e);
+    const Real d = std::hypot(c[0] - o[0], c[1] - o[1]);
+    if (d < best) {
+      best = d;
+      nearest = e;
+    }
+  }
+  EXPECT_EQ(level(twice.mesh, nearest), 2);
+  // Its grandparent, the input's centre cell (4, 4), was split fully twice.
+  const LO parent = twice.parent[static_cast<std::size_t>(nearest)];
+  EXPECT_EQ(mesh.gid(2)(once.parent[static_cast<std::size_t>(parent)]), cell_gid(9, 4, 4));
+}
+
+// Each bad input throws std::invalid_argument on every rank, whichever rank
+// holds it (the first or the last).
+TEST(RefineQuads, BadInputThrowsOnEveryRank) {
+  const Comm c = Comm::world();
+  const auto throws = [&](const soma::HostMesh& m, std::span<const std::int8_t> marks, soma::QuadRefineOptions o,
+                          const char* what) {
+    try {
+      (void)soma::refine_quads(c, m, marks, o);
+      ADD_FAILURE() << "no throw: " << what;
+    } catch (const std::invalid_argument& e) {
+      EXPECT_EQ(std::string(e.what()).rfind("refine_quads: ", 0), 0u) << e.what();
+    }
+  };
+  for (const std::size_t at : {std::size_t{0}, std::size_t{15}}) {
+    SCOPED_TRACE(testing::Message() << "bad cell " << at);
+    // Blocks of consecutive cells: cell 0 is on the first rank, cell 15 on the last.
+    Cells tri = plane(4, 4, 0);
+    tri.cells[at] = {Topology::tri, {tri.cells[at].second[0], tri.cells[at].second[1], tri.cells[at].second[2]}};
+    const soma::HostMesh t = build(c, tri, 0);
+    throws(t, marks_by_gid(t, {}), {}, "a triangle");
+    Cells poly = plane(4, 4, 0);
+    poly.cells[at].first = Topology::polygon;
+    const soma::HostMesh p = build(c, poly, 0);
+    throws(p, marks_by_gid(p, {}), {}, "a polygon");
+  }
+  throws(build(c, plane(4, 4, 1), 0), {}, {}, "triangles");
+  const soma::HostMesh hex = build(c, volume(2, 2, 2, Topology::hex), 0);
+  throws(hex, std::vector<std::int8_t>(static_cast<std::size_t>(hex.segment_table(3).owned_end), 0), {}, "hexes");
+  const soma::HostMesh mesh = build(c, plane(4, 4, 0), 0);
+  for (const int bad : {0, c.size() - 1}) {
+    std::vector<std::int8_t> marks = marks_by_gid(mesh, {});
+    if (c.rank() == bad) {
+      if (marks.empty()) marks.push_back(0);
+      else marks.pop_back();
+    }
+    throws(mesh, marks, {}, "marks not one per owned cell");
+  }
+  soma::sem::CubedSphereSpec quad9;
+  quad9.ne = 2;
+  quad9.geometry_order = 2;
+  const soma::HostMesh q9 = soma::sem::cubed_sphere_mesh(c, quad9);
+  throws(q9, marks_by_gid(q9, {}), {}, "Quad9");
+  const std::vector<std::int8_t> none = marks_by_gid(mesh, {});
+  for (const Real r : {0.0, -1.0, std::numeric_limits<Real>::infinity(), std::numeric_limits<Real>::quiet_NaN()}) {
+    throws(mesh, none, {.sphere_radius = r}, "a radius");
+    // On one rank only.
+    soma::QuadRefineOptions one;
+    if (c.rank() == c.size() - 1) one.sphere_radius = r;
+    throws(mesh, none, one, "a radius on the last rank");
+  }
 }

@@ -238,8 +238,11 @@ struct QuadRefineOptions {
 ///
 /// Collective; throws std::invalid_argument on every rank if any rank's mesh
 /// is not of quads alone (dimension 2, no edits, no high-order nodes), if a
-/// rank's marks are not one per owned cell, or if a gid of the result would
-/// not fit a GO.
+/// rank's marks are not one per owned cell, if a rank's sphere radius is not
+/// positive and finite, if a cell to be split or one of its children would
+/// not turn as the cell does at every corner (a non-convex cell, say: on a
+/// sphere, about the cell's area vector), or if a gid of the result would not
+/// fit a GO.
 [[nodiscard]] RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
                                         QuadRefineOptions options = {});
 

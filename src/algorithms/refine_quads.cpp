@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -106,13 +107,19 @@ RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<cons
   const int dim = mesh.dim();
   const LO owned = mesh.segment_table(dim).owned_end;
   {
-    // Marks not one per owned cell somewhere; a cell other than a quad somewhere.
-    std::int32_t flags[2] = {static_cast<LO>(marks.size()) == owned ? 0 : 1, dim == 2 ? 0 : 1};
+    // Somewhere: marks not one per owned cell; a cell other than a quad; a
+    // radius not positive and finite.
+    const Real radius = options.sphere_radius.value_or(1);
+    std::int32_t flags[3] = {static_cast<LO>(marks.size()) == owned ? 0 : 1, dim == 2 ? 0 : 1,
+                             std::isfinite(radius) && radius > 0 ? 0 : 1};
     const MeshView<Host> m = mesh.view();
     for (LO e = 0; e < mesh.count(dim) && flags[1] == 0; ++e) flags[1] = m.topology(dim, e) == Topology::quad ? 0 : 1;
     comm.allreduce(std::span<std::int32_t>(flags), Op::max);
     if (flags[1] != 0) throw std::invalid_argument(std::string(who) + ": a rank's mesh holds a cell other than a quad");
     if (flags[0] != 0) throw std::invalid_argument(std::string(who) + ": a rank's marks are not one per owned cell");
+    if (flags[2] != 0) {
+      throw std::invalid_argument(std::string(who) + ": a rank's sphere radius is not positive and finite");
+    }
   }
 
   const HostMesh work = detail::refine::work_part(comm, mesh);
