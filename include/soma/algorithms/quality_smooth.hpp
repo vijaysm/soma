@@ -31,8 +31,11 @@
 ///   reached. Raising the worst corners costs some good ones; these give
 ///   most of it back without losing the gain.
 ///
-/// A step is a line search along the direction found, from central
-/// differences in the plane; it is kept only if the objective improves, no
+/// A step is a line search along the direction found from central
+/// differences in the plane (shape: Newton's, where the 2 x 2 Hessian is
+/// positive definite, else steepest descent, tried first at 1.7 times its
+/// length: over-relaxed, as improvement spreads one cell a sweep); it is kept
+/// only if the objective improves, no
 /// corner of the patch has det A <= 0, and the patch's least angle stays at or
 /// above the mesh's least angle when the phase began, so the least angle
 /// never falls. Angles are those of the corners in space, as cells are drawn.
@@ -73,12 +76,13 @@ std::vector<std::int32_t> vertex_colours(const Comm& comm, const HostMesh& mesh,
 }  // namespace detail
 
 struct QualitySmoothOptions {
-  int shape_sweeps = 10;   ///< condition-number sweeps
+  int shape_sweeps = 50;   ///< condition-number sweeps
   int angle_sweeps = 5;    ///< least-angle sweeps
   int polish_sweeps = 10;  ///< condition-number sweeps after them
   /// Degrees in (0, 90]: the angle phase moves the vertices of cells whose
-  /// least angle is below it.
-  Real angle_threshold = 60;
+  /// least angle is below it. Higher raises the least angle further and
+  /// leaves more cells just under 45 degrees.
+  Real angle_threshold = 45;
   /// > 0: a phase ends once no vertex moved farther than this times its
   /// patch's shortest edge in a sweep.
   Real tolerance = 0;

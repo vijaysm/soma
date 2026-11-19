@@ -725,11 +725,12 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   free vertex of a surface mesh of triangles and quads to lower its cells' corner condition
   numbers (Knupp), then to raise the least corner angle of the cells below a threshold (Freitag
   and Plassmann, no corner left worse than the patch's worst), then polishes shapes above the
-  angle reached; the least angle never falls. Vertices move in their tangent plane (on a
+  angle reached; the least angle never falls. Shape steps are Newton's, over-relaxed (1.7).
+  Vertices move in their tangent plane (on a
   sphere, projected back) one colour at a time, colours from gid-hashed independent sets, so the
   result is the same bit for bit on any number of ranks. On ne30 refined to 12 km over the
   United States it raises the least angle from 30.1 to 43.3 degrees (centroid smoothing: 30.5 to
-  30.1) and the worst edge ratio from 4.8 to 3.2.
+  30.1), the mean least angle from 81.2 to 84.1 and lowers the worst edge ratio from 4.8 to 3.2.
 - `soma::mark_fraction(comm, indicator, fraction)` marks the cells of largest indicator that
   hold the fraction of its total (Doerfler marking), and `soma::mark_threshold` those above a
   value.

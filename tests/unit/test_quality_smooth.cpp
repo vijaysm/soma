@@ -165,7 +165,7 @@ TEST(QualitySmooth, ShapeImprovesAPerturbedGrid) {
   EXPECT_LT(k1, k0);
   EXPECT_TRUE(std::isfinite(k1));
   EXPECT_GE(a1, a0);
-  EXPECT_EQ(r.shape_sweeps, 10);
+  EXPECT_EQ(r.shape_sweeps, 50);
   EXPECT_NEAR(r.least_angle_before, a0, 1e-9);
   EXPECT_NEAR(r.least_angle_after, a1, 1e-9);
 }
@@ -269,6 +269,55 @@ TEST(QualitySmooth, ShapeImprovesPerturbedTriangles) {
   EXPECT_LT(k1, k0);
   EXPECT_GE(r.least_angle_after, r.least_angle_before);
 }
+
+namespace {
+
+// The cubed sphere ne 8 refined twice about a face's middle (cells within 0.5
+// radians, then their children within 0.3), with a ghost layer through
+// vertices on more than one rank: two levels and two bands of transitions.
+soma::HostMesh two_level_sphere(const soma::Comm& c) {
+  soma::sem::CubedSphereSpec spec;
+  spec.ne = 8;
+  spec.radius = kRadius;
+  soma::HostMesh m = soma::sem::cubed_sphere_mesh(c, spec);
+  const Real d[3] = {1 / std::sqrt(1.13), 0.3 / std::sqrt(1.13), 0.2 / std::sqrt(1.13)};
+  for (const Real reach : {Real{0.5}, Real{0.3}}) {
+    const auto mv = m.view();
+    std::vector<std::int8_t> marks;
+    for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
+      Real g[3] = {0, 0, 0};
+      for (LO i = 0; i < 4; ++i) {
+        const auto p = point(m, mv.vertex(2, e, i));
+        for (int q = 0; q < 3; ++q) g[q] += p[static_cast<std::size_t>(q)];
+      }
+      const Real cosine = (g[0] * d[0] + g[1] * d[1] + g[2] * d[2]) / std::hypot(g[0], g[1], g[2]);
+      marks.push_back(std::acos(std::min(cosine, Real{1})) < reach ? 1 : 0);
+    }
+    m = soma::refine_quads(c, m, marks, {.sphere_radius = kRadius}).mesh;
+  }
+  if (c.size() > 1) m.add_ghosts(c, soma::GhostOptions{1, 0});
+  return m;
+}
+
+// The sum over the owned cells' corners of their condition number against
+// the square, each corner in its cell's plane.
+Real total_kappa(const soma::Comm& c, const soma::HostMesh& m) {
+  const auto mv = m.view();
+  Real s = 0;
+  for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
+    for (LO i = 0; i < 4; ++i) {
+      const auto q = point(m, mv.vertex(2, e, i)), a = point(m, mv.vertex(2, e, (i + 3) % 4)),
+                 b = point(m, mv.vertex(2, e, (i + 1) % 4));
+      const Real u[3] = {b[0] - q[0], b[1] - q[1], b[2] - q[2]}, w[3] = {a[0] - q[0], a[1] - q[1], a[2] - q[2]};
+      const Real n[3] = {u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]};
+      s += (u[0] * u[0] + u[1] * u[1] + u[2] * u[2] + w[0] * w[0] + w[1] * w[1] + w[2] * w[2]) /
+           (2 * std::hypot(n[0], n[1], n[2]));
+    }
+  }
+  return c.allreduce(s, soma::Op::sum);
+}
+
+}  // namespace
 
 TEST(QualitySmooth, StaysOnTheSphere) {
   const soma::Comm c = soma::Comm::world();
@@ -479,4 +528,35 @@ TEST(QualitySmooth, BeatsCentroids) {
 TEST(QualitySmooth, AngleSameBitsOnAnyRankCount) {
   const soma::Comm c = soma::Comm::world();
   EXPECT_EQ(differ_from_serial(c, {.shape_sweeps = 0, .sphere_radius = kRadius}), 0);
+}
+
+
+
+// Two levels of refinement relax slowly (improvement spreads a cell a sweep):
+// from 20 centroid sweeps, the defaults raise the mean least angle by a degree
+// or more (measured 81.71 to 83.01; 10 unrelaxed steepest-descent sweeps made
+// 82.27) and the least angle, with no more cells under 45 degrees and no
+// worse aspect than centroids leave.
+TEST(QualitySmooth, DefaultsBeatCentroidsOnTwoLevels) {
+  const soma::Comm c = soma::Comm::world();
+  soma::HostMesh centroids = two_level_sphere(c);
+  (void)soma::laplacian_smooth(c, centroids,
+                               {.iterations = 20, .method = soma::SmoothMethod::centroids, .sphere_radius = kRadius});
+  soma::HostMesh optimized = two_level_sphere(c);
+  (void)soma::laplacian_smooth(c, optimized,
+                               {.iterations = 20, .method = soma::SmoothMethod::centroids, .sphere_radius = kRadius});
+  (void)soma::quality_smooth(c, optimized, {.sphere_radius = kRadius});
+  const Quality qc = quality(c, centroids), qo = quality(c, optimized);
+  const Real lc = least_angle(c, centroids), lo = least_angle(c, optimized);
+  const Real kc = total_kappa(c, centroids), ko = total_kappa(c, optimized);  // collective: every rank
+  if (c.rank() == 0) {
+    std::printf("two levels: least %.2f -> %.2f, mean %.3f -> %.3f, under 45 %g -> %g, aspect %.3f -> %.3f, "
+                "kappa %.1f -> %.1f\n",
+                lc, lo, qc.mean_angle, qo.mean_angle, qc.under_45, qo.under_45, qc.worst_aspect, qo.worst_aspect, kc,
+                ko);
+  }
+  EXPECT_GE(qo.mean_angle, qc.mean_angle + 1);
+  EXPECT_GT(lo, lc + 5);
+  EXPECT_LE(qo.under_45, qc.under_45);
+  EXPECT_LE(qo.worst_aspect, qc.worst_aspect);
 }

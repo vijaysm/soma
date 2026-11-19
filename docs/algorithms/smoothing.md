@@ -117,10 +117,10 @@ const soma::QualitySmoothReport r = soma::quality_smooth(comm, mesh, o);
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `shape_sweeps` | 10 | Sweeps lowering the sum of the cells' corner condition numbers. |
+| `shape_sweeps` | 50 | Sweeps lowering the sum of the cells' corner condition numbers. |
 | `angle_sweeps` | 5 | Sweeps raising the least corner angle of the cells below `angle_threshold`. |
 | `polish_sweeps` | 10 | Shape sweeps again, kept above the least angle the angle sweeps reached. |
-| `angle_threshold` | 60 | Degrees in (0, 90]. |
+| `angle_threshold` | 45 | Degrees in (0, 90]. Higher raises the least angle further and leaves more cells just under 45°. |
 | `tolerance` | 0 | > 0: a phase ends once no vertex moves farther than this times its shortest edge. |
 | `fixed` | empty | As for `laplacian_smooth`: the skin stays when empty. |
 | `sphere_radius` | none | Move in the sphere's tangent plane and project back onto it. |
@@ -134,28 +134,33 @@ const soma::QualitySmoothReport r = soma::quality_smooth(comm, mesh, o);
   Plassmann). Angles alone bound neither a quad's aspect nor its largest angle (a step can make
   a long thin rectangle, or a corner near 180 degrees), so a step must also leave no corner of
   the patch with a condition number above the patch's worst.
-- **Never worse:** every step is a line search kept only if its objective improves, and the
-  least angle of the mesh never falls during a phase.
+- **Steps:** a shape step is Newton's (a 2 x 2 Hessian from central differences) where the
+  Hessian is positive definite, else steepest descent, tried first at 1.7 times its length:
+  improvement spreads one cell a sweep, and the over-relaxation halves the sweeps needed. Every
+  step is a line search kept only if its objective improves, and the least angle of the mesh
+  never falls during a phase.
 - **Order:** vertices are coloured so that no two of one colour share a cell (Jones and
   Plassmann, priorities hashed from gids); a sweep moves one colour at a time with a halo update
   after each, and sums each patch in cell-gid order. The result is the same bit for bit on any
   number of ranks and threads.
 
-On `refine_quads`' cubed sphere (ne 4, refined about a face's middle), against 20 sweeps of
+On the cubed sphere ne 8 refined twice about a face's middle (1718 cells), from 20 sweeps of
 `centroids`:
 
-| | `centroids` | `quality_smooth` |
+| | `centroids` | then `quality_smooth` |
 | --- | --- | --- |
-| least angle | 33.1° | 40.1° |
-| mean of each cell's least angle | 79.1° | 79.4° |
+| least angle | 31.1° | 40.3° |
+| mean of each cell's least angle | 81.7° | 83.0° |
+| cells with a least angle under 45° | 58 | 52 |
 | worst ratio of longest to shortest edge | 5.1 | 3.3 |
-| change in the refined cells' mean spacing | +2.0% | +1.6% |
 
 On ne30 refined to 12 km over the United States (the
 [example](refinement.md#example-regionally-refined-meshes-of-the-sphere)), from the centroid
-result, the least angle goes from 30.1 to 43.3 degrees and the worst edge ratio from 4.8 to 3.2,
-at about 15 s on one core for 24436 cells. Its condition number does not see sizes, so the
-largest area ratio between neighbours grows (5.6 to 7.2 there).
+result, the least angle goes from 30.1 to 43.3 degrees, the mean least angle from 81.2 to 84.1
+and the worst edge ratio from 4.8 to 3.2, at about 12 s on one core for 24436 cells. With
+`angle_threshold` 40 the angle sweeps find nothing to move there: 40.1 degrees, mean 84.1, 381
+cells under 45 degrees against 418. Its condition number does not see sizes, so the largest
+area ratio between neighbours grows (5.6 to 6.4 there).
 
 It throws `std::invalid_argument` on every rank, as `laplacian_smooth` does, for a mesh not of
 dimension 2, a cell neither a triangle nor a quad, an inverted corner, an edited mesh, a missing

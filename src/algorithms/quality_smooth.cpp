@@ -129,6 +129,10 @@ constexpr Real kFirstStep = 0.25;
 constexpr int kHalvings = 20;
 // Steps per vertex visit.
 constexpr int kInner = 3;
+// Shape steps are over-relaxed (tried at this multiple of the Newton step
+// first): a sweep moves a vertex against its neighbours' old positions, so
+// improvement spreads one cell a sweep; overshooting halves the sweeps needed.
+constexpr Real kOverRelax = 1.7;
 // Angles within this many degrees of the least are active.
 constexpr Real kActive = 1e-3;
 
@@ -236,17 +240,37 @@ class Smoother {
     Real a = 0, b = 0;
     Measure now = measure(at(0, 0));
     for (int inner = 0; inner < kInner; ++inner) {
-      const Real ga = (measure(at(a + kDelta, b)).kappa - measure(at(a - kDelta, b)).kappa) / (2 * kDelta);
-      const Real gb = (measure(at(a, b + kDelta)).kappa - measure(at(a, b - kDelta)).kappa) / (2 * kDelta);
+      // Gradient and Hessian by central differences.
+      const Real f = now.kappa, d2 = kDelta * kDelta;
+      const Real fa = measure(at(a + kDelta, b)).kappa, fA = measure(at(a - kDelta, b)).kappa;
+      const Real fb = measure(at(a, b + kDelta)).kappa, fB = measure(at(a, b - kDelta)).kappa;
+      const Real ga = (fa - fA) / (2 * kDelta), gb = (fb - fB) / (2 * kDelta);
       const Real g = std::hypot(ga, gb);
       if (!std::isfinite(g) || g == 0) break;
+      const Real haa = (fa - 2 * f + fA) / d2, hbb = (fb - 2 * f + fB) / d2;
+      const Real hab = (measure(at(a + kDelta, b + kDelta)).kappa - measure(at(a + kDelta, b - kDelta)).kappa -
+                        measure(at(a - kDelta, b + kDelta)).kappa + measure(at(a - kDelta, b - kDelta)).kappa) /
+                       (4 * d2);
+      const Real det = haa * hbb - hab * hab;
+      // Newton where the Hessian is positive definite, else steepest descent;
+      // no step longer than kFirstStep shortest edges.
+      Real da = -ga * kFirstStep / g, db = -gb * kFirstStep / g;
+      if (std::isfinite(det) && haa > 0 && det > 0) {
+        da = -(hbb * ga - hab * gb) / det;
+        db = -(haa * gb - hab * ga) / det;
+        const Real l = std::hypot(da, db);
+        if (l > kFirstStep) {
+          da *= kFirstStep / l;
+          db *= kFirstStep / l;
+        }
+      }
       bool stepped = false;
-      Real s = kFirstStep;
+      Real s = kOverRelax;
       for (int h = 0; h <= kHalvings && !stepped; ++h, s /= 2) {
-        const Measure t = measure(at(a - s * ga / g, b - s * gb / g));
+        const Measure t = measure(at(a + s * da, b + s * db));
         if (t.valid && t.kappa < now.kappa * (1 - kProgress) && t.least >= floor) {
-          a -= s * ga / g;
-          b -= s * gb / g;
+          a += s * da;
+          b += s * db;
           now = t;
           stepped = true;
         }
