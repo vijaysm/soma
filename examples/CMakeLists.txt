@@ -14,6 +14,8 @@ add_executable(remap remap.cpp)
 target_link_libraries(remap PRIVATE soma soma_warnings)
 add_executable(refine refine.cpp)
 target_link_libraries(refine PRIVATE soma soma_warnings)
+add_executable(regional_refine regional_refine.cpp)
+target_link_libraries(regional_refine PRIVATE soma soma_warnings)
 # The example's own arithmetic rounds as Python's: no fused multiply-adds (pipeline_arith.cpp only).
 # The Fortran pipeline links it too, for its digests and printing.
 add_library(pipeline_arith OBJECT pipeline_arith.cpp)
@@ -111,5 +113,30 @@ if(SOMA_ENABLE_TESTS)
               ${CMAKE_CURRENT_BINARY_DIR}/conforming_np2.soma)
     set_tests_properties(example_refine_conforming.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
                          PASS_REGULAR_EXPRESSION "${conformed}")
+  endif()
+  # A regionally refined cubed sphere: CONUS, one pass at ne4 to 300 km, on one and two ranks alike; a box
+  # across the antimeridian; the saved mesh read back needs no further pass.
+  set(regional "passes 1; cells 96 -> 556; radius 6.37122e[+]06 m")
+  add_test(NAME example_regional_refine
+    COMMAND regional_refine --ne 4 --km 300 --smooth 3 --save ${CMAKE_CURRENT_BINARY_DIR}/regional.soma
+            ${CMAKE_CURRENT_BINARY_DIR}/regional)
+  set_tests_properties(example_regional_refine PROPERTIES PASS_REGULAR_EXPRESSION "${regional}"
+                       FIXTURES_SETUP regional_mesh)
+  add_test(NAME example_regional_refine_again
+    COMMAND regional_refine --mesh ${CMAKE_CURRENT_BINARY_DIR}/regional.soma --km 300 --smooth 0
+            ${CMAKE_CURRENT_BINARY_DIR}/regional_again)
+  set_tests_properties(example_regional_refine_again PROPERTIES PASS_REGULAR_EXPRESSION "passes 0; cells 556 -> 556"
+                       FIXTURES_REQUIRED regional_mesh)
+  add_test(NAME example_regional_refine_antimeridian
+    COMMAND regional_refine --ne 4 --km 300 --smooth 3 --box -20,20,170,-170
+            ${CMAKE_CURRENT_BINARY_DIR}/regional_dateline)
+  set_tests_properties(example_regional_refine_antimeridian PROPERTIES PASS_REGULAR_EXPRESSION "passes 1")
+  if(SOMA_ENABLE_MPI)
+    add_test(NAME example_regional_refine.np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:regional_refine> ${MPIEXEC_POSTFLAGS} --ne 4 --km 300 --smooth 3
+              ${CMAKE_CURRENT_BINARY_DIR}/regional_np2)
+    set_tests_properties(example_regional_refine.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
+                         PASS_REGULAR_EXPRESSION "${regional}")
   endif()
 endif()
