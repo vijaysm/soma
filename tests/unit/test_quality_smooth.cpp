@@ -335,10 +335,19 @@ TEST(QualitySmooth, AngleNeverFalls) {
   const soma::Comm c = soma::Comm::world();
   {
     soma::HostMesh m = refined_sphere(c);
+    const Real aspect = quality(c, m).worst_aspect;
     const auto r = soma::quality_smooth(c, m, {.shape_sweeps = 0, .polish_sweeps = 0, .sphere_radius = kRadius});
-    if (c.rank() == 0) std::printf("angle only: %.3f -> %.3f\n", r.least_angle_before, r.least_angle_after);
+    const Real after = quality(c, m).worst_aspect;
+    if (c.rank() == 0) {
+      std::printf("angle only: %.3f -> %.3f, worst aspect %.3f -> %.3f\n", r.least_angle_before, r.least_angle_after,
+                  aspect, after);
+    }
     EXPECT_GT(r.least_angle_after, r.least_angle_before);
     EXPECT_EQ(r.angle_sweeps, 5);
+    // Angles do not bound a quad's aspect: steps keep each corner within the
+    // patch's worst condition number, which bounds the stretching (measured
+    // 3.26 -> 3.95; without the bound, 22.6).
+    EXPECT_LE(after, 1.25 * aspect);
   }
   soma::HostMesh m = refined_sphere(c);
   const auto r = soma::quality_smooth(c, m, {.sphere_radius = kRadius});
@@ -373,14 +382,18 @@ TEST(QualitySmooth, BeatsCentroids) {
   soma::HostMesh optimized = refined_sphere(c);
   (void)soma::quality_smooth(c, optimized, {.sphere_radius = kRadius});
   const Real s0 = fine_spacing(start), sc = fine_spacing(centroids), so = fine_spacing(optimized);
-  const Quality qc = quality(c, centroids), qo = quality(c, optimized);
+  const Quality q0 = quality(c, start), qc = quality(c, centroids), qo = quality(c, optimized);
   const Real lc = least_angle(c, centroids), lo = least_angle(c, optimized);
   if (c.rank() == 0) {
-    std::printf("least %.2f (centroids) %.2f (optimized); mean %.2f %.2f; fine spacing change %.4f %.4f\n", lc, lo,
-                qc.mean_angle, qo.mean_angle, sc / s0 - 1, so / s0 - 1);
+    std::printf("least %.2f (centroids) %.2f (optimized); mean %.2f %.2f; fine spacing change %.4f %.4f; worst "
+                "aspect %.3f (start) %.3f %.3f\n",
+                lc, lo, qc.mean_angle, qo.mean_angle, sc / s0 - 1, so / s0 - 1, q0.worst_aspect, qc.worst_aspect,
+                qo.worst_aspect);
   }
   EXPECT_GT(lo, lc);
   EXPECT_GT(qo.mean_angle, qc.mean_angle);
+  // Cells are not stretched more than centroid smoothing stretches them.
+  EXPECT_LE(qo.worst_aspect, qc.worst_aspect);
   EXPECT_LE(std::abs(so / s0 - 1), 0.05);
 }
 

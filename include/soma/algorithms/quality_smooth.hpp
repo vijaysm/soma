@@ -24,7 +24,9 @@
 ///   corner degenerates;
 /// - angle: for the vertices of cells whose least corner angle is below the
 ///   threshold, raise the least angle of the corners the vertex moves
-///   (Freitag and Plassmann: the steepest ascent over the active angles);
+///   (Freitag and Plassmann: the steepest ascent over the active angles),
+///   no corner of the patch left worse in condition number than its worst:
+///   angles alone bound neither a quad's aspect nor its largest angle;
 /// - polish: shape sweeps again, kept above the least angle the angle phase
 ///   reached. Raising the worst corners costs some good ones; these give
 ///   most of it back without losing the gain.

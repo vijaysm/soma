@@ -136,6 +136,7 @@ constexpr Real kActive = 1e-3;
 struct Measure {
   bool valid = true;      // every corner's det A > 0
   Real kappa = 0;         // summed over the patch's corners
+  Real kappa_max = 0;     // the patch's worst corner
   Real least = 360;       // degrees, over the patch's corners
   Real least_moved = 360; // degrees, over the corners the vertex moves
   std::vector<Real> moved;  // those corners' angles, in patch order
@@ -214,7 +215,9 @@ class Smoother {
           det *= 2 / std::sqrt(Real{3});
         }
         if (!(det > 0)) out.valid = false;
-        out.kappa += det > 0 ? frob / (2 * det) : kInfinity;
+        const Real k = det > 0 ? frob / (2 * det) : kInfinity;
+        out.kappa += k;
+        out.kappa_max = std::max(out.kappa_max, k);
         out.least = std::min(out.least, angle);
         const bool moves = tri || i == at_v || i == (at_v + 1) % n || i == (at_v + n - 1) % n;
         if (moves) {
@@ -254,11 +257,14 @@ class Smoother {
   }
 
   // Raises the least angle of the corners the vertex moves (Freitag and
-  // Plassmann); returns the move over the shortest edge.
+  // Plassmann), no corner of the patch made worse in condition number than
+  // the worst was: angles alone do not bound a quad's aspect, nor its largest
+  // angle. Returns the move over the shortest edge.
   Real angle(Real threshold) {
     Real a = 0, b = 0;
     Measure now = measure(at(0, 0));
     if (now.least >= threshold) return 0;
+    const Real worst = now.kappa_max;
     for (int inner = 0; inner < kInner; ++inner) {
       const Measure pa = measure(at(a + kDelta, b)), ma = measure(at(a - kDelta, b));
       const Measure pb = measure(at(a, b + kDelta)), mb = measure(at(a, b - kDelta));
@@ -274,7 +280,7 @@ class Smoother {
       Real s = kFirstStep;
       for (int h = 0; h <= kHalvings && !stepped; ++h, s /= 2) {
         const Measure t = measure(at(a + s * d[0] / l, b + s * d[1] / l));
-        if (t.valid && t.least_moved > now.least_moved * (1 + kProgress)) {
+        if (t.valid && t.least_moved > now.least_moved * (1 + kProgress) && t.kappa_max <= worst) {
           a += s * d[0] / l;
           b += s * d[1] / l;
           now = t;
