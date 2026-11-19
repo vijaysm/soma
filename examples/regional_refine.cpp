@@ -3,8 +3,8 @@
 
 // regional_refine [--ne N | --mesh FILE] [--radius R] [--km K] [--np P]
 //                 [--box LAT0,LAT1,LON0,LON1]... [--transition N] [--grow G]
-//                 [--reruns R] [--smooth S] [--max-passes M] [--save FILE]
-//                 <out-prefix>
+//                 [--reruns R] [--smooth S] [--optimize SHAPE,ANGLE[,POLISH]]
+//                 [--max-passes M] [--save FILE] <out-prefix>
 //
 // A regionally refined mesh (RRM) of the sphere, as E3SM builds them: starts
 // from the cubed sphere (soma::sem::cubed_sphere_mesh, ne N, default 30) or a
@@ -34,14 +34,16 @@
 //
 // Then S sweeps (default 20) of each soma::laplacian_smooth method, the
 // vertices projected onto the sphere: neighbour averaging and cell
-// centroids. Writes <out-prefix>_refined.vtk, _neighbours.vtk and
-// _centroids.vtk with the cell fields refine:level, spacing_km, min_angle
+// centroids; then soma::quality_smooth from the centroid result (--optimize,
+// default 10,5,10 sweeps of shape, angle and polish; 0,0,0 skips it).
+// Writes <out-prefix>_refined.vtk, _neighbours.vtk, _centroids.vtk and
+// _optimized.vtk with the cell fields refine:level, spacing_km, min_angle
 // (degrees), aspect (longest over shortest edge), scaled_jacobian (least
 // over corners of sin of the corner angle, signed by the cell's turn) and
 // area_ratio (largest ratio to an edge neighbour's area), and prints the
-// passes, the spacing and a quality table. --save FILE also writes the
-// centroid-smoothed mesh (any extension soma::write_file takes) for a later
-// --mesh. Exit status: 0 done, 1 failed, 2 bad arguments.
+// passes, the bands, the spacing, a quality table and the change in the
+// finest cells' size. --save FILE also writes the last mesh made (any
+// extension soma::write_file takes) for a later --mesh. Exit status: 0 done, 1 failed, 2 bad arguments.
 
 #include <algorithm>
 #include <array>
@@ -61,6 +63,7 @@
 
 #include "regional_refine.hpp"
 #include "soma/algorithms/laplacian.hpp"
+#include "soma/algorithms/quality_smooth.hpp"
 #include "soma/io/mesh_file.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
@@ -137,6 +140,8 @@ int main(int argc, char** argv) {
         bad = bad || o.grow < 0;
       } else if (a == "--reruns" && more) {
         o.reruns = std::stoi(argv[++i]);
+      } else if (a == "--optimize" && more) {
+        o.optimize = parse_sweeps(argv[++i]);
       } else if (a == "--smooth" && more) {
         o.sweeps = std::stoi(argv[++i]);
       } else if (a == "--max-passes" && more) {
@@ -159,8 +164,8 @@ int main(int argc, char** argv) {
       std::fprintf(stderr,
                    "usage: regional_refine [--ne N | --mesh FILE] [--radius R] [--km K] [--np P]\n"
                    "                       [--box LAT0,LAT1,LON0,LON1]... [--transition N] [--grow G]\n"
-                   "                       [--reruns R] [--smooth S] [--max-passes M] [--save FILE]\n"
-                   "                       <out-prefix>\n");
+                   "                       [--reruns R] [--smooth S] [--optimize SHAPE,ANGLE[,POLISH]]\n"
+                   "                       [--max-passes M] [--save FILE] <out-prefix>\n");
     }
     return 2;
   }
@@ -254,12 +259,27 @@ int main(int argc, char** argv) {
     }
 
     soma::HostMesh smoothed = mesh.clone();
+    const Real refined_size = finest_size(comm, mesh);
     (void)assess_and_write(comm, mesh, o, "refined", radius);
     if (o.sweeps > 0) {
       smooth(comm, mesh, soma::SmoothMethod::neighbours, o);
       (void)assess_and_write(comm, mesh, o, "neighbours", radius);
       smooth(comm, smoothed, soma::SmoothMethod::centroids, o);
       (void)assess_and_write(comm, smoothed, o, "centroids", radius);
+    }
+    // The optimizer from the centroid-smoothed mesh (the refined one without sweeps).
+    if (o.optimize[0] + o.optimize[1] + o.optimize[2] > 0) {
+      if (comm.size() > 1) smoothed.add_ghosts(comm, soma::GhostOptions{1, 0});
+      (void)soma::quality_smooth(comm, smoothed, {.shape_sweeps = o.optimize[0], .angle_sweeps = o.optimize[1],
+                                                  .polish_sweeps = o.optimize[2], .sphere_radius = 1});
+      if (comm.size() > 1) smoothed.remove_ghosts(comm);
+      (void)assess_and_write(comm, smoothed, o, "optimized", radius);
+    }
+    const Real change = finest_size(comm, smoothed) / refined_size - 1;
+    if (comm.rank() == 0) {
+      std::printf("finest cells' mean size: %.2f km refined, %+.1f%% after smoothing\n", refined_size, 100 * change);
+      // Smoothing grows the finest cells: past 5%, one more pass in the regions of interest makes up for it.
+      if (std::abs(change) > 0.05) std::printf("warning: the finest cells' size changed by more than 5%%\n");
     }
     if (!o.save.empty()) {
       write_at(comm, smoothed, radius, o.save);

@@ -43,6 +43,7 @@ struct Box {
 struct Options {
   int ne = 30, np = 4, passes = 8, sweeps = 20, transition = 3, reruns = 4;
   int grow = -1;  ///< cells of growth per level before measuring; -1: transition
+  std::array<int, 3> optimize{10, 5, 10};  ///< quality_smooth's shape, angle and polish sweeps
   std::string mesh, save, prefix;
   std::optional<Real> radius;
   Real km = 12;
@@ -466,6 +467,33 @@ inline std::vector<Real> level_sizes(const soma::Comm& comm, const soma::HostMes
   comm.allreduce(std::span<Real>(s), soma::Op::sum);
   std::vector<Real> out(count, 0);
   for (std::size_t l = 0; l < count; ++l) out[l] = s[2 * l + 1] > 0 ? s[2 * l] / s[2 * l + 1] : 0;
+  return out;
+}
+
+// The mean size (km) of the finest level's owned cells, over every rank.
+inline Real finest_size(const soma::Comm& comm, const soma::HostMesh& m) {
+  const auto level = levels(m);
+  std::int32_t finest = 0;
+  for (const auto l : level) finest = std::max(finest, l);
+  finest = static_cast<std::int32_t>(comm.allreduce(static_cast<Real>(finest), soma::Op::max));
+  Real s[2] = {0, 0};
+  for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
+    if (level[static_cast<std::size_t>(e)] != finest) continue;
+    s[0] += km(std::sqrt(area(corners(m, e))));
+    s[1] += 1;
+  }
+  comm.allreduce(std::span<Real>(s), soma::Op::sum);
+  return s[0] / s[1];
+}
+
+// "S,A" or "S,A,P": sweeps, each at least 0 (P stays 10 when not given).
+inline std::array<int, 3> parse_sweeps(const std::string& t) {
+  std::istringstream in(t);
+  std::array<int, 3> out{0, 0, 10};
+  char c1 = 0, c2 = 0;
+  if (!(in >> out[0] >> c1 >> out[1]) || c1 != ',') throw std::invalid_argument("bad sweeps " + t);
+  if (!in.eof() && (!(in >> c2 >> out[2]) || c2 != ',' || !in.eof())) throw std::invalid_argument("bad sweeps " + t);
+  if (out[0] < 0 || out[1] < 0 || out[2] < 0) throw std::invalid_argument("bad sweeps " + t);
   return out;
 }
 

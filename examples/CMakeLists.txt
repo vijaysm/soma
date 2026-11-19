@@ -117,7 +117,7 @@ if(SOMA_ENABLE_TESTS)
   # (No semicolon in a pattern: CMake would split it into several, any of which passes.)
   # A regionally refined cubed sphere: CONUS, one pass at ne4 to 300 km, on one and two ranks alike; a box
   # across the antimeridian; the saved mesh read back needs no further pass.
-  set(regional "passes 1. cells 96 -> 252. radius 6.37122e[+]06\n")
+  set(regional "passes 1. cells 96 -> 252. radius 6.37122e[+]06\n[^#]*\noptimized [^#]*finest cells")
   add_test(NAME example_regional_refine
     COMMAND regional_refine --ne 4 --km 300 --smooth 3 --save ${CMAKE_CURRENT_BINARY_DIR}/regional.soma
             ${CMAKE_CURRENT_BINARY_DIR}/regional)
