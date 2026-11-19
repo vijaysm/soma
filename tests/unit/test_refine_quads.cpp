@@ -4,7 +4,8 @@
 // All-quad conforming refinement: a marked cell takes the full template and
 // its neighbours the transition ones; children tile their parent; the result
 // is conforming; two opposite or three marked corners promote a cell; no
-// marks keep the mesh; fields carry over.
+// marks keep the mesh; fields carry over; the result is the serial one on any
+// number of ranks, bit for bit.
 
 #include <algorithm>
 #include <array>
@@ -57,6 +58,54 @@ std::pair<LO, LO> edge_census(const Comm& self, soma::HostMesh& m) {
     one += n == 1 ? 1 : 0;
   }
   return {over, one};
+}
+
+// A refined mesh as maps by gid: vertex coordinates' bits, cells' corners.
+struct ByGid {
+  std::map<GO, std::array<std::uint64_t, 3>> vertices;
+  std::map<GO, std::vector<GO>> cells;
+  LO level_one = 0;
+};
+
+ByGid by_gid(const soma::HostMesh& m) {
+  ByGid out;
+  for (LO v = 0; v < m.count(0); ++v) {
+    const auto p = point(m, v);
+    out.vertices[m.gid(0)(v)] = {bits(p[0]), bits(p[1]), bits(p[2])};
+  }
+  const auto mv = m.view();
+  for (LO e = 0; e < m.count(2); ++e) {
+    std::vector<GO> corners;
+    for (LO i = 0; i < mv.num_vertices(2, e); ++i) corners.push_back(m.gid(0)(mv.vertex(2, e, i)));
+    out.cells[m.gid(2)(e)] = corners;
+    out.level_one += level(m, e) == 1 ? 1 : 0;
+  }
+  return out;
+}
+
+// The cells of `g` with these gids marked, refined on `c` dealt as `deal`
+// says, are the serial result: every vertex and cell by gid, bit for bit, and
+// the owned counts and level-one cells add up to the serial ones.
+void expect_serial(const Comm& c, const Cells& g, const std::set<GO>& marked, int deal) {
+  const Comm self = Comm::self();
+  const soma::HostMesh one = build(self, g, 2);
+  const ByGid serial = by_gid(soma::refine_quads(self, one, marks_by_gid(one, marked)).mesh);
+  const soma::HostMesh mesh = build(c, g, deal);
+  const auto fine = soma::refine_quads(c, mesh, marks_by_gid(mesh, marked));
+  const ByGid got = by_gid(fine.mesh);
+  LO differ = 0;
+  for (const auto& [gid, xyz] : got.vertices) {
+    const auto it = serial.vertices.find(gid);
+    differ += it != serial.vertices.end() && it->second == xyz ? 0 : 1;
+  }
+  for (const auto& [gid, corners] : got.cells) {
+    const auto it = serial.cells.find(gid);
+    differ += it != serial.cells.end() && it->second == corners ? 0 : 1;
+  }
+  EXPECT_EQ(c.allreduce(static_cast<Real>(differ), soma::Op::sum), 0);
+  EXPECT_EQ(owned_count(c, fine.mesh, 2), static_cast<Real>(serial.cells.size()));
+  EXPECT_EQ(owned_count(c, fine.mesh, 0), static_cast<Real>(serial.vertices.size()));
+  EXPECT_EQ(c.allreduce(static_cast<Real>(got.level_one), soma::Op::sum), static_cast<Real>(serial.level_one));
 }
 
 }  // namespace
@@ -179,4 +228,29 @@ TEST(RefineQuads, FieldsCarryOver) {
     const auto p = static_cast<std::size_t>(fine.parent[static_cast<std::size_t>(e)]);
     EXPECT_EQ(fq(static_cast<std::size_t>(e), 0), q(p, 0));
   }
+}
+
+// Cells dealt in blocks and round robin (every neighbour on another rank).
+TEST(RefineQuads, DistributedIsTheSerialOneBitForBit) {
+  const Comm c = Comm::world();
+  for (const int deal : {0, 1}) {
+    SCOPED_TRACE(testing::Message() << "deal " << deal);
+    expect_serial(c, plane(7, 6, 0), {cell_gid(7, 2, 2), cell_gid(7, 3, 2), cell_gid(7, 5, 4)}, deal);
+  }
+}
+
+// Marks on diagonal pairs promote cells between them, whose corners then
+// promote others, across ranks dealt round robin.
+TEST(RefineQuads, PromotionCascadesAcrossRanks) {
+  const Comm c = Comm::world();
+  expect_serial(c, plane(6, 6, 0), {cell_gid(6, 1, 1), cell_gid(6, 2, 2), cell_gid(6, 3, 3), cell_gid(6, 4, 4)}, 1);
+}
+
+// All cells on the first rank: the others take part with nothing.
+TEST(RefineQuads, EmptyRanksTakePart) {
+  const Comm c = Comm::world();
+  expect_serial(c, plane(7, 6, 0), {cell_gid(7, 2, 2), cell_gid(7, 5, 4)}, 2);
+  const soma::HostMesh mesh = build(c, plane(7, 6, 0), 2);
+  const auto fine = soma::refine_quads(c, mesh, marks_by_gid(mesh, {cell_gid(7, 2, 2)}));
+  if (c.rank() != 0) EXPECT_EQ(fine.mesh.count(2), 0);
 }

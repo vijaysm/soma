@@ -20,6 +20,7 @@
 #include "refine_internal.hpp"
 #include "soma/algorithms/refine.hpp"
 #include "soma/fields/registry.hpp"
+#include "soma/parallel/halo_exchange.hpp"
 #include "soma/topology/sides.hpp"
 
 namespace soma {
@@ -111,24 +112,31 @@ RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<cons
   std::vector<LO> input(static_cast<std::size_t>(cells));  // the input's owned cell of each work cell
   for (LO e = 0; e < cells; ++e) input[static_cast<std::size_t>(e)] = find_lid(in_cell, wc(e));
 
-  // Marks on corners, then promotion to a fixpoint.
-  std::vector<std::int32_t> vmark(static_cast<std::size_t>(work.count(0)), 0);
+  // Marks on corners, agreed by every rank holding the corner; then
+  // promotion until no cell on any rank changes. Marks only grow and a
+  // superset of a promoted cell's marks promotes it too (or marks it fully),
+  // so the fixpoint does not depend on the order: nor on the ranks.
+  const HaloExchange<Host> halo(comm, work, 0);
+  View2<std::int32_t, Host> vmark("soma::refine_quads.marks", static_cast<std::size_t>(work.count(0)), 1);
   const auto corners_marked = [&](LO e) {
     unsigned m = 0;
-    for (LO i = 0; i < 4; ++i) m |= vmark[static_cast<std::size_t>(w.vertex(2, e, i))] != 0 ? 1u << i : 0u;
+    for (LO i = 0; i < 4; ++i) m |= vmark(static_cast<std::size_t>(w.vertex(2, e, i)), 0) != 0 ? 1u << i : 0u;
     return m;
   };
   for (LO e = 0; e < cells; ++e) {
     if (marks[static_cast<std::size_t>(input[static_cast<std::size_t>(e)])] == 0) continue;
-    for (LO i = 0; i < 4; ++i) vmark[static_cast<std::size_t>(w.vertex(2, e, i))] = 1;
+    for (LO i = 0; i < 4; ++i) vmark(static_cast<std::size_t>(w.vertex(2, e, i)), 0) = 1;
   }
-  for (bool changed = true; changed;) {
-    changed = false;
+  halo.reduce(comm, vmark, Op::max);
+  for (;;) {
+    std::int32_t changed = 0;
     for (LO e = 0; e < cells; ++e) {
       if (!promoted(corners_marked(e))) continue;
-      for (LO i = 0; i < 4; ++i) vmark[static_cast<std::size_t>(w.vertex(2, e, i))] = 1;
-      changed = true;
+      for (LO i = 0; i < 4; ++i) vmark(static_cast<std::size_t>(w.vertex(2, e, i)), 0) = 1;
+      changed = 1;
     }
+    halo.reduce(comm, vmark, Op::max);
+    if (comm.allreduce(changed, Op::max) == 0) break;
   }
 
   // Gids: edge vertices from V, inside vertices from V + 2 E, children 9 per cell.
