@@ -138,6 +138,31 @@ TEST(SemDss, MatchesSerialBitwise) {
   }
 }
 
+TEST(SemDss, WorkspaceIsReused) {
+  const Comm c = Comm::world();
+  HostMesh m = sphere(c, 3);
+  const Space s(c, m, 4, SemGeometry::sphere(1));
+  HostMesh fresh_mesh = sphere(c, 3);
+  for (int call = 0; call < 3; ++call) {
+    const Values u = sample(s, m, 0.25 * (call + 1), 2);
+    const Values v = copy(u);
+    s.dss(c, u);
+    // A space that never ran dss gives the same bits on the same input.
+    const Space once(c, fresh_mesh, 4, SemGeometry::sphere(1));
+    once.dss(c, v);
+    for (LO r = 0; r < rows(s); ++r) {
+      for (int k = 0; k < 2; ++k) {
+        EXPECT_EQ(std::bit_cast<std::uint64_t>(u(r, k)), std::bit_cast<std::uint64_t>(v(r, k)))
+            << "call " << call << " row " << r;
+      }
+    }
+  }
+  EXPECT_EQ(s.workspace_allocations(), 1U);
+  const Values w = sample(s, m, 0.5, 3);
+  s.dss(c, w);
+  EXPECT_EQ(s.workspace_allocations(), 2U);
+}
+
 TEST(SemDss, RotatedCornerListsGiveTheSameResult) {
   const Comm c = Comm::world();
   const int nx = 4, ny = 3;

@@ -23,6 +23,7 @@ soma::build_distributed_adjacencies(comm, mesh, soma::AdjacencyRequest{}.add(2, 
 
 const soma::sem::SemSpace<Mem> space(comm, mesh, 3, soma::sem::SemGeometry::sphere(spec.radius));
 auto h = mesh.fields().add<double>("h", space.space(), 1).view();  // a value per GLL point
+auto lap = mesh.fields().add<double>("lap", space.space(), 1).view();
 soma::sem::laplacian(comm, space, h, lap);                         // continuous
 const double mass = space.integral(comm, h);                       // the same bits on any P
 ```
@@ -64,7 +65,8 @@ in three Cartesian components each:
 
 Every element on the rank has its geometry, ghosts included; the owned ones come first. In the
 plane the area is exact; on the sphere it converges spectrally ($4\pi$ to $3 \times 10^{-10}$ at
-$n_e = 2$, $p = 8$), and quadratic geometry converges as $h^4$ where linear converges as $h^2$.
+$n_e = 2$, $p = 8$), and quadratic geometry converges at about $h^4$ (measured 4.0) where linear converges at about
+$h^2$ (measured 2.0).
 
 The constructor throws `std::invalid_argument` on every rank, naming the smallest offending element
 gid where there is one, when a rank's mesh is not of dimension 2, $p$ is outside [1, 32], an element
@@ -105,10 +107,17 @@ With $f_\xi, f_\eta$ the reference derivatives:
 | `project_tangent(s, v)` | $v$ less its component along $a_1 \times a_2$ |
 | `laplacian(comm, s, f, lap)` | $-\sum w J\, \nabla\phi \cdot \nabla f$ per element, summed by DSS and divided by the assembled mass |
 | `hyperviscosity(comm, s, f, out)` | the Laplacian applied twice |
+| `cross_normal(s, v, out)` | $\hat n \times v$, $\hat n = a_1 \times a_2 / J$ |
+| `vector_laplacian(comm, s, v, out)` | $\nabla \delta + \hat n \times \nabla \zeta + 2 v / R^2$ with $\delta$, $\zeta$ the divergence and vorticity after DSS; summed by DSS and projected tangent |
+| `vector_hyperviscosity(comm, s, v, out)` | the vector Laplacian applied twice |
 
 GLL quadrature makes the divergence sum by parts: its integral is the net flux through the
 boundary, zero on the sphere to rounding. The Laplacian is the weak form, so on a mesh with a
-boundary it imposes a zero normal derivative there. Spherical harmonics are its eigenfunctions to
+boundary it imposes a zero normal derivative there. The vector Laplacian is HOMME's: the Hodge
+Laplacian plus $2v/R^2$ on a sphere of radius $R$, which puts rigid rotation in its null space so
+hyperviscosity of the velocity does not damp it (in the plane the term is absent). The gradient of
+$Y_3^2$ is its eigenvector of eigenvalue $-10$; at $n_e = 4$ its error falls from $9.6 \times 10^{-6}$
+at $p = 10$ to $2.0 \times 10^{-7}$ at $p = 12$. Spherical harmonics are its eigenfunctions to
 truncation error: for $Y_3^2$ at $n_e = 4$ the error falls from $1.7 \times 10^{-5}$ at $p = 8$ to
 $3.6 \times 10^{-9}$ at $p = 12$. `laplacian` and `hyperviscosity` are collective and, like `dss`,
 the same bit for bit on any number of ranks and threads.
