@@ -30,6 +30,19 @@
 /// vertex's neighbours are all here and the skin found here is the global
 /// one. Owners move their vertices; a halo update then gives copies and
 /// ghosts their owners' coordinates after every sweep.
+///
+/// SmoothMethod::centroids (meshes of dimension 2) moves each free vertex
+/// instead to the mean of the centroids (corners' averages) of the cells
+/// holding it, the cells summed in ascending gid order. A uniform grid stays.
+/// On a refined mesh it improves corner angles as neighbour averaging does
+/// while stretching cells less, and keeps cell sizes about as well. (Weighting
+/// the centroids by area, Lloyd's iteration at a uniform density, would even
+/// the sizes out and undo the refinement.)
+///
+/// options.sphere_radius projects every moved vertex onto the sphere of that
+/// radius about the origin after each sweep, x <- R x / |x|. A closed surface
+/// has no skin, so every vertex moves: without the projection, averaging
+/// shrinks a sphere sweep by sweep.
 
 #include <array>
 #include <cmath>
@@ -50,6 +63,12 @@
 
 namespace soma {
 
+/// Where a free vertex moves in a sweep.
+enum class SmoothMethod : std::uint8_t {
+  neighbours,  ///< the mean of its neighbours' coordinates
+  centroids,   ///< the mean of its cells' centroids (dimension 2)
+};
+
 struct SmoothOptions {
   int iterations = 1;
   /// Vertices are neighbours through the entities of this dimension that
@@ -59,6 +78,9 @@ struct SmoothOptions {
   Real tolerance = 0;
   /// Per vertex lid, nonzero for a vertex that stays; empty: the skin stays.
   std::span<const std::uint8_t> fixed;
+  SmoothMethod method = SmoothMethod::neighbours;
+  /// Project moved vertices onto the sphere of this radius about the origin.
+  std::optional<Real> sphere_radius;
 };
 
 struct SmoothReport {
@@ -78,14 +100,23 @@ struct SmoothingGraph {
 /// bridge_dim in [1, mesh.dim()]; the mesh not edited. Host only.
 SmoothingGraph smoothing_graph(const Mesh<Kokkos::HostSpace>& mesh, int bridge_dim);
 
+/// The cells holding each vertex, ascending by cell gid. Host only.
+struct VertexCells {
+  std::vector<Offset> offsets;  ///< vertex count + 1
+  std::vector<LO> cells;
+};
+VertexCells vertex_cells(const Mesh<Kokkos::HostSpace>& mesh);
+
 }  // namespace detail
 
 /// Collective. Throws std::invalid_argument on every rank if any rank passes
 /// a negative iteration count, a bridge_dim other than -1 or in [1, dim], a
 /// tolerance that is negative or not finite, a mask whose length is not the
 /// vertex count, a mesh of dimension 0 or one with unremoved edits, or, on
-/// more than one rank, a mesh without a ghost layer through vertices; or if
-/// ranks differ in iterations, bridge_dim or tolerance.
+/// more than one rank, a mesh without a ghost layer through vertices, the
+/// centroids method on a mesh not of dimension 2, a sphere radius not
+/// positive and finite; or if ranks differ in iterations, bridge_dim,
+/// tolerance, method or sphere radius (or in giving one).
 template <class MemSpace>
 SmoothReport laplacian_smooth(const Comm& comm, Mesh<MemSpace>& mesh, const SmoothOptions& options = {}) {
   using Exec = typename MemSpace::execution_space;
@@ -99,15 +130,23 @@ SmoothReport laplacian_smooth(const Comm& comm, Mesh<MemSpace>& mesh, const Smoo
       (comm.size() > 1 && (mesh.ghost_layers() < 1 || mesh.ghost_bridge_dim() != 0));
   // One reduction: the flag, then each option and its negative, which
   // agree only if every rank passed the same.
+  const bool centroids = options.method == SmoothMethod::centroids;
+  const Real radius = options.sphere_radius.value_or(1);
+  const bool bad_too = (centroids && dim != 2) || !std::isfinite(radius) || radius <= 0;
   const Real tolerance = finite ? options.tolerance : 0;
   const auto it = static_cast<Real>(options.iterations), b = static_cast<Real>(options.bridge_dim);
-  std::array<Real, 7> f{bad ? Real{1} : Real{0}, it, -it, b, -b, tolerance, -tolerance};
+  const Real meth = centroids ? 1 : 0, given = options.sphere_radius ? 1 : 0;
+  const Real r = std::isfinite(radius) ? radius : 0;
+  std::array<Real, 13> f{bad || bad_too ? Real{1} : Real{0}, it, -it, b, -b, tolerance, -tolerance, meth, -meth,
+                         given, -given, r, -r};
   comm.allreduce(std::span<Real>(f), Op::max);
-  if (f[0] != 0 || f[1] != -f[2] || f[3] != -f[4] || f[5] != -f[6]) {
+  if (f[0] != 0 || f[1] != -f[2] || f[3] != -f[4] || f[5] != -f[6] || f[7] != -f[8] || f[9] != -f[10] ||
+      f[11] != -f[12]) {
     throw std::invalid_argument(
         "laplacian_smooth: a rank passes a negative iteration count, a bridge_dim outside -1 and [1, dim], a "
         "negative or non-finite tolerance, a fixed mask not one per vertex, a mesh of dimension 0, with edits or, "
-        "on more than one rank, without a ghost layer through vertices; or ranks differ in their options");
+        "on more than one rank, without a ghost layer through vertices, the centroids method on a mesh not of "
+        "dimension 2 or a sphere radius not positive and finite; or ranks differ in their options");
   }
 
   const int bridge_dim = options.bridge_dim == -1 ? dim : options.bridge_dim;
@@ -134,6 +173,22 @@ SmoothReport laplacian_smooth(const Comm& comm, Mesh<MemSpace>& mesh, const Smoo
       MemSpace{}, Kokkos::View<const LO*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
                       g.targets.data(), g.targets.size()));
   const auto moving = Kokkos::create_mirror_view_and_copy(MemSpace{}, moving_host);
+  const detail::VertexCells vc = [&] {
+    if (!centroids) return detail::VertexCells{};
+    if constexpr (std::is_same_v<MemSpace, Kokkos::HostSpace>) {
+      return detail::vertex_cells(mesh);
+    } else {
+      return detail::vertex_cells(mesh.template mirror<Kokkos::HostSpace>());
+    }
+  }();
+  const auto cell_offsets = Kokkos::create_mirror_view_and_copy(
+      MemSpace{}, Kokkos::View<const Offset*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
+                      vc.offsets.data(), vc.offsets.size()));
+  const auto cells = Kokkos::create_mirror_view_and_copy(
+      MemSpace{}, Kokkos::View<const LO*, Kokkos::HostSpace, Kokkos::MemoryTraits<Kokkos::Unmanaged>>(
+                      vc.cells.data(), vc.cells.size()));
+  const MeshView<MemSpace> m = mesh.view();
+  const bool project = options.sphere_radius.has_value();
 
   const CoordView<MemSpace> x = mesh.coords();
   const CoordView<MemSpace> old(Kokkos::view_alloc(Kokkos::WithoutInitializing, "soma::laplacian_smooth::old"),
@@ -148,13 +203,34 @@ SmoothReport laplacian_smooth(const Comm& comm, Mesh<MemSpace>& mesh, const Smoo
     Kokkos::parallel_for(
         "soma::laplacian_smooth::sweep", Policy(Exec{}, 0, owned), KOKKOS_LAMBDA(const LO v) {
           if (moving(v) == 0) return;
-          Real sum[3] = {0, 0, 0};
-          for (Offset k = offsets(v); k < offsets(v + 1); ++k) {
-            const LO w = targets(k);
-            for (int q = 0; q < 3; ++q) sum[q] += old(w, q);
+          Real p[3] = {0, 0, 0};
+          if (centroids) {
+            // Each cell's centroid (its corners' average), in gid order.
+            for (Offset k = cell_offsets(v); k < cell_offsets(v + 1); ++k) {
+              const LO c = cells(k);
+              const LO nc = m.num_vertices(2, c);
+              Real g[3] = {0, 0, 0};
+              for (LO i = 0; i < nc; ++i) {
+                const LO u = m.vertex(2, c, i);
+                for (int q = 0; q < 3; ++q) g[q] += old(u, q);
+              }
+              for (int q = 0; q < 3; ++q) p[q] += g[q] / static_cast<Real>(nc);
+            }
+            const auto count = static_cast<Real>(cell_offsets(v + 1) - cell_offsets(v));
+            for (int q = 0; q < 3; ++q) p[q] /= count;
+          } else {
+            for (Offset k = offsets(v); k < offsets(v + 1); ++k) {
+              const LO w = targets(k);
+              for (int q = 0; q < 3; ++q) p[q] += old(w, q);
+            }
+            const auto count = static_cast<Real>(offsets(v + 1) - offsets(v));
+            for (int q = 0; q < 3; ++q) p[q] /= count;
           }
-          const auto count = static_cast<Real>(offsets(v + 1) - offsets(v));
-          for (int q = 0; q < 3; ++q) x(v, q) = sum[q] / count;
+          if (project) {
+            const Real scale = radius / Kokkos::sqrt(p[0] * p[0] + p[1] * p[1] + p[2] * p[2]);
+            for (int q = 0; q < 3; ++q) p[q] *= scale;
+          }
+          for (int q = 0; q < 3; ++q) x(v, q) = p[q];
         });
     Exec{}.fence();
     ++report.iterations;

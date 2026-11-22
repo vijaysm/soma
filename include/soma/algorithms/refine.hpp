@@ -74,10 +74,15 @@
 /// against it: plane cells are checked and refused (refine_marked: those it
 /// splits), volume cells are not.
 ///
+/// refine_quads (below) refines a quad mesh where marked and keeps it all-quad
+/// and conforming, edges split in three: for spectral elements, in the plane
+/// or on a sphere.
+///
 /// The refinement runs on the host (a HostMesh in, built with
 /// build_local_part); a device mesh is mirrored to the host and back.
 
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -184,6 +189,68 @@ struct MarkedOptions {
 /// owned cell.
 [[nodiscard]] RefineResult refine_marked(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
                                          MarkedOptions options = {});
+
+struct QuadRefineOptions {
+  std::optional<Real> sphere_radius;  ///< project new vertices onto this sphere about the origin
+};
+
+/// All-quad conforming refinement: the owned cells with a non-zero mark (one
+/// per owned cell, in local id order) split into nine, and their neighbours
+/// into transition quads, so that the result has quads alone and no hanging
+/// vertex (Schneiders' vertex-based templates, edges split in three). The
+/// input must be conforming: hanging vertices are not detected, and a mesh
+/// that has them (refine_marked's default output, say) gets more.
+///
+/// Marks move to corners: a marked cell marks its four. A cell with two
+/// opposite or three marked corners is promoted (all four marked), until no
+/// cell changes, on every rank alike. Each cell then splits by its marked
+/// corners (reference corners v0 (0,0), v1 (1,0), v2 (1,1), v3 (0,1), the
+/// cell's corner order; the cases rotated to its marked corners):
+///
+/// ```
+///   none        1 quad    the cell, whole
+///   one (v0)    3 quads   a (1/3,0), c (0,1/3), p (1/3,1/3):
+///                         [v0 a p c] [a v1 v2 p] [c p v2 v3]
+///   two (v0 v1) 7 quads   a (1/3,0) b (2/3,0) d (1,1/3) c (0,1/3) and
+///                         p q r s at (1/3,1/3) (2/3,1/3) (1/3,2/3) (2/3,2/3):
+///                         [v0 a p c] [a b q p] [b v1 d q] [c p r v3]
+///                         [p q s r] [q d v2 s] [r s v2 v3]
+///   four        9 quads   the 3 x 3 grid
+/// ```
+///
+/// An edge's new vertices depend on its ends alone (both marked: at 1/3 and
+/// 2/3; one: at 1/3 from it), so the cells on an edge split it alike.
+///
+/// Positions: an edge's new vertex is (2/3) lo + (1/3) hi or (1/3) lo +
+/// (2/3) hi, lo and hi its ends by gid; one inside a cell is the bilinear map
+/// of the cell's corners at its reference position, its weights summed in
+/// the corners' gid order. On a sphere (options.sphere_radius) each new
+/// vertex is then projected onto it; the input's vertices stay as they are.
+///
+/// Gids: with V and E the largest vertex and edge gid on any rank (edges
+/// derived as build_distributed_adjacencies derives them) and the cells
+/// numbered n = gid - G + 1 (G the least cell gid), an edge's new vertex is
+/// V + 2 (edge gid - 1) + k + 1, k = 0 for the one nearer its lower-gid end;
+/// a cell's new vertex nearest its corner j is V + 2 E + 4 (n - 1) + j + 1;
+/// child c, in the order above, is 9 (n - 1) + c + 1 (a whole cell is its
+/// own child 0, so every cell is renumbered). The result is the same mesh,
+/// gid for gid and bit for bit, on any number of ranks.
+///
+/// Levels are kept in the cell field "refine:level" (0 where missing): the
+/// nine children of a cell split fully are one level up, the others keep
+/// their parent's. No other state is kept; a later call takes the result as
+/// a mesh like any other. Fields carry over as refine_uniform carries them,
+/// a new vertex's value weighted as its position is (before projection).
+///
+/// Collective; throws std::invalid_argument on every rank if any rank's mesh
+/// is not of quads alone (dimension 2, no edits, no high-order nodes), if a
+/// rank's marks are not one per owned cell, if a rank's sphere radius is not
+/// positive and finite or the ranks differ in it (or in giving one), if a cell to be split or one of its children would
+/// not turn as the cell does at every corner (a non-convex cell, say: on a
+/// sphere, about the cell's area vector), or if a gid of the result would not
+/// fit a GO.
+[[nodiscard]] RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
+                                        QuadRefineOptions options = {});
 
 /// Records, in "refine:birth", the corners each vertex lies between, found by
 /// coordinates (match_points, exactly or within tol) as refinement would

@@ -20,6 +20,7 @@
 
 #include <Kokkos_Core.hpp>
 
+#include "../../examples/regional_refine.hpp"
 #include "../../tests/unit/sphere_meshes.hpp"
 #include "figure_data.hpp"
 #include "soma/algorithms/cg.hpp"
@@ -29,6 +30,7 @@
 #include "soma/algorithms/grid_index.hpp"
 #include "soma/algorithms/laplacian.hpp"
 #include "soma/algorithms/polygon.hpp"
+#include "soma/algorithms/quality_smooth.hpp"
 #include "soma/algorithms/refine.hpp"
 #include "soma/algorithms/remap.hpp"
 #include "soma/amr/box.hpp"
@@ -38,6 +40,7 @@
 #include "soma/amr/interlevel.hpp"
 #include "soma/amr/level_field.hpp"
 #include "soma/core/mesh.hpp"
+#include "soma/sem/cubed_sphere.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/fields/node_tables.hpp"
 #include "soma/io/mesh_file.hpp"
@@ -845,6 +848,80 @@ void set_readparts(const soma::Comm& comm, const fs::path& out) {
   }
 }
 
+// regional: the cubed sphere ne30 refined to 12 km over the contiguous United
+// States as examples/regional_refine does (2 passes, bands of 3 cells or more,
+// on the unit sphere, written at the Earth's radius); refined.vtk,
+// centroids.vtk after 20 sweeps of centroid smoothing onto the sphere, and
+// optimized.vtk after quality_smooth from there, with min_angle and
+// refine:level, turned so that the box's centre (37 N, 95.5 W) is at +z, north
+// +y and east +x (a view from above is the map there); regional.json with the
+// cell counts and, per mesh, the least and mean min_angle, the cells under 45
+// degrees and the worst aspect.
+void set_regional(const soma::Comm& comm, const fs::path& out) {
+  constexpr double radius = 6.37122e6;
+  regional::Options o;
+  o.boxes = {{24, 50, -125, -66}};
+  soma::sem::CubedSphereSpec spec;
+  spec.ne = 30;
+  spec.radius = 1;  // the example works on the unit sphere
+  const soma::HostMesh start = soma::sem::cubed_sphere_mesh(comm, spec);
+  const double cells0 = comm.allreduce(static_cast<double>(start.segment_table(2).owned_end), soma::Op::sum);
+  regional::Graded graded = regional::refine_graded(comm, start, o);
+  require(graded.passes.passes == 2 && graded.passes.marked == 0 && graded.settled,
+          "regional: two passes reach 12 km, bands of 3 cells or more");
+  soma::HostMesh mesh = std::move(graded.mesh);
+  const double cells = comm.allreduce(static_cast<double>(mesh.segment_table(2).owned_end), soma::Op::sum);
+  // About z by 95.5 degrees (the centre to longitude 0), about y by 37 - 90
+  // degrees (to +z), then x <- y, y <- -x (north to +y).
+  const double lon = -95.5 * regional::kDegree, tilt = (37 - 90) * regional::kDegree;
+  const auto turn = [&](soma::HostMesh& m) {
+    const auto x = m.coords();
+    for (soma::LO v = 0; v < m.count(0); ++v) {
+      const double a = x(v, 0) * std::cos(-lon) - x(v, 1) * std::sin(-lon);
+      const double b = x(v, 0) * std::sin(-lon) + x(v, 1) * std::cos(-lon);
+      const double c = x(v, 2);
+      const double a2 = a * std::cos(tilt) + c * std::sin(tilt), c2 = -a * std::sin(tilt) + c * std::cos(tilt);
+      x(v, 0) = radius * b;
+      x(v, 1) = -radius * a2;
+      x(v, 2) = radius * c2;
+    }
+  };
+  char head[96];
+  std::snprintf(head, sizeof head, "{\"cells\": [%.0f, %.0f]", cells0, cells);
+  std::string js = head;
+  soma::HostMesh smoothed = mesh.clone();
+  for (const char* name : {"refined", "neighbours", "centroids", "optimized"}) {
+    const std::string n = name;
+    soma::HostMesh m;
+    if (n == "refined") {
+      m = mesh.clone();
+    } else if (n == "neighbours") {
+      m = mesh.clone();
+      (void)soma::laplacian_smooth(comm, m, {.iterations = 20, .method = soma::SmoothMethod::neighbours,
+                                             .sphere_radius = 1});
+    } else if (n == "centroids") {
+      (void)soma::laplacian_smooth(comm, smoothed, {.iterations = 20, .method = soma::SmoothMethod::centroids,
+                                                    .sphere_radius = 1});
+      m = smoothed.clone();
+    } else {
+      (void)soma::quality_smooth(comm, smoothed, {.sphere_radius = 1});
+      m = smoothed.clone();
+    }
+    const regional::Row r = regional::assess(comm, m, o);
+    if (n != "neighbours") {
+      turn(m);
+      soma::write_file(comm, m, (out / (n + ".vtk")).string(),
+                       {.vtk_fields = std::vector<std::string>{"min_angle", "refine:level"}});
+    }
+    char row[192];
+    std::snprintf(row, sizeof row,
+                  ", \"%s\": {\"least\": %.2f, \"mean\": %.2f, \"under_45\": %.0f, \"aspect\": %.3f}", name, r.least,
+                  r.mean, r.under_45, r.aspect);
+    js += row;
+  }
+  write_json(comm, out / "regional.json", js + "}");
+}
+
 }  // namespace
 
 void add_algorithm_sets(Sets& sets) {
@@ -855,6 +932,7 @@ void add_algorithm_sets(Sets& sets) {
   sets["marked"] = {1, set_marked};
   sets["overlap"] = {1, set_overlap};
   sets["readparts"] = {4, set_readparts};
+  sets["regional"] = {1, set_regional};
   sets["poisson"] = {1, set_poisson};
   sets["remap"] = {1, set_remap};
   sets["search"] = {1, set_search};

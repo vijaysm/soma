@@ -14,6 +14,8 @@ add_executable(remap remap.cpp)
 target_link_libraries(remap PRIVATE soma soma_warnings)
 add_executable(refine refine.cpp)
 target_link_libraries(refine PRIVATE soma soma_warnings)
+add_executable(regional_refine regional_refine.cpp)
+target_link_libraries(regional_refine PRIVATE soma soma_warnings)
 # The example's own arithmetic rounds as Python's: no fused multiply-adds (pipeline_arith.cpp only).
 # The Fortran pipeline links it too, for its digests and printing.
 add_library(pipeline_arith OBJECT pipeline_arith.cpp)
@@ -111,5 +113,117 @@ if(SOMA_ENABLE_TESTS)
               ${CMAKE_CURRENT_BINARY_DIR}/conforming_np2.soma)
     set_tests_properties(example_refine_conforming.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
                          PASS_REGULAR_EXPRESSION "${conformed}")
+  endif()
+  # (No semicolon in a pattern: CMake would split it into several, any of which passes.)
+  # A regionally refined cubed sphere: CONUS, one pass at ne4 to 300 km, on one and two ranks alike; a box
+  # across the antimeridian; the saved mesh read back needs no further pass.
+  set(regional "passes 1. cells 96 -> 252. radius 6.37122e[+]06\n[^#]*\noptimized [^#]*finest cells' mean size")
+  add_test(NAME example_regional_refine
+    COMMAND regional_refine --ne 4 --km 300 --smooth 3 --save ${CMAKE_CURRENT_BINARY_DIR}/regional.soma
+            ${CMAKE_CURRENT_BINARY_DIR}/regional)
+  set_tests_properties(example_regional_refine PROPERTIES PASS_REGULAR_EXPRESSION "${regional}[^#]*saved "
+                       FIXTURES_SETUP regional_mesh)
+  add_test(NAME example_regional_refine_again
+    COMMAND regional_refine --mesh ${CMAKE_CURRENT_BINARY_DIR}/regional.soma --km 300 --smooth 0
+            ${CMAKE_CURRENT_BINARY_DIR}/regional_again)
+  set_tests_properties(example_regional_refine_again PROPERTIES PASS_REGULAR_EXPRESSION
+                       "passes 0. cells 252 -> 252[^#]*finest cells' mean size"
+                       FIXTURES_REQUIRED regional_mesh)
+  add_test(NAME example_regional_refine_antimeridian
+    COMMAND regional_refine --ne 4 --km 300 --smooth 3 --box -20,20,170,-170
+            ${CMAKE_CURRENT_BINARY_DIR}/regional_dateline)
+  set_tests_properties(example_regional_refine_antimeridian PROPERTIES PASS_REGULAR_EXPRESSION
+                       "passes 1. cells 96 -> 184[^#]*finest cells' mean size")
+  # Boxes round every longitude: an Arctic cap, and the whole sphere (no cell outside).
+  add_test(NAME example_regional_refine_arctic
+    COMMAND regional_refine --ne 4 --km 300 --smooth 0 --box 60,90,-180,180 ${CMAKE_CURRENT_BINARY_DIR}/regional_arctic)
+  set_tests_properties(example_regional_refine_arctic PROPERTIES PASS_REGULAR_EXPRESSION
+                       "passes 1. cells 96 -> 320[^#]*finest cells' mean size")
+  add_test(NAME example_regional_refine_everywhere
+    COMMAND regional_refine --ne 4 --km 300 --smooth 0 --box -90,90,-180,180 ${CMAKE_CURRENT_BINARY_DIR}/regional_all)
+  set_tests_properties(example_regional_refine_everywhere PROPERTIES PASS_REGULAR_EXPRESSION
+                       "passes 1. cells 96 -> 864. [^#]*cells marked: 96[^#]*outside: none[^#]*finest cells' mean size")
+  # Two levels (ne4 to 100 km): the band of level-1 cells between them is at least --transition cells wide.
+  add_test(NAME example_regional_refine_bands
+    COMMAND regional_refine --ne 4 --km 100 --smooth 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_bands)
+  set_tests_properties(example_regional_refine_bands PROPERTIES PASS_REGULAR_EXPRESSION
+                       "bands: 5\n[^#]*finest cells' mean size")
+  add_test(NAME example_regional_refine_transition1
+    COMMAND regional_refine --ne 4 --km 100 --smooth 0 --transition 1 ${CMAKE_CURRENT_BINARY_DIR}/regional_t1)
+  set_tests_properties(example_regional_refine_transition1 PROPERTIES PASS_REGULAR_EXPRESSION
+                       "bands: [1-9]\n[^#]*finest cells' mean size")
+  # No growth before measuring: the band is one cell, and one rerun widens it; with no reruns, a warning.
+  add_test(NAME example_regional_refine_rerun
+    COMMAND regional_refine --ne 4 --km 100 --smooth 0 --grow 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_rerun)
+  set_tests_properties(example_regional_refine_rerun PROPERTIES PASS_REGULAR_EXPRESSION
+                       "bands: 3\nreruns: 1\n[^#]*finest cells' mean size")
+  add_test(NAME example_regional_refine_bands_capped
+    COMMAND regional_refine --ne 4 --km 100 --smooth 0 --grow 0 --reruns 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_capped)
+  set_tests_properties(example_regional_refine_bands_capped PROPERTIES PASS_REGULAR_EXPRESSION
+                       "bands: 1\nreruns: 0\nwarning: bands under 3 cells after 0 reruns\n[^#]*finest cells' mean size")
+  # CONUS: its edges (-125 and -66) lie on grid meridians of the cubed sphere, so cells touch them; the input
+  # radius must not decide which (rounding slivers are no overlap).
+  foreach(r 6.37122e6 1)
+    add_test(NAME example_regional_refine_conus_r${r}
+      COMMAND regional_refine --radius ${r} --smooth 0 --optimize 0,0,0 ${CMAKE_CURRENT_BINARY_DIR}/regional_conus_${r})
+    set_tests_properties(example_regional_refine_conus_r${r} PROPERTIES PASS_REGULAR_EXPRESSION
+                         "passes 2. cells 5400 -> 23576. [^#]*finest cells' mean size")
+  endforeach()
+  # --max-cells stops before a pass that would pass it.
+  add_test(NAME example_regional_refine_max_cells
+    COMMAND regional_refine --ne 4 --km 100 --smooth 0 --max-cells 500 ${CMAKE_CURRENT_BINARY_DIR}/regional_max)
+  set_tests_properties(example_regional_refine_max_cells PROPERTIES PASS_REGULAR_EXPRESSION
+                       "pass 2 would make more than [0-9]+ cells [(]--max-cells 500[)]")
+  # A box reaching the pole marks the cells round it: one holding the pole (ne5), four meeting at it (ne4).
+  add_test(NAME example_regional_refine_pole_cell
+    COMMAND regional_refine --ne 5 --km 300 --smooth 0 --box 85,90,-180,180
+            ${CMAKE_CURRENT_BINARY_DIR}/regional_pole5)
+  set_tests_properties(example_regional_refine_pole_cell PROPERTIES PASS_REGULAR_EXPRESSION
+                       "cells marked: 1\n[^#]*finest cells' mean size")
+  add_test(NAME example_regional_refine_pole_vertex
+    COMMAND regional_refine --ne 4 --km 300 --smooth 0 --box 85,90,-180,180
+            ${CMAKE_CURRENT_BINARY_DIR}/regional_pole4)
+  set_tests_properties(example_regional_refine_pole_vertex PROPERTIES PASS_REGULAR_EXPRESSION
+                       "cells marked: 4\n[^#]*finest cells' mean size")
+  # The saved mesh is written back at the Earth's radius.
+  add_test(NAME example_regional_refine_earth_radius_out
+    COMMAND regional_refine --mesh ${CMAKE_CURRENT_BINARY_DIR}/regional.soma --km 300 --smooth 0
+            ${CMAKE_CURRENT_BINARY_DIR}/regional_radius)
+  set_tests_properties(example_regional_refine_earth_radius_out PROPERTIES PASS_REGULAR_EXPRESSION
+                       "radius 6.37122e[+]06\ncells marked[^#]*finest cells' mean size" FIXTURES_REQUIRED regional_mesh)
+  # A mesh on the unit sphere: spacing is measured as on the Earth, so it refines as the Earth-sized one does.
+  add_test(NAME example_regional_refine_unit_sphere
+    COMMAND regional_refine --ne 4 --radius 1 --km 300 --smooth 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_unit)
+  set_tests_properties(example_regional_refine_unit_sphere PROPERTIES PASS_REGULAR_EXPRESSION
+                       "passes 1. cells 96 -> 252. radius 1 [(]spacing as on the Earth[)][^#]*finest cells' mean size")
+  if(SOMA_ENABLE_MPI)
+    add_test(NAME example_regional_refine.np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:regional_refine> ${MPIEXEC_POSTFLAGS} --ne 4 --km 300 --smooth 3
+              ${CMAKE_CURRENT_BINARY_DIR}/regional_np2)
+    set_tests_properties(example_regional_refine.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
+                         PASS_REGULAR_EXPRESSION "${regional}")
+    # Cluster runs: SOMA files written by every rank, one copy of the mesh, the times and memory printed; the
+    # optimized mesh read back needs no pass.
+    add_test(NAME example_regional_refine_soma.np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:regional_refine> ${MPIEXEC_POSTFLAGS} --ne 4 --km 100 --smooth 3 --format soma
+              --no-neighbours ${CMAKE_CURRENT_BINARY_DIR}/regional_soma)
+    string(CONCAT soma_out "pass 2: [0-9]+ cells[^#]*\noptimized [^#]*regional_soma_optimized.soma\n"
+           "time [(]s[)] on 2 ranks: [^#]*peak memory [0-9]+ MB[^#]*finest cells' mean size")
+    set_tests_properties(example_regional_refine_soma.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
+                         FIXTURES_SETUP regional_soma PASS_REGULAR_EXPRESSION "${soma_out}")
+    add_test(NAME example_regional_refine_soma_again
+      COMMAND regional_refine --mesh ${CMAKE_CURRENT_BINARY_DIR}/regional_soma_optimized.soma --km 100 --smooth 0
+              --optimize 0,0,0 --format none ${CMAKE_CURRENT_BINARY_DIR}/regional_soma_again)
+    set_tests_properties(example_regional_refine_soma_again PROPERTIES FIXTURES_REQUIRED regional_soma
+                         PASS_REGULAR_EXPRESSION "passes 0[^#]*finest cells' mean size")
+    add_test(NAME example_regional_refine_bands.np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:regional_refine> ${MPIEXEC_POSTFLAGS} --ne 4 --km 100 --smooth 0
+              ${CMAKE_CURRENT_BINARY_DIR}/regional_bands_np2)
+    set_tests_properties(example_regional_refine_bands.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
+                         PASS_REGULAR_EXPRESSION
+                                              "passes 2. cells 96 -> 1000. [^#]*bands: 5\n[^#]*finest cells' mean size")
   endif()
 endif()

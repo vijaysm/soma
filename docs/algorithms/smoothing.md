@@ -35,11 +35,15 @@ gid order, which is what makes the result independent of the partition and threa
 Header: `soma/algorithms/laplacian.hpp`.
 
 ```cpp
+enum class SmoothMethod : std::uint8_t { neighbours, centroids };
+
 struct SmoothOptions {
   int iterations = 1;
   int bridge_dim = -1;
   Real tolerance = 0;
   std::span<const std::uint8_t> fixed;
+  SmoothMethod method = SmoothMethod::neighbours;
+  std::optional<Real> sphere_radius;
 };
 
 struct SmoothReport {
@@ -57,10 +61,111 @@ SmoothReport laplacian_smooth(const Comm& comm, Mesh<MemSpace>& mesh, const Smoo
 | `bridge_dim` | `-1` | Dimension of the entities that make two vertices neighbours: `-1` for the mesh's dimension (the cells), otherwise 1 to `dim`. |
 | `tolerance` | `0` | If greater than 0, stop once no vertex moved farther than this in a sweep. A length in the mesh's units. |
 | `fixed` | empty | One entry per vertex (by lid); a nonzero entry keeps that vertex where it is. Empty: the skin stays fixed. |
+| `method` | `neighbours` | Where a free vertex moves: the mean of its neighbours' coordinates, or (`centroids`, meshes of dimension 2) the mean of its cells' centroids. See [methods](#methods). |
+| `sphere_radius` | none | Project every moved vertex onto the sphere of this radius about the origin after each sweep. See [on a sphere](#on-a-sphere). |
 
 `SmoothReport::iterations` is the number of sweeps made; it is less than `options.iterations`
 when the tolerance stopped the iteration early. `largest_move` is the largest distance a
 vertex moved in the last sweep, over every rank, and is computed only when `tolerance > 0`.
+
+## Methods
+
+- **`neighbours`** (the default): each free vertex moves to the mean of its neighbours'
+  coordinates, as above.
+- **`centroids`** (meshes of dimension 2): each free vertex moves to the mean of the centroids
+  (corners' averages) of the cells holding it, the cells summed in ascending gid order, so the
+  result is again the same on any number of ranks and threads. A uniform grid stays as it is.
+
+On a refined mesh both raise the corner angles of the cells, but they differ in what else they
+change. On `refine_quads`' cubed sphere (ne 4, refined about a face's middle), 20 sweeps of each:
+
+| | none | `neighbours` | `centroids` |
+| --- | --- | --- | --- |
+| mean of each cell's least angle | 75.0° | 78.7° | 79.1° |
+| cells with a least angle under 45° | 28 | 12 | 12 |
+| worst ratio of longest to shortest edge | 3.3 | 8.2 | 5.1 |
+| change in the refined cells' mean area | | +3.5% | +4.5% |
+
+`centroids` stretches cells less and keeps sizes about as well. Weighting the centroids by
+their cells' areas (Lloyd's iteration at a uniform density) would instead even the sizes out:
+in the same test the refined cells grew by 87%, undoing the refinement.
+
+Neither method raises the single least angle of a refined mesh, and both can lower it: by about
+1 degree on ne30 refined to 12 km over the United States, by 6 to 7 degrees on the
+two-region run of the [regional refinement example](refinement.md#example-regionally-refined-meshes-of-the-sphere)
+(31.7 degrees to 26.1 with `neighbours`, 25.1 with `centroids`). The worst cells are transition
+cells, whose corners their templates set; smoothing improves the many cells around them, not
+those. [Optimization](#optimization) does.
+
+## On a sphere
+
+A closed surface has no skin, so every vertex moves, and the mean of points on a sphere lies
+inside it: without projection each sweep shrinks a sphere. With `sphere_radius = R`, every
+moved vertex is set to $R\,x/|x|$ after each sweep. The vertices that do not move stay where
+they are.
+
+## Optimization
+
+`quality_smooth` (`soma/algorithms/quality_smooth.hpp`, host meshes of triangles and quads)
+moves each free vertex to improve the cells around it rather than to an average:
+
+```cpp
+soma::QualitySmoothOptions o;
+o.sphere_radius = 6.37122e6;  // move on the sphere
+const soma::QualitySmoothReport r = soma::quality_smooth(comm, mesh, o);
+```
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `shape_sweeps` | 50 | Sweeps lowering the sum of the cells' corner condition numbers. |
+| `angle_sweeps` | 5 | Sweeps raising the least corner angle of the cells below `angle_threshold`. |
+| `polish_sweeps` | 10 | Shape sweeps again, kept above the least angle the angle sweeps reached. |
+| `angle_threshold` | 45 | Degrees in (0, 90]. Higher raises the least angle further and leaves more cells just under 45°. |
+| `tolerance` | 0 | > 0: a phase ends once no vertex moves farther than this times its shortest edge. |
+| `fixed` | empty | As for `laplacian_smooth`: the skin stays when empty. |
+| `sphere_radius` | none | Move in the sphere's tangent plane and project back onto it. |
+
+- **Shape:** each corner's condition number $\kappa = |A|_F^2 / (2 \det A)$, $A$ its two edges
+  (in the vertex's tangent plane) against the ideal corner, a square's or an equilateral
+  triangle's (Knupp). $\kappa$ is 1 for the ideal corner, does not depend on the cell's size,
+  and grows without bound as the corner degenerates; steps that make any $\det A \le 0$ are
+  refused.
+- **Angle:** the steepest ascent of the least angle over the active angles (Freitag and
+  Plassmann). Angles alone bound neither a quad's aspect nor its largest angle (a step can make
+  a long thin rectangle, or a corner near 180 degrees), so a step must also leave no corner of
+  the patch with a condition number above the patch's worst.
+- **Steps:** a shape step is Newton's (a 2 x 2 Hessian from central differences) where the
+  Hessian is positive definite, else steepest descent, tried first at 1.7 times its length:
+  improvement spreads one cell a sweep, and the over-relaxation halves the sweeps needed. Every
+  step is a line search kept only if its objective improves, and the least angle of the mesh
+  never falls during a phase.
+- **Order:** vertices are coloured so that no two of one colour share a cell (Jones and
+  Plassmann, priorities hashed from gids); a sweep moves one colour at a time with a halo update
+  after each, and sums each patch in cell-gid order. The result is the same bit for bit on any
+  number of ranks and threads.
+
+On the cubed sphere ne 8 refined twice about a face's middle (1718 cells), from 20 sweeps of
+`centroids`:
+
+| | `centroids` | then `quality_smooth` |
+| --- | --- | --- |
+| least angle | 31.1° | 40.3° |
+| mean of each cell's least angle | 81.7° | 83.0° |
+| cells with a least angle under 45° | 58 | 52 |
+| worst ratio of longest to shortest edge | 5.1 | 3.3 |
+
+On ne30 refined to 12 km over the United States (the
+[example](refinement.md#example-regionally-refined-meshes-of-the-sphere)), from the centroid
+result, the least angle goes from 30.1 to 43.3 degrees, the mean least angle from 81.2 to 84.1
+and the worst edge ratio from 4.8 to 3.2, at about 12 s on one core for 24436 cells. With
+`angle_threshold` 40 the angle sweeps find nothing to move there: 40.1 degrees, mean 84.1, 381
+cells under 45 degrees against 418. Its condition number does not see sizes, so the largest
+area ratio between neighbours grows (5.6 to 6.4 there).
+
+It throws `std::invalid_argument` on every rank, as `laplacian_smooth` does, for a mesh not of
+dimension 2, a cell neither a triangle nor a quad, an inverted corner, an edited mesh, a missing
+ghost layer on more than one rank, negative sweeps, a threshold outside (0, 90], a bad tolerance,
+mask or radius, or ranks differing in their options.
 
 ## Usage
 
@@ -96,8 +201,7 @@ local part, ghosts included.
 
 ## Parallel behaviour
 
-`laplacian_smooth` is collective: every rank must call it, with the same `iterations`,
-`bridge_dim` and `tolerance`.
+`laplacian_smooth` is collective: every rank must call it, with the same options.
 
 On more than one rank the mesh must hold a ghost layer through vertices,
 `GhostOptions{1, 0}` (see [ghosts and halos](../parallel/ghosts-and-halos.md)). Every cell
@@ -107,14 +211,14 @@ sweep a halo update gives shared copies and ghosts their owners' new coordinates
 copies and ghosts therefore hold their owners' coordinates, which is what
 [`FemSpace`](fem.md) expects of a mesh whose coordinates have moved.
 
-Because each vertex sums its neighbours in gid order and only owners compute, the coordinates
+Because each vertex sums its neighbours (or its cells) in gid order and only owners compute, the coordinates
 after smoothing are the same, bit for bit, on any number of ranks and threads. This holds
 whether or not `soma::reproducible()` is on (see [reproducible sums](../parallel/reproducible-sums.md)).
 
 ## Memory spaces
 
-`laplacian_smooth` accepts a mesh in any memory space. The neighbour graph and the skin are
-built on the host (a device mesh is mirrored to the host for this), once per call; the sweeps
+`laplacian_smooth` accepts a mesh in any memory space. The neighbour graph, the cells of each
+vertex (for `centroids`) and the skin are built on the host (a device mesh is mirrored to the host for this), once per call; the sweeps
 then run as Kokkos kernels in the mesh's memory space.
 
 ## Errors
@@ -128,6 +232,9 @@ then run as Kokkos kernels in the mesh's memory space.
 - a mesh of dimension 0, or an edited mesh (changed by `MeshEdit::apply` and not compressed
   since with `compress()`; see [editing](../concepts/editing.md));
 - on more than one rank, a mesh without a ghost layer through vertices;
+- `centroids` on a mesh not of dimension 2;
+- a sphere radius that is not positive and finite;
 
-or if ranks differ in `iterations`, `bridge_dim` or `tolerance`. All ranks take part in the
+or if ranks differ in `iterations`, `bridge_dim`, `tolerance`, `method` or the sphere radius
+(or in giving one). All ranks take part in the
 check (one reduction), so no rank is left waiting.

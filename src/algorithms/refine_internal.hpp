@@ -11,7 +11,9 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <cmath>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -74,10 +76,12 @@ inline bool supported_cell(Topology t, int dim) {
 }
 
 // A vertex the refinement adds (or, in marked refinement, reuses): its gid
-// and its corners' gids, ascending.
+// and its corners' gids, ascending, with their weights (aligned with them;
+// empty: the corners' average).
 struct NewVertex {
   GO gid = 0;
   std::vector<GO> corners;
+  std::vector<Real> weights;
 };
 
 // gid -> local id, from a sorted table.
@@ -187,10 +191,33 @@ struct Polygons {
 // The refined part from the children (by pattern slot: tri, quad, tet,
 // prism, pyramid, hex; and polygons) and the vertices added, with the
 // vertices the children use; parents and fields (but refine: ones) from
-// `mesh`, whose owned cells `work` holds.
+// `mesh`, whose owned cells `work` holds. A new vertex lies at its corners'
+// weighted sum (summed in corner order), projected onto the sphere of
+// `sphere_radius` about the origin when one is given.
 Level assemble(const Comm& comm, const HostMesh& mesh, const HostMesh& work, std::array<std::vector<GO>, 6>& kid_gids,
                std::array<std::vector<GO>, 6>& kid_conn, std::vector<NewVertex>& added, const Numbers& nums,
-               const Polygons& polygons);
+               const Polygons& polygons, std::optional<Real> sphere_radius = std::nullopt);
+
+// A new vertex's position: its corners' weighted sum (or average), in corner
+// order, projected onto the sphere of `radius` when one is given. `at` gives
+// a corner's position by gid.
+template <class At>
+P3 place(const NewVertex& nv, const At& at, std::optional<Real> radius) {
+  std::vector<P3> p;
+  for (const GO g : nv.corners) p.push_back(at(g));
+  P3 c;
+  if (nv.weights.empty()) {
+    c = average(p);
+  } else {
+    for (std::size_t k = 0; k < p.size(); ++k) {
+      const Real w = nv.weights[k];
+      c = c + P3{w * p[k].x, w * p[k].y, w * p[k].z};
+    }
+  }
+  if (!radius) return c;
+  const Real s = *radius / std::sqrt(c.x * c.x + c.y * c.y + c.z * c.z);
+  return {c.x * s, c.y * s, c.z * s};
+}
 
 // Collective: throws std::invalid_argument on every rank if any rank's mesh
 // cannot be refined or the ranks disagree on the levels or the dimension;

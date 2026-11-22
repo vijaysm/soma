@@ -112,6 +112,7 @@ algorithms/fv
 algorithms/grid_index
 algorithms/kokkos_sparse
 algorithms/laplacian
+algorithms/quality_smooth
 algorithms/petsc
 algorithms/refine
 algorithms/remap

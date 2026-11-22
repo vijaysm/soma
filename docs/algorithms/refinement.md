@@ -2,8 +2,9 @@
 
 SOMA refines unstructured meshes in parallel: uniformly, splitting every cell, or where cells
 are marked, keeping a 2:1 balance and either leaving hanging vertices or closing the mesh with
-transition cells. The refined mesh is the same, gid for gid and bit for bit, on any number of
-ranks. All the functions here are in `soma/algorithms/refine.hpp`, except `rebalance`, which is
+transition cells. Quad meshes for spectral elements can also be refined where marked into
+quads alone, conforming ([all-quad conforming refinement](#all-quad-conforming-refinement)).
+The refined mesh is the same, gid for gid and bit for bit, on any number of ranks. All the functions here are in `soma/algorithms/refine.hpp`, except `rebalance`, which is
 in `soma/parallel/migrate.hpp`.
 
 ## How cells are split
@@ -247,6 +248,204 @@ reuses those vertices and lists them as hanging.
 
 It is collective and throws as `refine_marked` does and as `match_points` does for `tol`.
 
+## All-quad conforming refinement
+
+```cpp
+struct QuadRefineOptions {
+  std::optional<Real> sphere_radius;  // project new vertices onto this sphere about the origin
+};
+[[nodiscard]] RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<const std::int8_t> marks,
+                                        QuadRefineOptions options = {});
+```
+
+`refine_quads` refines a mesh of quads where cells are marked and keeps it a mesh of quads
+with no hanging vertex. This is what [spectral elements](spectral-elements.md) need: their
+elements are quads, and a hanging vertex would need constraints the continuous space does not
+have. `refine_marked` with `conforming` closes a quad mesh with triangles instead, and without
+it leaves hanging vertices. Use `refine_quads` for a regionally refined mesh of the sphere or
+of a planar domain; use `refine_marked` for everything else.
+
+A marked cell is split into nine (each edge in three), and its neighbours into transition
+quads (Schneiders' vertex-based templates). The input must be conforming: hanging vertices
+are not detected, and a mesh that has them (such as `refine_marked`'s default output) gets
+more. Each call splits once; there is no 2:1 balance
+across calls. The output is order 1: a later SemSpace maps its elements bilinearly, projected
+onto the sphere.
+
+### Templates
+
+Marks move from cells to their corners: a marked cell marks its four. Each cell then splits by
+which of its corners are marked. With reference corners $v_0 = (0,0)$, $v_1 = (1,0)$,
+$v_2 = (1,1)$ and $v_3 = (0,1)$, in the cell's corner order, the four cases are:
+
+| Marked corners | Children | New vertices (reference) | Children, in order |
+| --- | --- | --- | --- |
+| none | 1 | none | $[v_0 v_1 v_2 v_3]$ (the cell, whole) |
+| one ($v_0$) | 3 | $a\,(1/3,0)$, $c\,(0,1/3)$, $p\,(1/3,1/3)$ | $[v_0 a p c]$, $[a v_1 v_2 p]$, $[c p v_2 v_3]$ |
+| two adjacent ($v_0$, $v_1$) | 7 | $a\,(1/3,0)$, $b\,(2/3,0)$, $d\,(1,1/3)$, $c\,(0,1/3)$, $p\,(1/3,1/3)$, $q\,(2/3,1/3)$, $r\,(1/3,2/3)$, $s\,(2/3,2/3)$ | $[v_0 a p c]$, $[a b q p]$, $[b v_1 d q]$, $[c p r v_3]$, $[p q s r]$, $[q d v_2 s]$, $[r s v_2 v_3]$ |
+| all four | 9 | the $3 \times 3$ grid $(i/3, j/3)$ | row by row from $v_0$ |
+
+The other marked corners are these cases turned about the cell. A cell with two opposite
+corners or three corners marked has no template: it is **promoted**, all four of its corners
+marked. That can change its neighbours' cases, so promotion repeats until no cell on any rank
+changes. Marks only grow, and a promoted cell's marks stay promoted as more are added, so the
+result does not depend on the order cells are visited in, or on the ranks.
+
+An edge's new vertices depend on its two ends alone: both marked, vertices at 1/3 and 2/3;
+one marked, a vertex at 1/3 from it; none, none. The two cells on an edge therefore split it
+alike, and the result is conforming.
+
+### Positions, gids and levels
+
+- **Positions.** A vertex on an edge is $(2/3)\,lo + (1/3)\,hi$ or $(1/3)\,lo + (2/3)\,hi$,
+  with $lo$ and $hi$ the edge's ends by gid. A vertex inside a cell is the bilinear map of the
+  cell's corners at its reference position, with the weights summed in the corners' gid order.
+  Every rank holding a vertex therefore computes the same bits.
+- **Gids.** Let $V$ and $E$ be the largest vertex and edge gids on any rank (edges derived as
+  `build_distributed_adjacencies` derives them), and number the cells $n = \mathrm{gid} - G + 1$,
+  with $G$ the least cell gid.
+  - The vertex on edge $e$ nearer its lower-gid end is $V + 2(e - 1) + 1$; the other is
+    $V + 2(e - 1) + 2$.
+  - The new vertex nearest corner $j$ inside cell $n$ is $V + 2E + 4(n - 1) + j + 1$.
+  - Child $c$ (0-based, in the template's order) is $9(n - 1) + c + 1$. A whole cell is its
+    own child 0, so every cell is renumbered, even with no marks.
+- **Levels.** The cell field `refine:level` (0 where missing) goes up by one for the nine
+  children of a cell split fully; transition children and whole cells keep their parent's
+  level. No other state is kept, so a later call takes the result as a mesh like any other.
+- **Fields** carry over as `refine_uniform` carries them. A new vertex's value is weighted as
+  its position is, before projection, so linear fields come through exactly in the plane.
+
+### The sphere and validity
+
+With `options.sphere_radius = R`, each new vertex $x$ is projected onto the sphere,
+$x \leftarrow R\,x/|x|$; the input's vertices stay where they are.
+
+Each split cell, and each of its children (projected), must turn as the cell does at every
+corner, about the cell's area vector $\sum_i x_i \times x_{i+1}$. A bilinear quad that turns
+positively at all four corners has a positive Jacobian everywhere, so at its GLL points too.
+A cell that fails, such as a dart (one corner reflex), throws on every rank, naming the least
+such cell gid. Cells left whole are not checked.
+
+### Errors
+
+`refine_quads` is collective. It throws `std::invalid_argument` on every rank, with a message
+beginning `refine_quads:`, if:
+
+- any rank's mesh holds a cell other than a quad, is not of dimension 2, has edits or has
+  high-order nodes (Quad9);
+- a rank's marks are not one per owned cell;
+- a rank's sphere radius is not positive and finite, or the ranks differ in it (or in giving
+  one);
+- a split cell or one of its children turns against the cell;
+- a gid of the result would not fit a `GO`.
+
+### Example: regionally refined meshes of the sphere
+
+`examples/regional_refine.cpp` builds the regionally refined meshes (RRM) E3SM runs on: a
+cubed sphere, or a quad mesh on a sphere read from a file, refined inside lat/lon boxes to a
+grid spacing in km, graded so that each level is a band of several cells, then smoothed. It
+works on the unit sphere (coordinates divided by the mesh's radius on input and multiplied back
+on output). A cell of size $s$ (km) that needs $k$ more passes is marked when it overlaps a box
+grown by $N s (1/3 + \dots + 1/3^{k-1})$, so that about $N$ cells of each level lie between the
+next finer and the next coarser:
+
+```cpp
+for (;;) {
+  std::vector<std::int8_t> marks;  // per owned cell: overlaps(corners, box, grow) for some box
+  ...                               // stop when no rank marks a cell
+  mesh = soma::rebalance(comm, soma::refine_quads(comm, mesh, marks, {.sphere_radius = 1}).mesh);
+}
+```
+
+- **Spacing** is that of the GLL points of spectral elements with `--np` points per edge
+  (default 4): $\sqrt{A}/(n_p - 1)$ for a cell of area $A$. This is E3SM's convention: ne30
+  (elements about 300 km across) is about 100 km. Each pass divides the spacing by 3, and a cell
+  is refined while its spacing is above 1.5 times `--km`: from ne30, `--km 12` stops at about
+  11 km (two passes) and `--km 25` or `--km 33` at about 33 km (one). Lengths are measured as
+  on the Earth (6.37122e6 m), so a mesh on the unit sphere, as TempestRemap and MOAB grids often
+  are, refines as the Earth-sized one does.
+- **Boxes** are `--box LAT0,LAT1,LON0,LON1` in degrees (default the contiguous United States as
+  four boxes: `31.3,49,-124.8,-103`, `25.8,49.4,-103,-89`, `29,47.5,-89,-67` and
+  `24.5,31,-87.6,-80`, the west, the plains, the east and Florida). `LON0 > LON1` wraps across the antimeridian, a box 360 degrees wide or
+  more (`60,90,-180,180`, the Arctic) holds every longitude, and `--box` may be repeated for
+  several regions refined together. A cell is in a box when its polygon, in longitude and
+  latitude about the box's centre, overlaps the box by more than $10^{-9}$ of its own area (CONUS's
+  edges lie on the cube's grid meridians, so cells touch them); a cell holding a pole spans every
+  longitude up to it.
+- **Transition bands:** `--transition N` (default 3) cells per level. After the passes, the band
+  of each level is measured in cells through edges, from the cells next to a finer level to the
+  nearest coarser cell. Promotion (below) can eat into a band, so a band under $N$ cells is grown
+  by the missing cells and the refinement reruns from the start, at most `--reruns` times
+  (default 4; then a warning). `--grow G` grows by $G$ cells instead of $N$ before the first
+  measure.
+- **Reuse:** `--save FILE` writes the result, and `--mesh FILE` starts from such a mesh (or any
+  quad mesh on a sphere). A mesh already fine enough takes no further pass.
+- **Large runs:** `--format soma` writes SOMA files from every rank (VTK, the default, gathers the
+  mesh on the first rank), `--no-neighbours` skips the comparison with neighbour smoothing and so
+  keeps one copy of the mesh, and `--max-cells C` stops before a pass that would make more than
+  `C` cells. Each pass prints its cell count and time, and the run its times and the peak memory
+  of any rank.
+
+```bash
+mpiexec -n 4 ./regional_refine --ne 30 --km 12 conus
+mpiexec -n 4 ./regional_refine --ne 30 --km 33 --box 35,72,-10,40 --box -45,-10,110,155 europe_australia
+```
+
+The figures below use the single box `24,50,-125,-66` (the red outline).
+
+```{figure} ../figures/img/regional-levels.png
+:alt: The contiguous United States, seen from above, coloured by refinement level: a red lat/lon box inside a yellow region of the finest cells, ringed by an even teal band, inside purple coarse cells; the yellow region's sides follow the cube's grid lines, with a notch on the west where it crosses a cube face's edge
+:width: 80%
+
+ne30 refined to 12 km over the contiguous United States (the red box): two passes, 5400 cells to 24436. Level 2
+(yellow, 33 km elements, 11 km spacing) and a band of level 1 (teal, 100 km elements, at least 5 cells wide)
+around level 0 (purple, 300 km). The fine region follows the cube's grid lines rather than the box: see the note
+below.
+```
+
+Each pass promotes the cells with two opposite or three marked corners, and a staircase of
+marked cells along a box edge that crosses the cube's grid diagonally has such a cell at every
+step. Promotion therefore fills the marked region out to a block of the cube's grid around the
+box. In the figure, 13895 of the 24436 cells lie in the box.
+
+The example then smooths copies of the mesh, 20 sweeps of each
+[smoothing](smoothing.md#methods) method by default, projected onto the sphere, then runs
+[`quality_smooth`](smoothing.md#optimization) from the centroid result (`--optimize
+SHAPE,ANGLE[,POLISH]`, default `50,5,10`; `--angle-threshold`, default 45), and reports a quality table and the change in the
+finest cells' size (a warning past 5%: one more pass in the regions of interest makes up for it).
+It writes `<prefix>_refined.vtk`, `_neighbours.vtk`, `_centroids.vtk` and `_optimized.vtk` with
+the cell fields `refine:level`, `spacing_km`, `min_angle` (degrees), `aspect` (longest over
+shortest edge), `scaled_jacobian` (least over corners of the sine of the corner angle, signed by
+the cell's turn) and `area_ratio` (largest ratio to an edge neighbour's area), for ParaView.
+
+```{figure} ../figures/img/regional-quality.png
+:alt: Three close-ups of the same place south-west of the box, coloured by each cell's least angle from 30 to 90 degrees: as refined, after centroid smoothing, and after optimization; large cells on the left of each meet a band of mid-sized cells and then small cells on the right through strips of transition cells, which stay dark after centroid smoothing and turn lighter after optimization
+:width: 100%
+
+South-west of the box, where the 300 km, 100 km and 33 km elements meet, coloured by each cell's least angle: as
+refined, after 20 sweeps of `SmoothMethod::centroids`, and after `quality_smooth` from there. Centroid smoothing
+squares up the cells between the transitions but leaves the transition cells' corners of 30 to 40 degrees, which
+their templates set; the optimizer opens them. Over the whole mesh, the least angle goes from 30.5 degrees
+(refined) to 30.1 (centroids) and 43.3 (optimized), the mean least angle from 79.9 to 81.2 and 84.1, the worst
+edge ratio from 3.5 to 4.8 and 3.2, and the cells under 45 degrees from 540 to 369 and 418; the finest cells'
+mean size does not change (0.0%).
+```
+
+### Regionally refined meshes from elsewhere
+
+E3SM's regionally refined meshes (RRM) and SQuadGen's are Exodus files (`.g`). Convert one
+with MOAB's `mbconvert` and read the result:
+
+```bash
+mbconvert ne30x4_rrm.g ne30x4_rrm.h5m
+```
+
+```cpp
+soma::HostMesh mesh = soma::read_h5m(comm, "ne30x4_rrm.h5m");
+```
+
+SOMA has no Exodus reader of its own.
+
 ## Marking
 
 ```cpp
@@ -254,7 +453,8 @@ It is collective and throws as `refine_marked` does and as `match_points` does f
 [[nodiscard]] std::vector<std::int8_t> mark_fraction(const Comm& comm, std::span<const Real> indicator, Real fraction);
 ```
 
-Both take an indicator per owned cell, in local id order, and return marks for `refine_marked`.
+Both take an indicator per owned cell, in local id order, and return marks for `refine_marked`
+or `refine_quads`.
 
 - `mark_threshold` marks the cells whose indicator exceeds `threshold`. It is local.
 - `mark_fraction` is Doerfler marking: it marks the cells of largest indicator whose indicators
