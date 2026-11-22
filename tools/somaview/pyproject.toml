@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2022-2026, Vijay Mahadevan.
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "somaview"
+version = "0.1.0"
+description = "Read SOMA mesh files and AMR checkpoints for visualisation"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "numpy",
+    "h5py",
+]
+
+[project.optional-dependencies]
+vtk = ["vtk"]
+pyvista = ["pyvista", "vtk"]
+yt = ["yt", "vtk"]
+mpi = ["mpi4py"]
+all = ["vtk", "pyvista", "yt", "mpi4py"]
+
+[project.scripts]
+somaview = "somaview.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/somaview"]
