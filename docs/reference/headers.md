@@ -136,6 +136,15 @@ Files. See [input and output](../io/overview.md).
 | `soma/algorithms/vertex_graph.hpp` | **internal**: host-side graphs over a mesh's vertices (neighbours, cells around a vertex, skin) ordered by gid |
 | `soma/algorithms/to_space.hpp` | **internal**: a host vector copied into a view of a memory space |
 
+## `soma/sem`
+
+| Header | Provides |
+| --- | --- |
+| [`soma/sem/gll.hpp`](api/sem/gll.md) | `gll_weights_1d`, `gll_derivative_1d`: the 1D GLL weights and derivative matrix. See [spectral elements](../algorithms/spectral-elements.md) |
+| [`soma/sem/cubed_sphere.hpp`](api/sem/cubed_sphere.md) | `CubedSphereSpec`, `cubed_sphere_mesh`: the equiangular cubed sphere, linear or quadratic, split across the ranks. See [spectral elements](../algorithms/spectral-elements.md) |
+| [`soma/sem/sem_space.hpp`](api/sem/sem_space.md) | `SemSpace`, `SemGeometry`: GLL points and geometry over quads in the plane or on a sphere; `dss`, `mass`, `integral`. See [spectral elements](../algorithms/spectral-elements.md) |
+| [`soma/sem/operators.hpp`](api/sem/operators.md) | `gradient`, `divergence`, `vorticity`, `project_tangent`, `laplacian`, `hyperviscosity`. See [spectral elements](../algorithms/spectral-elements.md) |
+
 ## `soma/amr`
 
 Patch-based AMR, namespace `soma::amr`. Documented in [block-structured AMR](../amr/block-amr.md).
