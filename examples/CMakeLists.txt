@@ -196,6 +196,22 @@ if(SOMA_ENABLE_TESTS)
     COMMAND regional_refine --ne 4 --radius 1 --km 300 --smooth 0 ${CMAKE_CURRENT_BINARY_DIR}/regional_unit)
   set_tests_properties(example_regional_refine_unit_sphere PROPERTIES PASS_REGULAR_EXPRESSION
                        "passes 1. cells 96 -> 252. radius 1 [(]spacing as on the Earth[)][^#]*finest cells' mean size")
+  # Each level smoothed before the next pass cuts it, the last smoothing near level changes only, the area ratio
+  # bounded by the mesh's own: the pass and final optimizer lines.
+  string(CONCAT pass_optimized "pass 1: [0-9]+ cells[^#]*\n  optimized: [0-9]+,[0-9]+,[0-9]+ sweeps, [0-9]+ vertices free"
+         "[^#]*[(]bound [0-9.]+[)][^#]*pass 2: [^#]*optimizer: [^#]*vertices free, area ratio [^#]*[(]bound ")
+  add_test(NAME example_regional_refine_pass_optimize
+    COMMAND regional_refine --ne 4 --km 100 --pass-optimize 5,2,2 --final-rings 2 --area-ratio keep --format none
+            ${CMAKE_CURRENT_BINARY_DIR}/regional_pass_optimize)
+  set_tests_properties(example_regional_refine_pass_optimize PROPERTIES PASS_REGULAR_EXPRESSION "${pass_optimized}")
+  if(SOMA_ENABLE_MPI)
+    add_test(NAME example_regional_refine_pass_optimize.np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}
+              $<TARGET_FILE:regional_refine> ${MPIEXEC_POSTFLAGS} --ne 4 --km 100 --pass-optimize 5,2,2 --final-rings 2
+              --area-ratio keep --format none ${CMAKE_CURRENT_BINARY_DIR}/regional_pass_optimize_np2)
+    set_tests_properties(example_regional_refine_pass_optimize.np2 PROPERTIES TIMEOUT 60 PROCESSORS 2
+                         PASS_REGULAR_EXPRESSION "${pass_optimized}")
+  endif()
   if(SOMA_ENABLE_MPI)
     add_test(NAME example_regional_refine.np2
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2 ${MPIEXEC_PREFLAGS}

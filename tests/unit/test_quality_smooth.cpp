@@ -560,3 +560,149 @@ TEST(QualitySmooth, DefaultsBeatCentroidsOnTwoLevels) {
   EXPECT_LE(qo.under_45, qc.under_45);
   EXPECT_LE(qo.worst_aspect, qc.worst_aspect);
 }
+
+namespace {
+
+// `m` with two ghost layers through vertices in place of one (more than one rank).
+soma::HostMesh two_layers(const soma::Comm& c, soma::HostMesh m) {
+  if (c.size() > 1) {
+    m.remove_ghosts(c);
+    m.add_ghosts(c, soma::GhostOptions{2, 0});
+  }
+  return m;
+}
+
+// The largest area ratio (larger over smaller) of an owned cell to a local cell
+// sharing two of its corners, over every rank: found through the cells of each
+// corner, apart from the library's edge tables.
+Real brute_ratio(const soma::Comm& c, const soma::HostMesh& m) {
+  const auto mv = m.view();
+  const auto around = soma::detail::vertex_cells(m);
+  Real most = 1;
+  for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
+    const Real a = area(m, e);
+    for (LO i = 0; i < mv.num_vertices(2, e); ++i) {
+      const auto v = static_cast<std::size_t>(mv.vertex(2, e, i));
+      for (auto k = around.offsets[v]; k < around.offsets[v + 1]; ++k) {
+        const LO d = around.cells[static_cast<std::size_t>(k)];
+        if (d == e) continue;
+        int shared = 0;
+        for (LO p = 0; p < mv.num_vertices(2, e); ++p) {
+          for (LO q = 0; q < mv.num_vertices(2, d); ++q) shared += mv.vertex(2, e, p) == mv.vertex(2, d, q) ? 1 : 0;
+        }
+        if (shared < 2) continue;
+        const Real b = area(m, d);
+        most = std::max(most, a > b ? a / b : b / a);
+      }
+    }
+  }
+  return c.allreduce(most, soma::Op::max);
+}
+
+}  // namespace
+
+// With the edge stencil, no two corners of two cells sharing an edge share a
+// colour, ghost cells included, and every vertex has one.
+TEST(QualitySmooth, StencilColoursSeparateEdgeNeighbours) {
+  const soma::Comm c = soma::Comm::world();
+  const soma::HostMesh m = two_layers(c, dealt_sphere(c));
+  const auto cells = soma::detail::vertex_cells(m);
+  const auto neighbours = soma::detail::edge_neighbours(m, cells);
+  const auto colour = soma::detail::vertex_colours(c, m, soma::detail::edge_stencil(m, cells, neighbours));
+  const auto mv = m.view();
+  Real bad = 0;
+  for (LO v = 0; v < m.count(0); ++v) bad += colour[static_cast<std::size_t>(v)] < 0 ? 1 : 0;
+  for (LO e = 0; e < m.count(2); ++e) {
+    const auto ei = static_cast<std::size_t>(e);
+    for (auto k = neighbours.offsets[ei]; k < neighbours.offsets[ei + 1]; ++k) {
+      const LO d = neighbours.cells[static_cast<std::size_t>(k)];
+      if (d < 0) continue;
+      std::set<LO> corners;
+      std::set<std::int32_t> seen;
+      for (const LO f : {e, d}) {
+        for (LO i = 0; i < mv.num_vertices(2, f); ++i) corners.insert(mv.vertex(2, f, i));
+      }
+      for (const LO v : corners) seen.insert(colour[static_cast<std::size_t>(v)]);
+      bad += seen.size() == corners.size() ? 0 : 1;
+    }
+  }
+  EXPECT_EQ(c.allreduce(bad, soma::Op::sum), 0);
+}
+
+// Where two levels meet, shape sweeps trade size for shape (the unbounded run
+// raises the ratio); with the bound at the mesh's own largest ratio the ratio
+// does not grow and the summed condition number still falls; with the bound at
+// 1 no pair grows past where its patch was.
+TEST(QualitySmooth, AreaRatioBoundHolds) {
+  const soma::Comm c = soma::Comm::world();
+  const soma::HostMesh start = two_layers(c, two_level_sphere(c));
+  const Real before = brute_ratio(c, start);
+  const Real kappa_before = total_kappa(c, start);
+  const soma::QualitySmoothOptions sweeps{.shape_sweeps = 10, .angle_sweeps = 3, .polish_sweeps = 3,
+                                          .sphere_radius = kRadius};
+  soma::HostMesh free = start.clone();
+  (void)soma::quality_smooth(c, free, sweeps);
+  const Real unbounded = brute_ratio(c, free);
+  EXPECT_GT(unbounded, before);
+  for (const Real bound : {before, Real{1}}) {
+    soma::HostMesh m = start.clone();
+    soma::QualitySmoothOptions o = sweeps;
+    o.area_ratio_bound = bound;
+    const auto r = soma::quality_smooth(c, m, o);
+    const Real after = brute_ratio(c, m);
+    const Real kappa_after = total_kappa(c, m);
+    if (c.rank() == 0) {
+      std::printf("area ratio: start %.4f, unbounded %.4f, bound %.4f -> %.4f; kappa %.1f -> %.1f\n", before,
+                  unbounded, bound, after, kappa_before, kappa_after);
+    }
+    EXPECT_LE(after, std::max(bound, before) * (1 + 1e-12));
+    EXPECT_NEAR(r.area_ratio_before, before, 1e-12 * before);
+    EXPECT_NEAR(r.area_ratio_after, after, 1e-12 * after);
+    EXPECT_LT(kappa_after, kappa_before);
+    EXPECT_GE(r.least_angle_after, r.least_angle_before);
+  }
+}
+
+// The bound's result is the same bit for bit on any number of ranks.
+TEST(QualitySmooth, AreaRatioSameBitsOnAnyRankCount) {
+  const soma::Comm c = soma::Comm::world();
+  const soma::Comm self = soma::Comm::self();
+  const soma::QualitySmoothOptions o{.shape_sweeps = 5, .angle_sweeps = 3, .polish_sweeps = 3,
+                                     .area_ratio_bound = 1.5, .sphere_radius = kRadius};
+  soma::HostMesh serial = refined_sphere(self, false);
+  (void)soma::quality_smooth(self, serial, o);
+  std::map<GO, std::array<std::uint64_t, 3>> want;
+  for (LO v = 0; v < serial.count(0); ++v) {
+    const auto p = point(serial, v);
+    want[serial.gid(0)(v)] = {std::bit_cast<std::uint64_t>(p[0]), std::bit_cast<std::uint64_t>(p[1]),
+                              std::bit_cast<std::uint64_t>(p[2])};
+  }
+  soma::HostMesh m = two_layers(c, dealt_sphere(c));
+  (void)soma::quality_smooth(c, m, o);
+  Real differ = 0;
+  for (LO v = 0; v < m.count(0); ++v) {
+    const auto p = point(m, v);
+    const std::array<std::uint64_t, 3> got{std::bit_cast<std::uint64_t>(p[0]), std::bit_cast<std::uint64_t>(p[1]),
+                                           std::bit_cast<std::uint64_t>(p[2])};
+    const auto it = want.find(m.gid(0)(v));
+    differ += it != want.end() && it->second == got ? 0 : 1;
+  }
+  EXPECT_EQ(c.allreduce(differ, soma::Op::sum), 0);
+}
+
+TEST(QualitySmooth, AreaRatioOptionsAreChecked) {
+  const soma::Comm c = soma::Comm::world();
+  const Real inf = std::numeric_limits<Real>::infinity(), nan = std::numeric_limits<Real>::quiet_NaN();
+  soma::HostMesh m = two_layers(c, refined_sphere(c));
+  for (const Real b : {Real{0.5}, -Real{1}, inf, nan}) {
+    expect_refused(c, m, {.area_ratio_bound = b, .sphere_radius = kRadius});
+  }
+  if (c.size() > 1) {
+    expect_refused(c, m, {.area_ratio_bound = c.rank() == 1 ? Real{2} : Real{3}, .sphere_radius = kRadius});
+    soma::HostMesh one = refined_sphere(c);  // one ghost layer
+    expect_refused(c, one, {.area_ratio_bound = 2, .sphere_radius = kRadius});
+    EXPECT_NO_THROW((void)soma::quality_smooth(c, one, {.shape_sweeps = 1, .sphere_radius = kRadius}));
+  }
+  EXPECT_NO_THROW(
+      (void)soma::quality_smooth(c, m, {.shape_sweeps = 1, .area_ratio_bound = 2, .sphere_radius = kRadius}));
+}

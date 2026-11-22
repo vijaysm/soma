@@ -45,6 +45,12 @@
 /// to the sum of the patch's area vectors. Fixed vertices stay: those of the
 /// mask, else the skin (none on a closed surface).
 ///
+/// With an area ratio bound, every phase's steps also keep the area ratios
+/// of the cells sharing an edge with the patch's cells at or below the bound
+/// (or below where they already were): the condition number does not depend
+/// on size, so without it the phases trade size for shape where cells of two
+/// levels meet.
+///
 /// Sweeps visit the vertex colours of detail::vertex_colours in turn (no two
 /// vertices of a colour share a cell), owners moving their vertices and a
 /// halo update after each colour; patches sum their cells in cell-gid order.
@@ -73,6 +79,21 @@ namespace detail {
 /// every rank if a round colours no vertex (ranks disagreeing on the mesh).
 std::vector<std::int32_t> vertex_colours(const Comm& comm, const HostMesh& mesh, const VertexCells& cells);
 
+/// Per cell lid, the cell across each edge (edge i joins corners i and i + 1):
+/// num_vertices entries from offsets[c], -1 where no local cell is there.
+/// `cells` is vertex_cells(mesh).
+struct CellNeighbours {
+  std::vector<Offset> offsets;  ///< cell count + 1
+  std::vector<LO> cells;
+};
+CellNeighbours edge_neighbours(const HostMesh& mesh, const VertexCells& cells);
+
+/// Per owned vertex, its cells and the cells sharing an edge with them (in
+/// lid order, each once); ghost vertices get none. Given to vertex_colours,
+/// no two vertices of a colour lie in cells sharing an edge. Needs two ghost
+/// layers through vertices for the owned vertices' lists to be whole.
+VertexCells edge_stencil(const HostMesh& mesh, const VertexCells& cells, const CellNeighbours& neighbours);
+
 }  // namespace detail
 
 struct QualitySmoothOptions {
@@ -86,6 +107,16 @@ struct QualitySmoothOptions {
   /// > 0: a phase ends once no vertex moved farther than this times its
   /// patch's shortest edge in a sweep.
   Real tolerance = 0;
+  /// >= 1: in every phase a step is kept only if no two cells sharing an
+  /// edge, one of them in the vertex's patch, are left with an area ratio
+  /// (larger over smaller) above max(area_ratio_bound, the largest such ratio
+  /// before the vertex moved). The mesh's largest ratio then ends at most
+  /// max(area_ratio_bound, its largest at the start). A cell's area is half
+  /// the length of its area vector, from its corners in space. On more than
+  /// one rank the mesh needs two ghost layers through vertices; vertices are
+  /// coloured so that no two of a colour lie in cells sharing an edge. 0: no
+  /// bound.
+  Real area_ratio_bound = 0;
   /// Per vertex lid, nonzero for a vertex that stays; empty: the skin stays.
   std::span<const std::uint8_t> fixed;
   /// Move on the sphere of this radius about the origin.
@@ -98,15 +129,18 @@ struct QualitySmoothReport {
   int polish_sweeps = 0;         ///< sweeps made
   Real least_angle_before = 0;   ///< degrees, over the cells of every rank
   Real least_angle_after = 0;    ///< degrees, over the cells of every rank
+  Real area_ratio_before = 0;    ///< largest over the cells of every rank; 0 without a bound
+  Real area_ratio_after = 0;     ///< largest over the cells of every rank; 0 without a bound
 };
 
 /// Collective. Throws std::invalid_argument on every rank if any rank passes
 /// a mesh not of dimension 2, with a cell neither a triangle nor a quad, with
 /// a corner whose det A <= 0 (in the tangent plane), with unremoved edits,
-/// or, on more than one rank, without a ghost layer through vertices;
-/// negative sweeps, a threshold outside (0, 90], a tolerance negative or not
-/// finite, a mask not one per vertex, a radius not positive and finite; or
-/// if ranks differ in any option (or in giving a radius).
+/// or, on more than one rank, without a ghost layer through vertices (two
+/// with an area ratio bound); negative sweeps, a threshold outside (0, 90], a
+/// tolerance negative or not finite, an area ratio bound negative, in (0, 1)
+/// or not finite, a mask not one per vertex, a radius not positive and
+/// finite; or if ranks differ in any option (or in giving a radius).
 QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const QualitySmoothOptions& options = {});
 
 }  // namespace soma

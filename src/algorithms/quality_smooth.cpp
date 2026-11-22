@@ -98,6 +98,65 @@ std::vector<std::int32_t> vertex_colours(const Comm& comm, const HostMesh& mesh,
   return {colour.data(), colour.data() + n};
 }
 
+CellNeighbours edge_neighbours(const HostMesh& mesh, const VertexCells& cells) {
+  const auto m = mesh.view();
+  const int dim = mesh.dim();
+  const LO count = mesh.count(dim);
+  CellNeighbours out;
+  out.offsets.assign(static_cast<std::size_t>(count) + 1, 0);
+  for (LO c = 0; c < count; ++c) {
+    const auto i = static_cast<std::size_t>(c);
+    out.offsets[i + 1] = out.offsets[i] + static_cast<Offset>(m.num_vertices(dim, c));
+  }
+  out.cells.assign(static_cast<std::size_t>(out.offsets.back()), -1);
+  for (LO c = 0; c < count; ++c) {
+    const LO n = m.num_vertices(dim, c);
+    for (LO i = 0; i < n; ++i) {
+      const auto a = static_cast<std::size_t>(m.vertex(dim, c, i));
+      const LO b = m.vertex(dim, c, (i + 1) % n);
+      for (Offset k = cells.offsets[a]; k < cells.offsets[a + 1]; ++k) {
+        const LO d = cells.cells[static_cast<std::size_t>(k)];
+        if (d == c) continue;
+        bool shares = false;
+        for (LO j = 0; j < m.num_vertices(dim, d) && !shares; ++j) shares = m.vertex(dim, d, j) == b;
+        if (shares) {
+          out.cells[static_cast<std::size_t>(out.offsets[static_cast<std::size_t>(c)] + i)] = d;
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
+VertexCells edge_stencil(const HostMesh& mesh, const VertexCells& cells, const CellNeighbours& neighbours) {
+  const LO n = mesh.count(0);
+  const LO owned = mesh.segment_table(0).owned_end;
+  VertexCells out;
+  out.offsets.assign(static_cast<std::size_t>(n) + 1, 0);
+  std::vector<LO> mine;
+  for (LO v = 0; v < n; ++v) {
+    const auto i = static_cast<std::size_t>(v);
+    mine.clear();
+    if (v < owned) {
+      for (Offset k = cells.offsets[i]; k < cells.offsets[i + 1]; ++k) {
+        const LO c = cells.cells[static_cast<std::size_t>(k)];
+        mine.push_back(c);
+        const auto ci = static_cast<std::size_t>(c);
+        for (Offset j = neighbours.offsets[ci]; j < neighbours.offsets[ci + 1]; ++j) {
+          const LO d = neighbours.cells[static_cast<std::size_t>(j)];
+          if (d >= 0) mine.push_back(d);
+        }
+      }
+      std::sort(mine.begin(), mine.end());
+      mine.erase(std::unique(mine.begin(), mine.end()), mine.end());
+    }
+    out.cells.insert(out.cells.end(), mine.begin(), mine.end());
+    out.offsets[i + 1] = static_cast<Offset>(out.cells.size());
+  }
+  return out;
+}
+
 }  // namespace soma::detail
 
 namespace soma {
@@ -144,12 +203,29 @@ struct Measure {
   Real least = 360;       // degrees, over the patch's corners
   Real least_moved = 360; // degrees, over the corners the vertex moves
   std::vector<Real> moved;  // those corners' angles, in patch order
+  Real ratio = 1;         // with a bound: the largest area ratio of a patch cell to an edge neighbour
 };
+
+// A cell's area: half the length of its area vector, about its first corner.
+template <class Point>
+Real cell_area(const MeshView<Kokkos::HostSpace>& m, LO c, Point&& point) {
+  const LO n = m.num_vertices(2, c);
+  const P3 o = point(m.vertex(2, c, 0));
+  P3 s{0, 0, 0};
+  for (LO i = 1; i + 1 < n; ++i) {
+    const P3 t = cross(sub(point(m.vertex(2, c, i)), o), sub(point(m.vertex(2, c, i + 1)), o));
+    for (std::size_t q = 0; q < 3; ++q) s[q] += t[q];
+  }
+  return norm(s) / 2;
+}
 
 class Smoother {
  public:
-  Smoother(const HostMesh& mesh, const detail::VertexCells& cells, std::optional<Real> radius)
-      : m_(mesh.view()), x_(mesh.coords()), cells_(cells), radius_(radius) {}
+  // `neighbours` (the cells across each cell's edges) only with an area ratio
+  // bound >= 1.
+  Smoother(const HostMesh& mesh, const detail::VertexCells& cells, std::optional<Real> radius,
+           const detail::CellNeighbours* neighbours = nullptr, Real bound = 0)
+      : m_(mesh.view()), x_(mesh.coords()), cells_(cells), radius_(radius), neighbours_(neighbours), bound_(bound) {}
 
   // The patch's normal for det A and the plane's frame, at the vertex's
   // present position.
@@ -181,6 +257,7 @@ class Smoother {
     e[axis] = 1;
     t1_ = unit(axpy(-dot(e, plane), plane, e));
     t2_ = cross(plane, t1_);
+    if (neighbours_ != nullptr) pairs();
   }
 
   // The vertex's position at (a, b) in its plane, in units of the shortest edge.
@@ -230,6 +307,7 @@ class Smoother {
         }
       }
     }
+    if (neighbours_ != nullptr) out.ratio = ratio();
     put(v_, keep);
     return out;
   }
@@ -239,6 +317,7 @@ class Smoother {
   Real shape(Real floor) {
     Real a = 0, b = 0;
     Measure now = measure(at(0, 0));
+    const Real cap = std::max(bound_, now.ratio);
     for (int inner = 0; inner < kInner; ++inner) {
       // Gradient and Hessian by central differences.
       const Real f = now.kappa, d2 = kDelta * kDelta;
@@ -268,7 +347,7 @@ class Smoother {
       Real s = kOverRelax;
       for (int h = 0; h <= kHalvings && !stepped; ++h, s /= 2) {
         const Measure t = measure(at(a + s * da, b + s * db));
-        if (t.valid && t.kappa < now.kappa * (1 - kProgress) && t.least >= floor) {
+        if (t.valid && t.kappa < now.kappa * (1 - kProgress) && t.least >= floor && within(t, cap)) {
           a += s * da;
           b += s * db;
           now = t;
@@ -289,6 +368,7 @@ class Smoother {
     Measure now = measure(at(0, 0));
     if (now.least >= threshold) return 0;
     const Real worst = now.kappa_max;
+    const Real cap = std::max(bound_, now.ratio);
     for (int inner = 0; inner < kInner; ++inner) {
       const Measure pa = measure(at(a + kDelta, b)), ma = measure(at(a - kDelta, b));
       const Measure pb = measure(at(a, b + kDelta)), mb = measure(at(a, b - kDelta));
@@ -304,7 +384,7 @@ class Smoother {
       Real s = kFirstStep;
       for (int h = 0; h <= kHalvings && !stepped; ++h, s /= 2) {
         const Measure t = measure(at(a + s * d[0] / l, b + s * d[1] / l));
-        if (t.valid && t.least_moved > now.least_moved * (1 + kProgress) && t.kappa_max <= worst) {
+        if (t.valid && t.least_moved > now.least_moved * (1 + kProgress) && t.kappa_max <= worst && within(t, cap)) {
           a += s * d[0] / l;
           b += s * d[1] / l;
           now = t;
@@ -324,6 +404,50 @@ class Smoother {
   Offset end(LO v) const { return cells_.offsets[static_cast<std::size_t>(v) + 1]; }
   void put(LO v, const P3& p) const {
     for (int q = 0; q < 3; ++q) x_(v, q) = p[static_cast<std::size_t>(q)];
+  }
+
+  // With a bound: a trial point is within it when its patch's largest ratio
+  // is at most `cap`. Without one every point is.
+  [[nodiscard]] bool within(const Measure& t, Real cap) const { return neighbours_ == nullptr || t.ratio <= cap; }
+
+  // The pairs of cells sharing an edge, one of them in the patch: each pair
+  // once, a neighbour outside the patch with its area (it does not move with
+  // the vertex).
+  void pairs() {
+    patch_.clear();
+    pairs_.clear();
+    for (Offset k = begin(v_); k < end(v_); ++k) patch_.push_back(cells_.cells[static_cast<std::size_t>(k)]);
+    area_.assign(patch_.size(), 0);
+    const auto in_patch = [&](LO d) {
+      for (std::size_t j = 0; j < patch_.size(); ++j) {
+        if (patch_[j] == d) return static_cast<std::ptrdiff_t>(j);
+      }
+      return std::ptrdiff_t{-1};
+    };
+    for (std::size_t i = 0; i < patch_.size(); ++i) {
+      const auto c = static_cast<std::size_t>(patch_[i]);
+      for (Offset k = neighbours_->offsets[c]; k < neighbours_->offsets[c + 1]; ++k) {
+        const LO d = neighbours_->cells[static_cast<std::size_t>(k)];
+        if (d < 0) continue;
+        const std::ptrdiff_t j = in_patch(d);
+        if (j >= 0) {
+          if (static_cast<std::size_t>(j) > i) pairs_.push_back({i, j, 0});
+        } else {
+          pairs_.push_back({i, -1, cell_area(m_, d, [&](LO u) { return point(u); })});
+        }
+      }
+    }
+  }
+
+  // The largest ratio over the pairs, the patch's cells at their present corners.
+  Real ratio() {
+    for (std::size_t i = 0; i < patch_.size(); ++i) area_[i] = cell_area(m_, patch_[i], [&](LO u) { return point(u); });
+    Real most = 1;
+    for (const Pair& p : pairs_) {
+      const Real a = area_[p.i], b = p.j >= 0 ? area_[static_cast<std::size_t>(p.j)] : p.outer;
+      most = std::max(most, a > b ? a / b : b / a);
+    }
+    return most;
   }
 
   Real finish(Real a, Real b) {
@@ -366,10 +490,43 @@ class Smoother {
   CoordView<Kokkos::HostSpace> x_;
   const detail::VertexCells& cells_;
   std::optional<Real> radius_;
+  const detail::CellNeighbours* neighbours_ = nullptr;
+  Real bound_ = 0;
   LO v_ = 0;
   P3 x0_{}, normal_{}, t1_{}, t2_{};
   Real shortest_ = 0;
+  // With a bound, for the vertex visited: its patch's cells, their areas at
+  // the trial point, and the pairs (patch cell i, patch cell j or -1 and the
+  // outer neighbour's area).
+  struct Pair {
+    std::size_t i = 0;
+    std::ptrdiff_t j = -1;
+    Real outer = 0;
+  };
+  std::vector<LO> patch_;
+  std::vector<Real> area_;
+  std::vector<Pair> pairs_;
 };
+
+// With a bound: the largest area ratio of an owned cell to a cell across one
+// of its edges, over every rank.
+Real largest_ratio(const Comm& comm, const HostMesh& mesh, const detail::CellNeighbours& neighbours) {
+  const auto m = mesh.view();
+  const auto x = mesh.coords();
+  const auto point = [&](LO u) { return P3{x(u, 0), x(u, 1), x(u, 2)}; };
+  Real most = 1;
+  for (LO c = 0; c < mesh.segment_table(2).owned_end; ++c) {
+    const Real a = cell_area(m, c, point);
+    const auto ci = static_cast<std::size_t>(c);
+    for (Offset k = neighbours.offsets[ci]; k < neighbours.offsets[ci + 1]; ++k) {
+      const LO d = neighbours.cells[static_cast<std::size_t>(k)];
+      if (d < 0) continue;
+      const Real b = cell_area(m, d, point);
+      most = std::max(most, a > b ? a / b : b / a);
+    }
+  }
+  return comm.allreduce(most, Op::max);
+}
 
 // The least corner angle (degrees) over the owned cells of every rank.
 Real least_angle(const Comm& comm, const HostMesh& mesh) {
@@ -395,11 +552,15 @@ QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const Quali
   const int dim = mesh.dim();
   const LO n = mesh.count(0);
   const auto m = mesh.view();
-  const bool no_ghosts = comm.size() > 1 && (mesh.ghost_layers() < 1 || mesh.ghost_bridge_dim() != 0);
+  const Real bound = options.area_ratio_bound;
+  const bool bounded = std::isfinite(bound) && bound >= 1;
+  const bool no_ghosts =
+      comm.size() > 1 && (mesh.ghost_layers() < (bounded ? 2 : 1) || mesh.ghost_bridge_dim() != 0);
   bool bad = dim != 2 || mesh.edited() || no_ghosts || options.shape_sweeps < 0 || options.angle_sweeps < 0 ||
              options.polish_sweeps < 0 ||
              !(options.angle_threshold > 0) || !(options.angle_threshold <= 90) ||
              !std::isfinite(options.tolerance) || options.tolerance < 0 ||
+             !std::isfinite(bound) || bound < 0 || (bound > 0 && bound < 1) ||
              (!options.fixed.empty() && options.fixed.size() != static_cast<std::size_t>(n));
   const Real radius = options.sphere_radius.value_or(1);
   bad = bad || !std::isfinite(radius) || radius <= 0;
@@ -413,8 +574,9 @@ QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const Quali
     const auto num = [](Real r) { return std::isfinite(r) ? r : 0; };
     const Real s = options.shape_sweeps, a = options.angle_sweeps, p = options.polish_sweeps,
                t = num(options.angle_threshold), tol = num(options.tolerance), given = options.sphere_radius ? 1 : 0,
-               r = num(radius);
-    std::array<Real, 15> f{flag ? Real{1} : Real{0}, s, -s, a, -a, p, -p, t, -t, tol, -tol, given, -given, r, -r};
+               r = num(radius), b = num(bound);
+    std::array<Real, 17> f{flag ? Real{1} : Real{0}, s, -s, a, -a, p, -p, t, -t, tol, -tol, given, -given, r, -r,
+                           b, -b};
     comm.allreduce(std::span<Real>(f), Op::max);
     for (std::size_t i = 1; i < f.size(); i += 2) {
       if (f[i] != -f[i + 1]) return false;
@@ -424,9 +586,10 @@ QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const Quali
   const auto refuse = [] {
     throw std::invalid_argument(
         "quality_smooth: a rank passes a mesh not of dimension 2, with a cell not a triangle or quad, with an "
-        "inverted corner or with edits, or, on more than one rank, without a ghost layer through vertices; "
-        "negative sweeps, an angle threshold outside (0, 90], a negative or non-finite tolerance, a fixed mask "
-        "not one per vertex or a sphere radius not positive and finite; or ranks differ in their options");
+        "inverted corner or with edits, or, on more than one rank, without a ghost layer through vertices (two "
+        "with an area ratio bound); negative sweeps, an angle threshold outside (0, 90], a negative or non-finite "
+        "tolerance, an area ratio bound negative, in (0, 1) or not finite, a fixed mask not one per vertex or a "
+        "sphere radius not positive and finite; or ranks differ in their options");
   };
   if (!agree(bad)) refuse();
 
@@ -434,7 +597,9 @@ QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const Quali
   const std::vector<std::uint8_t> skin = options.fixed.empty() ? detail::skin(mesh) : std::vector<std::uint8_t>{};
   const LO owned = mesh.segment_table(0).owned_end;
   std::vector<std::uint8_t> moving(static_cast<std::size_t>(owned), 0);
-  Smoother smoother(mesh, cells, options.sphere_radius);
+  const detail::CellNeighbours neighbours =
+      bounded ? detail::edge_neighbours(mesh, cells) : detail::CellNeighbours{};
+  Smoother smoother(mesh, cells, options.sphere_radius, bounded ? &neighbours : nullptr, bound);
   bool inverted = false;
   for (LO v = 0; v < owned; ++v) {
     const auto i = static_cast<std::size_t>(v);
@@ -446,7 +611,11 @@ QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const Quali
   }
   if (comm.allreduce(inverted ? Real{1} : Real{0}, Op::max) != 0) refuse();
 
-  const std::vector<std::int32_t> colour = detail::vertex_colours(comm, mesh, cells);
+  // With a bound, no two vertices of a colour lie in cells sharing an edge, so
+  // each visit's pairs are exact whatever the partition.
+  const std::vector<std::int32_t> colour =
+      bounded ? detail::vertex_colours(comm, mesh, detail::edge_stencil(mesh, cells, neighbours))
+              : detail::vertex_colours(comm, mesh, cells);
   std::int32_t colours = 0;
   for (const auto h : colour) colours = std::max(colours, h + 1);
   colours = static_cast<std::int32_t>(comm.allreduce(static_cast<Real>(colours), Op::max));
@@ -462,6 +631,7 @@ QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const Quali
 
   QualitySmoothReport report;
   report.least_angle_before = least_angle(comm, mesh);
+  if (bounded) report.area_ratio_before = largest_ratio(comm, mesh, neighbours);
   // One phase: sweeps of `step` over the colours in turn.
   const auto phase = [&](int sweeps, int& made, auto&& step) {
     for (int sweep = 0; sweep < sweeps; ++sweep) {
@@ -483,6 +653,7 @@ QualitySmoothReport quality_smooth(const Comm& comm, HostMesh& mesh, const Quali
   const Real raised = options.polish_sweeps > 0 ? least_angle(comm, mesh) : floor;
   phase(options.polish_sweeps, report.polish_sweeps, [&] { return smoother.shape(raised); });
   report.least_angle_after = least_angle(comm, mesh);
+  if (bounded) report.area_ratio_after = largest_ratio(comm, mesh, neighbours);
   return report;
 }
 

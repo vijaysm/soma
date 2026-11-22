@@ -731,6 +731,18 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   result is the same bit for bit on any number of ranks. On ne30 refined to 12 km over the
   United States it raises the least angle from 30.1 to 43.3 degrees (centroid smoothing: 30.5 to
   30.1), the mean least angle from 81.2 to 84.1 and lowers the worst edge ratio from 4.8 to 3.2.
+- `QualitySmoothOptions::area_ratio_bound` (>= 1) bounds the area ratio of cells sharing an
+  edge in every phase: a step may not leave a pair touching the patch above the bound or above
+  where the pair's patch already was, so the mesh's largest ratio never passes the larger of the
+  bound and its start (`QualitySmoothReport::area_ratio_before`, `area_ratio_after`). It needs
+  two ghost layers through vertices, and colours vertices so that no two of a colour lie in cells
+  sharing an edge (`detail::edge_stencil`), so the result stays the same bit for bit on any
+  number of ranks. 0 (the default) leaves the smoother as it was.
+- `regional_refine`: `--pass-optimize S,A,P` smooths each level before the next pass refines it
+  (level-0 corners stay; cells marked again), `--final-rings N` limits the last smoothing to
+  vertices within N cells of a level change, `--tolerance T` and `--area-ratio R|keep` reach
+  `quality_smooth`; the quality table gains the least spacing and shortest edge in km, and the
+  optimizer's sweeps, free vertices and area ratios are printed.
 - `soma::mark_fraction(comm, indicator, fraction)` marks the cells of largest indicator that
   hold the fraction of its total (Doerfler marking), and `soma::mark_threshold` those above a
   value.
