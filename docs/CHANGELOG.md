@@ -1041,6 +1041,30 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   workflow use Doxygen 1.17.0, downloaded and verified.
 - The wiki links its API reference entries to the pages on Read the Docs, and links whose label is
   code (``[`name`](page.md)``) are now rewritten like any other.
+- An application page, a 200 m mesh of the contiguous United States: the `regional_refine` run of
+  50 million cells on 48 ranks, the refinement, grading and per-level optimization it uses, the
+  area ratio bound, a comparison with and without the bound and with one optimization at the end,
+  and figures of the mesh (a telescoping zoom to the 200 m cells, least angles in stereographic
+  projection, transition templates, the two runs side by side). The smoothing, refinement and
+  example pages describe the bound and the per-pass options.
+- Visualization pages (an overview, ParaView, VisIt, pyvista and yt with VTKHDF) and a gallery of
+  the figures of every page. The figures of the CONUS and visualization pages are made on a
+  cluster and composed by scripts in `tools/somaview/` (see the making-figures page).
+
+### Visualization
+
+- `tools/somaview/`, readers of SOMA mesh files and AMR checkpoints for visualization tools: a
+  Python core (`somaview`, numpy and h5py) that reads any subset of a file's parts with their
+  halo, by scanning the sharing tables or by one all-to-all under MPI, and gives VTK cells
+  (quadratic cells, polygons, knives as polyhedra, VTK 9.7's wedge order or the older one), point
+  and cell fields, set labels, part and global ids, and AMR hierarchies with blanking; a ParaView
+  Python reader plugin answering pvbatch and pvserver pieces; a VisIt database plugin over the
+  header-only C++ reader `soma_reader.hpp`; pyvista and yt front-ends, a command line
+  (`somaview info`, `render`, `convert`) and a writer of partitioned VTKHDF files, collective
+  under MPI.
+- Tests against SOMA's own reader on files SOMA writes (`tests/make_data.sh` builds them with an
+  installed SOMA through `tests/gen/`), MPI checks at 1 to 8 ranks with both halo methods and
+  ParaView pieces, VisIt engine checks, and the CONUS figure scripts (`examples/conus/`).
 
 ### Packaging
 

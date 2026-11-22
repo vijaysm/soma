@@ -122,6 +122,7 @@ const soma::QualitySmoothReport r = soma::quality_smooth(comm, mesh, o);
 | `polish_sweeps` | 10 | Shape sweeps again, kept above the least angle the angle sweeps reached. |
 | `angle_threshold` | 45 | Degrees in (0, 90]. Higher raises the least angle further and leaves more cells just under 45°. |
 | `tolerance` | 0 | > 0: a phase ends once no vertex moves farther than this times its shortest edge. |
+| `area_ratio_bound` | 0 | >= 1: bound the area ratio of cells sharing an edge (see [below](#bounding-the-area-ratio)); 0: no bound. |
 | `fixed` | empty | As for `laplacian_smooth`: the skin stays when empty. |
 | `sphere_radius` | none | Move in the sphere's tangent plane and project back onto it. |
 
@@ -162,10 +163,26 @@ and the worst edge ratio from 4.8 to 3.2, at about 12 s on one core for 24436 ce
 cells under 45 degrees against 418. Its condition number does not see sizes, so the largest
 area ratio between neighbours grows (5.6 to 6.4 there).
 
+### Bounding the area ratio
+
+`area_ratio_bound` $R \ge 1$ keeps a step only if no two cells sharing an edge, one of them
+among the moving vertex's cells, are left with an area ratio (larger over smaller) above $R$ or
+above the largest such ratio before the step. The mesh's largest ratio then ends at most
+$\max(R, \text{its largest at the start})$; `QualitySmoothReport::area_ratio_before` and
+`area_ratio_after` give it over every rank. A step's effect now reaches the cells next to the
+patch, so on more than one rank the mesh needs two ghost layers through vertices
+(`GhostOptions{2, 0}`), and the vertices are coloured so that no two of a colour lie in cells
+sharing an edge; the result is still the same bit for bit on any number of ranks and threads.
+The bound has a cost where refinement levels meet: the transition cells' small corners open by
+changing their sizes, so a bound lowers the least angle the optimizer reaches. On the
+[200 m CONUS mesh](../apps/conus-200m.md#quality), keeping the refined mesh's ratio (4.609) gives
+a least angle of 34.17 degrees against 43.15 without the bound, whose ratio ends at 6.955.
+
 It throws `std::invalid_argument` on every rank, as `laplacian_smooth` does, for a mesh not of
 dimension 2, a cell neither a triangle nor a quad, an inverted corner, an edited mesh, a missing
-ghost layer on more than one rank, negative sweeps, a threshold outside (0, 90], a bad tolerance,
-mask or radius, or ranks differing in their options.
+ghost layer on more than one rank (two with an area ratio bound), negative sweeps, a threshold
+outside (0, 90], a bad tolerance, area ratio bound, mask or radius, or ranks differing in their
+options.
 
 ## Usage
 

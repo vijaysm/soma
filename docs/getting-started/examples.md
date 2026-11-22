@@ -137,7 +137,9 @@ See [refinement](../algorithms/refinement.md).
 regional_refine [--ne N | --mesh FILE] [--radius R] [--km K] [--np P]
                 [--box LAT0,LAT1,LON0,LON1]... [--transition N] [--grow G]
                 [--reruns R] [--smooth S] [--optimize SHAPE,ANGLE[,POLISH]]
-                [--angle-threshold T] [--max-passes M] [--max-cells C]
+                [--angle-threshold T] [--pass-optimize SHAPE,ANGLE[,POLISH]]
+                [--final-rings N] [--tolerance T] [--area-ratio R|keep]
+                [--max-passes M] [--max-cells C]
                 [--format vtk|soma|none] [--no-neighbours] [--save FILE] <out-prefix>
 ```
 
@@ -151,8 +153,17 @@ repeat `--box` for several regions. It then smooths by `S` sweeps (default 20) o
 `soma::laplacian_smooth` method and optimizes the centroid result with `soma::quality_smooth`
 (default `50,5,10` sweeps, the angle sweeps on cells under 45 degrees; `0,0,0` skips it). It prints the passes, the band widths, the spacing
 in and out of the boxes, a table of cell quality and the change in the finest cells' size, and
-writes four meshes with quality fields (`--format soma` from every rank, for large runs). See
+writes four meshes with quality fields (`--format soma` from every rank, for large runs, which
+[ParaView, VisIt, pyvista and yt](../visualization/overview.md) open directly). See
 [the example in refinement](../algorithms/refinement.md#example-regionally-refined-meshes-of-the-sphere).
+
+For meshes of many levels, `--pass-optimize SHAPE,ANGLE[,POLISH]` also optimizes each level a
+pass makes before the next pass refines it, so the children copy a smoothed shape (the centroid
+sweeps then default to 0); `--final-rings N` lets the last optimization move only the vertices
+within `N` cells of a level change; `--tolerance T` ends a phase once no vertex moves farther than
+`T` times its shortest edge; and `--area-ratio R` or `keep` (the largest ratio of the mesh being
+optimized) bounds the area ratio of cells sharing an edge. With them the 50-million-cell
+[200 m CONUS mesh](../apps/conus-200m.md) is made on 48 ranks in under nine minutes.
 
 ```text
 ./regional_refine: passes 2; cells 5400 -> 23576; radius 6.37122e+06
