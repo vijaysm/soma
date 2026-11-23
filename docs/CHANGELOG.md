@@ -739,7 +739,7 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   sharing an edge (`detail::edge_stencil`), so the result stays the same bit for bit on any
   number of ranks. 0 (the default) leaves the smoother as it was.
 - `regional_refine`: `--pass-optimize S,A,P` smooths each level before the next pass refines it
-  (level-0 corners stay; cells marked again), `--final-rings N` limits the last smoothing to
+  (a vertex all of whose cells are of level 0 stays; cells marked again), `--final-rings N` limits the last smoothing to
   vertices within N cells of a level change, `--tolerance T` and `--area-ratio R|keep` reach
   `quality_smooth`; the quality table gains the least spacing and shortest edge in km, and the
   optimizer's sweeps, free vertices and area ratios are printed.
@@ -1065,6 +1065,10 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
 - Tests against SOMA's own reader on files SOMA writes (`tests/make_data.sh` builds them with an
   installed SOMA through `tests/gen/`), MPI checks at 1 to 8 ranks with both halo methods and
   ParaView pieces, VisIt engine checks, and the CONUS figure scripts (`examples/conus/`).
+- The C++ reader checks the sizes of what it reads (root, field and value metadata, the part
+  table, attribute bytes, corner and node counts against the connectivity) and throws on a
+  truncated or damaged file instead of reading out of bounds; `check_malformed.py` checks seven
+  such files under AddressSanitizer.
 
 ### Packaging
 
