@@ -44,7 +44,8 @@
 // 50,5,10 sweeps of shape, angle and polish; 0,0,0 skips it; the angle
 // sweeps move the vertices of cells under T degrees, default 45).
 // --pass-optimize S,A,P also runs quality_smooth on each level a pass makes
-// before the next pass refines it (the corners of level-0 cells stay), so the
+// before the next pass refines it (a vertex all of whose cells are of level 0
+// stays), so the
 // children copy a smoothed shape; the cells are then marked again. With it the
 // centroid sweeps default to 0. --final-rings N lets the last quality_smooth
 // move only the vertices within N cells of a level change. --tolerance T ends

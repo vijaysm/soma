@@ -1,0 +1,2 @@
+case5 8.45e-4 SOMA swe_atm ne30 p=3 against the T213 reference, 2026-11-23; ne15 8.87e-4, ne60 8.50e-4 (the reference's own level); against SOMA ne60: ne30 8.4e-5, HOMME 6.7e-5 at ne30 np4 (Guba et al. 2014, GMD 7, Fig. 12, read from the plot)
+case6 6.07e-3 SOMA swe_atm ne30 p=3 against the T213 reference, 2026-11-23; ne15 1.27e-2, ne60 2.52e-3; no published HOMME value against T213 found

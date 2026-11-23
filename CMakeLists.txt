@@ -206,6 +206,8 @@ endif()
 
 if(SOMA_ENABLE_FORTRAN)
   set(SOMA_ENABLE_C_API ON CACHE BOOL "The C API (soma_c), for C callers and the Fortran module" FORCE)
+  # Before the tests: packaging.c_fortran passes the Fortran compiler on, even on a first configure.
+  enable_language(Fortran)
 endif()
 if(SOMA_ENABLE_C_API)
   add_subdirectory(src/c)
@@ -222,7 +224,6 @@ endif()
 
 # After the tests: the Fortran tests register with enable_testing() in force.
 if(SOMA_ENABLE_FORTRAN)
-  enable_language(Fortran)
   add_subdirectory(fortran)
 endif()
 

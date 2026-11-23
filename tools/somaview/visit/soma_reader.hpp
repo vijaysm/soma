@@ -304,6 +304,12 @@ struct RootMeta {
 };
 
 namespace detail {
+// Throws unless the attribute `what` holds at least `n` words (a truncated or foreign file).
+inline void need_words(const std::vector<std::int64_t>& w, std::size_t n, const std::string& what) {
+  if (w.size() < n)
+    throw io_error(what + " has " + std::to_string(w.size()) + " words, fewer than " + std::to_string(n));
+}
+
 inline std::vector<int> mask_bits(std::int64_t mask) {
   std::vector<int> out;
   for (int d = 0; d < 4; ++d)
@@ -317,6 +323,9 @@ inline std::vector<double> typed_attr(const std::optional<std::vector<std::uint8
                                       int ncomp) {
   std::vector<double> out;
   if (!raw) return out;
+  if (ncomp < 0 || raw->size() < static_cast<std::size_t>(ncomp) * dtype_size(dtype))
+    throw io_error("an attribute of " + std::to_string(raw->size()) + " bytes is shorter than its " +
+                   std::to_string(ncomp) + " components");
   const std::uint8_t* p = raw->data();
   out.resize(static_cast<std::size_t>(ncomp));
   for (int c = 0; c < ncomp; ++c) {
@@ -362,11 +371,13 @@ class SomaFile {
     if (h5detail::has_attr(file_.id, "", "amr")) {
       kind_ = FileKind::amr;
       auto w = h5detail::read_int_attr(file_.id, "", "amr");
+      detail::need_words(w, 3, path + ": /soma attribute amr");
       format_version_ = static_cast<int>(w[0]);
       nparts_ = static_cast<int>(w[2]);
     } else if (h5detail::has_attr(file_.id, "", "meta")) {
       kind_ = FileKind::mesh;
       auto w = h5detail::read_int_attr(file_.id, "", "meta");
+      detail::need_words(w, 10, path + ": /soma attribute meta");
       meta_.format_version = static_cast<int>(w[0]);
       meta_.dim = static_cast<int>(w[1]);
       meta_.nparts = static_cast<int>(w[2]);
@@ -397,6 +408,9 @@ class SomaFile {
       while (std::getline(ss, tok, '\n')) {
         if (!tok.empty()) columns_[tok] = k++;
       }
+      if (nparts_ < 0 || n != static_cast<decltype(n)>(nparts_) + 1 || static_cast<std::size_t>(k) > table_ncols_)
+        throw io_error(path + ": parts/offsets is " + std::to_string(n) + " x " + std::to_string(ncols) + " for " +
+                       std::to_string(nparts_) + " parts and " + std::to_string(k) + " columns");
     }
     if (kind_ == FileKind::mesh) { read_fields(); read_values(); }
   }
@@ -419,6 +433,8 @@ class SomaFile {
   std::pair<LO, LO> part_rows(const std::string& path, int part) const {
     auto it = columns_.find(path);
     if (it == columns_.end()) throw io_error(path_ + ": '" + path + "' is not a per-part column");
+    if (part < 0 || part >= nparts_)
+      throw io_error(path_ + ": part " + std::to_string(part) + " of " + std::to_string(nparts_));
     LO lo = table_[static_cast<std::size_t>(part) * table_ncols_ + static_cast<std::size_t>(it->second)];
     LO hi = table_[static_cast<std::size_t>(part + 1) * table_ncols_ + static_cast<std::size_t>(it->second)];
     return {lo, hi};
@@ -534,6 +550,10 @@ class SomaFile {
     for (int i = 0; i < meta_.nfields; ++i) {
       std::string g = "fields/f" + std::to_string(i);
       auto m = h5detail::read_int_attr(file_.id, g, "meta");
+      detail::need_words(m, 17, path_ + ": " + g + " attribute meta");
+      if (m[16] < 0 || static_cast<std::size_t>(m[16]) > m.size() - 17)
+        throw io_error(path_ + ": " + g + " attribute meta gives " + std::to_string(m[16]) + " dimensions in " +
+                       std::to_string(m.size()) + " words");
       FieldInfo f;
       f.index = i;
       f.name = h5detail::read_string_attr(file_.id, g, "name");
@@ -554,6 +574,7 @@ class SomaFile {
     for (int i = 0; i < meta_.nvalues; ++i) {
       std::string g = "values/v" + std::to_string(i);
       auto m = h5detail::read_int_attr(file_.id, g, "meta");
+      detail::need_words(m, 2, path_ + ": " + g + " attribute meta");
       MeshValue v;
       v.dtype = static_cast<DType>(m[0]);
       v.ncomp = static_cast<int>(m[1]);
@@ -735,9 +756,34 @@ inline VtkCells vtk_cells(const std::vector<std::uint8_t>& topology, const std::
   out.types.resize(n);
   out.offsets.resize(n + 1, 0);
   std::vector<LO> cstart(n + 1, 0), nstart(n + 1, 0);
-  for (std::size_t e = 0; e < n; ++e) cstart[e + 1] = cstart[e] + counts[e];
+  if (counts.size() != n) throw io_error("soma_reader: " + std::to_string(n) + " elements with " +
+                                         std::to_string(counts.size()) + " corner counts");
+  for (std::size_t e = 0; e < n; ++e) {
+    if (counts[e] < 0) throw io_error("soma_reader: an element with " + std::to_string(counts[e]) + " corners");
+    cstart[e + 1] = cstart[e] + counts[e];
+  }
+  if (static_cast<std::size_t>(cstart[n]) != conn.size())
+    throw io_error("soma_reader: corner counts sum to " + std::to_string(cstart[n]) + ", the connectivity has " +
+                   std::to_string(conn.size()) + " entries");
   bool use_nodes = high_order && nodes != nullptr && node_counts != nullptr && !nodes->empty();
-  for (std::size_t e = 0; e < n; ++e) nstart[e + 1] = nstart[e] + (use_nodes ? (*node_counts)[e] : 0);
+  if (use_nodes) {
+    if (node_counts->size() != n) throw io_error("soma_reader: " + std::to_string(n) + " elements with " +
+                                                 std::to_string(node_counts->size()) + " node counts");
+    for (std::size_t e = 0; e < n; ++e) {
+      if ((*node_counts)[e] < 0) throw io_error("soma_reader: an element with a negative node count");
+      nstart[e + 1] = nstart[e] + (*node_counts)[e];
+    }
+    if (static_cast<std::size_t>(nstart[n]) != nodes->size())
+      throw io_error("soma_reader: node counts sum to " + std::to_string(nstart[n]) + ", the nodes have " +
+                     std::to_string(nodes->size()) + " entries");
+  }
+  // An element's node ids, permuted; throws if the permutation needs more nodes than it has.
+  auto take = [](const std::vector<LO>& from, int p) {
+    if (p < 0 || static_cast<std::size_t>(p) >= from.size())
+      throw io_error("soma_reader: an element of " + std::to_string(from.size()) + " nodes needs node " +
+                     std::to_string(p));
+    return from[static_cast<std::size_t>(p)];
+  };
 
   std::vector<LO> full;  // scratch: this element's SOMA-ordered node ids (corners then extra)
   for (std::size_t e = 0; e < n; ++e) {
@@ -753,13 +799,13 @@ inline VtkCells vtk_cells(const std::vector<std::uint8_t>& topology, const std::
     }
     if (ho) {
       out.types[e] = static_cast<std::uint8_t>(ho->vtk_type);
-      for (int p : ho->perm) out.connectivity.push_back(full[static_cast<std::size_t>(p)]);
+      for (int p : ho->perm) out.connectivity.push_back(take(full, p));
       out.offsets[e + 1] = out.offsets[e] + static_cast<LO>(ho->perm.size());
     } else {
       out.types[e] = static_cast<std::uint8_t>(detail::linear_vtk_type(t));
       const std::vector<int>* perm = detail::corner_perm(t, legacy_wedge);
       if (perm) {
-        for (int p : *perm) out.connectivity.push_back(full[static_cast<std::size_t>(p)]);
+        for (int p : *perm) out.connectivity.push_back(take(full, p));
         out.offsets[e + 1] = out.offsets[e] + static_cast<LO>(perm->size());
       } else {
         out.connectivity.insert(out.connectivity.end(), full.begin(), full.begin() + c);
@@ -1439,6 +1485,7 @@ class AmrFile {
   explicit AmrFile(const SomaFile& sf) : sf_(sf) {
     if (sf.kind() != FileKind::amr) throw io_error(sf.path() + ": a SOMA mesh file, not an AMR checkpoint");
     auto w = h5detail::read_int_attr(sf.raw(), "", "amr");
+    detail::need_words(w, 11, sf.path() + ": /soma attribute amr");
     format_version_ = static_cast<int>(w[0]);
     dim_ = static_cast<int>(w[1]);
     nparts_ = static_cast<int>(w[2]);

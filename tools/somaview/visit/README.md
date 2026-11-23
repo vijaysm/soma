@@ -70,7 +70,11 @@ compiler VisIt was built with (a conda compiler in `PATH` links against a differ
    cached path. 618 mesh checks and 24 AMR checks pass, in both prism conventions
    (`SOMAVIEW_VTK_WEDGE=legacy|current`); 844 further checks pass on 8 files written by SOMA's
    own MPI writer (3 to 7 parts).
-2. VisIt itself (`tests/visit_test.py`, expectations from `tests/visit_expected.py`, driven by
+2. Malformed files (`tests/check_malformed.py <cpp_driver> <good.soma> <workdir>`, with `cpp_driver`
+   built with `-fsanitize=address`): damaged copies of a mesh file (short root, field or value
+   metadata, a part table shorter than its parts, corner counts that do not sum to the
+   connectivity) each end with an error, never an out-of-bounds read; 7 cases.
+3. VisIt itself (`tests/visit_test.py`, expectations from `tests/visit_expected.py`, driven by
    `tests/run_visit_tests.sh`): 16 files on a serial engine and on a 4-rank parallel engine, and the
    50,304,352-cell, 48-part CONUS mesh on an 8-rank engine. For every file the zone count of
    the data read equals the Python core's and the MinMax of a field equals the Python core's;

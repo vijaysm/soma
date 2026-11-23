@@ -148,8 +148,9 @@ longitudes may be in [0, 360) or [-180, 180).
     (STSWM 2.0) at the parameters of NCAR's published reference runs (Jakob-Chien, Hack and
     Williamson 1995); `apps/swe_atm/reference/README_STSWM.md` records the procedure.
   - A case passes when its $l_2$ error is at most twice the mark in `REFDIR/marks.txt`. Each line
-    there reads `case5 <l2> <citation>`: HOMME's published $l_2$ error at that resolution, with
-    its source.
+    there reads `case5 <l2> <source>`. No paper gives HOMME's $l_2$ error against the T213
+    references at ne30 np4, so the marks are this model's own errors at ne30, kept so that a
+    change cannot double them; the checks below are what makes them trustworthy.
 - **`galewsky.sh NP [OUTDIR]`**
   - The unperturbed jet at ne30 for 6 days, reporting its drift.
   - The perturbed jet at ne30, ne60 and ne120 to day 6, writing vorticity on a 361 x 720 grid.
@@ -160,8 +161,25 @@ The pass marks:
 | Case | Mark |
 | --- | --- |
 | 2 | exponential convergence in $p$, down to rounding-limited errors |
-| 5, 6 | $l_2$ height error at day 15, ne30 $p = 3$, within a factor of 2 of HOMME's published value |
+| 5, 6 | $l_2$ height error at day 15, ne30 $p = 3$, at most twice the mark; the error falls with $n_e$ to the reference's own level |
 | Galewsky | the unperturbed jet stays steady; the perturbed run converges toward the ne120 run |
+
+Results (v0.1.0; 8 ranks of 1 thread, M2 Max), normalised $l_2$ height error at day 15:
+
+| | ne15 | ne30 | ne60 |
+| --- | --- | --- | --- |
+| case 5 against T213 | 8.87e-4 | 8.45e-4 | 8.50e-4 |
+| case 5 against SOMA ne60 | 4.87e-4 | 8.4e-5 | |
+| case 6 against T213 | 1.27e-2 | 6.07e-3 | 2.52e-3 |
+
+- Case 6 converges toward T213, its error falling by a factor of 2.1 to 2.4 per doubling of
+  $n_e$.
+- Case 5 meets T213 at about 8.5e-4 from ne15 on: the model converges well below that (ne30
+  against ne60, 8.4e-5; with `--latlon 181,360` and areas weighted by $\cos\phi$), so the level is
+  the reference's own difference from the converged solution. HOMME's error at ne30 np4 against
+  a 0.125-degree HOMME run is about 6.7e-5 (Guba et al. 2014, *Geosci. Model Dev.* 7,
+  2803-2816, Fig. 12, read from the plot), within a factor of 1.3 of ours.
+- Case 2 converges exponentially in $p$, to 2.6e-13 at ne16 $p = 8$.
 
 The scripts take the executable from `SWE_ATM` (default `build/apps/swe_atm/swe_atm`) and the
 launcher from `MPIEXEC`. On the M2 Max, ne30 $p = 3$ case 5 runs at about 250 simulated days per
