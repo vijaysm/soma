@@ -6,6 +6,8 @@
     python3 tests/docs/test_build_wiki.py
 """
 
+from __future__ import annotations
+
 import importlib.util
 import sys
 import tempfile
