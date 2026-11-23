@@ -238,6 +238,8 @@ At a coarse resolution (4 ranks x 2 threads, ne8 $p = 3$, 15 days, default visco
 
 The pass mark is at ne30 $p = 3$: `apps/swe_atm/bench/run_cases.sh NP`, which reads `case5.nc`,
 `case6.nc` and `marks.txt` from this directory (or from `REFDIR` given as its second argument).
+`marks.txt` holds `swe_atm`'s own ne30 errors against these files, with the convergence that
+backs them; `docs/apps/swe-atm.md` (Benchmarks) gives the numbers.
 
 ## Files
 
