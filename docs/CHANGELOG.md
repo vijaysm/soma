@@ -3,7 +3,11 @@
 All notable changes to SOMA are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.1.0] - Unreleased
+## [0.1.0] - 2026-11-23
+
+The first release. It is verified on host backends only: the suite (2021 tests, MPI at 1 to 8
+ranks) passes on macOS arm64 with AppleClang 21, gfortran 16, MPICH, HDF5 1.14 and Kokkos 5.1
+(Serial and OpenMP). GPU backends can be configured but are not tested in this release.
 
 ### Build
 
@@ -786,6 +790,10 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   the discrete operator's spectral radius.
 - Benchmark scripts for cases 2, 5, 6 and Galewsky are in `apps/swe_atm/bench/`; T213 reference
   solutions of cases 5 and 6, computed with NCAR's STSWM, are in `apps/swe_atm/reference/`.
+- `marks.txt` holds the pass marks of cases 5 and 6: the model's own ne30 errors against T213
+  (8.45e-4, 6.07e-3). Case 6 converges toward T213; case 5 meets it at the reference's own level
+  from ne15 on while ne30 is within 8.4e-5 of ne60, as HOMME's 6.7e-5 at ne30 np4 (Guba et al.
+  2014).
 
 ### Python bindings
 
