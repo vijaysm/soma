@@ -47,7 +47,8 @@ struct Options {
   int grow = -1;  ///< cells of growth per level before measuring; -1: transition
   std::array<int, 3> optimize{50, 5, 10};  ///< quality_smooth's shape, angle and polish sweeps
   /// quality_smooth's sweeps on each level made by a pass that another pass
-  /// refines, before it does (0,0,0: none); the vertices of level-0 cells only stay.
+  /// refines, before it does (0,0,0: none); a vertex all of whose cells are of
+  /// level 0 stays.
   std::array<int, 3> pass_optimize{0, 0, 0};
   int final_rings = 0;           ///< > 0: the last optimize moves only vertices this many cells from a level change
   Real tolerance = 0;            ///< quality_smooth's tolerance (0: every sweep)
@@ -370,7 +371,7 @@ inline std::vector<std::int32_t> levels(const soma::HostMesh& m) {
 // Which vertices an optimize moves.
 enum class Moving : std::uint8_t {
   all,      ///< every vertex (the skin stays: none on a closed sphere)
-  refined,  ///< the vertices of cells refined at least once (level-0 cells keep their corners)
+  refined,  ///< the vertices of cells refined at least once (those of level-0 cells only stay)
   rings,    ///< the vertices within Options::final_rings cells (through vertices) of a level change
 };
 

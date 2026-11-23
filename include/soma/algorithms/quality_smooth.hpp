@@ -46,10 +46,10 @@
 /// mask, else the skin (none on a closed surface).
 ///
 /// With an area ratio bound, every phase's steps also keep the area ratios
-/// of the cells sharing an edge with the patch's cells at or below the bound
-/// (or below where they already were): the condition number does not depend
-/// on size, so without it the phases trade size for shape where cells of two
-/// levels meet.
+/// of the cells sharing an edge with the patch's cells at or below the larger
+/// of the bound and the patch's largest such ratio before the vertex moved:
+/// the condition number does not depend on size, so without it the phases
+/// trade size for shape where cells of two levels meet.
 ///
 /// Sweeps visit the vertex colours of detail::vertex_colours in turn (no two
 /// vertices of a colour share a cell), owners moving their vertices and a
