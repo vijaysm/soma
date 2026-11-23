@@ -9,6 +9,9 @@ the sphere) and adaptive refinement.
 
 Start with the [overview](getting-started/overview.md) and [installation](getting-started/installation.md),
 then the [quick start](getting-started/quickstart.md).
+The [gallery](getting-started/gallery.md) shows what SOMA's examples and tools make, and
+[Visualizing SOMA files](visualization/overview.md) how to open SOMA files in ParaView, VisIt,
+pyvista and yt.
 
 ```{toctree}
 :maxdepth: 2
@@ -21,6 +24,7 @@ getting-started/examples
 getting-started/python
 getting-started/fortran
 getting-started/from-imoab
+getting-started/gallery
 ```
 
 ```{toctree}
@@ -61,6 +65,16 @@ io/amr-checkpoints
 
 ```{toctree}
 :maxdepth: 2
+:caption: Visualization
+
+visualization/overview
+visualization/paraview
+visualization/visit
+visualization/python
+```
+
+```{toctree}
+:maxdepth: 2
 :caption: Algorithms
 
 algorithms/smoothing
@@ -85,6 +99,7 @@ amr/block-amr
 :caption: Applications
 
 apps/swe-atm
+apps/conus-200m
 ```
 
 ```{toctree}

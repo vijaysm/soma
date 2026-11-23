@@ -70,6 +70,25 @@ With tests on, ctest makes every data set (`doc_figures.<set>`) and checks that
    `python3 docs/figures/check_figures.py` (ctest `docs.figures`), the Sphinx build with `-W`,
    and `python3 docs/wiki/build_wiki.py --check`.
 
+## Figures made on a cluster
+
+Two groups of figures are not made by `make_figures.sh`, since their data or their renderers do
+not fit a workstation run:
+
+- the [200 m CONUS mesh](../apps/conus-200m.md)'s (`conus-*.png`), from a 50-million-cell
+  `regional_refine` run on 48 ranks, rendered by ParaView's `pvbatch` on 16 ranks with
+  `tools/somaview/examples/conus/conus_job.sh` and `conus_compare.py`;
+- the [visualization](../visualization/overview.md) pages' (`visualization-*.png`), renders of
+  the test files by ParaView (`tools/somaview/paraview/examples/pv_gallery.py`), VisIt
+  (`tools/somaview/visit/tests/run_visit_tests.sh`) and pyvista and yt
+  (`tools/somaview/examples/gallery.py`).
+
+Both are composed with matplotlib and cut to 256 colours by
+`tools/somaview/examples/conus/compose_conus.py` and `tools/somaview/examples/compose_gallery.py`,
+which write the images into `docs/figures/img/`; the CONUS page lists the commands. Run them again
+only when the mesh, the readers or the renderers change. `docs.figures` checks these images as it
+does the others.
+
 ## Style
 
 `docs/figures/style.py` holds what every figure shares:

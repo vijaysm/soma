@@ -731,6 +731,18 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   result is the same bit for bit on any number of ranks. On ne30 refined to 12 km over the
   United States it raises the least angle from 30.1 to 43.3 degrees (centroid smoothing: 30.5 to
   30.1), the mean least angle from 81.2 to 84.1 and lowers the worst edge ratio from 4.8 to 3.2.
+- `QualitySmoothOptions::area_ratio_bound` (>= 1) bounds the area ratio of cells sharing an
+  edge in every phase: a step may not leave a pair touching the patch above the bound or above
+  where the pair's patch already was, so the mesh's largest ratio never passes the larger of the
+  bound and its start (`QualitySmoothReport::area_ratio_before`, `area_ratio_after`). It needs
+  two ghost layers through vertices, and colours vertices so that no two of a colour lie in cells
+  sharing an edge (`detail::edge_stencil`), so the result stays the same bit for bit on any
+  number of ranks. 0 (the default) leaves the smoother as it was.
+- `regional_refine`: `--pass-optimize S,A,P` smooths each level before the next pass refines it
+  (level-0 corners stay; cells marked again), `--final-rings N` limits the last smoothing to
+  vertices within N cells of a level change, `--tolerance T` and `--area-ratio R|keep` reach
+  `quality_smooth`; the quality table gains the least spacing and shortest edge in km, and the
+  optimizer's sweeps, free vertices and area ratios are printed.
 - `soma::mark_fraction(comm, indicator, fraction)` marks the cells of largest indicator that
   hold the fraction of its total (Doerfler marking), and `soma::mark_threshold` those above a
   value.
@@ -1029,6 +1041,30 @@ SOMA never links VTK; it writes and reads legacy VTK files itself.
   workflow use Doxygen 1.17.0, downloaded and verified.
 - The wiki links its API reference entries to the pages on Read the Docs, and links whose label is
   code (``[`name`](page.md)``) are now rewritten like any other.
+- An application page, a 200 m mesh of the contiguous United States: the `regional_refine` run of
+  50 million cells on 48 ranks, the refinement, grading and per-level optimization it uses, the
+  area ratio bound, a comparison with and without the bound and with one optimization at the end,
+  and figures of the mesh (a telescoping zoom to the 200 m cells, least angles in stereographic
+  projection, transition templates, the two runs side by side). The smoothing, refinement and
+  example pages describe the bound and the per-pass options.
+- Visualization pages (an overview, ParaView, VisIt, pyvista and yt with VTKHDF) and a gallery of
+  the figures of every page. The figures of the CONUS and visualization pages are made on a
+  cluster and composed by scripts in `tools/somaview/` (see the making-figures page).
+
+### Visualization
+
+- `tools/somaview/`, readers of SOMA mesh files and AMR checkpoints for visualization tools: a
+  Python core (`somaview`, numpy and h5py) that reads any subset of a file's parts with their
+  halo, by scanning the sharing tables or by one all-to-all under MPI, and gives VTK cells
+  (quadratic cells, polygons, knives as polyhedra, VTK 9.7's wedge order or the older one), point
+  and cell fields, set labels, part and global ids, and AMR hierarchies with blanking; a ParaView
+  Python reader plugin answering pvbatch and pvserver pieces; a VisIt database plugin over the
+  header-only C++ reader `soma_reader.hpp`; pyvista and yt front-ends, a command line
+  (`somaview info`, `render`, `convert`) and a writer of partitioned VTKHDF files, collective
+  under MPI.
+- Tests against SOMA's own reader on files SOMA writes (`tests/make_data.sh` builds them with an
+  installed SOMA through `tests/gen/`), MPI checks at 1 to 8 ranks with both halo methods and
+  ParaView pieces, VisIt engine checks, and the CONUS figure scripts (`examples/conus/`).
 
 ### Packaging
 

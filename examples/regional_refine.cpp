@@ -43,6 +43,15 @@
 // then soma::quality_smooth from the centroid result (--optimize, default
 // 50,5,10 sweeps of shape, angle and polish; 0,0,0 skips it; the angle
 // sweeps move the vertices of cells under T degrees, default 45).
+// --pass-optimize S,A,P also runs quality_smooth on each level a pass makes
+// before the next pass refines it (the corners of level-0 cells stay), so the
+// children copy a smoothed shape; the cells are then marked again. With it the
+// centroid sweeps default to 0. --final-rings N lets the last quality_smooth
+// move only the vertices within N cells of a level change. --tolerance T ends
+// a quality_smooth phase once no vertex moves farther than T times its
+// shortest edge. --area-ratio R (>= 1) or keep (the largest ratio of the mesh
+// smoothed) bounds the area ratio of cells sharing an edge in every
+// quality_smooth.
 // Writes <out-prefix>_refined.vtk, _neighbours.vtk, _centroids.vtk and
 // _optimized.vtk (--format: vtk, gathered on the first rank; soma, written
 // by every rank; none) with the cell fields refine:level, spacing_km, min_angle
@@ -134,8 +143,8 @@ Row assess_and_write(const soma::Comm& comm, soma::HostMesh& m, const Options& o
   if (o.format == "vtk") write_at(comm, m, radius, path, {.vtk_fields = kFields});
   if (o.format == "soma") write_at(comm, m, radius, path);
   if (comm.rank() == 0) {
-    std::printf("%-11s %9.2f %9.2f %8.0f %8.3f %9.3f %8.3f  %s\n", name, r.least, r.mean, r.under_45, r.aspect,
-                r.jacobian, r.ratio, path.c_str());
+    std::printf("%-11s %9.2f %9.2f %8.0f %8.3f %9.3f %8.3f %8.3f %8.3f  %s\n", name, r.least, r.mean, r.under_45,
+                r.aspect, r.jacobian, r.ratio, r.min_km, r.edge_km, path.c_str());
   }
   return r;
 }
@@ -152,7 +161,7 @@ int main(int argc, char** argv) {
   const soma::ScopeGuard guard(argc, argv);
   const soma::Comm comm = soma::Comm::world();
   Options o;
-  bool bad = false, ne_given = false;
+  bool bad = false, ne_given = false, smooth_given = false;
   for (int i = 1; i < argc; ++i) {
     const std::string a = argv[i];
     const bool more = i + 1 < argc;
@@ -182,7 +191,21 @@ int main(int argc, char** argv) {
         bad = bad || !(o.angle_threshold > 0 && o.angle_threshold <= 90);
       } else if (a == "--optimize" && more) {
         o.optimize = parse_sweeps(argv[++i]);
+      } else if (a == "--pass-optimize" && more) {
+        o.pass_optimize = parse_sweeps(argv[++i]);
+      } else if (a == "--final-rings" && more) {
+        o.final_rings = std::stoi(argv[++i]);
+        bad = bad || o.final_rings < 0;
+      } else if (a == "--tolerance" && more) {
+        o.tolerance = std::stod(argv[++i]);
+        bad = bad || !(o.tolerance >= 0) || !std::isfinite(o.tolerance);
+      } else if (a == "--area-ratio" && more) {
+        const std::string r = argv[++i];
+        o.area_ratio_keep = r == "keep";
+        if (!o.area_ratio_keep) o.area_ratio = std::stod(r);
+        bad = bad || (!o.area_ratio_keep && !(o.area_ratio >= 1 && std::isfinite(o.area_ratio)));
       } else if (a == "--smooth" && more) {
+        smooth_given = true;
         o.sweeps = std::stoi(argv[++i]);
       } else if (a == "--max-passes" && more) {
         o.passes = std::stoi(argv[++i]);
@@ -206,6 +229,9 @@ int main(int argc, char** argv) {
     }
   }
   if (o.boxes.empty()) o.boxes = kConus;
+  // With the levels smoothed as they are made, the centroid sweeps (which bound
+  // no size) are left out unless asked for.
+  if (o.pass_optimize[0] + o.pass_optimize[1] + o.pass_optimize[2] > 0 && !smooth_given) o.sweeps = 0;
   if (bad || o.prefix.empty() || (ne_given && !o.mesh.empty()) || o.ne < 1 || o.np < 2 || !(o.km > 0) ||
       o.transition < 1 || o.reruns < 0 || o.sweeps < 0 || o.passes < 0 || (o.radius && !(*o.radius > 0))) {
     if (comm.rank() == 0) {
@@ -213,7 +239,9 @@ int main(int argc, char** argv) {
                    "usage: regional_refine [--ne N | --mesh FILE] [--radius R] [--km K] [--np P]\n"
                    "                       [--box LAT0,LAT1,LON0,LON1]... [--transition N] [--grow G]\n"
                    "                       [--reruns R] [--smooth S] [--optimize SHAPE,ANGLE[,POLISH]]\n"
-                   "                       [--angle-threshold T] [--max-passes M] [--max-cells C]\n"
+                   "                       [--angle-threshold T] [--pass-optimize SHAPE,ANGLE[,POLISH]]\n"
+                   "                       [--final-rings N] [--tolerance T] [--area-ratio R|keep]\n"
+                   "                       [--max-passes M] [--max-cells C]\n"
                    "                       [--format vtk|soma|none] [--no-neighbours] [--save FILE] <out-prefix>\n");
     }
     return 2;
@@ -256,6 +284,7 @@ int main(int argc, char** argv) {
     const auto t_refine = std::chrono::steady_clock::now();
     Graded graded = refine_graded(comm, mesh, o);
     const Real refine_s = since(t_refine);
+    const Real pass_s = graded.optimize_seconds;
     mesh = std::move(graded.mesh);
     const Passes made = graded.passes;
     const int passes = made.passes;
@@ -286,6 +315,17 @@ int main(int argc, char** argv) {
       std::printf("cells marked: %.0f\n", made.refined);
       for (std::size_t k = 0; k < made.cells.size(); ++k) {
         std::printf("pass %zu: %.0f cells, %.2f s\n", k + 1, made.cells[k], made.seconds[k]);
+        if (k < made.optimized.size()) {
+          const Optimized& q = made.optimized[k];
+          std::printf("  optimized: %d,%d,%d sweeps, %.0f vertices free, least angle %.2f -> %.2f", q.report.shape_sweeps,
+                      q.report.angle_sweeps, q.report.polish_sweeps, q.moving, q.report.least_angle_before,
+                      q.report.least_angle_after);
+          if (q.bound > 0) {
+            std::printf(", area ratio %.3f -> %.3f (bound %.3f)", q.report.area_ratio_before, q.report.area_ratio_after,
+                        q.bound);
+          }
+          std::printf(", %.2f s\n", q.seconds);
+        }
       }
       std::string bands;
       for (const Real b : graded.widths) {  // a band as wide as the cap measured or wider: "12+"
@@ -309,8 +349,8 @@ int main(int argc, char** argv) {
       } else {
         std::printf("outside: none\n");
       }
-      std::printf("%-11s %9s %9s %8s %8s %9s %8s\n", "mesh", "min angle", "mean", "< 45 deg", "aspect", "jacobian",
-                  "area");
+      std::printf("%-11s %9s %9s %8s %8s %9s %8s %8s %8s\n", "mesh", "min angle", "mean", "< 45 deg", "aspect",
+                  "jacobian", "area", "min km", "edge km");
     }
 
     const Real refined_size = finest_size(comm, mesh);
@@ -335,25 +375,36 @@ int main(int argc, char** argv) {
       (void)assess_and_write(comm, smoothed, o, "centroids", radius);
     }
     // The optimizer from the centroid-smoothed mesh (the refined one without sweeps).
+    std::optional<Optimized> last;
     if (o.optimize[0] + o.optimize[1] + o.optimize[2] > 0) {
-      const auto t0 = std::chrono::steady_clock::now();
-      if (comm.size() > 1) smoothed.add_ghosts(comm, soma::GhostOptions{1, 0});
-      (void)soma::quality_smooth(comm, smoothed, {.shape_sweeps = o.optimize[0], .angle_sweeps = o.optimize[1],
-                                                  .polish_sweeps = o.optimize[2],
-                                                  .angle_threshold = o.angle_threshold, .sphere_radius = 1});
-      if (comm.size() > 1) smoothed.remove_ghosts(comm);
-      optimize_s = since(t0);
+      last = optimize(comm, smoothed, o.optimize, o, o.final_rings > 0 ? Moving::rings : Moving::all);
+      optimize_s = last->seconds;
       (void)assess_and_write(comm, smoothed, o, "optimized", radius);
     }
     const Real change = finest_size(comm, smoothed) / refined_size - 1;
     const Real peak = peak_mb(comm);
     if (comm.rank() == 0) {
-      std::printf("time (s) on %d ranks: refine %.2f, smooth %.2f, optimize %.2f, total %.2f; peak memory %.0f MB "
-                  "a rank\n",
-                  comm.size(), refine_s, smooth_s, optimize_s, since(t_start), peak);
+      if (pass_s > 0) {
+        std::printf("time (s) on %d ranks: refine %.2f, pass optimize %.2f, smooth %.2f, optimize %.2f, total %.2f; "
+                    "peak memory %.0f MB a rank\n",
+                    comm.size(), refine_s - pass_s, pass_s, smooth_s, optimize_s, since(t_start), peak);
+      } else {
+        std::printf("time (s) on %d ranks: refine %.2f, smooth %.2f, optimize %.2f, total %.2f; peak memory %.0f MB "
+                    "a rank\n",
+                    comm.size(), refine_s, smooth_s, optimize_s, since(t_start), peak);
+      }
       std::printf("finest cells' mean size: %.2f km refined, %+.1f%% after smoothing\n", refined_size, 100 * change);
       // Smoothing grows the finest cells: past 5%, one more pass in the regions of interest makes up for it.
       if (std::abs(change) > 0.05) std::printf("warning: the finest cells' size changed by more than 5%%\n");
+      if (last) {
+        std::printf("optimizer: %d,%d,%d sweeps, %.0f vertices free", last->report.shape_sweeps,
+                    last->report.angle_sweeps, last->report.polish_sweeps, last->moving);
+        if (last->bound > 0) {
+          std::printf(", area ratio %.3f -> %.3f (bound %.3f)", last->report.area_ratio_before,
+                      last->report.area_ratio_after, last->bound);
+        }
+        std::printf("\n");
+      }
     }
     if (!o.save.empty()) {
       write_at(comm, smoothed, radius, o.save);

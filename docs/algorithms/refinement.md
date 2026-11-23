@@ -431,6 +431,14 @@ edge ratio from 3.5 to 4.8 and 3.2, and the cells under 45 degrees from 540 to 3
 mean size does not change (0.0%).
 ```
 
+One optimization of the finished mesh costs more as levels are added: improvement spreads one cell
+a sweep, and the sweeps over the finest level, most of the cells, dominate. `--pass-optimize`
+instead optimizes each level as a pass makes it, before the next pass refines it, and
+`--final-rings` limits the last optimization to the cells near level changes.
+[A 200 m mesh of the contiguous United States](../apps/conus-200m.md) uses both on a
+50-million-cell mesh: 5.5 times faster than one optimization at the end, with a higher mean least
+angle.
+
 ### Regionally refined meshes from elsewhere
 
 E3SM's regionally refined meshes (RRM) and SQuadGen's are Exodus files (`.g`). Convert one
