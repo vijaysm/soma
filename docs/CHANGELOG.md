@@ -3,6 +3,41 @@
 All notable changes to SOMA are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Spectral elements
+
+- `soma::sem::divergence_weak` (`soma/sem/operators.hpp`): the weak divergence, HOMME's
+  `divergence_sphere_wk`, assembled; zero flux through the mesh boundary is built in.
+- `soma::sem::make_boundary` and `remove_normal` (`soma/sem/boundary.hpp`): a space's boundary
+  points with unit normals from their skin edges, the same on any number of ranks; velocity loses
+  its normal component at the coast and vanishes at corners of 90 degrees or more and at pinch
+  points.
+
+### Algorithms
+
+- `soma::refine_graded` (`soma/algorithms/refine_graded.hpp`): the graded refinement of
+  `examples/regional_refine`, moved into the library with its target given by a callback ("is this
+  cell within g of the target"); `regional_refine`'s outputs are unchanged.
+- `soma::edge_reachable` (`soma/algorithms/components.hpp`): the elements joined to a seed through
+  shared edges, over a distributed mesh.
+
+### Barotropic ocean
+
+- `apps/swe_ocean` (`SOMA_ENABLE_APPS=ON`): the barotropic ocean on the spectral elements, with
+  coasts, wind stress, quadratic or linear drag and hyperviscosity, the same bits on any number of
+  ranks and threads.
+- The mesh: the cubed sphere refined toward ETOPO1's coastline, the bathymetry averaged over each
+  GLL point's footprint (each rank reading only its windows of the NetCDF-4 file) and smoothed to
+  a slope factor of 0.2, land and closed basins removed. It can be saved as a SOMA file and read
+  back at any number of ranks.
+- Passive tracers on K levels of ROMS's terrain-following coordinate or of z-star levels with
+  vanished bottom layers, conserved to rounding.
+- Cases `stommel` and `kelvin` (analytic, in the plane), `rest` and `wind` (global, with the Drake
+  Passage transport). Stommel's error at order 4 falls from 5.5e-3 to 4.0e-4 from 4 to 8 elements
+  a side; Kelvin's from 2.2e-2 to 3.7e-7 from order 2 to 6.
+- Output: SOMA snapshots and `.npy` latitude-longitude fields (NaN over land).
+
 ## [0.1.0] - 2026-11-23
 
 The first release. It is verified on host backends only: the suite (2021 tests, MPI at 1 to 8

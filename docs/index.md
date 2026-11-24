@@ -99,6 +99,7 @@ amr/block-amr
 :caption: Applications
 
 apps/swe-atm
+apps/swe-ocean
 apps/conus-200m
 ```
 
