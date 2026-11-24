@@ -39,6 +39,8 @@
 // Each stage of the model's SSP-RK3 takes the explicit tendency (tendency) and then the vertical fluxes
 // implicitly, with T of the stage's end (vertical): a z-star level near h_min passes the fluxes of its thick
 // neighbours on through w, so w dt / h_k can pass the explicit limit (1.8 on the synthetic Earth of the tests).
+// The implicit vertical term is first order in time within each stage (backward Euler on the stage's weight);
+// the horizontal terms keep SSP-RK3's order.
 // Every row is computed alone (no reductions), so a run has the same bits on any number of ranks and threads.
 //
 // The views have a row per point of the space: h holds K components (level k in component k - 1), hT and the
@@ -91,7 +93,8 @@ class Tracers {
   // first rescales the state so that T is unchanged (when eta is set anew).
   void thicken(ConstValues eta, bool keep = false);
 
-  // For the model. The state a (K count components), stepped by the model's stages.
+  // For the model. The state a (K count components), stepped by the model's stages. A test may write it (then
+  // thicken, to recompose hT) to carry a tracer on the anomaly alone.
   Values state() const { return anomaly_; }
 
   // For the model. Collective: da, the explicit part of the tendency of the state a at a stage whose free

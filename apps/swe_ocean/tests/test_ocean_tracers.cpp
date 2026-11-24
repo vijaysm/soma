@@ -54,6 +54,16 @@ constexpr double conservation_tolerance = 1e-13;
 constexpr double surface_tolerance = 1e-13;
 // h_k = h0_k (1 + eta / H): a quotient, a sum and a product, a few ulps of h_k.
 constexpr double thickness_tolerance = 1e-14;
+// A tracer of 7 carried wholly as the anomaly (Tbar = 0) is uniform only as far as the tracer transport matches
+// the levels' continuity. The plane box's levels are all thick enough that its rounding stays at a few ulps of 7
+// over 30 steps; on the synthetic Earth, vanished z-star levels (1e-3 m) pass their thick neighbours' fluxes on
+// and magnify rounding (4.2e-13 measured for a uniform tracer carried this way); 1e-11 leaves room for that and
+// is still eleven orders below the 0.76 of a transport that weights a stage's vertical fluxes wrongly.
+constexpr double offset_tolerance_plane = 1e-13;
+constexpr double offset_tolerance_sphere = 1e-11;
+constexpr long offset_steps = 30;
+// No limiter: the overshoot of the varying tracer is measured, bounded only loosely to catch a blow-up.
+constexpr double overshoot_factor = 10;
 constexpr double uniform_value = 7;
 
 ocean::VerticalSpec coordinate(Vertical kind) {
@@ -196,6 +206,25 @@ Measures measure(const Comm& c, OceanModel& m, long steps) {
   return out;
 }
 
+// Tracer 0 set to 0 (Tbar = 0) and its state then written as 7 h_k, so that T = 7 rides wholly on the anomaly
+// and its transport, not on Tbar; the worst max |T - 7| over offset_steps steps.
+double offset_error(const Comm& c, OceanModel& m) {
+  m.tracers().set(c, [](const std::array<double, 3>&, double, int) { return 0.0; });
+  const auto a = m.tracers().state();
+  const auto h = m.tracers().h();
+  const int K = m.tracers().levels();
+  for (std::size_t r = 0; r < a.extent(0); ++r) {
+    for (int k = 0; k < K; ++k) a(r, k) = uniform_value * h(r, k);
+  }
+  m.tracers().thicken(m.eta());
+  double worst = uniform_error(c, m);
+  for (long n = 0; n < offset_steps; ++n) {
+    m.advance(c, m.time() + m.dt());
+    worst = std::max(worst, uniform_error(c, m));
+  }
+  return worst;
+}
+
 void report(const Comm& c, const char* where, Vertical kind, const Measures& r) {
   if (c.rank() != 0) return;
   std::printf("%s %s: %ld steps, max |T - 7| %.3g, total %.17g -> %.17g (drift %.3g of %.17g), w_0 %.3g m/s "
@@ -205,6 +234,7 @@ void report(const Comm& c, const char* where, Vertical kind, const Measures& r) 
 }
 
 void expect_measures(const Measures& r, Vertical kind) {
+  EXPECT_LT(r.extreme, overshoot_factor * r.extreme0) << name(kind);
   EXPECT_LE(r.uniform, uniform_tolerance) << name(kind);
   EXPECT_GT(r.scale, 0) << name(kind);
   EXPECT_LE(std::abs(r.total - r.total0), conservation_tolerance * r.scale) << name(kind);
@@ -270,7 +300,7 @@ class TracersTest : public ::testing::Test {
     }
   }
 
-  static Measures bump_run(const Comm& c, Vertical kind) {
+  static std::unique_ptr<OceanModel> bump_model(const Comm& c, Vertical kind) {
     ocean::MeshOptions mo;
     mo.ne = 4;
     mo.order = 3;
@@ -279,10 +309,12 @@ class TracersTest : public ::testing::Test {
     ModelOptions o;
     o.forcing.wind = westerlies;
     o.vertical = coordinate(kind);
-    OceanModel m(c, ocean::build_ocean_mesh(c, mo), o);
-    m.initialize(c, bump);
-    return measure(c, m, bump_steps);
+    auto m = std::make_unique<OceanModel>(c, ocean::build_ocean_mesh(c, mo), o);
+    m->initialize(c, bump);
+    return m;
   }
+
+  static Measures bump_run(const Comm& c, Vertical kind) { return measure(c, *bump_model(c, kind), bump_steps); }
 
   // The world run of a coordinate, made once.
   static const Measures& run(Vertical kind) {
@@ -312,6 +344,16 @@ TEST_F(TracersTest, conserved) {
     const Measures& r = run(kind);
     EXPECT_GT(r.scale, 0) << name(kind);
     EXPECT_LE(std::abs(r.total - r.total0), conservation_tolerance * r.scale) << name(kind);
+    EXPECT_LT(r.extreme, overshoot_factor * r.extreme0) << name(kind);
+  }
+}
+
+TEST_F(TracersTest, transport_matches_level_continuity) {
+  const Comm c = Comm::world();
+  for (const Vertical kind : {Vertical::s, Vertical::zstar}) {
+    const double error = offset_error(c, *bump_model(c, kind));
+    if (c.rank() == 0) std::printf("sphere %s: offset tracer max |T - 7| %.3g\n", name(kind), error);
+    EXPECT_LE(error, offset_tolerance_sphere) << name(kind);
   }
 }
 
@@ -392,6 +434,17 @@ TEST(Tracers, plane_box) {
     expect_measures(r, kind);
     expect_thickness(r, kind);
     EXPECT_EQ(r.digest, plane_run(Comm::self(), kind).digest) << name(kind);
+  }
+}
+
+TEST(Tracers, plane_transport_matches_level_continuity) {
+  const Comm c = Comm::world();
+  for (const Vertical kind : {Vertical::s, Vertical::zstar}) {
+    OceanModel m(c, box(c), beta_plane(kind));
+    m.initialize(c, plane_bump);
+    const double error = offset_error(c, m);
+    if (c.rank() == 0) std::printf("plane %s: offset tracer max |T - 7| %.3g\n", name(kind), error);
+    EXPECT_LE(error, offset_tolerance_plane) << name(kind);
   }
 }
 
