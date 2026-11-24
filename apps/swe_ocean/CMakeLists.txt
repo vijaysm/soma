@@ -3,7 +3,7 @@
 
 # The barotropic ocean: a library of the model's parts (swe_ocean_core), its
 # driver (swe_ocean) and, with tests on, its tests.
-add_library(swe_ocean_core STATIC vertical.cpp grid_file.cpp bathymetry.cpp)
+add_library(swe_ocean_core STATIC vertical.cpp grid_file.cpp bathymetry.cpp coastline.cpp)
 add_executable(swe_ocean main.cpp)
 target_link_libraries(swe_ocean PRIVATE swe_ocean_core soma_warnings)
 if(SOMA_ENABLE_HDF5)
@@ -38,4 +38,5 @@ if(SOMA_ENABLE_TESTS)
   ocean_add_test(test_ocean_vertical SOURCES tests/test_ocean_vertical.cpp)
   ocean_add_test(test_ocean_grid_file SOURCES tests/test_ocean_grid_file.cpp RANKS 1 2 4)
   ocean_add_test(test_ocean_bathymetry SOURCES tests/test_ocean_bathymetry.cpp RANKS 1 2 3 4)
+  ocean_add_test(test_ocean_coastline SOURCES tests/test_ocean_coastline.cpp RANKS 1 2 4)
 endif()
