@@ -123,8 +123,8 @@ class OceanModel {
   // Collective: the integral of eta (m^3), summed exactly.
   double mass(const soma::Comm& comm) const;
 
-  // Collective: FNV-1a over every owned element's (gid, eta, u, hT) in gid order, gathered on every rank: the
-  // same on any number of ranks.
+  // Collective: each owned element's FNV-1a over its (gid, eta, u, hT), and FNV-1a over the (gid, hash) pairs of
+  // every rank in gid order (only the pairs are gathered): the same on any number of ranks.
   std::uint64_t digest(const soma::Comm& comm) const;
 
  private:

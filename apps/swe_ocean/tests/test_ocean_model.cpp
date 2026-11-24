@@ -269,6 +269,33 @@ TEST(OceanModel, plane_box_conserves_and_slips) {
   }
 }
 
+// The digest sees every value: one tracer value at one interior point of one element (on the first rank that
+// owns any), changed, changes it on every rank; changed back, the digest is the old one.
+TEST(OceanModel, digest_sees_one_value) {
+  const Comm c = Comm::world();
+  OceanModel m(c, box(c), beta_plane(false));
+  m.initialize(c, plane_bump);
+  m.advance(c, 3 * m.dt());
+  const std::uint64_t before = m.digest(c);
+  const auto state = m.tracers().state();
+  const std::size_t row = static_cast<std::size_t>(1 + (m.space().order() + 1));  // point (1, 1) of element 0
+  const std::int32_t first = c.allreduce(m.space().owned_elements() > 0 ? c.rank() : c.size(), soma::Op::min);
+  const double old = c.rank() == first ? state(row, 0) : 0.0;
+  const auto nudge = [&](double v) {
+    if (c.rank() == first) state(row, 0) = v;
+    m.tracers().thicken(m.eta());
+  };
+  nudge(old + 1);
+  const std::uint64_t after = m.digest(c);
+  EXPECT_NE(after, before);
+  std::uint64_t lowest = after, highest = after;
+  lowest = c.allreduce(lowest, soma::Op::min);
+  highest = c.allreduce(highest, soma::Op::max);
+  EXPECT_EQ(lowest, highest) << "the digest differs between ranks";
+  nudge(old);
+  EXPECT_EQ(m.digest(c), before);
+}
+
 // initialize's velocity: set at every point, kept in the interior, with no normal flow at the coast.
 TEST(OceanModel, plane_box_initial_velocity) {
   const Comm c = Comm::world();

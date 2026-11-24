@@ -449,32 +449,38 @@ const Tracers& OceanModel::tracers() const noexcept { return *s_->tracers; }
 double OceanModel::mass(const soma::Comm& comm) const { return s_->ocean.space->integral(comm, s_->eta, 0); }
 
 std::uint64_t OceanModel::digest(const soma::Comm& comm) const {
+  constexpr std::uint64_t basis = 1469598103934665603ull, prime = 1099511628211ull;
   const State& s = *s_;
   const auto ppe = static_cast<std::size_t>(s.ocean.space->points_per_element());
   const auto hT = s.tracers->hT();
-  const std::size_t width = 1 + (4 + hT.extent(1)) * ppe;
   const auto gid = s.ocean.mesh->gid(2);
+  // Each owned element's own FNV-1a over (gid, then per point eta, u, hT), as (gid, hash) pairs.
   std::vector<std::uint64_t> mine;
   for (LO e = 0; e < s.ocean.space->owned_elements(); ++e) {
-    mine.push_back(static_cast<std::uint64_t>(gid(e)));
+    std::uint64_t hash = basis;
+    const auto add = [&hash](std::uint64_t bits) { hash = (hash ^ bits) * prime; };
+    const auto add_value = [&add](double v) {
+      std::uint64_t bits = 0;
+      std::memcpy(&bits, &v, sizeof bits);
+      add(bits);
+    };
+    add(static_cast<std::uint64_t>(gid(e)));
     for (std::size_t k = 0; k < ppe; ++k) {
       const std::size_t r = static_cast<std::size_t>(e) * ppe + k;
-      const auto push = [&mine](double v) {
-        std::uint64_t bits = 0;
-        std::memcpy(&bits, &v, sizeof bits);
-        mine.push_back(bits);
-      };
-      for (const double v : {s.eta(r, 0), s.u(r, 0), s.u(r, 1), s.u(r, 2)}) push(v);
-      for (std::size_t c = 0; c < hT.extent(1); ++c) push(hT(r, c));
+      for (const double v : {s.eta(r, 0), s.u(r, 0), s.u(r, 1), s.u(r, 2)}) add_value(v);
+      for (std::size_t c = 0; c < hT.extent(1); ++c) add_value(hT(r, c));
     }
+    mine.push_back(static_cast<std::uint64_t>(gid(e)));
+    mine.push_back(hash);
   }
   const std::vector<std::uint64_t> all = comm.allgatherv(std::span<const std::uint64_t>(mine));
-  std::vector<std::size_t> order(all.size() / width);
+  std::vector<std::size_t> order(all.size() / 2);
   for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
-  std::sort(order.begin(), order.end(), [&](std::size_t i, std::size_t j) { return all[i * width] < all[j * width]; });
-  std::uint64_t hash = 1469598103934665603ull;
+  std::sort(order.begin(), order.end(), [&](std::size_t i, std::size_t j) { return all[2 * i] < all[2 * j]; });
+  std::uint64_t hash = basis;
   for (const std::size_t i : order) {
-    for (std::size_t j = 0; j < width; ++j) hash = (hash ^ all[i * width + j]) * 1099511628211ull;
+    hash = (hash ^ all[2 * i]) * prime;
+    hash = (hash ^ all[2 * i + 1]) * prime;
   }
   return hash;
 }
