@@ -138,6 +138,11 @@ void check(const ModelOptions& o) {
   if (o.forcing.drag_linear && !(*o.forcing.drag_linear >= 0 && std::isfinite(*o.forcing.drag_linear))) {
     bad = "linear drag " + text(*o.forcing.drag_linear) + " negative";
   }
+  if (o.nu_tracer && !(*o.nu_tracer >= 0 && std::isfinite(*o.nu_tracer))) {
+    bad = "tracer viscosity " + text(*o.nu_tracer) + " negative";
+  }
+  if (o.tracers < 0) bad = std::to_string(o.tracers) + " tracers";
+  if (o.vertical.levels < 1) bad = std::to_string(o.vertical.levels) + " levels";
   if (!bad.empty()) throw std::invalid_argument("swe_ocean: " + bad);
 }
 
@@ -161,6 +166,9 @@ struct OceanModel::State {
   Values eta0, u0, eta1, u1, deta, du, zeta, phi, lap, grad, nxu, flux, div, hyper_u;
   double time = 0, dt = 0, nu = 0, rho = 0;
   long steps = 0;
+  // The tracers, and their state (Tracers::state) at the step's start, at a stage and its explicit tendency.
+  std::unique_ptr<Tracers> tracers;
+  Values hT0, hT1, dhT;
 
   State(const soma::Comm& comm, OceanMesh&& mesh, const ModelOptions& o)
       : options(o), ocean(std::move(mesh)), boundary(soma::sem::make_boundary(comm, *ocean.mesh, *ocean.space)) {
@@ -201,6 +209,10 @@ struct OceanModel::State {
     }
     if (nu > 0 && !o.dt) rho = hyperviscous_radius(comm, s, *ocean.mesh);
     pick_dt(comm);
+
+    tracers = std::make_unique<Tracers>(s, H, o.vertical, o.tracers, o.nu_tracer.value_or(nu));
+    const auto nt = static_cast<std::size_t>(o.vertical.levels * o.tracers);
+    hT0 = make("ocean::hT0", nt), hT1 = make("ocean::hT1", nt), dhT = make("ocean::dhT", nt);
   }
 
   // The step as the header says, from the state now.
@@ -235,8 +247,8 @@ struct OceanModel::State {
     dt = std::min(advective, hyperviscous);
   }
 
-  // deta, du from (ee, uu).
-  void tendencies(const soma::Comm& comm, const Values& ee, const Values& uu) {
+  // deta, du and the tracers' explicit tendency dhT from (ee, uu) and their state hT.
+  void tendencies(const soma::Comm& comm, const Values& ee, const Values& uu, const Values& hT) {
     const Space& s = *ocean.space;
     const bool linear = options.linear;
     // The flux D u + nu grad(L eta).
@@ -296,6 +308,8 @@ struct OceanModel::State {
       subtract(nu, hyper_u, du);
     }
     soma::sem::project_tangent(s, du);
+    // The tracers, with the flux and d eta/dt of this stage.
+    if (tracers->count() > 0) tracers->tendency(comm, ee, flux, deta, hT, dhT);
   }
 
   // No normal flow: remove_normal twice. One pass leaves a normal component of rounding size relative to the
@@ -307,22 +321,33 @@ struct OceanModel::State {
   }
 
   // SSP-RK3 (Shu and Osher): y1 = y + dt F(y); y2 = 3/4 y + 1/4 (y1 + dt F(y1)); y = 1/3 y + 2/3 (y2 + dt
-  // F(y2)); u loses its normal component at the coast after each (slip).
+  // F(y2)); u loses its normal component at the coast after each (slip). The tracers' state is combined as eta
+  // is and then takes the stage's vertical fluxes implicitly, weighted as the stage weights its tendency
+  // (Tracers::vertical); h and hT follow eta at the end (Tracers::thicken).
   void step(const soma::Comm& comm, double k) {
+    const Values hT = tracers->state();
     Kokkos::deep_copy(eta0, eta);
     Kokkos::deep_copy(u0, u);
-    tendencies(comm, eta0, u0);
+    Kokkos::deep_copy(hT0, hT);
+    tendencies(comm, eta0, u0, hT0);
     combine(0, eta0, 1, eta0, k, deta, eta1);
     combine(0, u0, 1, u0, k, du, u1);
+    combine(0, hT0, 1, hT0, k, dhT, hT1);
+    tracers->vertical(eta1, k, hT1);
     slip(u1);
-    tendencies(comm, eta1, u1);
+    tendencies(comm, eta1, u1, hT1);
     combine(0.75, eta0, 0.25, eta1, k, deta, eta1);
     combine(0.75, u0, 0.25, u1, k, du, u1);
+    combine(0.75, hT0, 0.25, hT1, k, dhT, hT1);
+    tracers->vertical(eta1, 0.25 * k, hT1);
     slip(u1);
-    tendencies(comm, eta1, u1);
+    tendencies(comm, eta1, u1, hT1);
     combine(1.0 / 3, eta0, 2.0 / 3, eta1, k, deta, eta);
     combine(1.0 / 3, u0, 2.0 / 3, u1, k, du, u);
+    combine(1.0 / 3, hT0, 2.0 / 3, hT1, k, dhT, hT);
+    tracers->vertical(eta, 2.0 / 3 * k, hT);
     slip(u);
+    tracers->thicken(eta);
   }
 
   bool healthy() const {
@@ -331,6 +356,10 @@ struct OceanModel::State {
       if (!(H(r, 0) + eta(r, 0) > 0) || !std::isfinite(eta(r, 0))) return false;
       for (std::size_t c = 0; c < 3; ++c) {
         if (!std::isfinite(u(r, c))) return false;
+      }
+      const auto hT = tracers->hT();
+      for (std::size_t c = 0; c < hT.extent(1); ++c) {
+        if (!std::isfinite(hT(r, c))) return false;
       }
     }
     return true;
@@ -352,6 +381,7 @@ void OceanModel::initialize(const soma::Comm& comm,
   const auto x = s.ocean.space->x();
   for (std::size_t r = 0; r < s.eta.extent(0); ++r) s.eta(r, 0) = eta0({x(r, 0), x(r, 1), x(r, 2)});
   s.ocean.space->dss(comm, s.eta);
+  s.tracers->thicken(s.eta, true);
   s.pick_dt(comm);
 }
 
@@ -403,24 +433,29 @@ ConstValues OceanModel::eta() const { return s_->eta; }
 ConstValues OceanModel::u() const { return s_->u; }
 ConstValues OceanModel::H() const { return s_->H; }
 ConstValues OceanModel::f() const { return s_->f; }
+Tracers& OceanModel::tracers() noexcept { return *s_->tracers; }
+const Tracers& OceanModel::tracers() const noexcept { return *s_->tracers; }
 
 double OceanModel::mass(const soma::Comm& comm) const { return s_->ocean.space->integral(comm, s_->eta, 0); }
 
 std::uint64_t OceanModel::digest(const soma::Comm& comm) const {
   const State& s = *s_;
   const auto ppe = static_cast<std::size_t>(s.ocean.space->points_per_element());
-  const std::size_t width = 1 + 4 * ppe;
+  const auto hT = s.tracers->hT();
+  const std::size_t width = 1 + (4 + hT.extent(1)) * ppe;
   const auto gid = s.ocean.mesh->gid(2);
   std::vector<std::uint64_t> mine;
   for (LO e = 0; e < s.ocean.space->owned_elements(); ++e) {
     mine.push_back(static_cast<std::uint64_t>(gid(e)));
     for (std::size_t k = 0; k < ppe; ++k) {
       const std::size_t r = static_cast<std::size_t>(e) * ppe + k;
-      for (const double v : {s.eta(r, 0), s.u(r, 0), s.u(r, 1), s.u(r, 2)}) {
+      const auto push = [&mine](double v) {
         std::uint64_t bits = 0;
         std::memcpy(&bits, &v, sizeof bits);
         mine.push_back(bits);
-      }
+      };
+      for (const double v : {s.eta(r, 0), s.u(r, 0), s.u(r, 1), s.u(r, 2)}) push(v);
+      for (std::size_t c = 0; c < hT.extent(1); ++c) push(hT(r, c));
     }
   }
   const std::vector<std::uint64_t> all = comm.allgatherv(std::span<const std::uint64_t>(mine));

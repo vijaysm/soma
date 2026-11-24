@@ -3,7 +3,8 @@
 
 # The barotropic ocean: a library of the model's parts (swe_ocean_core), its
 # driver (swe_ocean) and, with tests on, its tests.
-add_library(swe_ocean_core STATIC vertical.cpp grid_file.cpp bathymetry.cpp coastline.cpp ocean_mesh.cpp model.cpp)
+add_library(swe_ocean_core STATIC vertical.cpp grid_file.cpp bathymetry.cpp coastline.cpp ocean_mesh.cpp model.cpp
+  tracers.cpp)
 add_executable(swe_ocean main.cpp)
 target_link_libraries(swe_ocean PRIVATE swe_ocean_core soma_warnings)
 if(SOMA_ENABLE_HDF5)
@@ -41,6 +42,7 @@ if(SOMA_ENABLE_TESTS)
   ocean_add_test(test_ocean_coastline SOURCES tests/test_ocean_coastline.cpp RANKS 1 2 4)
   ocean_add_test(test_ocean_mesh SOURCES tests/test_ocean_mesh.cpp RANKS 1 2 3 4)
   ocean_add_test(test_ocean_model SOURCES tests/test_ocean_model.cpp RANKS 1 2 3 4 8)
+  ocean_add_test(test_ocean_tracers SOURCES tests/test_ocean_tracers.cpp RANKS 1 2 4)
   # A run is the same bit for bit at any number of threads: in a plane box always, on the synthetic Earth (a grid
   # file written with HDF5) when HDF5 is on.
   add_test(NAME test_ocean_model.plane_threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_ocean_model>

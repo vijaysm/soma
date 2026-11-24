@@ -29,6 +29,9 @@
 // The viscosity (when not given): 1e15 (dx_min / dx_30)^3.2 m^4/s, dx_30 = pi a / 60 (the edge of a cubed-
 // sphere element at ne = 30) and dx_min the shortest element edge over all ranks (great-circle on the sphere,
 // straight in the plane, between the GLL corner points); 0 in the linear mode.
+//
+// Tracers (tracers.hpp) ride on the K levels of the vertical coordinate, stepped in the same stages with the
+// barotropic flux D u + F of each stage shared over the levels.
 
 #include <array>
 #include <cstdint>
@@ -40,7 +43,9 @@
 #include "ocean_mesh.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/sem/boundary.hpp"
+#include "tracers.hpp"
 #include "types.hpp"
+#include "vertical.hpp"
 
 namespace ocean {
 
@@ -54,13 +59,18 @@ struct Forcing {
 };
 
 // linear: the linear mode above; cfl, dt (s), nu (m^4/s): the step and the viscosity, as above; coriolis: f
-// (1/s) at a point's position, by default 2 Omega z / |x| (2 Omega sin(latitude) on the sphere, 0 in the plane).
+// (1/s) at a point's position, by default 2 Omega z / |x| (2 Omega sin(latitude) on the sphere, 0 in the plane);
+// vertical: the tracers' levels; tracers: how many (temperature and salinity by default); nu_tracer (m^4/s):
+// their hyperviscosity nu_T, by default nu.
 struct ModelOptions {
   bool linear = false;
   double cfl = 0.4;
   std::optional<double> dt, nu;
   std::function<double(const std::array<double, 3>&)> coriolis;
   Forcing forcing;
+  VerticalSpec vertical;
+  int tracers = 2;
+  std::optional<double> nu_tracer;
 };
 
 class OceanModel {
@@ -68,16 +78,18 @@ class OceanModel {
   // Collective: takes the ocean mesh over (its space may be on the sphere or in the plane; its bathymetry's H,
   // one component per row, is the depth), finds the boundary, evaluates f and the wind stress, sets eta = 0 and
   // u = 0 at t = 0 and picks the viscosity and the step. Throws std::invalid_argument on every rank for cfl <=
-  // 0, dt <= 0, nu < 0, a drag coefficient negative (or any of them not finite), or a mesh without a space or
-  // with H not one component per row of it (that last on the ranks where it is so, the others may wait); what
-  // make_boundary and the wind throw.
+  // 0, dt <= 0, nu < 0, nu_tracer < 0, a drag coefficient negative (or any of them not finite), tracers < 0,
+  // vertical.levels < 1, or a mesh without a space or with H not one component per row of it (that last on the
+  // ranks where it is so, the others may wait); what make_boundary, the wind and the tracers' reference
+  // thicknesses throw (the last on the ranks holding a depth the coordinate refuses).
   OceanModel(const soma::Comm& comm, OceanMesh&& mesh, const ModelOptions& options);
   OceanModel(const OceanModel&) = delete;
   OceanModel& operator=(const OceanModel&) = delete;
   ~OceanModel();
 
-  // Collective: sets eta to eta0 at every point (made continuous) and picks the step again unless it was given.
-  // Throws std::logic_error on every rank once a step has been taken.
+  // Collective: sets eta to eta0 at every point (made continuous), thickens the tracers' levels to it keeping
+  // their T, and picks the step again unless it was given. Throws std::logic_error on every rank once a step
+  // has been taken.
   void initialize(const soma::Comm& comm, const std::function<double(const std::array<double, 3>&)>& eta0);
 
   // Collective: steps to t_end (s) exactly, the last step shortened when dt does not divide the interval.
@@ -102,12 +114,14 @@ class OceanModel {
   ConstValues u() const;  // 3 components
   ConstValues H() const;
   ConstValues f() const;
+  Tracers& tracers() noexcept;
+  const Tracers& tracers() const noexcept;
 
   // Collective: the integral of eta (m^3), summed exactly.
   double mass(const soma::Comm& comm) const;
 
-  // Collective: FNV-1a over every owned element's (gid, eta, u) in gid order, gathered on every rank: the same
-  // on any number of ranks.
+  // Collective: FNV-1a over every owned element's (gid, eta, u, hT) in gid order, gathered on every rank: the
+  // same on any number of ranks.
   std::uint64_t digest(const soma::Comm& comm) const;
 
  private:
