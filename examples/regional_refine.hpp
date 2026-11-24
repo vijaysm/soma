@@ -19,10 +19,12 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "soma/algorithms/quality_smooth.hpp"
 #include "soma/algorithms/refine.hpp"
+#include "soma/algorithms/refine_graded.hpp"
 #include "soma/parallel/comm.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/ghosts.hpp"
@@ -359,15 +361,6 @@ inline Row assess(const soma::Comm& comm, soma::HostMesh& m, const Options& o) {
   return r;
 }
 
-// Each owned cell's refine:level (0 without the field).
-inline std::vector<std::int32_t> levels(const soma::HostMesh& m) {
-  std::vector<std::int32_t> out(static_cast<std::size_t>(m.segment_table(2).owned_end), 0);
-  if (!m.fields().contains("refine:level")) return out;
-  const auto l = m.fields().get<std::int32_t>("refine:level", 2).view();
-  for (std::size_t e = 0; e < out.size(); ++e) out[e] = l(e, 0);
-  return out;
-}
-
 // Which vertices an optimize moves.
 enum class Moving : std::uint8_t {
   all,      ///< every vertex (the skin stays: none on a closed sphere)
@@ -382,7 +375,7 @@ enum class Moving : std::uint8_t {
 inline std::vector<std::uint8_t> fixed_vertices(const soma::Comm& comm, const soma::HostMesh& m, Moving moving,
                                                 int rings) {
   if (moving == Moving::all) return {};
-  const auto own = levels(m);
+  const auto own = soma::refine_levels(m);
   const auto cells = static_cast<std::size_t>(m.count(2));
   const auto verts = static_cast<std::size_t>(m.count(0));
   const LO owned = m.segment_table(0).owned_end;
@@ -482,168 +475,15 @@ inline Optimized optimize(const soma::Comm& comm, soma::HostMesh& m, const std::
   return r;
 }
 
-// The passes, on the unit sphere. A cell of level m and size s (km) that
-// needs k > 0 more trisections to reach a spacing of at most 1.5 km is marked
-// when it overlaps a box grown by
-//   grow * s * (1/3 + ... + 1/3^(k-1)) + widen[m + 1] + widen[m + 2] + ...
-// so that about `transition` cells of each level lie between the next finer
-// and the next coarser (widen, km per level: what earlier runs added). Each
-// pass refines the marked cells (refine_quads, onto the sphere) and evens the
-// ranks out, until none is marked or after `passes`. Returns the passes made,
-// the cells still marked and the cells marked over every pass.
-struct Passes {
-  int passes = 0;
-  Real marked = 0;
-  Real refined = 0;
-  std::vector<Real> cells;    // after each pass
-  std::vector<Real> seconds;  // each pass's time
+// The passes of the last run of refine_graded (soma::refine_graded, on the
+// unit sphere; spacing in km), and the pass optimizes of that run.
+struct Passes : soma::GradedPasses {
   std::vector<Optimized> optimized;  // with Options::pass_optimize: each level a pass made and another refined
 };
 
-inline Passes refine_regions(const soma::Comm& comm, soma::HostMesh& mesh, const Options& o,
-                             const std::vector<Real>& widen = {}) {
-  Passes p;
-  const bool optimizing = o.pass_optimize[0] + o.pass_optimize[1] + o.pass_optimize[2] > 0;
-  // The marks of the owned cells, and their count over every rank.
-  const auto mark = [&](std::vector<std::int8_t>& marks) {
-    const auto level = levels(mesh);
-    marks.clear();
-    for (LO e = 0; e < mesh.segment_table(2).owned_end; ++e) {
-      const auto pts = corners(mesh, e);
-      const Real size = km(std::sqrt(area(pts)));
-      int k = 0;
-      for (Real t = size / (o.np - 1); t > 1.5 * o.km; t /= 3) ++k;
-      bool in = false;
-      if (k > 0) {
-        Real grow = 0;
-        const int cells = o.grow < 0 ? o.transition : o.grow;
-        for (int i = 1; i < k; ++i) grow += cells * size / std::pow(Real{3}, i);
-        for (std::size_t j = static_cast<std::size_t>(level[static_cast<std::size_t>(e)]) + 1; j < widen.size(); ++j) {
-          grow += widen[j];
-        }
-        for (const Box& b : o.boxes) in = in || overlaps(pts, b, grow);
-      }
-      marks.push_back(in ? 1 : 0);
-    }
-    Real count = 0;
-    for (const auto k : marks) count += k;
-    return comm.allreduce(count, soma::Op::sum);
-  };
-  std::vector<std::int8_t> marks;
-  for (;;) {
-    p.marked = mark(marks);
-    if (p.marked == 0 || p.passes == o.passes) return p;
-    // A level about to be refined: smoothed first, so its children copy the
-    // smoothed shape; marked again from the smoothed corners.
-    if (optimizing && p.passes > 0) {
-      p.optimized.push_back(optimize(comm, mesh, o.pass_optimize, o, Moving::refined));
-      p.marked = mark(marks);
-      if (p.marked == 0) return p;
-    }
-    // Each marked cell becomes 9: at least 8 more cells (transitions add more).
-    const Real cells = comm.allreduce(static_cast<Real>(mesh.segment_table(2).owned_end), soma::Op::sum);
-    if (o.max_cells > 0 && cells + 8 * p.marked > o.max_cells) {
-      throw std::runtime_error("pass " + std::to_string(p.passes + 1) + " would make more than " +
-                               std::to_string(static_cast<long long>(cells + 8 * p.marked)) + " cells (--max-cells " +
-                               std::to_string(static_cast<long long>(o.max_cells)) + ")");
-    }
-    p.refined += p.marked;
-    const auto t0 = std::chrono::steady_clock::now();
-    mesh = soma::rebalance(comm, soma::refine_quads(comm, mesh, marks, {.sphere_radius = 1}).mesh);
-    p.seconds.push_back(std::chrono::duration<Real>(std::chrono::steady_clock::now() - t0).count());
-    p.cells.push_back(comm.allreduce(static_cast<Real>(mesh.segment_table(2).owned_end), soma::Op::sum));
-    ++p.passes;
-  }
-}
-
-// Per level l from 1 to the finest but one: the fewest level-l cells crossed
-// (through edges) from a level-l cell next to a finer one to a cell coarser
-// than l, counted up to cap; -1 where no level-l cell meets a finer one or no
-// cell is coarser. Adds and removes a ghost layer.
-inline std::vector<Real> band_widths(const soma::Comm& comm, soma::HostMesh& m, int cap) {
-  const auto own = levels(m);
-  std::int32_t finest = 0;
-  for (const auto l : own) finest = std::max(finest, l);
-  finest = static_cast<std::int32_t>(comm.allreduce(static_cast<Real>(finest), soma::Op::max));
-  std::vector<Real> out;
-  if (finest < 2) return out;
-  if (comm.size() > 1) m.add_ghosts(comm, soma::GhostOptions{1, 0});
-  soma::build_distributed_adjacencies(comm, m, soma::AdjacencyRequest{}.add(2, 1).add(1, 2));
-  const auto down = m.adjacency(2, 1);
-  const auto up = m.adjacency(1, 2);
-  const auto n = static_cast<std::size_t>(m.count(2));
-  const LO owned = m.segment_table(2).owned_end;
-  std::optional<soma::HaloExchange<Kokkos::HostSpace>> halo;
-  if (comm.size() > 1) halo.emplace(comm, m, 2);
-  const soma::View2<Real, Kokkos::HostSpace> lev("levels", n, 1), d("distance", n, 1);
-  for (std::size_t e = 0; e < own.size(); ++e) lev(e, 0) = own[e];
-  if (halo) halo->update(comm, lev);
-  // The cells sharing an edge with e.
-  const auto each_neighbour = [&](std::size_t e, auto&& f) {
-    for (auto k = down.offsets(e); k < down.offsets(e + 1); ++k) {
-      const auto edge = static_cast<std::size_t>(down.targets(k));
-      for (auto j = up.offsets(edge); j < up.offsets(edge + 1); ++j) {
-        const auto c = static_cast<std::size_t>(up.targets(j));
-        if (c != e) f(c);
-      }
-    }
-  };
-  const Real far = cap;
-  for (std::int32_t l = 1; l < finest; ++l) {
-    Real coarser = 0;
-    for (std::size_t e = 0; e < n; ++e) {
-      d(e, 0) = lev(e, 0) < l ? 0 : far;
-      coarser += e < static_cast<std::size_t>(owned) && lev(e, 0) < l ? 1 : 0;
-    }
-    for (int sweep = 0; sweep < cap; ++sweep) {
-      std::vector<Real> next(n);
-      for (std::size_t e = 0; e < n; ++e) next[e] = d(e, 0);
-      for (LO e = 0; e < owned; ++e) {
-        const auto ei = static_cast<std::size_t>(e);
-        if (lev(ei, 0) != l) continue;
-        each_neighbour(ei, [&](std::size_t c) { next[ei] = std::min(next[ei], d(c, 0) + 1); });
-      }
-      for (std::size_t e = 0; e < n; ++e) d(e, 0) = next[e];
-      if (halo) halo->update(comm, d);
-    }
-    Real width = far + 1, meets = 0;
-    for (LO e = 0; e < owned; ++e) {
-      const auto ei = static_cast<std::size_t>(e);
-      if (lev(ei, 0) != l) continue;
-      bool finer = false;
-      each_neighbour(ei, [&](std::size_t c) { finer = finer || lev(c, 0) > l; });
-      if (!finer) continue;
-      meets = 1;
-      width = std::min(width, d(ei, 0));
-    }
-    width = comm.allreduce(width, soma::Op::min);
-    meets = comm.allreduce(meets, soma::Op::max);
-    coarser = comm.allreduce(coarser, soma::Op::sum);
-    out.push_back(meets == 0 || coarser == 0 ? -1 : std::min(width, far));
-  }
-  if (comm.size() > 1) m.remove_ghosts(comm);
-  return out;
-}
-
-// The mean size (km) of the owned cells of each level, over every rank.
-inline std::vector<Real> level_sizes(const soma::Comm& comm, const soma::HostMesh& m, std::size_t count) {
-  std::vector<Real> s(2 * count, 0);
-  const auto level = levels(m);
-  for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
-    const auto l = static_cast<std::size_t>(level[static_cast<std::size_t>(e)]);
-    if (l >= count) continue;
-    s[2 * l] += km(std::sqrt(area(corners(m, e))));
-    s[2 * l + 1] += 1;
-  }
-  comm.allreduce(std::span<Real>(s), soma::Op::sum);
-  std::vector<Real> out(count, 0);
-  for (std::size_t l = 0; l < count; ++l) out[l] = s[2 * l + 1] > 0 ? s[2 * l] / s[2 * l + 1] : 0;
-  return out;
-}
-
 // The mean size (km) of the finest level's owned cells, over every rank.
 inline Real finest_size(const soma::Comm& comm, const soma::HostMesh& m) {
-  const auto level = levels(m);
+  const auto level = soma::refine_levels(m);
   std::int32_t finest = 0;
   for (const auto l : level) finest = std::max(finest, l);
   finest = static_cast<std::int32_t>(comm.allreduce(static_cast<Real>(finest), soma::Op::max));
@@ -671,9 +511,11 @@ inline std::array<int, 3> parse_sweeps(const std::string& t) {
 // Bands are measured up to this many cells.
 inline int band_cap(const Options& o) { return 4 * o.transition; }
 
-// refine_regions from `start`, rerun with wider growth while a band is under
-// `transition` cells (each thin band of level l adds the missing cells' mean
-// size to widen[l]), at most `reruns` times.
+// soma::refine_graded from `start` toward the boxes: a cell is marked when it
+// overlaps a box grown by the growth soma::refine_graded gives it (km), at a
+// spacing of Options::km. With Options::pass_optimize, each level a pass made
+// is optimized (vertices of level-0 cells only stay) before the next pass
+// refines it.
 struct Graded {
   soma::HostMesh mesh;
   Passes passes;
@@ -684,25 +526,48 @@ struct Graded {
 };
 
 inline Graded refine_graded(const soma::Comm& comm, const soma::HostMesh& start, const Options& o) {
-  Graded g;
-  std::vector<Real> widen;
-  for (;;) {
-    g.mesh = start.clone();
-    g.passes = refine_regions(comm, g.mesh, o, widen);
-    for (const Optimized& r : g.passes.optimized) g.optimize_seconds += r.seconds;
-    g.widths = band_widths(comm, g.mesh, band_cap(o));
-    const auto size = level_sizes(comm, g.mesh, g.widths.size() + 1);
-    widen.resize(std::max(widen.size(), g.widths.size() + 1), 0);
-    bool thin = false;
-    for (std::size_t i = 0; i < g.widths.size(); ++i) {
-      if (g.widths[i] < 0 || g.widths[i] >= o.transition) continue;
-      widen[i + 1] += (o.transition - g.widths[i]) * size[i + 1];
-      thin = true;
+  const soma::GradedOptions g{.np = o.np, .passes = o.passes, .transition = o.transition, .grow = o.grow,
+                              .reruns = o.reruns, .spacing = o.km, .max_cells = o.max_cells, .length = km};
+  const auto target = [&](const soma::HostMesh& m, const std::vector<Real>& grow) {
+    std::vector<std::uint8_t> in(grow.size(), 0);
+    for (std::size_t e = 0; e < grow.size(); ++e) {
+      if (grow[e] < 0) continue;
+      const auto pts = corners(m, static_cast<LO>(e));
+      bool hit = false;
+      for (const Box& b : o.boxes) hit = hit || overlaps(pts, b, grow[e]);
+      in[e] = hit ? 1 : 0;
     }
-    g.settled = !thin;
-    if (!thin || g.reruns == o.reruns) return g;
-    ++g.reruns;
+    return in;
+  };
+  Graded out;
+  std::vector<Optimized> optimized;  // of the run `run`
+  int run = -1;
+  soma::GradedHook hook;
+  if (o.pass_optimize[0] + o.pass_optimize[1] + o.pass_optimize[2] > 0) {
+    hook = [&](soma::HostMesh& m, int r, int) {
+      if (r != run) optimized.clear();
+      run = r;
+      optimized.push_back(optimize(comm, m, o.pass_optimize, o, Moving::refined));
+      out.optimize_seconds += optimized.back().seconds;
+    };
   }
+  soma::GradedResult r;
+  try {
+    r = soma::refine_graded(comm, start, g, target, hook);
+  } catch (const std::runtime_error& e) {  // max_cells is --max-cells here
+    std::string what = e.what();
+    const auto at = what.find("(max_cells ");
+    if (at == std::string::npos) throw;
+    what.replace(at, 11, "(--max-cells ");
+    throw std::runtime_error(what);
+  }
+  out.mesh = std::move(r.mesh);
+  static_cast<soma::GradedPasses&>(out.passes) = std::move(r.passes);
+  if (run == r.reruns) out.passes.optimized = std::move(optimized);
+  out.widths = std::move(r.widths);
+  out.reruns = r.reruns;
+  out.settled = r.settled;
+  return out;
 }
 
 const std::vector<std::string> kFields{"refine:level", "spacing_km",      "min_angle",

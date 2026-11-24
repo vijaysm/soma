@@ -115,6 +115,7 @@ algorithms/laplacian
 algorithms/quality_smooth
 algorithms/petsc
 algorithms/refine
+algorithms/refine_graded
 algorithms/remap
 ```
 
