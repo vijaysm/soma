@@ -115,7 +115,7 @@ CaseResult relative_errors(const soma::Comm& comm, const Space& s, ConstValues f
 
 }  // namespace
 
-CaseResult run_stommel(const soma::Comm& comm, int nx, int order, const StommelSpec& spec) {
+CaseResult run_stommel(const soma::Comm& comm, int nx, int order, const StommelSpec& spec, const CaseFinish& finish) {
   constexpr const char* name = "run_stommel";
   check_size(nx, order, name);
   check_positive(spec.L, "L", name);
@@ -176,10 +176,12 @@ CaseResult run_stommel(const soma::Comm& comm, int nx, int order, const StommelS
   }
   CaseResult result = relative_errors(comm, s, model.u(), exact, 3);
   result.steps = model.steps();
+  result.digest = model.digest(comm);
+  if (finish) finish(model);
   return result;
 }
 
-CaseResult run_kelvin(const soma::Comm& comm, int nx, int order, const KelvinSpec& spec) {
+CaseResult run_kelvin(const soma::Comm& comm, int nx, int order, const KelvinSpec& spec, const CaseFinish& finish) {
   constexpr const char* name = "run_kelvin";
   check_size(nx, order, name);
   check_positive(spec.lx, "lx", name);
@@ -215,6 +217,8 @@ CaseResult run_kelvin(const soma::Comm& comm, int nx, int order, const KelvinSpe
   for (std::size_t r = 0; r < x.extent(0); ++r) exact(r, 0) = packet({x(r, 0), x(r, 1), x(r, 2)}, t);
   CaseResult result = relative_errors(comm, model.space(), model.eta(), exact, 1);
   result.steps = model.steps();
+  result.digest = model.digest(comm);
+  if (finish) finish(model);
   return result;
 }
 

@@ -4,7 +4,7 @@
 # The barotropic ocean: a library of the model's parts (swe_ocean_core), its
 # driver (swe_ocean) and, with tests on, its tests.
 add_library(swe_ocean_core STATIC vertical.cpp grid_file.cpp bathymetry.cpp coastline.cpp ocean_mesh.cpp model.cpp
-  tracers.cpp cases.cpp)
+  tracers.cpp cases.cpp sample.cpp output.cpp)
 add_executable(swe_ocean main.cpp)
 target_link_libraries(swe_ocean PRIVATE swe_ocean_core soma_warnings)
 if(SOMA_ENABLE_HDF5)
@@ -44,6 +44,7 @@ if(SOMA_ENABLE_TESTS)
   ocean_add_test(test_ocean_model SOURCES tests/test_ocean_model.cpp RANKS 1 2 3 4 8)
   ocean_add_test(test_ocean_tracers SOURCES tests/test_ocean_tracers.cpp RANKS 1 2 4)
   ocean_add_test(test_ocean_cases SOURCES tests/test_ocean_cases.cpp RANKS 1 4)
+  ocean_add_test(test_ocean_sample SOURCES tests/test_ocean_sample.cpp RANKS 1 2 3 4 8)
   # A run is the same bit for bit at any number of threads: in a plane box always, on the synthetic Earth (a grid
   # file written with HDF5) when HDF5 is on.
   add_test(NAME test_ocean_model.plane_threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_ocean_model>
@@ -56,4 +57,27 @@ if(SOMA_ENABLE_TESTS)
       -P ${PROJECT_SOURCE_DIR}/tests/unit/compare_threads.cmake)
     set_tests_properties(test_ocean_model.threads PROPERTIES TIMEOUT 180)
   endif()
+  # The driver: Kelvin's state the same at 1, 2 and 4 ranks; a mesh built at 2 ranks and saved, read back at 3,
+  # gives the same run; a bad option is refused with the case names (exit 2).
+  if(SOMA_ENABLE_MPI)
+    set(kelvin "--case kelvin --ne 8 --order 4")
+    add_test(NAME swe_ocean.kelvin.digests COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean>
+      -DMPIEXEC=${MPIEXEC_EXECUTABLE} "-DRUNS=1 ${kelvin}|2 ${kelvin}|4 ${kelvin}"
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/driver_runs.cmake)
+    set_tests_properties(swe_ocean.kelvin.digests PROPERTIES TIMEOUT 120 PROCESSORS 4)
+    if(SOMA_ENABLE_HDF5)
+      add_executable(write_earth tests/write_earth.cpp)
+      target_include_directories(write_earth PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/tests)
+      target_link_libraries(write_earth PRIVATE swe_ocean_core HDF5::HDF5 soma_warnings)
+      set(dir ${CMAKE_CURRENT_BINARY_DIR}/mesh_reuse)
+      set(wind "--case wind --ne 4 --order 3 --coast-km 400 --days 0.02")
+      add_test(NAME swe_ocean.mesh_reuse COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean>
+        -DMPIEXEC=${MPIEXEC_EXECUTABLE} "-DPREPARE=$<TARGET_FILE:write_earth> ${dir}/earth.h5"
+        "-DRUNS=2 ${wind} --bathymetry ${dir}/earth.h5 --save-mesh ${dir}/earth.soma|3 ${wind} --mesh ${dir}/earth.soma"
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/driver_runs.cmake)
+      set_tests_properties(swe_ocean.mesh_reuse PROPERTIES TIMEOUT 120 PROCESSORS 3)
+    endif()
+  endif()
+  add_test(NAME swe_ocean.bad_option COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean> "-DARGS=--case tides"
+    -DCODE=2 "-DMATCH=stommel\\|kelvin\\|rest\\|wind" -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_exit.cmake)
 endif()

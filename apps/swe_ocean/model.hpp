@@ -110,6 +110,7 @@ class OceanModel {
   const ModelOptions& options() const noexcept;
 
   const soma::HostMesh& mesh() const noexcept;
+  soma::HostMesh& mesh() noexcept;  // for output: fields may be added to it
   const Space& space() const noexcept;
   const soma::sem::SemBoundary<Host>& boundary() const noexcept;
   ConstValues eta() const;

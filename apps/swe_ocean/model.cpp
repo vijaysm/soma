@@ -436,6 +436,7 @@ double OceanModel::nu() const noexcept { return s_->nu; }
 long OceanModel::steps() const noexcept { return s_->steps; }
 const ModelOptions& OceanModel::options() const noexcept { return s_->options; }
 const soma::HostMesh& OceanModel::mesh() const noexcept { return *s_->ocean.mesh; }
+soma::HostMesh& OceanModel::mesh() noexcept { return *s_->ocean.mesh; }
 const Space& OceanModel::space() const noexcept { return *s_->ocean.space; }
 const soma::sem::SemBoundary<Host>& OceanModel::boundary() const noexcept { return s_->boundary; }
 ConstValues OceanModel::eta() const { return s_->eta; }

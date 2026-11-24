@@ -24,16 +24,25 @@
 // Errors are relative: error_l2 the l2 norm (the space's integral) of the difference over that of the analytic
 // field (the velocity vector for Stommel, eta for Kelvin), error_max the largest pointwise difference (vector
 // magnitude for Stommel) over the largest analytic value; both at the GLL points, the same bits on any number of
-// ranks.
+// ranks. digest is the model's state digest at the end (OceanModel::digest); `finish`, when given, sees the model
+// at the end (the driver writes its output there).
+
+#include <cstdint>
+#include <functional>
 
 #include "soma/parallel/comm.hpp"
 
 namespace ocean {
 
+class OceanModel;
+
 struct CaseResult {
   double error_l2 = 0, error_max = 0;
   long steps = 0;
+  std::uint64_t digest = 0;
 };
+
+using CaseFinish = std::function<void(OceanModel&)>;
 
 // L (m), beta (1/(m s)), f0 (1/s), H (m), r (1/s), tau0 (N/m^2); tolerance: the steady-state test above;
 // max_steps: the steps after which a run not yet steady throws (about 4 times what nx = 12, order 4 takes);
@@ -59,12 +68,14 @@ struct KelvinSpec {
 // nx < 1, order < 1 or a spec value not positive and finite (tolerance, max_steps and every length, rate and
 // depth; tau0 may be any finite value); std::runtime_error on every rank when the run is not steady after
 // max_steps steps; what OceanModel throws.
-CaseResult run_stommel(const soma::Comm& comm, int nx, int order, const StommelSpec& spec);
+CaseResult run_stommel(const soma::Comm& comm, int nx, int order, const StommelSpec& spec,
+                       const CaseFinish& finish = {});
 
 // Collective: the Kelvin case on nx by max(1, round(nx ly / lx)) elements of the order. Throws
 // std::invalid_argument on every rank for nx < 1, order < 1, a spec value not finite, or a length, f, H, sigma or
 // cfl not positive (amplitude, x0 and distance may be any finite value); what OceanModel throws.
-CaseResult run_kelvin(const soma::Comm& comm, int nx, int order, const KelvinSpec& spec);
+CaseResult run_kelvin(const soma::Comm& comm, int nx, int order, const KelvinSpec& spec,
+                      const CaseFinish& finish = {});
 
 }  // namespace ocean
 
