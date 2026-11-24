@@ -3,7 +3,7 @@
 
 # The barotropic ocean: a library of the model's parts (swe_ocean_core), its
 # driver (swe_ocean) and, with tests on, its tests.
-add_library(swe_ocean_core STATIC vertical.cpp grid_file.cpp bathymetry.cpp coastline.cpp ocean_mesh.cpp)
+add_library(swe_ocean_core STATIC vertical.cpp grid_file.cpp bathymetry.cpp coastline.cpp ocean_mesh.cpp model.cpp)
 add_executable(swe_ocean main.cpp)
 target_link_libraries(swe_ocean PRIVATE swe_ocean_core soma_warnings)
 if(SOMA_ENABLE_HDF5)
@@ -40,4 +40,10 @@ if(SOMA_ENABLE_TESTS)
   ocean_add_test(test_ocean_bathymetry SOURCES tests/test_ocean_bathymetry.cpp RANKS 1 2 3 4)
   ocean_add_test(test_ocean_coastline SOURCES tests/test_ocean_coastline.cpp RANKS 1 2 4)
   ocean_add_test(test_ocean_mesh SOURCES tests/test_ocean_mesh.cpp RANKS 1 2 3 4)
+  ocean_add_test(test_ocean_model SOURCES tests/test_ocean_model.cpp RANKS 1 2 3 4 8)
+  # A run is the same bit for bit at any number of threads.
+  add_test(NAME test_ocean_model.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_ocean_model>
+    -DFILTER=OceanModelTest.rank_and_thread_independent "-DTHREADS=1;2;4"
+    -P ${PROJECT_SOURCE_DIR}/tests/unit/compare_threads.cmake)
+  set_tests_properties(test_ocean_model.threads PROPERTIES TIMEOUT 180)
 endif()

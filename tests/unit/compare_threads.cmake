@@ -1,14 +1,17 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2022-2026, Vijay Mahadevan.
 
-# Runs EXE --gtest_filter=FILTER at 1, 3 and 4 host threads (KOKKOS_NUM_THREADS)
-# and compares the "digest reproducible" lines it prints: they must agree.
-# Where it prints "digest plain" lines, they must differ somewhere when a run
+# Runs EXE --gtest_filter=FILTER at 1, 3 and 4 host threads (KOKKOS_NUM_THREADS;
+# THREADS, a list, replaces those counts) and compares the "digest
+# reproducible" lines it prints: they must agree. Where it prints "digest plain" lines, they must differ somewhere when a run
 # had more than one thread, so that the comparison could fail.
 set(reproducible "")
 set(plain "")
 set(threaded OFF)
-foreach(n IN ITEMS 1 3 4)
+if(NOT DEFINED THREADS)
+  set(THREADS 1 3 4)
+endif()
+foreach(n IN LISTS THREADS)
   set(ENV{KOKKOS_NUM_THREADS} ${n})
   execute_process(COMMAND ${EXE} --gtest_filter=${FILTER} OUTPUT_VARIABLE out ERROR_VARIABLE err RESULT_VARIABLE rc)
   if(NOT rc EQUAL 0)
@@ -33,4 +36,4 @@ list(LENGTH plain distinct_plain)
 if(threaded AND distinct_plain EQUAL 1 AND NOT plain STREQUAL "")
   message(FATAL_ERROR "plain digests agree across thread counts: the comparison proves nothing")
 endif()
-message(STATUS "reproducible digest ${reproducible} at 1, 3 and 4 threads; plain digests: ${plain}")
+message(STATUS "reproducible digest ${reproducible} at ${THREADS} threads; plain digests: ${plain}")

@@ -47,45 +47,26 @@
 #include "ocean_mesh.hpp"
 #include "soma/algorithms/refine_graded.hpp"
 #include "soma/parallel/comm.hpp"
+#include "synthetic_earth.hpp"
 
 #ifdef SWE_OCEAN_HAVE_HDF5
 
 namespace {
 
 namespace fs = std::filesystem;
+using ocean::testing::angle_deg;
+using ocean::testing::at;
+using ocean::testing::deg;
+using ocean::testing::heights;
+using ocean::testing::in_basin;
+using ocean::testing::in_lake;
+using ocean::testing::lake_radius;
 using ocean::testing::Registration;
 using ocean::testing::Storage;
 using soma::Comm;
 using soma::GO;
 using soma::HostMesh;
 using soma::LO;
-using P3 = std::array<double, 3>;
-
-constexpr double deg = std::numbers::pi / 180;
-
-P3 at(double lat, double lon) {
-  return {std::cos(lat * deg) * std::cos(lon * deg), std::cos(lat * deg) * std::sin(lon * deg), std::sin(lat * deg)};
-}
-double angle_deg(const P3& u, const P3& v) {
-  const P3 c{u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]};
-  return std::atan2(std::hypot(c[0], c[1], c[2]), u[0] * v[0] + u[1] * v[1] + u[2] * v[2]) / deg;
-}
-
-// The basin, the lake and the land of the synthetic Earth, as described above.
-bool in_basin(double lat, double lon) { return lat > -16 && lat < -4 && lon > -16 && lon < -4; }
-constexpr double lake_lat = 0, lake_lon = 90, lake_radius = 8;
-bool in_lake(double lat, double lon) { return angle_deg(at(lat, lon), at(lake_lat, lake_lon)) < lake_radius; }
-
-double heights(double lat, double lon) {
-  constexpr double ocean = -1000, inland = -500, land = 500;
-  if (std::abs(lat) <= 40 && std::abs(lon) <= 40) {
-    const bool bay = (lat > 4 && lon > 4) || (lon > 18 && lat > -18) || (lat > 18 && lon > -18);
-    if (bay) return ocean;
-    return in_basin(lat, lon) ? inland : land;
-  }
-  if (std::abs(lat) <= 35 && std::abs(lon - 90) <= 35) return in_lake(lat, lon) ? inland : land;
-  return ocean;
-}
 
 // Latitude and longitude (degrees) of a point at any radius.
 std::pair<double, double> lat_lon(const double* x) {
