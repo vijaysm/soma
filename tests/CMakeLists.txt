@@ -77,6 +77,7 @@ add_test(NAME test_sem_dss.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:
 set_tests_properties(test_sem_dss.threads PROPERTIES TIMEOUT 300)
 soma_add_test(test_sem_operators SOURCES unit/test_sem_operators.cpp RANKS 1 2 3 4 8)
 soma_add_test(test_sem_weak_divergence SOURCES unit/test_sem_weak_divergence.cpp RANKS 1 2 3 4)
+soma_add_test(test_sem_boundary SOURCES unit/test_sem_boundary.cpp RANKS 1 2 3 4 8)
 soma_add_test(test_cg SOURCES unit/test_cg.cpp RANKS 1 2 3 4 5 7 8)
 # Reproducible CG is the same bit for bit at any number of threads.
 add_test(NAME test_cg.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_cg> -DFILTER=Cg.SolutionDigests
