@@ -146,6 +146,7 @@ Files. See [input and output](../io/overview.md).
 | [`soma/sem/cubed_sphere.hpp`](api/sem/cubed_sphere.md) | `CubedSphereSpec`, `cubed_sphere_mesh`: the equiangular cubed sphere, linear or quadratic, split across the ranks. See [spectral elements](../algorithms/spectral-elements.md) |
 | [`soma/sem/sem_space.hpp`](api/sem/sem_space.md) | `SemSpace`, `SemGeometry`: GLL points and geometry over quads in the plane or on a sphere; `dss`, `mass`, `integral`. See [spectral elements](../algorithms/spectral-elements.md) |
 | [`soma/sem/operators.hpp`](api/sem/operators.md) | `gradient`, `divergence`, `vorticity`, `project_tangent`, `laplacian`, `hyperviscosity`. See [spectral elements](../algorithms/spectral-elements.md) |
+| [`soma/sem/boundary.hpp`](api/sem/boundary.md) | `SemBoundary`, `make_boundary`, `remove_normal`: the coast points of a `SemSpace`, their outward normals and the no-slip corners; removes the normal flow from a vector field. See [spectral elements](../algorithms/spectral-elements.md) |
 
 ## `soma/amr`
 

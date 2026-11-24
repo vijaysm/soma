@@ -124,6 +124,7 @@ algorithms/remap
 ```{toctree}
 :maxdepth: 1
 
+sem/boundary
 sem/cubed_sphere
 sem/gll
 sem/operators
