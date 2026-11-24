@@ -87,10 +87,12 @@ class OceanModel {
   OceanModel& operator=(const OceanModel&) = delete;
   ~OceanModel();
 
-  // Collective: sets eta to eta0 at every point (made continuous), thickens the tracers' levels to it keeping
-  // their T, and picks the step again unless it was given. Throws std::logic_error on every rank once a step
-  // has been taken.
-  void initialize(const soma::Comm& comm, const std::function<double(const std::array<double, 3>&)>& eta0);
+  // Collective: sets eta to eta0 at every point (made continuous) and, when u0 is given, u to u0 (m/s, Cartesian;
+  // made continuous and tangent, without normal flow at the coast; u stays as it was otherwise), thickens the
+  // tracers' levels to eta keeping their T, and picks the step again unless it was given. Throws
+  // std::logic_error on every rank once a step has been taken.
+  void initialize(const soma::Comm& comm, const std::function<double(const std::array<double, 3>&)>& eta0,
+                  const std::function<std::array<double, 3>(const std::array<double, 3>&)>& u0 = {});
 
   // Collective: steps to t_end (s) exactly, the last step shortened when dt does not divide the interval.
   // Throws std::runtime_error on every rank when a total depth is not positive or a value not finite after a

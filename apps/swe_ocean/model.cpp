@@ -374,13 +374,22 @@ OceanModel::OceanModel(const soma::Comm& comm, OceanMesh&& mesh, const ModelOpti
 
 OceanModel::~OceanModel() = default;
 
-void OceanModel::initialize(const soma::Comm& comm,
-                            const std::function<double(const std::array<double, 3>&)>& eta0) {
+void OceanModel::initialize(const soma::Comm& comm, const std::function<double(const std::array<double, 3>&)>& eta0,
+                            const std::function<std::array<double, 3>(const std::array<double, 3>&)>& u0) {
   State& s = *s_;
   if (s.steps > 0) throw std::logic_error("swe_ocean: initialize after " + std::to_string(s.steps) + " steps");
   const auto x = s.ocean.space->x();
   for (std::size_t r = 0; r < s.eta.extent(0); ++r) s.eta(r, 0) = eta0({x(r, 0), x(r, 1), x(r, 2)});
   s.ocean.space->dss(comm, s.eta);
+  if (u0) {
+    for (std::size_t r = 0; r < s.u.extent(0); ++r) {
+      const std::array<double, 3> v = u0({x(r, 0), x(r, 1), x(r, 2)});
+      for (std::size_t k = 0; k < 3; ++k) s.u(r, k) = v[k];
+    }
+    s.ocean.space->dss(comm, s.u);
+    soma::sem::project_tangent(*s.ocean.space, s.u);
+    s.slip(s.u);
+  }
   s.tracers->thicken(s.eta, true);
   s.pick_dt(comm);
 }

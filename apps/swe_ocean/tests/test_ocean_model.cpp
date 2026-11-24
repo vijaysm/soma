@@ -269,6 +269,26 @@ TEST(OceanModel, plane_box_conserves_and_slips) {
   }
 }
 
+// initialize's velocity: set at every point, kept in the interior, with no normal flow at the coast.
+TEST(OceanModel, plane_box_initial_velocity) {
+  const Comm c = Comm::world();
+  OceanModel m(c, box(c), beta_plane(true));
+  m.initialize(c, plane_bump, [](const std::array<double, 3>&) { return std::array<double, 3>{0.3, -0.2, 0}; });
+  const auto u = m.u();
+  const auto& b = m.boundary();
+  std::int64_t interior = 0;
+  for (std::size_t r = 0; r < u.extent(0); ++r) {
+    if (b.kind(r) != 0) continue;
+    // Direct stiffness summation averages a point's copies with mass weights: equal values to rounding.
+    EXPECT_NEAR(u(r, 0), 0.3, 1e-15) << "row " << r;
+    EXPECT_NEAR(u(r, 1), -0.2, 1e-15) << "row " << r;
+    EXPECT_EQ(u(r, 2), 0.0) << "row " << r;
+    ++interior;
+  }
+  EXPECT_GT(c.allreduce(interior, soma::Op::sum), 0);
+  EXPECT_GT(expect_no_normal_flow(c, m), 0);
+}
+
 // For compare_threads.cmake (test_ocean_model.plane_threads), which runs this at several thread counts: the
 // nonlinear mode, with hyperviscosity, wind and quadratic drag.
 TEST(OceanModel, plane_box_thread_independent) {
