@@ -18,7 +18,8 @@ mpiexec -n 8 build/apps/swe_ocean/swe_ocean --case wind --mesh ocean_ne30.soma -
 ```
 
 Without HDF5 the analytic cases run, but the global cases cannot read a height file or a saved
-mesh: `--bathymetry` is refused with a message naming `SOMA_ENABLE_HDF5`.
+mesh, and nothing can be written as a SOMA file: `--bathymetry`, `--mesh`, `--save-mesh` and
+`--output` are refused (exit 2) with a message naming `SOMA_ENABLE_HDF5`.
 
 ## Equations
 
@@ -156,8 +157,8 @@ $\mathbf u$ over $1/r$ is below $10^{-7}$, Kelvin until the packet has travelled
 | `--transition N` | 3 | cells per refinement band |
 | `--bathymetry FILE` | | the height file (NetCDF-4, read through HDF5); the global cases need it or `--mesh` |
 | `--bathy-var`, `--bathy-lat`, `--bathy-lon` | `z`, `y`, `x` | its variable and coordinate names (ETOPO1's) |
-| `--mesh FILE`, `--save-mesh FILE` | | read a saved mesh instead of building one; save the mesh built (or read) |
-| `--vertical s\|zstar`, `--levels K` | `s`, 10 | the tracers' vertical coordinate |
+| `--mesh FILE`, `--save-mesh FILE` | | read a saved mesh instead of building one (`--ne`, `--coast-km`, `--transition` and `--bathy-*` are then ignored: the mesh and its bathymetry are as saved); save the mesh built (or read) |
+| `--vertical s\|zstar`, `--levels K` | `s`, 10 | the tracers' vertical coordinate; $K \ge 1$ |
 | `--theta-s`, `--theta-b`, `--hc` | 5, 2, 100 | the s-coordinate's stretching |
 | `--days D` | 1 | run length; the last step is shortened to land on it |
 | `--dt S`, `--nu V` | from the limits, as above | time step and viscosity |

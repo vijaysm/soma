@@ -81,8 +81,17 @@ if(SOMA_ENABLE_TESTS)
         "-DARGS=--case wind --ne 4 --order 3 --coast-km 400 --days 0 --bathymetry ${dir}/earth.h5" -DCODE=0
         "-DMATCH=values, [1-9][0-9]* coastline points" -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_exit.cmake)
       set_tests_properties(swe_ocean.built_report PROPERTIES FIXTURES_REQUIRED ocean_earth)
+      # A read mesh has no build to report; reports asked for more often than the step come once per step.
+      add_test(NAME swe_ocean.read_report COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean>
+        "-DARGS=--case rest --order 3 --days 0.005 --report-hours 0.0002 --mesh ${dir}/earth.soma" -DCODE=0
+        "-DMATCH=n/a smoothing sweeps, peak window n/a, n/a coastline points" "-DDISTINCT=step +[0-9]+ "
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_exit.cmake)
+      set_tests_properties(swe_ocean.read_report PROPERTIES FIXTURES_REQUIRED ocean_earth)
     endif()
   endif()
   add_test(NAME swe_ocean.bad_option COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean> "-DARGS=--case tides"
     -DCODE=2 "-DMATCH=stommel\\|kelvin\\|rest\\|wind" -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_exit.cmake)
+  add_test(NAME swe_ocean.bad_levels COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean>
+    "-DARGS=--case kelvin --levels 0" -DCODE=2 "-DMATCH=--levels must be at least 1"
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_exit.cmake)
 endif()

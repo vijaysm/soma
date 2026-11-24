@@ -17,6 +17,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "bathymetry.hpp"
@@ -150,6 +151,9 @@ Options parse(int argc, char** argv) {
       }
     } else if (key == "--levels") {
       o.model.vertical.levels = integer(key, value);
+      if (o.model.vertical.levels < 1) {
+        throw BadOption("swe_ocean: --levels must be at least 1\n" + std::string(usage));
+      }
     } else if (key == "--theta-s") {
       o.model.vertical.theta_s = number(key, value);
     } else if (key == "--theta-b") {
@@ -193,8 +197,14 @@ Options parse(int argc, char** argv) {
     throw BadOption("swe_ocean: give --bathymetry or --mesh, not both\n" + std::string(usage));
   }
 #ifndef SWE_OCEAN_HAVE_HDF5
-  if (o.bathymetry) {
-    throw BadOption("swe_ocean: --bathymetry needs HDF5; this build has none (configure with SOMA_ENABLE_HDF5)\n");
+  for (const auto& [given, name] : {std::pair{o.bathymetry.has_value(), "--bathymetry"},
+                                    std::pair{o.output.has_value(), "--output"},
+                                    std::pair{o.save_mesh.has_value(), "--save-mesh"},
+                                    std::pair{o.mesh_file.has_value(), "--mesh"}}) {
+    if (given) {
+      throw BadOption(std::string("swe_ocean: ") + name +
+                      " needs HDF5; this build has none (configure with SOMA_ENABLE_HDF5)\n");
+    }
   }
 #endif
   if ((o.latlon || o.output_reports) && !o.output) {
@@ -327,11 +337,15 @@ int run_global(const soma::Comm& comm, Options o) {
                 comm.size(), source.c_str(), build_seconds);
     std::printf("cells %lld; removed %.6g km^2 of land, %.6g km^2 not joined to the world ocean\n",
                 static_cast<long long>(cells), mesh.removed_land_km2, mesh.removed_disconnected_km2);
-    const std::string coastline = o.mesh_file ? "n/a" : std::to_string(mesh.coastline_points);
-    std::printf("bathymetry: rx0 %.4f (r_max %.2f, %s), %d smoothing sweeps (%d clipping), peak window %llu values, "
-                "%s coastline points\n",
-                rx0, o.mesh.bathymetry.r_max, smoothing, mesh.bathymetry.sweeps, mesh.bathymetry.clip_sweeps,
-                static_cast<unsigned long long>(peak), coastline.c_str());
+    // A read mesh was not built here: no sweeps, windows or coastline to report.
+    const bool built = !o.mesh_file;
+    const std::string sweeps = built ? std::to_string(mesh.bathymetry.sweeps) + " smoothing sweeps (" +
+                                           std::to_string(mesh.bathymetry.clip_sweeps) + " clipping)"
+                                     : "n/a smoothing sweeps";
+    const std::string window = built ? std::to_string(peak) + " values" : "n/a";
+    const std::string coastline = built ? std::to_string(mesh.coastline_points) : "n/a";
+    std::printf("bathymetry: rx0 %.4f (r_max %.2f, %s), %s, peak window %s, %s coastline points\n", rx0,
+                o.mesh.bathymetry.r_max, smoothing, sweeps.c_str(), window.c_str(), coastline.c_str());
     std::printf("rx1 of %d levels: s %.4f, zstar %.4f\n", o.model.vertical.levels, rx1_s, rx1_z);
   }
 
@@ -385,6 +399,7 @@ int run_global(const soma::Comm& comm, Options o) {
     }
   };
   report();
+  long reported = m.steps();
   const double end = o.days * 86400;
   const double every = o.report_hours ? *o.report_hours * 3600 : end;
   const auto start = std::chrono::steady_clock::now();
@@ -397,6 +412,9 @@ int run_global(const soma::Comm& comm, Options o) {
     } else {
       m.advance(comm, end);
     }
+    // Reports asked for more often than the step would repeat the last one: one per step.
+    if (m.steps() == reported) continue;
+    reported = m.steps();
     report();
     if (o.output_reports && m.time() < end) {
       ocean::write_snapshot(comm, m, *o.output + ".step" + std::to_string(m.steps()) + ".soma");
