@@ -93,7 +93,7 @@ struct Island {
   }
 };
 
-// The brief's island: radius 500 km at 30N, 60W, on a regional grid of 0.02 degrees (2.2 km) from 20N to 40N,
+// An island of radius 500 km at 30N, 60W, on a regional grid of 0.02 degrees (2.2 km) from 20N to 40N,
 // 75W to 45W, rows north first.
 const Island island{30, -60, 500};
 const ocean::testing::Extent island_extent{20, 40, -75, -45};

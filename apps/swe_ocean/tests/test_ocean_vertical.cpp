@@ -27,7 +27,7 @@ constexpr double formula_tolerance = 1e-12;
 // The s-coordinate at H = hc * 1e-6 differs from uniform sigma by (H / (hc + H)) times the stretching's
 // departure from uniform, at most about the largest K dC (below 50 for the defaults): a bound of 1e-6 * 50.
 constexpr double shallow_tolerance = 5e-5;
-// The z-star thicknesses of the brief are decimals (14.999, 1e-3) subtracted from interfaces near 100: a few
+// The hand-computed z-star thicknesses are decimals (14.999, 1e-3) subtracted from interfaces near 100: a few
 // hundred ulps of 100 bound them.
 constexpr double zstar_tolerance = 1e-12;
 // rx1 of the hand-computed columns is a ratio of integers, exact to a couple of ulps.

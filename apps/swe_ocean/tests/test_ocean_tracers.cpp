@@ -46,9 +46,8 @@ using ocean::Vertical;
 using soma::Comm;
 using soma::LO;
 
-// The bounds of the brief. A uniform tracer, a conserved total and the surface velocity are all exact but for
-// rounding: each step rounds every update a few times, so 1e-13 leaves room for a few hundred steps' drift of
-// a few ulps each.
+// A uniform tracer, a conserved total and the surface velocity are all exact but for rounding: each step rounds
+// every update a few times, so 1e-13 leaves room for a few hundred steps' drift of a few ulps each.
 constexpr double uniform_tolerance = 1e-13;
 constexpr double conservation_tolerance = 1e-13;
 constexpr double surface_tolerance = 1e-13;
@@ -144,7 +143,7 @@ double absolute_total(const Comm& c, const OceanModel& m, int tracer) {
   return m.space().integral(c, a, 0);
 }
 
-// The thickness check of the brief, worst over owned rows and levels: z-star, max(0, floor - h_k) / h_min with
+// The thickness check, worst over owned rows and levels: z-star, max(0, floor - h_k) / h_min with
 // floor = h_min (1 - max |eta| / H_min); s, |h_k - h0_k (1 + eta / H)| / h_k with h0_k from
 // reference_thicknesses.
 double thickness_error(const Comm& c, const OceanModel& m) {
