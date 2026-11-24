@@ -105,6 +105,7 @@ io/vtk_writer
 
 algorithms/arborx_index
 algorithms/cg
+algorithms/components
 algorithms/csr
 algorithms/fem
 algorithms/fem_space

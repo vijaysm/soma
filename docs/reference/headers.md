@@ -131,6 +131,7 @@ Files. See [input and output](../io/overview.md).
 | [`soma/algorithms/remap.hpp`](api/algorithms/remap.md) | `RemapOperator`, `RemapOptions`: first-order conservative remap between plane, volume or sphere meshes. See [remap](../algorithms/remap.md) |
 | [`soma/algorithms/refine.hpp`](api/algorithms/refine.md) | `refine_uniform`, `refine_marked`, `mark_fraction`, `mark_threshold`, `infer_births`, `RefineOptions`, `MarkedOptions`, `RefineResult`. See [refinement](../algorithms/refinement.md) |
 | [`soma/algorithms/refine_graded.hpp`](api/algorithms/refine_graded.md) | `refine_graded`, `refine_levels`, `band_widths`, `level_sizes`, `GradedOptions`, `GradedTarget`, `GradedHook`, `GradedResult`: graded all-quad refinement on the unit sphere toward a target given by a callback. See [refinement](../algorithms/refinement.md) |
+| [`soma/algorithms/components.hpp`](api/algorithms/components.md) | `edge_reachable`: the elements joined to a seed through shared edges, corner contacts not joining |
 | `soma/algorithms/polygon.hpp` | **internal**: plane polygons for intersection (clipping, triangulation), callable in kernels. See [remap](../algorithms/remap.md) |
 | `soma/algorithms/tet_clip.hpp` | **internal**: the overlap of two tetrahedra, for volume remap. See [remap](../algorithms/remap.md) |
 | `soma/algorithms/convex_clip.hpp` | **internal**: the overlap of two convex cells with flat faces, for volume remap. See [remap](../algorithms/remap.md) |
