@@ -327,8 +327,9 @@ int run_global(const soma::Comm& comm, Options o) {
                 comm.size(), source.c_str(), build_seconds);
     std::printf("cells %lld; removed %.6g km^2 of land, %.6g km^2 not joined to the world ocean\n",
                 static_cast<long long>(cells), mesh.removed_land_km2, mesh.removed_disconnected_km2);
-    std::printf("bathymetry: rx0 %.4f (r_max %.2f, %s), %d smoothing sweeps, peak window %llu values\n", rx0,
-                o.mesh.bathymetry.r_max, smoothing, mesh.bathymetry.sweeps, static_cast<unsigned long long>(peak));
+    std::printf("bathymetry: rx0 %.4f (r_max %.2f, %s), %d smoothing sweeps (%d clipping), peak window %llu values\n",
+                rx0, o.mesh.bathymetry.r_max, smoothing, mesh.bathymetry.sweeps, mesh.bathymetry.clip_sweeps,
+                static_cast<unsigned long long>(peak));
     std::printf("rx1 of %d levels: s %.4f, zstar %.4f\n", o.model.vertical.levels, rx1_s, rx1_z);
   }
 

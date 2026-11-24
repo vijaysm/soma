@@ -19,16 +19,28 @@
 // the west of its footprint), whatever the windows, and dss makes shared points continuous: H is the same,
 // bit for bit, on any number of ranks.
 //
-// smooth: H = max(H, H_min) at every point (land too: with land at 0 the slope factor is 1 at every coast and
-// the smoothing could never finish), then sweeps H = max(H + kappa m L(H), H_min), L the space's weak
-// Laplacian (soma::sem::laplacian, DSS-continuous), kappa = 0.5 / lambda_max (lambda_max of -L from 20 power
-// iterations from a fixed start), until max_rx0 <= r_max or sweep_limit sweeps; then H = max(H, H_min) again.
-// The mask m is 1 at the points of the elements whose largest rx0 exceeds r_max and of the elements touching
-// them (one element further: the steep elements alone can settle to a steady state still above r_max, at
-// order 4 and up), 0 elsewhere. The clamp at H_min in every sweep keeps H positive, so rx0, which steers the
-// mask and the stop, means what it says: diffusion of a jump undershoots, below 0 next to a coast. smoothed is
-// true exactly when the final rx0 is at most r_max. Every reduction goes through the space (dss, integral) or
-// an allreduce of a maximum, so the result is the same, bit for bit, on any number of ranks.
+// smooth: land points (land, 1) take exactly H_min and stay there: they are fixed values, not unknowns, as the
+// model has no land mask and a land point given an ocean depth would be ocean. Every other point takes at least
+// H_min. Then sweeps diffuse u = ln H on the other points: u += kappa m L(u), L the space's weak Laplacian
+// (soma::sem::laplacian, DSS-continuous), kappa = 0.5 / lambda_max (lambda_max of -L from 20 power iterations
+// from a fixed start; the operator applied, L on the free points with the fixed ones as boundary values, has
+// its eigenvalues within those of -L). In ln H the slope factor is rx0 = tanh(|ln H_a - ln H_b| / 2): rx0 <=
+// r_max is exactly |ln H_a - ln H_b| <= ln((1 + r_max) / (1 - r_max)) (ln 1.5 for 0.2), whatever the depths,
+// so the ramps it leaves are geometric: about 4 GLL gaps from H_min to a 50 m shelf, 15 to 4000 m, which is
+// how far a coast shoals. ln H has no sign to lose, so no clamp is needed while sweeping. The mask m is 1 at
+// the points of the elements whose largest rx0 exceeds r_max (and the points their neighbours share with
+// them), 0 elsewhere. Next to fixed land the masked diffusion can settle with rx0 still above r_max, or crawl: a
+// harmonic ramp's largest GLL gap carries its largest step, and a ramp ending on a corner of a staircase coast
+// or on a one-point island is steepest there (around an island of ETOPO1 at ne 30 the diffusion takes rx0 from
+// 0.96 only to 0.89 in 10000 sweeps; widening the mask until it converges drains enclosed shelves toward
+// H_min). So once no point moves by more than 1e-4 of ln 1.5 in a sweep, or after diffusion_limit sweeps, the
+// remaining sweeps clip instead: each point is made no deeper than its neighbours allow, H <= H_neighbour (1 +
+// r_max) / (1 - r_max) (Martinho and Batteen 2006, in ln H; it only shoals, and only where needed).
+// Sweeps stop when max_rx0 <= r_max or after sweep_limit sweeps of either kind; then H = max(H, H_min) again
+// off land. smoothed is true exactly when the final rx0 is at most r_max; rx0 is over every pair of
+// neighbouring points, land included (land is wet in the model). Every reduction goes through the space (dss,
+// integral) or an allreduce of a maximum, and ln and exp of the same bits are the same bits, so the result is
+// the same, bit for bit, on any number of ranks.
 
 #include <cstddef>
 #include <cstdint>
@@ -42,24 +54,25 @@
 namespace ocean {
 
 // grid: the height file. r_max: the largest slope factor smoothing leaves; H_min (m): the least depth;
-// sweep_limit: the most smoothing sweeps; bilinear_below_m (m): footprint radii below this interpolate;
+// sweep_limit: the most smoothing sweeps; diffusion_limit: the most of them that diffuse before the rest clip;
+// bilinear_below_m (m): footprint radii below this interpolate;
 // strip_rows: rows read and processed at a time (540, nine degrees of ETOPO1's arc minutes).
 struct BathymetryOptions {
   GridSpec grid;
   double r_max = 0.2, H_min = 10;
-  int sweep_limit = 10000;
+  int sweep_limit = 10000, diffusion_limit = 1000;
   double bilinear_below_m = 2000;
   std::size_t strip_rows = 540;
 };
 
 // H and roughness: one component per row of space() (every element's points, ghosts included, continuous);
-// land: per row, 1 where the averaged H was at most 0. sweeps, rx0 and smoothed: what smooth did (the sweeps
-// taken, max_rx0 at the end and whether it reached r_max). peak_window: the most values in one window this
-// rank read.
+// land: per row, 1 where the averaged H was at most 0. sweeps, clip_sweeps, rx0 and smoothed: what smooth did
+// (the sweeps taken, how many of them clipped, max_rx0 at the end and whether it reached r_max). peak_window:
+// the most values in one window this rank read.
 struct Bathymetry {
   Values H, roughness;
   std::vector<std::uint8_t> land;
-  int sweeps = 0;
+  int sweeps = 0, clip_sweeps = 0;
   double rx0 = 0;
   bool smoothed = true;
   std::size_t peak_window = 0;
@@ -71,10 +84,11 @@ struct Bathymetry {
 Bathymetry average(const soma::Comm& comm, const Space& space, const soma::HostMesh& mesh,
                    const BathymetryOptions& options);
 
-// Raises H to H_min, smooths it until max_rx0 <= r_max (or sweep_limit sweeps: smoothed false) and raises it
-// again; sets sweeps, rx0 and smoothed. Collective. Throws std::invalid_argument for H not one component per
-// row of the space, r_max not in (0, 1), H_min not positive or sweep_limit negative; std::runtime_error if
-// the power iterations find no positive eigenvalue.
+// Sets land points to H_min, raises the others to it, smooths ln H until max_rx0 <= r_max (or sweep_limit
+// sweeps: smoothed false) and raises it again; sets sweeps, clip_sweeps, rx0 and smoothed. Collective. Throws
+// std::invalid_argument for H or land not one value per row of the space, r_max not in (0, 1), H_min not
+// positive, or sweep_limit or diffusion_limit negative; std::runtime_error if the power iterations find no
+// positive eigenvalue.
 void smooth(const soma::Comm& comm, const Space& space, Bathymetry& bathymetry, const BathymetryOptions& options);
 
 // The largest slope factor rx0(H_a, H_b) = |H_a - H_b| / (H_a + H_b) between neighbouring GLL points of an

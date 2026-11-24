@@ -47,6 +47,7 @@
 #include "ocean_mesh.hpp"
 #include "soma/algorithms/refine_graded.hpp"
 #include "soma/parallel/comm.hpp"
+#include "soma/sem/cubed_sphere.hpp"
 #include "synthetic_earth.hpp"
 
 #ifdef SWE_OCEAN_HAVE_HDF5
@@ -360,6 +361,50 @@ TEST_F(OceanMesh, round_trip) {
     EXPECT_EQ(read.removed_disconnected_km2, built_->removed_disconnected_km2);
   }
   c.barrier();
+}
+
+// The land flags survive the removal by (element gid, point): with no refinement and no vertex smoothing the
+// mesh before the removal is the cubed sphere at ne scaled to the Earth, whose first averaging (on one rank:
+// the result is the same on any number) gives each kept element's flags; the built mesh holds the same flags,
+// and its land points stay at exactly H_min through the smoothing.
+TEST_F(OceanMesh, land_carried_by_gid) {
+  const Comm c = Comm::world();
+  ocean::MeshOptions o = options();
+  o.coast_km = 0;
+  o.optimize = {0, 0, 0};
+  const ocean::OceanMesh built = ocean::build_ocean_mesh(c, o);
+  const Comm self = Comm::self();
+  soma::sem::CubedSphereSpec spec;
+  spec.ne = o.ne;
+  HostMesh whole = soma::sem::cubed_sphere_mesh(self, spec);
+  const auto x = whole.coords();
+  for (LO v = 0; v < whole.count(0); ++v) {
+    for (int k = 0; k < 3; ++k) x(v, k) *= ocean::a;
+  }
+  const ocean::Space space(self, whole, o.order, soma::sem::SemGeometry::sphere(ocean::a));
+  const ocean::Bathymetry first = ocean::average(self, space, whole, o.bathymetry);
+  const LO ppe = space.points_per_element();
+  std::map<GO, std::vector<std::uint8_t>> expected;
+  const auto wgid = whole.gid(2);
+  for (LO e = 0; e < space.owned_elements(); ++e) {
+    auto& flags = expected[wgid(e)];
+    for (LO k = 0; k < ppe; ++k) flags.push_back(first.land[static_cast<std::size_t>(e * ppe + k)]);
+  }
+  const auto gid = built.mesh->gid(2);
+  std::int64_t land = 0, flooded = 0;
+  for (LO e = 0; e < built.space->num_elements(); ++e) {
+    const auto it = expected.find(gid(e));
+    ASSERT_NE(it, expected.end()) << "element " << gid(e);
+    for (LO k = 0; k < ppe; ++k) {
+      const auto r = static_cast<std::size_t>(e * ppe + k);
+      EXPECT_EQ(built.bathymetry.land[r], it->second[static_cast<std::size_t>(k)]) << gid(e) << " " << k;
+      if (built.bathymetry.land[r] == 0) continue;
+      if (e < built.space->owned_elements()) ++land;
+      if (built.bathymetry.H(r, 0) != o.bathymetry.H_min) ++flooded;
+    }
+  }
+  EXPECT_GT(c.allreduce(land, soma::Op::sum), 0);
+  EXPECT_EQ(c.allreduce(flooded, soma::Op::sum), 0) << "land points not at H_min";
 }
 
 // A seed on land is refused on every rank, and the same Earth seeded in its ocean is not: a planet of land

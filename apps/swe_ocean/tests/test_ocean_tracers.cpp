@@ -62,8 +62,12 @@ constexpr double thickness_tolerance = 1e-14;
 constexpr double offset_tolerance_plane = 1e-13;
 constexpr double offset_tolerance_sphere = 1e-11;
 constexpr long offset_steps = 30;
-// No limiter: the overshoot of the varying tracer is measured, bounded only loosely to catch a blow-up.
+// No limiter: the overshoot of the varying tracer is measured, bounded only loosely to catch a blow-up, over
+// the levels thicker than vanished_m. A vanished z-star level (h_min = 1e-3 m, as at the synthetic Earth's
+// 10 m coasts) holds T = (h T) / h of whatever its thick neighbours' fluxes leave it: up to 18 times the initial
+// max in 50 steps there (47 in 400, oscillating, not growing), meaningless for a millimetre of water.
 constexpr double overshoot_factor = 10;
+constexpr double vanished_m = 1e-2;
 constexpr double uniform_value = 7;
 
 ocean::VerticalSpec coordinate(Vertical kind) {
@@ -113,7 +117,7 @@ double uniform_error(const Comm& c, const OceanModel& m) {
   return c.allreduce(worst, soma::Op::max);
 }
 
-// max over owned rows and levels of |T| of a tracer.
+// max over owned rows and levels thicker than vanished_m of |T| of a tracer.
 double extreme(const Comm& c, const OceanModel& m, int tracer) {
   const auto& t = m.tracers();
   const int K = t.levels();
@@ -121,7 +125,9 @@ double extreme(const Comm& c, const OceanModel& m, int tracer) {
   const auto hT = t.hT();
   double most = 0;
   for (std::size_t r = 0; r < owned_rows(m); ++r) {
-    for (int k = 0; k < K; ++k) most = std::max(most, std::abs(hT(r, tracer * K + k) / h(r, k)));
+    for (int k = 0; k < K; ++k) {
+      if (h(r, k) > vanished_m) most = std::max(most, std::abs(hT(r, tracer * K + k) / h(r, k)));
+    }
   }
   return c.allreduce(most, soma::Op::max);
 }

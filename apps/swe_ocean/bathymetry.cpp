@@ -22,6 +22,10 @@ namespace {
 
 constexpr double deg = std::numbers::pi / 180;
 constexpr int power_iterations = 20;
+// smooth: the diffusion has settled when no point's ln H moves by more than settle_fraction of ln((1 + r_max) /
+// (1 - r_max)) in a sweep; the clip keeps neighbouring ln H within (1 - clip_margin) of that.
+constexpr double settle_fraction = 1e-4;
+constexpr double clip_margin = 1e-6;
 
 std::size_t all_rows(const Space& s) {
   return static_cast<std::size_t>(s.num_elements()) * static_cast<std::size_t>(s.points_per_element());
@@ -357,48 +361,89 @@ double max_rx0(const soma::Comm& comm, const Space& space, const ConstValues& H)
 
 void smooth(const soma::Comm& comm, const Space& space, Bathymetry& b, const BathymetryOptions& options) {
   const std::size_t n = all_rows(space);
-  if (b.H.extent(0) != n || b.H.extent(1) != 1) {
-    throw std::invalid_argument("ocean: smooth needs H with one value per row of the space");
+  if (b.H.extent(0) != n || b.H.extent(1) != 1 || b.land.size() != n) {
+    throw std::invalid_argument("ocean: smooth needs H and land with one value per row of the space");
   }
   if (!(options.r_max > 0 && options.r_max < 1)) throw std::invalid_argument("ocean: smooth needs r_max in (0, 1)");
   if (!(options.H_min > 0)) throw std::invalid_argument("ocean: smooth needs H_min > 0");
-  if (options.sweep_limit < 0) throw std::invalid_argument("ocean: smooth needs sweep_limit >= 0");
+  if (options.sweep_limit < 0 || options.diffusion_limit < 0) {
+    throw std::invalid_argument("ocean: smooth needs sweep_limit >= 0 and diffusion_limit >= 0");
+  }
   const auto raise = [&] {
-    for (std::size_t r = 0; r < n; ++r) b.H(r, 0) = std::max(b.H(r, 0), options.H_min);
+    for (std::size_t r = 0; r < n; ++r) {
+      b.H(r, 0) = b.land[r] != 0 ? options.H_min : std::max(b.H(r, 0), options.H_min);
+    }
   };
   raise();
-  const int ppe = space.points_per_element();
+  const int np = space.order() + 1;
+  const auto points = static_cast<std::size_t>(space.points_per_element());
   std::vector<double> per_element;
   double worst = comm.allreduce(element_rx0(space, b.H, per_element), soma::Op::max);
   b.sweeps = 0;
+  b.clip_sweeps = 0;
   if (worst > options.r_max && options.sweep_limit > 0) {
+    // u = ln H, the land points held fixed. The operator the diffusion applies, L on the free points with
+    // the fixed ones as boundary values, is in the mass inner product a principal submatrix of L: its
+    // eigenvalues lie within those of -L, so kappa = 0.5 / lambda_max is stable for every mask.
     const double kappa = 0.5 / largest_eigenvalue(comm, space);
-    Values mask("ocean::smooth::mask", n, 1), lap("ocean::smooth::laplacian", n, 1);
-    const auto points = static_cast<std::size_t>(ppe);
+    const double delta = 2 * std::atanh(options.r_max);  // rx0 <= r_max exactly where |du| <= delta
+    const double settled = settle_fraction * delta, limit = delta * (1 - clip_margin);
+    Values u("ocean::smooth::u", n, 1), mask("ocean::smooth::mask", n, 1), work("ocean::smooth::work", n, 1);
+    for (std::size_t r = 0; r < n; ++r) u(r, 0) = std::log(b.H(r, 0));
+    bool clipping = false;
     while (worst > options.r_max && b.sweeps < options.sweep_limit) {
-      // 1 at every point of an element too steep; dss spreads it to the points its neighbours share (the
-      // dss average of a 0/1 indicator is positive where any element holding the point has 1).
-      for (std::size_t r = 0; r < n; ++r) {
-        const std::size_t e = r / points;
-        mask(r, 0) = e < per_element.size() && per_element[e] > options.r_max ? 1.0 : 0.0;
-      }
-      space.dss(comm, mask);
-      // Grown by one element: every point of an owned element touching a steep one. A mask of the steep
-      // elements alone can settle where L(H) = 0 on it with rx0 still above r_max (at order 4 and up).
-      for (std::size_t e = 0; e < per_element.size(); ++e) {
-        bool touches = false;
-        for (std::size_t k = 0; k < points; ++k) touches = touches || mask(e * points + k, 0) > 0;
-        for (std::size_t k = 0; k < points; ++k) mask(e * points + k, 0) = touches ? 1.0 : 0.0;
-      }
-      space.dss(comm, mask);
-      // Clamped at H_min each sweep: diffusion of a jump undershoots (below 0 next to a coast), and rx0 of
-      // a pair whose sum is near or below 0 would steer the mask and the stop wrongly.
-      soma::sem::laplacian(comm, space, ConstValues(b.H), lap);
-      for (std::size_t r = 0; r < n; ++r) {
-        if (mask(r, 0) > 0) b.H(r, 0) = std::max(b.H(r, 0) + kappa * lap(r, 0), options.H_min);
+      double step = 0;
+      if (!clipping) {
+        // 1 at every point of an element too steep; dss spreads it to the points its neighbours share (the
+        // dss average of a 0/1 indicator is positive where any element holding the point has 1).
+        for (std::size_t r = 0; r < n; ++r) {
+          const std::size_t e = r / points;
+          mask(r, 0) = e < per_element.size() && per_element[e] > options.r_max ? 1.0 : 0.0;
+        }
+        space.dss(comm, mask);
+        soma::sem::laplacian(comm, space, ConstValues(u), work);
+        for (std::size_t r = 0; r < n; ++r) {
+          if (mask(r, 0) > 0 && b.land[r] == 0) {
+            step = std::max(step, std::abs(kappa * work(r, 0)));
+            u(r, 0) += kappa * work(r, 0);
+            b.H(r, 0) = std::exp(u(r, 0));
+          }
+        }
+      } else {
+        // Each point no deeper than its neighbours (along i and j) allow: u <= u_neighbour + delta, with a
+        // margin so that the dss average of the copies of a shared point, which approaches the least copy
+        // geometrically, gets there in finitely many sweeps. It only shoals, so land (the least u) stays.
+        for (std::size_t e = 0; e < per_element.size(); ++e) {
+          const std::size_t base = e * points;
+          for (int j = 0; j < np; ++j) {
+            for (int i = 0; i < np; ++i) {
+              const std::size_t r = base + static_cast<std::size_t>(i + np * j), row = static_cast<std::size_t>(np);
+              double c = u(r, 0);
+              if (i > 0) c = std::min(c, u(r - 1, 0) + limit);
+              if (i + 1 < np) c = std::min(c, u(r + 1, 0) + limit);
+              if (j > 0) c = std::min(c, u(r - row, 0) + limit);
+              if (j + 1 < np) c = std::min(c, u(r + row, 0) + limit);
+              work(r, 0) = c;
+            }
+          }
+        }
+        space.dss(comm, work);
+        for (std::size_t r = 0; r < n; ++r) {
+          if (b.land[r] == 0 && work(r, 0) < u(r, 0)) {
+            u(r, 0) = work(r, 0);
+            b.H(r, 0) = std::exp(u(r, 0));
+          }
+        }
+        ++b.clip_sweeps;
       }
       ++b.sweeps;
       worst = comm.allreduce(element_rx0(space, b.H, per_element), soma::Op::max);
+      // The diffusion has settled (no point moves by more than settled) above r_max, or has had its sweeps:
+      // clip from here on.
+      if (!clipping && worst > options.r_max &&
+          (b.sweeps >= options.diffusion_limit || comm.allreduce(step, soma::Op::max) < settled)) {
+        clipping = true;
+      }
     }
   }
   raise();

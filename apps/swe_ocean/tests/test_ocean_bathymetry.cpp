@@ -293,8 +293,8 @@ TEST(Bathymetry, bilinear_when_fine) {
   EXPECT_LE(worst, bilinear_tolerance);
 }
 
-// A Gaussian seamount rising from 5000 m to 200 m. Masked diffusion moves H between neighbours and changes
-// its integral only where the mask cuts the Laplacian's flux (3.5e-5 measured); 5% is the bound asked for.
+// A Gaussian seamount rising from 5000 m to 200 m. The diffusion is of ln H, so it does not keep the integral
+// of H (1.8e-6 measured); 5% is the bound asked for.
 constexpr double mass_tolerance = 0.05;
 
 TEST(Bathymetry, smoothing_reaches_rmax) {
@@ -348,11 +348,10 @@ TEST(Bathymetry, smoothing_reaches_rmax) {
   EXPECT_GT(c.allreduce(far, soma::Op::sum), 0);
 }
 
-// A 10 m shelf against 5000 m along latitude 33 (a coast after the H_min raise). Explicit diffusion of a jump
-// overshoots: the first sweep pulls points next to it to -83 m (order 4), where rx0 of a pair whose sum is
-// near or below 0 means nothing. And at order 4 a mask of the steep elements alone settles to a steady state
-// (rx0 0.209, every sweep after the 5000th a no-op) that the sweep limit ends unsmoothed. Smoothing must reach
-// r_max at either order, with H at least H_min, and report smoothed only when it did.
+// A 10 m shelf against 5000 m along latitude 33 (ocean on both sides: nothing is fixed). Explicit diffusion of
+// a jump in H overshoots below 0 next to it; in ln H it cannot. The masked diffusion alone settles at rx0 0.26
+// (order 3) or flickers about 0.3 (order 4); the clip finishes. Smoothing must reach r_max at either order, with H at least H_min, and report smoothed only when
+// it did.
 TEST(Bathymetry, smoothing_survives_undershoot_at_a_shelf) {
   const Comm c = Comm::world();
   const ocean::BathymetryOptions o;
@@ -402,6 +401,66 @@ TEST(Bathymetry, smoothing_raises_land_and_stops_at_the_limit) {
   for (std::size_t r = 0; r < n; ++r) EXPECT_GE(b.H(r, 0), 10);
   o.r_max = 0;
   EXPECT_THROW(ocean::smooth(c, space, b, o), std::invalid_argument);
+}
+
+// Two oceans apart: a land strip |lon| <= 6 (about one element of ne 8 wide) and its twin at 180, with caps
+// beyond 70 degrees of latitude, part a 4000 m basin in the east from a 50 m shelf in the west. Averaged and
+// smoothed, the land points stay land at exactly H_min (they are fixed values, not unknowns: diffusing them
+// would flood the strip with the basin's water), the slope factor reaches r_max over every neighbouring pair,
+// land points included (the diffusion settles above it at the caps' staircase coasts, and the clip finishes),
+// and the shelf away from the coasts keeps its depth: its mean over |lat| < 50, -150 < lon < -30 moves by less
+// than shelf_tolerance (under 1e-4 m measured).
+constexpr double shelf_tolerance = 0.5;  // m, 1% of the shelf's 50 m
+
+double isthmus_heights(double lat, double lon) {
+  if (std::abs(lat) > 70 || std::abs(lon) <= 6 || std::abs(lon) >= 174) return 100;
+  return lon > 0 ? -4000 : -50;
+}
+
+TEST(Bathymetry, isthmus_stays_land) {
+  const Comm c = Comm::world();
+  const Scratch dir(c);
+  const fs::path path = dir.path("isthmus.h5");
+  write_on_root(c, path, 181, 361, Registration::grid, Storage::int32, isthmus_heights);
+  HostMesh mesh = sem_test::sphere(c, 8, ocean::a);
+  const ocean::Space space(c, mesh, 3, Geometry::sphere(ocean::a));
+  ocean::BathymetryOptions o;
+  o.grid.file = path;
+  o.strip_rows = 9;
+  ocean::Bathymetry b = ocean::average(c, space, mesh, o);
+  const auto interior = [&](std::size_t r) {
+    const auto [lat, lon] = lat_lon(space, r);
+    return std::abs(lat) < 50 && lon > -150 && lon < -30;
+  };
+  const auto shelf_mean = [&] {
+    ocean::Values masked("masked", b.land.size(), 1), one("one", b.land.size(), 1);
+    for (std::size_t r = 0; r < b.land.size(); ++r) {
+      masked(r, 0) = interior(r) ? b.H(r, 0) : 0;
+      one(r, 0) = interior(r) ? 1 : 0;
+    }
+    return space.integral(c, masked) / space.integral(c, one);
+  };
+  const double before = shelf_mean();
+  std::int64_t land = 0;
+  for (std::size_t r = 0; r < owned_rows(space); ++r) land += b.land[r];
+  land = c.allreduce(land, soma::Op::sum);
+  ocean::smooth(c, space, b, o);
+  const double after = shelf_mean();
+  if (c.rank() == 0) {
+    std::printf("isthmus: %lld land points, rx0 %.4f in %d sweeps (%d clipping), shelf mean %.4f -> %.4f m\n",
+                static_cast<long long>(land), b.rx0, b.sweeps, b.clip_sweeps, before, after);
+  }
+  EXPECT_GT(land, 0);
+  std::int64_t flooded = 0;
+  for (std::size_t r = 0; r < b.land.size(); ++r) {
+    if (b.land[r] != 0 && b.H(r, 0) != o.H_min) ++flooded;
+  }
+  EXPECT_EQ(c.allreduce(flooded, soma::Op::sum), 0) << "land points not at H_min";
+  EXPECT_TRUE(b.smoothed);
+  EXPECT_EQ(b.rx0, ocean::max_rx0(c, space, b.H));
+  EXPECT_LE(b.rx0, o.r_max);
+  EXPECT_LT(std::abs(after - before), shelf_tolerance);
+  expect_continuous(space, b);
 }
 
 // At 4 ranks each rank reads well under the file: its strips' columns only (a quarter of the cubed sphere's
