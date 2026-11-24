@@ -217,11 +217,14 @@ std::vector<Real> level_sizes(const Comm& comm, const HostMesh& m, std::size_t c
 
 GradedResult refine_graded(const Comm& comm, const HostMesh& start, const GradedOptions& o,
                            const GradedTarget& target, const GradedHook& before_marking) {
-  if (o.np < 2 || o.transition < 1 || o.passes < 0 || o.reruns < 0 || !target) {
+  if (o.np < 2 || o.transition < 1 || o.passes < 0 || o.reruns < 0 || !(o.spacing > 0) || !std::isfinite(o.spacing) ||
+      !target) {
     throw std::invalid_argument("refine_graded: np " + std::to_string(o.np) + ", transition " +
                                 std::to_string(o.transition) + ", passes " + std::to_string(o.passes) + ", reruns " +
-                                std::to_string(o.reruns) + (target ? "" : ", no target") +
-                                " (np >= 2, transition >= 1, passes and reruns >= 0 and a target)");
+                                std::to_string(o.reruns) + ", spacing " + std::to_string(o.spacing) +
+                                (target ? "" : ", no target") +
+                                " (np >= 2, transition >= 1, passes and reruns >= 0, a positive finite spacing and a "
+                                "target)");
   }
   GradedResult g;
   std::vector<Real> widen;

@@ -96,8 +96,10 @@ struct GradedResult {
 };
 
 /// Collective: `start` refined toward `target` as described above.
-/// Throws std::invalid_argument for np < 2, transition < 1, passes < 0 or
-/// reruns < 0, or a target that does not answer one value per owned cell;
+/// Throws std::invalid_argument for np < 2, transition < 1, passes < 0,
+/// reruns < 0 or a spacing not positive and finite (on every rank, as every
+/// rank holds the same options), or a target that does not answer one value
+/// per owned cell;
 /// std::runtime_error, naming the pass, before a pass that would make more
 /// than max_cells cells (at least 8 more per marked cell); what refine_quads
 /// throws.

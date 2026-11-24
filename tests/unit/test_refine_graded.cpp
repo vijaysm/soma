@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <limits>
 #include <numbers>
 #include <span>
 #include <stdexcept>
@@ -200,6 +201,18 @@ TEST(RefineGraded, max_cells_names_the_pass) {
     FAIL() << "no throw";
   } catch (const std::runtime_error& e) {
     EXPECT_NE(std::string(e.what()).find("pass 1 "), std::string::npos) << e.what();
+  }
+}
+
+// A spacing that is not positive and finite is refused on every rank (0 or less would never stop dividing the
+// cells' size by 3 to reach it).
+TEST(RefineGraded, spacing_must_be_positive) {
+  const Comm comm = Comm::world();
+  for (const Real spacing : {0.0, -1.0, std::numeric_limits<Real>::quiet_NaN(),
+                             std::numeric_limits<Real>::infinity()}) {
+    soma::GradedOptions o = options();
+    o.spacing = spacing;
+    EXPECT_THROW((void)soma::refine_graded(comm, ne4(comm), o, near_point), std::invalid_argument) << spacing;
   }
 }
 
