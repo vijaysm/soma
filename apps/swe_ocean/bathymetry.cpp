@@ -374,16 +374,28 @@ void smooth(const soma::Comm& comm, const Space& space, Bathymetry& b, const Bat
   if (worst > options.r_max && options.sweep_limit > 0) {
     const double kappa = 0.5 / largest_eigenvalue(comm, space);
     Values mask("ocean::smooth::mask", n, 1), lap("ocean::smooth::laplacian", n, 1);
+    const auto points = static_cast<std::size_t>(ppe);
     while (worst > options.r_max && b.sweeps < options.sweep_limit) {
-      // 1 at every point of an element too steep; dss spreads it to the points its neighbours share.
+      // 1 at every point of an element too steep; dss spreads it to the points its neighbours share (the
+      // dss average of a 0/1 indicator is positive where any element holding the point has 1).
       for (std::size_t r = 0; r < n; ++r) {
-        const std::size_t e = r / static_cast<std::size_t>(ppe);
+        const std::size_t e = r / points;
         mask(r, 0) = e < per_element.size() && per_element[e] > options.r_max ? 1.0 : 0.0;
       }
       space.dss(comm, mask);
+      // Grown by one element: every point of an owned element touching a steep one. A mask of the steep
+      // elements alone can settle where L(H) = 0 on it with rx0 still above r_max (at order 4 and up).
+      for (std::size_t e = 0; e < per_element.size(); ++e) {
+        bool touches = false;
+        for (std::size_t k = 0; k < points; ++k) touches = touches || mask(e * points + k, 0) > 0;
+        for (std::size_t k = 0; k < points; ++k) mask(e * points + k, 0) = touches ? 1.0 : 0.0;
+      }
+      space.dss(comm, mask);
+      // Clamped at H_min each sweep: diffusion of a jump undershoots (below 0 next to a coast), and rx0 of
+      // a pair whose sum is near or below 0 would steer the mask and the stop wrongly.
       soma::sem::laplacian(comm, space, ConstValues(b.H), lap);
       for (std::size_t r = 0; r < n; ++r) {
-        if (mask(r, 0) > 0) b.H(r, 0) += kappa * lap(r, 0);
+        if (mask(r, 0) > 0) b.H(r, 0) = std::max(b.H(r, 0) + kappa * lap(r, 0), options.H_min);
       }
       ++b.sweeps;
       worst = comm.allreduce(element_rx0(space, b.H, per_element), soma::Op::max);

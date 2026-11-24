@@ -20,11 +20,15 @@
 // bit for bit, on any number of ranks.
 //
 // smooth: H = max(H, H_min) at every point (land too: with land at 0 the slope factor is 1 at every coast and
-// the smoothing could never finish), then sweeps H += kappa m L(H), L the space's weak Laplacian
-// (soma::sem::laplacian, DSS-continuous), kappa = 0.5 / lambda_max (lambda_max of -L from 20 power iterations
-// from a fixed start), m = 1 at the points of elements whose largest rx0 exceeds r_max and 0 elsewhere, until
-// max_rx0 <= r_max or sweep_limit sweeps; then H = max(H, H_min) again. Every reduction goes through the space
-// (dss, integral) or an allreduce of a maximum, so the result is the same, bit for bit, on any number of ranks.
+// the smoothing could never finish), then sweeps H = max(H + kappa m L(H), H_min), L the space's weak
+// Laplacian (soma::sem::laplacian, DSS-continuous), kappa = 0.5 / lambda_max (lambda_max of -L from 20 power
+// iterations from a fixed start), until max_rx0 <= r_max or sweep_limit sweeps; then H = max(H, H_min) again.
+// The mask m is 1 at the points of the elements whose largest rx0 exceeds r_max and of the elements touching
+// them (one element further: the steep elements alone can settle to a steady state still above r_max, at
+// order 4 and up), 0 elsewhere. The clamp at H_min in every sweep keeps H positive, so rx0, which steers the
+// mask and the stop, means what it says: diffusion of a jump undershoots, below 0 next to a coast. smoothed is
+// true exactly when the final rx0 is at most r_max. Every reduction goes through the space (dss, integral) or
+// an allreduce of a maximum, so the result is the same, bit for bit, on any number of ranks.
 
 #include <cstddef>
 #include <cstdint>
@@ -62,8 +66,8 @@ struct Bathymetry {
 };
 
 // The footprint average at every point. Collective. Throws std::invalid_argument on every rank if the space
-// is not on a sphere or not over this mesh, or the grid has fewer than 2 rows or columns; std::runtime_error
-// as open_grid does, and on every rank if any rank fails to read its windows.
+// is not on a sphere or not over this mesh, strip_rows is 0, or the grid has fewer than 2 rows or columns;
+// std::runtime_error as open_grid does, and on every rank if any rank fails to read its windows.
 Bathymetry average(const soma::Comm& comm, const Space& space, const soma::HostMesh& mesh,
                    const BathymetryOptions& options);
 

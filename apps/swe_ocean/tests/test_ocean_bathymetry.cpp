@@ -132,8 +132,9 @@ void expect_continuous(const ocean::Space& s, const ocean::Bathymetry& b) {
   }
 }
 
-// The field depth = 3000 + 500 z + 300 x of the unit vector (x, z) = (cos lat cos lon, sin lat): linear in
-// space, smooth through the poles and across longitude 180, all ocean. Its mean over a cap of angular radius
+// The field depth = 3000 + 500 z + 300 x + 300 y of the unit vector (cos lat cos lon, cos lat sin lon, sin lat):
+// linear in space, smooth through the poles and across longitude 180 and not symmetric about it (y changes sign
+// there), all ocean. Its mean over a cap of angular radius
 // rho about p is exactly its value at p (1 + cos rho) / 2 (the mean unit vector of a cap), within 1.6 m of the
 // value at the point for these discs. Sampling a disc of 2 to 5 degrees by 0.25-degree cell centres moves its
 // centroid by a few hundredths of a degree (~ 0.2 m at 8.7 m per degree); a disc over the pole or across the
@@ -145,9 +146,12 @@ TEST(Bathymetry, footprint_mean_of_linear_field) {
   const Comm c = Comm::world();
   const Scratch dir(c);
   const fs::path path = dir.path("linear.h5");
-  const auto depth = [](double ux, double uz, double scale) { return 3000 + (500 * uz + 300 * ux) * scale; };
+  const auto depth = [](double ux, double uy, double uz, double scale) {
+    return 3000 + (500 * uz + 300 * ux + 300 * uy) * scale;
+  };
   write_on_root(c, path, 721, 1441, Registration::grid, Storage::float64, [&](double lat, double lon) {
-    return -depth(std::cos(lat * deg) * std::cos(lon * deg), std::sin(lat * deg), 1);
+    return -depth(std::cos(lat * deg) * std::cos(lon * deg), std::cos(lat * deg) * std::sin(lon * deg),
+                  std::sin(lat * deg), 1);
   });
   HostMesh mesh = sem_test::sphere(c, 4, ocean::a);
   const ocean::Space space(c, mesh, 3, Geometry::sphere(ocean::a));
@@ -156,19 +160,28 @@ TEST(Bathymetry, footprint_mean_of_linear_field) {
   const ocean::Bathymetry b = ocean::average(c, space, mesh, o);
   const auto x = space.x();
   double worst = 0, worst_point = 0;
+  std::int64_t seam = 0;
   for (std::size_t r = 0; r < owned_rows(space); ++r) {
     const double norm = std::sqrt(x(r, 0) * x(r, 0) + x(r, 1) * x(r, 1) + x(r, 2) * x(r, 2));
-    const double ux = x(r, 0) / norm, uz = x(r, 2) / norm;
-    const double cap = depth(ux, uz, (1 + std::cos(footprint(space, r))) / 2), point = depth(ux, uz, 1);
+    const double ux = x(r, 0) / norm, uy = x(r, 1) / norm, uz = x(r, 2) / norm;
+    const double rho = footprint(space, r);
+    const double cap = depth(ux, uy, uz, (1 + std::cos(rho)) / 2), point = depth(ux, uy, uz, 1);
+    // Discs clear of the poles that reach across longitude 180.
+    const auto [lat, lon] = lat_lon(space, r);
+    const bool clear = std::abs(lat) * deg + rho < std::numbers::pi / 2;
+    if (clear && std::abs(lon) * deg + rho / std::cos(lat * deg) > std::numbers::pi) ++seam;
     worst = std::max(worst, std::abs(b.H(r, 0) - cap) / cap);
     worst_point = std::max(worst_point, std::abs(b.H(r, 0) - point) / point);
     EXPECT_EQ(b.land[r], 0);
   }
   worst = c.allreduce(worst, soma::Op::max);
   worst_point = c.allreduce(worst_point, soma::Op::max);
+  seam = c.allreduce(seam, soma::Op::sum);
   if (c.rank() == 0) {
-    std::printf("linear field: worst relative error %.3e (cap mean), %.3e (point)\n", worst, worst_point);
+    std::printf("linear field: worst relative error %.3e (cap mean), %.3e (point); %lld discs across 180\n",
+                worst, worst_point, static_cast<long long>(seam));
   }
+  EXPECT_GT(seam, 0);
   EXPECT_LE(worst, linear_tolerance);
   EXPECT_LE(worst_point, linear_tolerance);
 }
@@ -281,7 +294,7 @@ TEST(Bathymetry, bilinear_when_fine) {
 }
 
 // A Gaussian seamount rising from 5000 m to 200 m. Masked diffusion moves H between neighbours and changes
-// its integral only where the mask cuts the Laplacian's flux (5e-4 measured); 5% is the bound asked for.
+// its integral only where the mask cuts the Laplacian's flux (3.5e-5 measured); 5% is the bound asked for.
 constexpr double mass_tolerance = 0.05;
 
 TEST(Bathymetry, smoothing_reaches_rmax) {
@@ -333,6 +346,40 @@ TEST(Bathymetry, smoothing_reaches_rmax) {
     ++far;
   }
   EXPECT_GT(c.allreduce(far, soma::Op::sum), 0);
+}
+
+// A 10 m shelf against 5000 m along latitude 33 (a coast after the H_min raise). Explicit diffusion of a jump
+// overshoots: the first sweep pulls points next to it to -83 m (order 4), where rx0 of a pair whose sum is
+// near or below 0 means nothing. And at order 4 a mask of the steep elements alone settles to a steady state
+// (rx0 0.209, every sweep after the 5000th a no-op) that the sweep limit ends unsmoothed. Smoothing must reach
+// r_max at either order, with H at least H_min, and report smoothed only when it did.
+TEST(Bathymetry, smoothing_survives_undershoot_at_a_shelf) {
+  const Comm c = Comm::world();
+  const ocean::BathymetryOptions o;
+  HostMesh mesh = sem_test::sphere(c, 4, ocean::a);
+  for (const int order : {3, 4}) {
+    const ocean::Space space(c, mesh, order, Geometry::sphere(ocean::a));
+    const auto n = static_cast<std::size_t>(space.num_elements() * space.points_per_element());
+    ocean::Bathymetry b;
+    b.H = ocean::Values("H", n, 1);
+    b.roughness = ocean::Values("roughness", n, 1);
+    b.land.assign(n, 0);
+    const auto x = space.x();
+    const double shelf = std::sin(33 * deg) * ocean::a;
+    for (std::size_t r = 0; r < n; ++r) b.H(r, 0) = x(r, 2) > shelf + 1 ? 5000 : 10;
+    ocean::smooth(c, space, b, o);
+    const double after = ocean::max_rx0(c, space, b.H);
+    double low = 1e300;
+    for (std::size_t r = 0; r < n; ++r) low = std::min(low, b.H(r, 0));
+    low = c.allreduce(low, soma::Op::min);
+    if (c.rank() == 0) {
+      std::printf("shelf, order %d: rx0 %.4f in %d sweeps, smoothed %d\n", order, after, b.sweeps, b.smoothed);
+    }
+    EXPECT_EQ(b.rx0, after) << "order " << order;
+    EXPECT_TRUE(b.smoothed) << "order " << order;
+    if (b.smoothed) EXPECT_LE(after, o.r_max) << "order " << order;
+    EXPECT_GE(low, o.H_min) << "order " << order;
+  }
 }
 
 TEST(Bathymetry, smoothing_raises_land_and_stops_at_the_limit) {
