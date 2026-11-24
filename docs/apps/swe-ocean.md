@@ -81,9 +81,16 @@ The global cases build the mesh in one pipeline (`ocean::build_ocean_mesh`):
 5. elements with no ocean point removed, then every element not joined through shared edges to the
    world ocean (a seed point in the central Pacific): inland seas, lakes and basins cut off by
    unresolved straits. Both areas are reported;
-6. the bathymetry averaged again on the final mesh and smoothed by diffusion until the slope factor
-   $r_{x0} = |H_a - H_b| / (H_a + H_b)$ between neighbouring GLL points is at most 0.2, with $H
-   \ge H_{\min} = 10$ m.
+6. the bathymetry averaged again on the final mesh, the land points of the kept elements set to
+   $H_{\min} = 10$ m and held there (the model has no land mask: they are shallow water), and $\ln
+   H$ smoothed until the slope factor $r_{x0} = |H_a - H_b| / (H_a + H_b)$ between neighbouring
+   GLL points, land points included, is at most 0.2, or the sweep limit (10000) is reached; the
+   start-up report gives $r_{x0}$, the sweeps and whether it got there. The sweeps diffuse $\ln H$
+   where the elements are too steep; where the diffusion settles above the bound (next to the
+   corners of staircase coasts and one-point islands) or after 1000 sweeps, the rest clip
+   instead, making each point no deeper than 1.5 times its neighbours. In $\ln H$ the bound is
+   $|\ln H_a - \ln H_b| \le \ln 1.5$, so coasts shoal geometrically from 10 m: over about 4 GLL
+   gaps to a 50 m shelf and 15 to 4000 m.
 
 `--save-mesh FILE` writes the mesh with $H$, the roughness and the land flags as a SOMA file;
 `--mesh FILE` reads it back at any number of ranks, giving the same $H$ by element and the same
@@ -178,9 +185,10 @@ level values $T_k$).
 ## Reports
 
 A global run first reports what the build did: the cells, the removed land and disconnected
-areas, $r_{x0}$, the smoothing sweeps, the largest window of the height file one rank read, the
-$r_{x1}$ of both coordinates, then the area, volume, step, viscosity and the coast and no-slip
-points. Each report then gives the time, the step, the kinetic energy $\tfrac12 \rho_0 \int D
+areas, $r_{x0}$, the smoothing sweeps (and how many clipped), the largest window of the height
+file one rank read, the decimated coastline's points (`n/a` for these three when the mesh was
+read), the $r_{x1}$ of both coordinates, then the area, volume, step, viscosity and the coast and
+no-slip points. Each report (one per step at most) then gives the time, the step, the kinetic energy $\tfrac12 \rho_0 \int D
 |\mathbf u|^2$, the largest speed, the change of $\int \eta$ over the ocean's volume, each
 tracer's relative change of total, and the Drake Passage transport. At the end it prints the
 simulated days per wall-clock hour and the state's digest, a hash of every element's values in
@@ -214,7 +222,7 @@ The tests run under `ctest` (`ctest --test-dir build -R "ocean|swe_ocean"`), eac
 | coast | no normal velocity at coast points to rounding; zero at no-slip points |
 | `rest` | $\eta$ and $\mathbf u$ stay exactly 0 |
 | uniform tracer | stays uniform to $10^{-15}$ over the synthetic Earth's bathymetry, in both coordinates; $w_0$ at the surface 3e-15 of $\max|\nabla\cdot(D\mathbf u)|$ |
-| bathymetry | the footprint mean of an analytic field; $r_{x0} \le 0.2$ after smoothing; each rank reads only its windows (counted) |
+| bathymetry | the footprint mean of an analytic field; $r_{x0} \le 0.2$ after smoothing, land points kept at exactly 10 m (a one-element isthmus between a 4000 m basin and a 50 m shelf, the shelf's interior unchanged); each rank reads only its windows (counted) |
 | reproducibility | the same digest at 1 to 8 ranks and 1, 2, 4 threads; the driver's Kelvin run at 1, 2 and 4 ranks (`swe_ocean.kelvin.digests`); a mesh saved at 2 ranks and read at 3 (`swe_ocean.mesh_reuse`) |
 
 Errors converge exponentially in $p$ for Kelvin, and at about $h^4$ for Stommel at $p = 4$ (the
@@ -225,49 +233,42 @@ western boundary layer, $r / \beta = 100$ km, is 0.4 of an element at $n_x = 4$)
 ETOPO1 at ne30, $p = 3$, coasts refined to 50 km, 8 ranks of 1 thread (M2 Max):
 
 ```text
-swe_ocean: case wind, p 3, 8 rank(s); mesh built at ne 30 in 41.6 s
+swe_ocean: case wind, p 3, 8 rank(s); mesh built at ne 30 in 8.7 s
 cells 36875; removed 1.22307e+08 km^2 of land, 1.80289e+06 km^2 not joined to the world ocean
-bathymetry: rx0 0.2772 (r_max 0.20, NOT smoothed to r_max), 10000 smoothing sweeps, peak window 9741600 values
-rx1 of 10 levels: s 3.3704, zstar 1329353.1831
-area 3.859895e+14 m^2, volume 1.344950e+18 m^3; dt 16.7549 s, nu 7.31274e+11 m^4/s, 10 levels (s), 2 tracers
+bathymetry: rx0 0.2000 (r_max 0.20, smoothed), 1050 smoothing sweeps (50 clipping), peak window 9741600 values, 31463 coastline points
+rx1 of 10 levels: s 3.4066, zstar 1328956.2298
+area 3.859895e+14 m^2, volume 1.203350e+18 m^3; dt 16.7549 s, nu 7.31274e+11 m^4/s, 10 levels (s), 2 tracers
 coast points 6494, no-slip points 717
-t    0.1000 d  step      516  KE 1.3984e+14 J  max|u| 1.084e-01 m/s  mass +8.25e-26  tracers +0.00e+00 +0.00e+00
-simulated 0.1 days in 516 steps, 359.767 s: 1.001 days per hour
+t    0.0000 d  step        0  KE 0.0000e+00 J  max|u| 0.000e+00 m/s  mass +0.00e+00  tracers +0.00e+00 +0.00e+00  Drake +0.0000 Sv (-69.34..-54.91)
+t    0.0248 d  step      128  KE 4.3949e+13 J  max|u| 2.243e-02 m/s  mass +2.22e-25  tracers +0.00e+00 +0.00e+00  Drake +0.3213 Sv (-69.34..-54.91)
+t    0.0498 d  step      257  KE 1.6639e+14 J  max|u| 5.218e-02 m/s  mass +6.86e-25  tracers +0.00e+00 +0.00e+00  Drake +0.6139 Sv (-69.34..-54.91)
+t    0.0749 d  step      386  KE 3.4657e+14 J  max|u| 1.227e-01 m/s  mass -1.18e-24  tracers +0.00e+00 +0.00e+00  Drake +0.8501 Sv (-69.34..-54.91)
+t    0.1000 d  step      516  KE 5.6540e+14 J  max|u| 2.560e-01 m/s  mass +1.76e-24  tracers +0.00e+00 +0.00e+00  Drake +1.0129 Sv (-69.34..-54.91)
+simulated 0.1 days in 516 steps, 344.070 s: 1.046 days per hour
+digest 8b71e5f20273fddb
 ```
 
-- The mesh build (coastline, refinement, two bathymetry averages, smoothing) takes 42 s and
-  under 720 MB per rank; the saved mesh is 13 MB.
-- The smoothing stops at its sweep limit with $r_{x0} = 0.28$ above the bound of 0.2: the run
-  says so rather than failing. The step (17 s) is set by the hyperviscous and advective limits
-  of the 50 km coastal elements; at 1 simulated day per hour, 60 days and 10 km coasts are runs
-  for a cluster.
-- Mass changes by $10^{-25}$ of the volume and the tracers by $10^{-16}$: rounding.
+- The mesh build (coastline, refinement, two bathymetry averages, smoothing) takes 9 s and under
+  810 MB per rank; the saved mesh is 13 MB.
+- The smoothing reaches $r_{x0} = 0.2$: 1000 sweeps of diffusion, then 50 of clipping. All land
+  points of the kept elements (24524 element points) stay at 10 m. The coasts shoal: the volume
+  is 1.20e18 m$^3$, against 1.34e18 m$^3$ when the smoothing still flooded land points with
+  ocean depths, and the shelf seas are shallower than ETOPO1's mean over their water (the Yellow
+  Sea 36 m against 44 m, the North Sea 48 m against 72 m, the Persian Gulf 21 m against 33 m).
+- The step (17 s) is set by the hyperviscous and advective limits of the 50 km coastal elements;
+  at 1 simulated day per hour, 60 days and 10 km coasts are runs for a cluster.
+- Mass changes by $10^{-24}$ of the volume and the tracers by less than $10^{-16}$: rounding.
 - With the land flags, the Drake Passage section runs from 69.3 S to 54.9 S (Tierra del Fuego);
-  the transport is spinning up from rest (0.13 Sv after 0.01 day).
-
-## Real bathymetry: ETOPO1
-
-The global cases read ETOPO1 (NOAA's 1 arc-minute global relief, ice surface, grid registered:
-10801 x 21601 heights in metres, negative below sea level). Download and convert it once to
-NetCDF-4 (the reader uses HDF5), chunked so that a window of rows is a few chunks:
-
-```sh
-curl -O https://www.ngdc.noaa.gov/mgg/global/relief/ETOPO1/data/ice_surface/grid_registered/netcdf/ETOPO1_Ice_g_gmt4.grd.gz
-gunzip ETOPO1_Ice_g_gmt4.grd.gz
-nccopy -k nc4 -d 4 -s -c y/540,x/540 ETOPO1_Ice_g_gmt4.grd ETOPO1_Ice_g_gmt4.nc
-```
-
-The file holds `z` over `y` (latitude) and `x` (longitude), the reader's defaults. Other grids
-work too: grid- or cell-registered, either latitude order, any variable and axis names
-(`--bathy-var`, `--bathy-lat`, `--bathy-lon`). The data are not part of SOMA.
+  the transport is spinning up from rest (1.0 Sv after 0.1 day).
 
 ## Reproducibility
 
 Every sum that crosses elements or ranks is partition-independent: DSS, integrals (exact sums),
 the bathymetry's footprints (each point sums its cells in a fixed order), the smoothing's
 reductions, the coastline (each edge seen by one rank, decimated in a fixed order) and the
-digest's gather. The mesh is the same gid for gid on any number of ranks. A run therefore has the
-same bits on any number of ranks and threads, and with any report interval.
+digest (each element hashed where it lies, the hashes combined in gid order). The mesh is the
+same gid for gid on any number of ranks. A run therefore has the same bits on any number of
+ranks and threads, and with any report interval.
 
 ## References
 

@@ -28,8 +28,9 @@ All notable changes to SOMA are recorded here. The format follows
   coasts, wind stress, quadratic or linear drag and hyperviscosity, the same bits on any number of
   ranks and threads.
 - The mesh: the cubed sphere refined toward ETOPO1's coastline, the bathymetry averaged over each
-  GLL point's footprint (each rank reading only its windows of the NetCDF-4 file) and smoothed to
-  a slope factor of 0.2, land and closed basins removed. It can be saved as a SOMA file and read
+  GLL point's footprint (each rank reading only its windows of the NetCDF-4 file), land and closed
+  basins removed, the remaining land points held at 10 m and $\ln H$ smoothed until the slope
+  factor is at most 0.2 or a sweep limit is reached (reported). It can be saved as a SOMA file and read
   back at any number of ranks.
 - Passive tracers on K levels of ROMS's terrain-following coordinate or of z-star levels with
   vanished bottom layers, conserved to rounding.
