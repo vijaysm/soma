@@ -55,6 +55,9 @@ double hyperviscous_radius(const soma::Comm& comm, const Space& s, const soma::H
   const auto ppe = s.points_per_element();
   const auto n = static_cast<std::size_t>(s.num_elements() * ppe);
   const auto gid = mesh.gid(2);
+  const auto x = s.x();
+  // swe_atm's small smooth term (z over the radius; 0 in the plane, where z = 0) beside the gid-seeded noise.
+  const double scale = s.geometry().kind == soma::sem::SemGeometry::Kind::sphere ? s.geometry().radius : 1.0;
   double radius = 0;
   for (const int nc : {1, 3}) {
     Values v("ocean::power", n, static_cast<std::size_t>(nc)), w("ocean::power_image", n, static_cast<std::size_t>(nc));
@@ -62,7 +65,7 @@ double hyperviscous_radius(const soma::Comm& comm, const Space& s, const soma::H
     for (std::size_t r = 0; r < n; ++r) {
       const double seed = static_cast<double>(gid(static_cast<LO>(r) / ppe)) * 0.618033988749 +
                           static_cast<double>(static_cast<LO>(r) % ppe) * 0.414213562373;
-      for (int c = 0; c < nc; ++c) v(r, c) = std::sin(97.0 * seed + 13.0 * c);
+      for (int c = 0; c < nc; ++c) v(r, c) = std::sin(97.0 * seed + 13.0 * c) + 1e-3 * x(r, 2) / scale;
     }
     s.dss(comm, v);
     if (nc == 3) soma::sem::project_tangent(s, v);

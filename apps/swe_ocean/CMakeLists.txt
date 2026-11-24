@@ -41,9 +41,16 @@ if(SOMA_ENABLE_TESTS)
   ocean_add_test(test_ocean_coastline SOURCES tests/test_ocean_coastline.cpp RANKS 1 2 4)
   ocean_add_test(test_ocean_mesh SOURCES tests/test_ocean_mesh.cpp RANKS 1 2 3 4)
   ocean_add_test(test_ocean_model SOURCES tests/test_ocean_model.cpp RANKS 1 2 3 4 8)
-  # A run is the same bit for bit at any number of threads.
-  add_test(NAME test_ocean_model.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_ocean_model>
-    -DFILTER=OceanModelTest.rank_and_thread_independent "-DTHREADS=1;2;4"
+  # A run is the same bit for bit at any number of threads: in a plane box always, on the synthetic Earth (a grid
+  # file written with HDF5) when HDF5 is on.
+  add_test(NAME test_ocean_model.plane_threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_ocean_model>
+    -DFILTER=OceanModel.plane_box_thread_independent "-DTHREADS=1;2;4"
     -P ${PROJECT_SOURCE_DIR}/tests/unit/compare_threads.cmake)
-  set_tests_properties(test_ocean_model.threads PROPERTIES TIMEOUT 180)
+  set_tests_properties(test_ocean_model.plane_threads PROPERTIES TIMEOUT 180)
+  if(SOMA_ENABLE_HDF5)
+    add_test(NAME test_ocean_model.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_ocean_model>
+      -DFILTER=OceanModelTest.rank_and_thread_independent "-DTHREADS=1;2;4"
+      -P ${PROJECT_SOURCE_DIR}/tests/unit/compare_threads.cmake)
+    set_tests_properties(test_ocean_model.threads PROPERTIES TIMEOUT 180)
+  endif()
 endif()

@@ -4,8 +4,9 @@
 // The barotropic ocean model on the synthetic Earth of test_ocean_mesh.cpp (synthetic_earth.hpp) and on a plane
 // box: the ocean at rest stays exactly at rest; a free-surface bump under a wind, with quadratic drag and the
 // default viscosity, conserves mass to rounding and has no flow through the coast; and a run has the same bits
-// on any number of ranks (and threads, through the .threads test, which runs rank_and_thread_independent at
-// several thread counts and compares the digests it prints).
+// on any number of ranks (and threads, through the .threads and .plane_threads tests, which run
+// rank_and_thread_independent and plane_box_thread_independent at several thread counts and compare the digests
+// they print).
 
 #include <unistd.h>
 
@@ -265,6 +266,21 @@ TEST(OceanModel, plane_box_conserves_and_slips) {
     serial.initialize(Comm::self(), plane_bump);
     serial.advance(Comm::self(), 30 * serial.dt());
     EXPECT_EQ(m.digest(c), serial.digest(Comm::self())) << "linear " << linear;
+  }
+}
+
+// For compare_threads.cmake (test_ocean_model.plane_threads), which runs this at several thread counts: the
+// nonlinear mode, with hyperviscosity, wind and quadratic drag.
+TEST(OceanModel, plane_box_thread_independent) {
+  const Comm c = Comm::world();
+  ModelOptions o = beta_plane(false);
+  OceanModel m(c, box(c), o);
+  m.initialize(c, plane_bump);
+  m.advance(c, 30 * m.dt());
+  const std::uint64_t digest = m.digest(c);
+  if (c.rank() == 0) {
+    std::printf("digest reproducible %016llx\n", static_cast<unsigned long long>(digest));
+    std::printf("concurrency %d\n", Kokkos::DefaultHostExecutionSpace().concurrency());
   }
 }
 

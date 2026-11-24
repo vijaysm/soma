@@ -3,8 +3,9 @@
 
 # Runs EXE --gtest_filter=FILTER at 1, 3 and 4 host threads (KOKKOS_NUM_THREADS;
 # THREADS, a list, replaces those counts) and compares the "digest
-# reproducible" lines it prints: they must agree. Where it prints "digest plain" lines, they must differ somewhere when a run
-# had more than one thread, so that the comparison could fail.
+# reproducible" lines it prints: they must agree. Where it prints "digest
+# plain" lines, they must differ somewhere when a run had more than one
+# thread, so that the comparison could fail.
 set(reproducible "")
 set(plain "")
 set(threaded OFF)
