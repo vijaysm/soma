@@ -75,7 +75,12 @@ if(SOMA_ENABLE_TESTS)
         -DMPIEXEC=${MPIEXEC_EXECUTABLE} "-DPREPARE=$<TARGET_FILE:write_earth> ${dir}/earth.h5"
         "-DRUNS=2 ${wind} --bathymetry ${dir}/earth.h5 --save-mesh ${dir}/earth.soma|3 ${wind} --mesh ${dir}/earth.soma"
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/driver_runs.cmake)
-      set_tests_properties(swe_ocean.mesh_reuse PROPERTIES TIMEOUT 120 PROCESSORS 3)
+      set_tests_properties(swe_ocean.mesh_reuse PROPERTIES TIMEOUT 120 PROCESSORS 3 FIXTURES_SETUP ocean_earth)
+      # The start-up report of a built mesh gives the coastline's size.
+      add_test(NAME swe_ocean.built_report COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean>
+        "-DARGS=--case wind --ne 4 --order 3 --coast-km 400 --days 0 --bathymetry ${dir}/earth.h5" -DCODE=0
+        "-DMATCH=values, [1-9][0-9]* coastline points" -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_exit.cmake)
+      set_tests_properties(swe_ocean.built_report PROPERTIES FIXTURES_REQUIRED ocean_earth)
     endif()
   endif()
   add_test(NAME swe_ocean.bad_option COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean> "-DARGS=--case tides"

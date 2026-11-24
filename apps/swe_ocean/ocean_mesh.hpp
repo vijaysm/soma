@@ -31,6 +31,7 @@
 // as written; sweeps 0, rx0 recomputed (max_rx0), smoothed true.
 
 #include <array>
+#include <cstddef>
 #include <filesystem>
 #include <memory>
 
@@ -58,13 +59,15 @@ struct MeshOptions {
 // mesh: the ocean's elements on the sphere of radius a, a ghost layer and distributed edges on more than one
 // rank; space: the space of the order over *mesh; bathymetry: per row of the space; removed_*_km2: the area of
 // the elements removed as land and as not joined to the world ocean; refined: what refine_graded reported
-// (its mesh moved out; default when read from a file).
+// (its mesh moved out; default when read from a file); coastline_points: the decimated coastline's points (every
+// rank holds them all; 0 without refinement or when read from a file).
 struct OceanMesh {
   std::unique_ptr<soma::HostMesh> mesh;
   std::unique_ptr<Space> space;
   Bathymetry bathymetry;
   double removed_land_km2 = 0, removed_disconnected_km2 = 0;
   soma::GradedResult refined;
+  std::size_t coastline_points = 0;
 };
 
 // The pipeline above. Collective. Throws std::invalid_argument on every rank for ne < 1, order < 1, a seed

@@ -222,8 +222,9 @@ OceanMesh build_ocean_mesh(const soma::Comm& comm, const MeshOptions& o) {
     g.reruns = o.reruns;
     g.spacing = o.coast_km;
     g.length = [](Real l) { return l * a / 1000; };
-    out.refined = soma::refine_graded(
-        comm, mesh, g, coast_target(coastline(comm, o.bathymetry.grid, o.coast_km, o.bathymetry.strip_rows)));
+    std::vector<std::array<double, 3>> coast = coastline(comm, o.bathymetry.grid, o.coast_km, o.bathymetry.strip_rows);
+    out.coastline_points = coast.size();
+    out.refined = soma::refine_graded(comm, mesh, g, coast_target(std::move(coast)));
     mesh = std::move(out.refined.mesh);
     out.refined.mesh = HostMesh{};
   }

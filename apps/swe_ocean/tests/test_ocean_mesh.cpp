@@ -276,6 +276,7 @@ std::pair<std::int64_t, std::int64_t> check_levels(const Comm& c, const ocean::O
                                                    const ocean::MeshOptions& o, std::int32_t least) {
   const auto points = ocean::coastline(c, o.bathymetry.grid, o.coast_km);
   EXPECT_FALSE(points.empty());
+  EXPECT_EQ(built.coastline_points, points.size()) << "the build reports the coastline it refined toward";
   // The mesh on the unit sphere, as the target takes it.
   HostMesh unit = built.mesh->clone();
   const auto x = unit.coords();
@@ -346,6 +347,7 @@ TEST_F(OceanMesh, round_trip) {
   const std::map<GO, Element> expected = by_gid(whole);
   expect_same(c, by_gid(*built_), expected);
   EXPECT_EQ(whole.removed_land_km2, built_->removed_land_km2);
+  EXPECT_EQ(whole.coastline_points, 0U) << "a read mesh has no coastline";
   EXPECT_EQ(whole.removed_disconnected_km2, built_->removed_disconnected_km2);
   // A space of another order finds no matching fields: an error on every rank.
   EXPECT_THROW((void)ocean::read_ocean_mesh(c, path, 4), std::invalid_argument);
