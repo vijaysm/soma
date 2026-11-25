@@ -22,5 +22,5 @@ unless the launcher binds the ranks: an unbound rank's thread is then pinned to 
 core, with every other rank's. On NFS add `--io-aggregators 1`. See
 [Running on a cluster](../../docs/apps/swe-ocean.md#running-on-a-cluster).
 
-Frames of the snapshots (`--output-reports`), vorticity and speed on a map: `render_ocean.py`; see
+Frames of the snapshots (`--output-reports`), vorticity, eta and speed on a map: `render_ocean.py`; see
 [Movies](../../docs/apps/swe-ocean.md#movies).

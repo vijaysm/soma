@@ -317,16 +317,21 @@ redirected log follows the run.
 
 `apps/swe_ocean/render_ocean.py` draws the snapshots of `--output-reports` as frames: the surface
 relative vorticity (the radial part of $\nabla \times \mathbf{u}$, from each element's GLL
-derivative) and the speed, with the fastest point marked, on a longitude-latitude map, land points
-grey. It needs somaview and PyVista (`pip install 'tools/somaview[pyvista]'`); the snapshots carry
-no time, so give the run's `dt`:
+derivative), the surface height $\eta$ and the speed, with the fastest point marked, on a
+longitude-latitude map, land points grey. It needs somaview and PyVista
+(`pip install 'tools/somaview[pyvista]'`); the snapshots carry no time, so give the run's `dt`:
 
 ```sh
-python apps/swe_ocean/render_ocean.py 'movie.step*.soma' --dt 16.7549 --out frames
+python apps/swe_ocean/render_ocean.py 'movie.step*.soma' --dt 16.7549 --out frames --log-speed
 ffmpeg -framerate 4 -i frames/frame%04d.png -pix_fmt yuv420p ocean.mp4
 ```
 
-Without a display, run it under `xvfb-run -a` or with an off-screen VTK (`vtk-osmesa`).
+In the first days the speed and vorticity are coastal: the wind accelerates 10-50 m of water a
+hundred times faster than 4000 m, and the open ocean's response is far below their colour limits.
+`--log-speed` (from a thousandth of the limit, or `--speed-min`) shows the interior beside the
+coasts; the fastest point moves between coastal points of nearly the same speed (`--no-marker`
+drops its dot). Without a display, run it under `xvfb-run -a` or with an off-screen VTK
+(`vtk-osmesa`).
 
 ## Reproducibility
 
