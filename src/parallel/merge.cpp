@@ -24,6 +24,7 @@
 #include "soma/fields/domain_mesh.hpp"
 #include "records.hpp"
 #include "soma/parallel/ghosts.hpp"
+#include "soma/parallel/halo_exchange.hpp"
 #include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/sort.hpp"
 #include "soma/topology/build.hpp"
@@ -481,6 +482,44 @@ Renumbering merge_live(const Comm& comm, HostMesh& mesh, const MergeOptions& opt
   return out;
 }
 
+// Each field with one row per entity of a whole dimension: its owners' values
+// to the copies and ghosts. Fields in name order; which qualify is agreed.
+void owners_values(const Comm& comm, HostMesh& mesh) {
+  const std::uint64_t h = detail::fields_hash(mesh);
+  std::array<std::uint64_t, 2> same{h, ~h};
+  comm.allreduce(std::span<std::uint64_t>(same), Op::max);
+  if (same[0] != ~same[1]) throw std::invalid_argument("sync_mesh: the ranks' fields differ");
+  std::vector<FieldInfo> list;  // not SOMA's own (soma:sharing, soma:owner), held only where entities are shared
+  for (FieldInfo& f : mesh.fields().list()) {
+    if (!f.name.starts_with("soma:")) list.push_back(std::move(f));
+  }
+  std::sort(list.begin(), list.end(), [](const FieldInfo& a, const FieldInfo& b) { return a.name < b.name; });
+  std::vector<std::int32_t> fit(list.size(), 0);
+  for (std::size_t i = 0; i < list.size(); ++i) {
+    const FieldInfo& f = list[i];
+    if (f.variable || f.handle || f.dims.size() != 1 || f.dims[0] > mesh.dim() || f.rows != mesh.count(f.dims[0])) continue;
+    bool rows = true;
+    dispatch_data_type(f.type, [&]<class T>() {
+      const auto g = mesh.fields().template get<T>(f.id);
+      for (LO e = 0; e < mesh.count(f.dims[0]) && rows; ++e) {
+        const RowRange r = g.space().entity_rows(f.dims[0], e);
+        rows = r.begin == e && r.end == e + 1;
+      }
+    });
+    fit[i] = rows ? 1 : 0;
+  }
+  if (!fit.empty()) comm.allreduce(std::span<std::int32_t>(fit), Op::min);
+  std::array<std::optional<HaloExchange<Kokkos::HostSpace>>, 4> halo;
+  for (std::size_t i = 0; i < list.size(); ++i) {
+    if (fit[i] == 0) continue;
+    const int d = list[i].dims[0];
+    if (!halo[static_cast<std::size_t>(d)]) halo[static_cast<std::size_t>(d)].emplace(comm, mesh, d);
+    dispatch_data_type(list[i].type, [&]<class T>() {
+      halo[static_cast<std::size_t>(d)]->update(comm, mesh.fields().template get<T>(list[i].id).view());
+    });
+  }
+}
+
 }  // namespace
 
 Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, const MergeOptions& options) {
@@ -534,6 +573,7 @@ Renumbering sync_mesh(const Comm& comm, HostMesh& mesh, const SyncOptions& optio
     then = std::move(both);
   }
   if (options.ghosts && f[2] > 0 && comm.size() > 1) next.add_ghosts(comm, GhostOptions{f[2], f[3], options.ghost_sets});
+  if (options.fields && comm.size() > 1) owners_values(comm, next);
   mesh.swap(next);
   return out;
 }

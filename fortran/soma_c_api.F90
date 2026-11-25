@@ -280,11 +280,11 @@ module soma_c_api
       type(c_ptr), value :: m
       integer(c_int), intent(out) :: needs
     end function
-    integer(c_int) function c_mesh_sync(comm, m, tolerance, ghosts, out) bind(C, name='soma_mesh_sync')
+    integer(c_int) function c_mesh_sync(comm, m, tolerance, ghosts, fields, out) bind(C, name='soma_mesh_sync')
       import :: c_int, c_ptr, c_double
       type(c_ptr), value :: comm, m
       real(c_double), value :: tolerance
-      integer(c_int), value :: ghosts
+      integer(c_int), value :: ghosts, fields
       type(c_ptr), intent(out) :: out
     end function
     integer(c_int) function c_renumbering_new_lids(r, d, lids, n) bind(C, name='soma_renumbering_new_lids')

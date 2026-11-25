@@ -195,7 +195,10 @@ makes the part whole again, on every rank:
 - where some rank did, vertices are matched by place (`SyncOptions::tol`), so a vertex that two
   ranks added on their common boundary becomes one; gids `MeshEdit` chose give way to one the
   ranks agree on, and gids the caller gave stay;
-- fields and sets follow, and `r` maps old local ids to new ones (empty when no rank's part
+- fields and sets follow each entity; the owners' values of fields with one row per entity over a whole
+  dimension (dense tags, `GLOBAL_ID` through the MOAB layer) then reach every shared copy
+  (`SyncOptions::fields`, on by default). Fields of other layouts keep each rank's values, unless ghosts are
+  placed again, which gives every copy its owner's values. `r` maps old local ids to new ones (empty when no rank's part
   needed it).
 
 A throw leaves the mesh unchanged. `sync_mesh` uses `merge_mesh`, which can also be called itself,

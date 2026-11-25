@@ -281,10 +281,11 @@ int soma_mesh_compress(soma_mesh_t* mesh, soma_renumbering_t** renumbering);
 int soma_mesh_needs_sync(const soma_mesh_t* mesh, int* needs);
 /// Collective: makes the part whole again after edits on any rank: compressed,
 /// its sharing, graphs and ghosts (layers as before; none where ghosts is 0)
-/// made again; vertices added are matched by place, within tolerance.
+/// made again; vertices added are matched by place, within tolerance. With
+/// fields, owners' values of whole-dimension fields reach every copy.
 /// *renumbering gives each old lid's new one, for no dimension where no
 /// rank's part needed it.
-int soma_mesh_sync(const soma_comm_t* comm, soma_mesh_t* mesh, double tolerance, int ghosts,
+int soma_mesh_sync(const soma_comm_t* comm, soma_mesh_t* mesh, double tolerance, int ghosts, int fields,
                    soma_renumbering_t** renumbering);
 /// The new lid of each old lid of dimension d (-1: removed); count of them.
 int soma_renumbering_new_lids(const soma_renumbering_t* renumbering, int d, const soma_lo_t** new_lids,

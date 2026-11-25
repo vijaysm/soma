@@ -108,6 +108,10 @@ Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, const MergeOptions& opt
 struct SyncOptions {
   PointTolerance tol{};     ///< of the added vertices' places, where some rank added entities
   bool ghosts = true;       ///< as many layers again as the mesh had
+  /// Owners' values to their shared copies (and ghosts), for each field with
+  /// one value row per entity over a whole dimension (a dense tag, as MOAB's
+  /// GLOBAL_ID); fields of other layouts keep each rank's values.
+  bool fields = true;
   bool ghost_sets = false;  ///< GhostOptions::sets
 };
 
@@ -119,7 +123,9 @@ struct SyncOptions {
 /// some rank did, merge_mesh matches the vertices by their places (so also
 /// those that coincided before: the two sides of a slit become one) and gives
 /// the entities whose gids MeshEdit chose the gid of what they coincide with,
-/// or a new one; gids the caller gave stay. Returns old lid -> new lid per
+/// or a new one; gids the caller gave stay. With SyncOptions::fields, the
+/// owners' values of whole-dimension fields reach every copy and ghost (the
+/// ranks' field lists must agree: std::invalid_argument on every rank if not). Returns old lid -> new lid per
 /// dimension (invalid_lo: removed, a ghost, or merged into another), empty
 /// where nothing changed: no rank's mesh needed it. Fields and sets follow,
 /// as merge_mesh; ghosts take their owners' values. A throw (as merge_mesh and

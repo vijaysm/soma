@@ -1304,24 +1304,29 @@ contains
 
   !> Collective, in place: makes the part whole again after edits on any rank:
   !> compressed, its sharing, graphs and ghost layers (none if ghosts is false)
-  !> made again; vertices added are matched by place, within tolerance (0).
-  subroutine mesh_sync(self, comm, tolerance, ghosts, renumbering, ierr)
+  !> made again; vertices added are matched by place, within tolerance (0); with
+  !> fields (true), owners' values of whole-dimension fields reach every copy.
+  subroutine mesh_sync(self, comm, tolerance, ghosts, fields, renumbering, ierr)
     class(soma_mesh), intent(inout) :: self
     type(soma_comm), intent(in) :: comm
     real(c_double), intent(in), optional :: tolerance
-    logical, intent(in), optional :: ghosts
+    logical, intent(in), optional :: ghosts, fields
     type(soma_renumbering), intent(out), optional :: renumbering
     integer, intent(out), optional :: ierr
     type(soma_renumbering) :: r
     real(c_double) :: tol
-    integer(c_int) :: g
+    integer(c_int) :: g, f
     tol = 0
     if (present(tolerance)) tol = tolerance
     g = 1
     if (present(ghosts)) then
       if (.not. ghosts) g = 0
     end if
-    call finish(c_mesh_sync(comm%ptr, self%ptr, tol, g, r%ptr), ierr)
+    f = 1
+    if (present(fields)) then
+      if (.not. fields) f = 0
+    end if
+    call finish(c_mesh_sync(comm%ptr, self%ptr, tol, g, f, r%ptr), ierr)
     if (present(renumbering)) renumbering = r
   end subroutine
 

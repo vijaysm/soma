@@ -307,7 +307,7 @@ TEST(CApiParallel, EditsNeedASync) {
   EXPECT_EQ(needs, rank == 0 ? 1 : 0);
   if (size > 1) EXPECT_NE(soma_mesh_add_ghosts(w.comm, m, 1, 0, 0), SOMA_OK);
   soma_renumbering_t* r = nullptr;
-  ASSERT_EQ(soma_mesh_sync(w.comm, m, 0.0, 1, &r), SOMA_OK) << last_error();
+  ASSERT_EQ(soma_mesh_sync(w.comm, m, 0.0, 1, 1, &r), SOMA_OK) << last_error();
   ASSERT_EQ(soma_mesh_needs_sync(m, &needs), SOMA_OK);
   EXPECT_EQ(needs, 0);
   EXPECT_EQ(owned_totals(m, 3).first, before.first - 1);

@@ -149,7 +149,7 @@ int soma_mesh_needs_sync(const soma_mesh_t* mesh, int* needs) {
   });
 }
 
-int soma_mesh_sync(const soma_comm_t* comm, soma_mesh_t* mesh, double tolerance, int ghosts,
+int soma_mesh_sync(const soma_comm_t* comm, soma_mesh_t* mesh, double tolerance, int ghosts, int fields,
                    soma_renumbering_t** renumbering) {
   return call([&] {
     constexpr const char* what = "soma_mesh_sync";
@@ -164,6 +164,7 @@ int soma_mesh_sync(const soma_comm_t* comm, soma_mesh_t* mesh, double tolerance,
     soma::SyncOptions options;
     options.tol.tol = tolerance;
     options.ghosts = ghosts != 0;
+    options.fields = fields != 0;
     m->state->changed();
     *r = new_renumbering(soma::sync_mesh(c, m->get(), options));
   });

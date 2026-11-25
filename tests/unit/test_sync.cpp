@@ -373,3 +373,59 @@ TEST(Sync, FieldsAndLidsFollow) {
     }
   }
 }
+
+// Each rank's own values on the vertices it added: with SyncOptions::fields
+// every copy then holds its owner's value (a double field, and an integer
+// one as MOAB's GLOBAL_ID); without, and without ghosts placed again, copies
+// on part boundaries keep theirs.
+TEST(Sync, OwnersValuesReachTheCopies) {
+  const Comm c = Comm::world();
+  for (const bool fields : {true, false}) {
+    for (const int layers : {0, 1}) {
+      SCOPED_TRACE(testing::Message() << "fields " << fields << " layers " << layers);
+      soma::HostMesh m = box_part(c, spec_of(Topology::quad, 4), Part{.layers = layers});
+      (void)m.fields().add_tag<Real>("u", 0, 2);
+      (void)m.fields().add_tag<std::int32_t>("GLOBAL_ID", 0, 1);
+      {
+        const auto v = m.view();
+        soma::MeshEdit edit(m);
+        // Each owned quad's first edge split, so that both sides of a part boundary add its midpoint.
+        std::vector<LO> old;
+        for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
+          const LO a = v.vertex(2, e, 0), b = v.vertex(2, e, 1), q = v.vertex(2, e, 2), r = v.vertex(2, e, 3);
+          std::vector<Real> p;
+          for (int k = 0; k < 3; ++k) p.push_back((m.coords()(a, k) + m.coords()(b, k)) / 2);
+          const LO x = edit.add_vertices(p);
+          edit.add_elements(Topology::tri, std::vector<LO>{a, x, r, x, b, q, x, q, r});
+          old.push_back(e);
+        }
+        edit.remove(2, old);
+        (void)edit.apply();
+      }
+      auto u = m.fields().get<Real>("u", 0).view();
+      auto g = m.fields().get<std::int32_t>("GLOBAL_ID", 0).view();
+      for (LO i = 0; i < m.count(0); ++i) {
+        const auto k = static_cast<std::size_t>(i);
+        u(k, 0) = c.rank();
+        u(k, 1) = -c.rank();
+        g(k, 0) = c.rank() + 100;
+      }
+      (void)soma::sync_mesh(c, m, {.tol = {1e-12, soma::PointNorm::l2}, .fields = fields});
+      const auto owner = soma::owner_ranks(c, m, 0);
+      u = m.fields().get<Real>("u", 0).view();
+      g = m.fields().get<std::int32_t>("GLOBAL_ID", 0).view();
+      std::int64_t off = 0;
+      for (LO i = 0; i < m.count(0); ++i) {
+        const auto k = static_cast<std::size_t>(i);
+        const int o = owner[k];
+        off += u(k, 0) != o || u(k, 1) != -o || g(k, 0) != o + 100;
+      }
+      off = c.allreduce(off, Op::sum);
+      if (fields || layers > 0 || c.size() == 1) {  // placing ghosts gives copies their owners' values too
+        EXPECT_EQ(off, 0);
+      } else {
+        EXPECT_GT(off, 0);
+      }
+    }
+  }
+}
