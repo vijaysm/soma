@@ -10,7 +10,11 @@
 //   cached: if the literal word "cached" is given as a 5th argument, the halo is resolved
 //           through HaloCache (read_piece_cached) instead of the per-call scan (read_piece);
 //           results must be identical either way.
-//   nodal: also dump the spectral-element fields and their sub-quads (see dump_nodal).
+//   nodal[=N]: also dump the spectral-element fields and their sub-quads, N along an element's side
+//           (default: on the GLL points; see dump_nodal).
+//   closed: with cached, the cells closed at their hanging vertices.
+// An AMR checkpoint's fields are dumped as stored and, where they have them, as node values continuous
+// over the hierarchy (AmrNodeValues).
 #include <cstdlib>
 #include "../soma_reader.hpp"
 
@@ -78,6 +82,8 @@ void dump_block(std::ofstream& out, const MeshPiece& piece, const CellBlock& blo
   }
   // The node gids in VTK order (orientation and node permutations included), then sorted per cell.
   write_i64(out, "cell_vtk_gids:" + d, corner_gids);
+  write_i64(out, "cell_conn:" + d, block.connectivity);
+  write_i64(out, "cell_source:" + d, block.source);
   for (std::size_t c = 0; c + 1 < block.offsets.size(); ++c) {
     std::sort(corner_gids.begin() + block.offsets[c], corner_gids.begin() + block.offsets[c + 1]);
   }
@@ -87,7 +93,7 @@ void dump_block(std::ofstream& out, const MeshPiece& piece, const CellBlock& blo
 
 // The GLL fields on sub-quads, by order: the gid of each point's element and its node (both as
 // nodal.py numbers them), positions, sub-quads and values.
-void dump_nodal(const SomaFile& sf, std::ofstream& out, std::vector<int> parts) {
+void dump_nodal(const SomaFile& sf, std::ofstream& out, std::vector<int> parts, int resolution) {
   HaloCache hc(sf);
   const MeshPiece piece = read_piece_cached(sf, hc, parts, {2});
   const CellBlock& block = piece.blocks.at(2);
@@ -95,11 +101,12 @@ void dump_nodal(const SomaFile& sf, std::ofstream& out, std::vector<int> parts) 
   std::set<int> orders;
   for (auto& f : sf.fields()) if (f.nodal_on_quads()) orders.insert(f.order);
   for (int p : orders) {
-    const Subcells sub = subcells(piece, block, p, radius);
+    const Subcells sub = subcells(piece, block, p, radius, resolution);
     const std::string tag = ":" + std::to_string(p);
     std::vector<std::int64_t> gid;
     for (auto c : sub.cells)
-      for (int k = 0; k < (p + 1) * (p + 1); ++k) gid.push_back(block.gids[static_cast<std::size_t>(c)] * (p + 1) * (p + 1) + k);
+      for (int k = 0, m = (sub.side() + 1) * (sub.side() + 1); k < m; ++k)
+        gid.push_back(block.gids[static_cast<std::size_t>(c)] * m + k);
     write_i64(out, "nodal_gid" + tag, gid);
     write_f64(out, "nodal_xyz" + tag, sub.points, 3);
     write_i64(out, "nodal_conn" + tag, sub.connectivity, 4);
@@ -113,10 +120,11 @@ void dump_nodal(const SomaFile& sf, std::ofstream& out, std::vector<int> parts) 
 }
 
 void dump_mesh(const SomaFile& sf, std::ofstream& out, std::vector<int> parts, std::vector<int> dims, bool cached,
-              bool high_order, bool nodal) {
+              bool high_order, int nodal, bool closed) {
   MeshPiece piece;
   ReadOptions opt;
   opt.high_order = high_order;
+  opt.close_hanging = closed;
   // The wedge convention of the VTK the Python core compares against (SOMAVIEW_VTK_WEDGE).
   if (const char* w = std::getenv("SOMAVIEW_VTK_WEDGE")) opt.legacy_wedge = std::string(w) == "legacy";
   if (cached) {
@@ -132,7 +140,7 @@ void dump_mesh(const SomaFile& sf, std::ofstream& out, std::vector<int> parts, s
   write_i64(out, "piece_parts", parts_out);
   for (auto& [name, arr] : piece.point_data) write_f64(out, "point_data:" + name, arr.data, arr.ncomp);
   for (auto& [d, block] : piece.blocks) dump_block(out, piece, block);
-  if (nodal) dump_nodal(sf, out, parts);
+  if (nodal >= 0) dump_nodal(sf, out, parts, nodal);
   end_sections(out);
 }
 
@@ -165,6 +173,18 @@ void dump_amr(const SomaFile& sf, std::ofstream& out) {
       write_f64(out, "amr_field:" + f.name + ":" + std::to_string(l), flat, 1);
     }
   }
+  for (auto& f : af.fields()) {
+    if (f.centering(af.dim()) == "mixed") continue;
+    AmrNodeValues nodes(af, f);
+    for (int l = 0; l < af.nlevels(); ++l) {
+      std::vector<double> flat;
+      for (std::size_t b = 0; b < af.boxes()[static_cast<std::size_t>(l)].size(); ++b) {
+        const auto& v = nodes.box(l, static_cast<LO>(b));
+        flat.insert(flat.end(), v.begin(), v.end());
+      }
+      write_f64(out, "amr_smooth:" + f.name + ":" + std::to_string(l), flat, 1);
+    }
+  }
   end_sections(out);
 }
 
@@ -172,25 +192,28 @@ void dump_amr(const SomaFile& sf, std::ofstream& out) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::cerr << "usage: cpp_driver <file.soma> <out.bin> [parts=csv] [dims=csv] [cached] [nodal]\n";
+    std::cerr << "usage: cpp_driver <file.soma> <out.bin> [parts=csv] [dims=csv] [cached] [closed] [nodal[=N]]\n";
     return 2;
   }
   std::string path = argv[1], outpath = argv[2];
   std::vector<int> parts = argc > 3 && argv[3][0] ? parse_csv_int(argv[3]) : std::vector<int>{};
   std::vector<int> dims = argc > 4 && argv[4][0] ? parse_csv_int(argv[4]) : std::vector<int>{};
-  bool cached = false, high_order = true, nodal = false;
+  bool cached = false, high_order = true, closed = false;
+  int nodal = -1;
   for (int i = 5; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "cached") cached = true;
+    if (a == "closed") closed = true;
     if (a == "nohi") high_order = false;
-    if (a == "nodal") nodal = true;
+    if (a == "nodal") nodal = 0;
+    if (a.rfind("nodal=", 0) == 0) nodal = std::stoi(a.substr(6));
   }
   try {
     SomaFile sf(path);
     std::ofstream out(outpath, std::ios::binary);
     if (!out) { std::cerr << "cannot open " << outpath << " for writing\n"; return 3; }
     if (sf.kind() == FileKind::amr) dump_amr(sf, out);
-    else dump_mesh(sf, out, parts, dims, cached, high_order, nodal);
+    else dump_mesh(sf, out, parts, dims, cached, high_order, nodal, closed);
   } catch (const std::exception& e) {
     std::cerr << "error: " << e.what() << "\n";
     return 1;

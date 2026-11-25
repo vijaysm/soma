@@ -23,7 +23,7 @@ import nodal_files as nf  # noqa: E402
 import somaview as sv  # noqa: E402
 from compare_with_python import read_sections  # noqa: E402
 
-TOL = 1e-12  # positions, relative to the mesh's size; values must be equal
+TOL = 1e-12  # positions, relative to the mesh's size; stored values must be equal, interpolated ones to it
 CASES = [dict(p=1), dict(p=3), dict(p=4), dict(p=8, n=2), dict(p=3, radius=6.37e6), dict(p=3, nodes=8),
          dict(p=4, nodes=9), dict(p=5, nodes=9, radius=2.0), dict(p=3, parts=3, n=5),
          dict(p=3, parts=3, partial=True), dict(p=3, partial=True), dict(p=4, nodes=9, radius=2.0, parts=4)]
@@ -45,13 +45,14 @@ def check(ok, what):
         failed.append(what)
 
 
-def drive(driver, path, out, parts=None):
-    r = subprocess.run([driver, str(path), str(out), ",".join(map(str, parts or [])), "2", "nodal"],
+def drive(driver, path, out, parts=None, n=None):
+    r = subprocess.run([driver, str(path), str(out), ",".join(map(str, parts or [])), "2",
+                        "nodal" if n is None else f"nodal={n}"],
                        capture_output=True, text=True, timeout=300)
     return r.returncode, r.stderr
 
 
-def same(sec, piece, p, label):
+def same(sec, piece, p, label, stored=True):
     tag = f":{p}"
     size = np.abs(piece.points).max()
     check(np.array_equal(sec["nodal_gid" + tag].ravel(), piece.point_gids), f"{label}: points")
@@ -61,8 +62,10 @@ def same(sec, piece, p, label):
     check(names == set(piece.point_data), f"{label}: fields {names} against {set(piece.point_data)}")
     for name, v in piece.point_data.items():
         got = sec.get(f"nodal_data{tag}:{name}")
-        check(got is not None and np.array_equal(got, np.asarray(v, float).reshape(len(got), -1), equal_nan=True),
-              f"{label}: {name}")
+        want = None if got is None else np.asarray(v, float).reshape(len(got), -1)
+        ok = got is not None and (np.array_equal(got, want, equal_nan=True) if stored else np.allclose(
+            got, want, rtol=0, atol=TOL * max(1.0, np.nanmax(np.abs(want))), equal_nan=True))
+        check(ok, f"{label}: {name}")
 
 
 def known(sec, pos, fields, p, label):
@@ -88,6 +91,12 @@ def main(driver, work, files):
                 sec = read_sections(out)
                 same(sec, sv.read_nodal(path, parts), case["p"], label)
                 known(sec, pos, fields, case["p"], label)
+            for n in (1, 4, 7):
+                code, err = drive(driver, path, out, parts, n)
+                check(code == 0, f"{label} resolution {n}: {err}")
+                if code == 0:
+                    same(read_sections(out), sv.read_nodal(path, parts, resolution=n), case["p"],
+                         f"{label} resolution {n}", stored=False)
     for f in files:
         with sv.SomaFile(f) as sf:
             orders, nparts = sorted({x.order for x in sf.fields if x.nodal_on_quads}), sf.nparts
