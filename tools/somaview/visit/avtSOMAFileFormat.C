@@ -9,6 +9,7 @@
 #include <array>
 #include <cstring>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -45,6 +46,7 @@ namespace {
 
 const char *kMainMeshName = "mesh";
 const char *kLowerMeshPrefix = "elements_dim";
+const char *kNodalMeshPrefix = "mesh_gll_p";
 
 std::string MeshNameForDim(int mainDim, int d) {
   if (d == mainDim) return kMainMeshName;
@@ -80,6 +82,11 @@ avtSOMAFileFormat::avtSOMAFileFormat(const char *filename)
     haloCache_ = std::make_unique<soma_reader::HaloCache>(*file_);
     for (int d : file_->written_dims())
       if (d != file_->dim() && d > 0) dims_.push_back(d);
+    for (const FieldInfo &f : file_->fields())
+      if (f.nodal_on_quads()) {
+        radius_ = soma_reader::sphere_radius(*file_);
+        break;
+      }
   } else {
     amr_ = std::make_unique<soma_reader::AmrFile>(*file_);
     int domain = 0;
@@ -100,6 +107,7 @@ avtSOMAFileFormat::~avtSOMAFileFormat() {}
 
 void avtSOMAFileFormat::FreeUpResources(void) {
   pieceCache_.clear();
+  subcellCache_.clear();
 }
 
 void avtSOMAFileFormat::AmrLocation(int domain, int &level, int &box) const {
@@ -168,6 +176,21 @@ void avtSOMAFileFormat::PopulateMeshMetaData(avtDatabaseMetaData *md) {
     placed.push_back({&f, dim, isPoint});
     ++uses[f.name];
   }
+  // A spectral-element field goes on the sub-quads of its order.
+  std::vector<const FieldInfo *> nodal;
+  const std::vector<int> written = file_->written_dims();
+  std::string skipped;
+  for (const FieldInfo &f : file_->fields()) {
+    if (f.drawable()) continue;
+    if (f.nodal_on_quads() && std::find(written.begin(), written.end(), 2) != written.end()) {
+      nodal.push_back(&f);
+      ++uses[f.name];
+    } else {
+      skipped += (skipped.empty() ? "" : ", ") + f.name + " (" +
+                 (f.variable ? "variable-length" : f.handle ? "handles" : "values at element nodes") + ")";
+    }
+  }
+
   // One name, several fields (MOAB's GLOBAL_ID tag, written once per dimension): VisIt keys
   // variables by name alone, so each is qualified by where it lives -- "nodal/GLOBAL_ID",
   // "mesh/GLOBAL_ID", "elements_dim1/GLOBAL_ID" (VisIt shows a '/' as a submenu).
@@ -195,6 +218,37 @@ void avtSOMAFileFormat::PopulateMeshMetaData(avtDatabaseMetaData *md) {
       }
     }
   }
+
+  std::set<int> orders;
+  for (const FieldInfo *f : nodal) orders.insert(f->order);
+  for (int p : orders) {
+    avtMeshMetaData *sub = new avtMeshMetaData;
+    sub->name = kNodalMeshPrefix + std::to_string(p);
+    sub->meshType = AVT_UNSTRUCTURED_MESH;
+    sub->numBlocks = file_->nparts();
+    sub->blockOrigin = 0;
+    sub->spatialDimension = 3;
+    sub->topologicalDimension = 2;
+    md->Add(sub);
+  }
+  for (const FieldInfo *f : nodal) {
+    const std::string meshName = kNodalMeshPrefix + std::to_string(f->order);
+    const bool taken = uses[f->name] > 1 || f->name == "soma_part";
+    const std::string varname = taken ? meshName + "/" + f->name : f->name;
+    if (f->ncomp == 1 || f->ncomp == 2 || f->ncomp == 3) {
+      if (f->ncomp == 1) md->Add(new avtScalarMetaData(varname, meshName, AVT_NODECENT));
+      else md->Add(new avtVectorMetaData(varname, meshName, AVT_NODECENT, f->ncomp));
+      nodalField_[varname] = f->index;
+    } else {
+      for (int c = 0; c < f->ncomp; ++c) {
+        const std::string compName = varname + "_" + std::to_string(c);
+        md->Add(new avtScalarMetaData(compName, meshName, AVT_NODECENT));
+        nodalField_[compName] = f->index;
+        fieldComp_[compName] = c;
+      }
+    }
+  }
+  if (!skipped.empty()) md->SetDatabaseComment("SOMA: fields of " + path_ + " that cannot be drawn: " + skipped);
 
   // soma_part (the owning file part of every cell) and any entity-set labels, as zonal
   // scalars on the main mesh.
@@ -237,6 +291,9 @@ const MeshPiece &avtSOMAFileFormat::CachedPiece(int domain) {
 
 vtkDataSet *avtSOMAFileFormat::GetMesh(int domain, const char *meshname) {
   if (file_->kind() == FileKind::amr) return GetAmrBox(domain);
+  const std::string nodalPrefix(kNodalMeshPrefix);
+  if (std::string(meshname).compare(0, nodalPrefix.size(), nodalPrefix) == 0)
+    return GetSubcellMesh(domain, std::atoi(meshname + nodalPrefix.size()));
   int dim;
   if (!DimForMeshName(meshname, file_->dim(), dim))
     throw std::invalid_argument(std::string("avtSOMAFileFormat: unknown mesh '") + meshname + "'");
@@ -303,6 +360,50 @@ vtkDataSet *avtSOMAFileFormat::GetMeshPiece(int domain, int dim) {
   return ug;
 }
 
+// ****************************************************************************
+//  Method: avtSOMAFileFormat::GetSubcellMesh
+//
+//  Every quad of the domain as order x order sub-quads on its GLL points (soma_reader's subcells).
+//  Points are not shared between elements, and no global ids are given: a field here has a value
+//  at every point of the domain's own elements, so no ghost zones are needed.
+// ****************************************************************************
+
+const soma_reader::Subcells &avtSOMAFileFormat::CachedSubcells(int domain, int order) {
+  const auto key = std::make_pair(domain, order);
+  auto it = subcellCache_.find(key);
+  if (it != subcellCache_.end()) return it->second;
+  const MeshPiece &piece = CachedPiece(domain);
+  return subcellCache_.emplace(key, soma_reader::subcells(piece, piece.blocks.at(2), order, radius_)).first->second;
+}
+
+vtkDataSet *avtSOMAFileFormat::GetSubcellMesh(int domain, int order) {
+  if (order < 1 || order > soma_reader::MAX_NODE_ORDER)
+    throw std::invalid_argument("avtSOMAFileFormat: no sub-quads of order " + std::to_string(order));
+  const soma_reader::Subcells &sub = CachedSubcells(domain, order);
+  vtkUnstructuredGrid *ug = vtkUnstructuredGrid::New();
+  vtkPoints *pts = vtkPoints::New();
+  pts->SetDataTypeToDouble();
+  pts->SetNumberOfPoints(static_cast<vtkIdType>(sub.num_points()));
+  if (!sub.points.empty()) std::memcpy(pts->GetVoidPointer(0), sub.points.data(), sub.points.size() * sizeof(double));
+  ug->SetPoints(pts);
+  pts->Delete();
+  const vtkIdType ncells = static_cast<vtkIdType>(sub.size());
+  vtkIdTypeArray *offsets = vtkIdTypeArray::New();
+  offsets->SetNumberOfTuples(ncells + 1);
+  for (vtkIdType c = 0; c <= ncells; ++c) offsets->SetValue(c, 4 * c);
+  vtkIdTypeArray *conn = vtkIdTypeArray::New();
+  conn->SetNumberOfTuples(4 * ncells);
+  for (vtkIdType k = 0; k < 4 * ncells; ++k)
+    conn->SetValue(k, static_cast<vtkIdType>(sub.connectivity[static_cast<std::size_t>(k)]));
+  vtkCellArray *cells = vtkCellArray::New();
+  cells->SetData(offsets, conn);
+  offsets->Delete();
+  conn->Delete();
+  ug->SetCells(VTK_QUAD, cells);
+  cells->Delete();
+  return ug;
+}
+
 // -- scalar/vector/part arrays -------------------------------------------------------------
 
 namespace {
@@ -354,15 +455,26 @@ vtkDataArray *avtSOMAFileFormat::FieldArray(int domain, const std::string &varna
   return ArrayToVtk(fit->second, comp);
 }
 
+// A spectral-element field is read when asked for, not with the domain: a file may hold many.
+vtkDataArray *avtSOMAFileFormat::NodalArray(int domain, const std::string &varname) {
+  const FieldInfo &f = file_->fields()[static_cast<std::size_t>(nodalField_.at(varname))];
+  const soma_reader::Subcells &sub = CachedSubcells(domain, f.order);
+  const Array a = soma_reader::subcell_values(*file_, f, CachedPiece(domain), sub, nodalCache_);
+  auto comp = fieldComp_.find(varname);
+  return ArrayToVtk(a, comp == fieldComp_.end() ? -1 : comp->second);
+}
+
 vtkDataArray *avtSOMAFileFormat::GetVar(int domain, const char *varname) {
   if (file_->kind() == FileKind::amr) return GetAmrVar(domain, std::string(varname));
   std::string name(varname);
   if (name == "soma_part") return PartArray(domain);
+  if (nodalField_.count(name)) return NodalArray(domain, name);
   return FieldArray(domain, name);
 }
 
 vtkDataArray *avtSOMAFileFormat::GetVectorVar(int domain, const char *varname) {
   if (file_->kind() == FileKind::amr) return GetAmrVar(domain, std::string(varname));
+  if (nodalField_.count(varname)) return NodalArray(domain, std::string(varname));
   return FieldArray(domain, std::string(varname));
 }
 

@@ -70,6 +70,8 @@ Parts are assigned as SOMA assigns them: at P ranks, part q goes to rank floor(q
 * Fields with one fixed-size row per entity: point data on vertices, cell data on elements;
   entities outside a field's domain get NaN. Fields on entity sets become cell labels
   `set:<name>`. Variable-length, handle and element-node fields are listed as skipped.
+* Spectral-element fields (GLL values on quads) by `sv.read_nodal(path)`: a piece of order x order
+  sub-quads per element with the stored values as point data (`sv.plot(piece, scalars="eta")`).
 * `soma_part` (owning part of each cell) and `soma_gid` (global ids, also VTK GlobalIds).
 * AMR checkpoints: one grid per box, coarse cells covered by finer boxes blanked.
 

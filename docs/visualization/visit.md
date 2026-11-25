@@ -45,6 +45,11 @@ them. Build with the compiler VisIt was built with, not one from another environ
   component. VisIt names variables by name alone, so a name several fields share (MOAB's
   `GLOBAL_ID`, written once per dimension) is qualified by where it lives: `nodal/GLOBAL_ID`,
   `mesh/GLOBAL_ID`, `elements_dim1/GLOBAL_ID`.
+- A spectral-element field (GLL values on quads, as
+  [`SemSpace`](../algorithms/spectral-elements.md) makes) is on the mesh `mesh_gll_p<order>`, every
+  quad drawn as order x order sub-quads on its GLL points, the stored values at the points.
+- Fields that cannot be drawn are named in the database comment (File information).
+- VisIt shows a `:` in a name as `_colon_`: `ocean:H` is `ocean_colon_H`.
 - `soma_part` and `set:<name>` are zonal scalars on `mesh`.
 - An AMR checkpoint's domains are its boxes over every level, grouped by level, each a
   rectilinear grid; coarse cells under finer boxes are blanked through VisIt's domain nesting.
@@ -64,6 +69,8 @@ every kind, the knife last; an ocean mesh (3 parts) by node id; a 2D AMR checkpo
   small program `visit/tests/cpp_driver.cpp` (`visit/tests/build.sh` builds it), against the
   Python core on every test file, whole and part by part: coordinates, cell corners, fields, set
   labels and AMR boxes, in both prism conventions.
+- `visit/tests/compare_nodal.py` checks the sub-quads of spectral-element fields against files of known
+  positions and values and against the Python core, and that damaged files are refused.
 - `visit/tests/run_visit_tests.sh` builds the plugin against a VisIt install and runs
   `visit_test.py` in `visit -nowin -cli` on a serial engine and a 4-rank engine (and a large file
   on 8 ranks): the zones read and a field's range must equal the core's, and each file is

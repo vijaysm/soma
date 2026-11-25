@@ -23,7 +23,7 @@ def _info_mesh(path: str) -> None:
         if sf.fields:
             print("fields:")
         for f in sf.fields:
-            note = "" if f.drawable else f" (not drawable: {f.layout.name}{', variable' if f.variable else ''})"
+            note = "" if f.drawable else f" (GLL order {f.order}: read_nodal)" if f.nodal_on_quads else f" (not drawable: {f.layout.name}{', variable' if f.variable else ''})"
             print(f"  {f.name}: {f.dtype}, {f.ncomp} comp, on dims {f.dims}{note}")
         if sf.values:
             print("mesh values:")

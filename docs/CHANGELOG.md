@@ -3,6 +3,14 @@
 All notable changes to SOMA are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Visualization
+
+- somaview draws spectral-element fields (GLL values on quads) on sub-quads: `sv.read_nodal` in
+  Python, a mesh `mesh_gll_p<order>` in VisIt, whose database comment names the fields it cannot draw.
+- The VisIt plugin builds against VisIt 3.5.0's macOS package (`visit_macos.cmake`).
+
 ## [0.1.0] - 2026-11-23
 
 The first release. It is verified on host backends only: the suite (2021 tests, MPI at 1 to 8

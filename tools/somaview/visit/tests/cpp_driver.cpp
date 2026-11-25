@@ -10,6 +10,7 @@
 //   cached: if the literal word "cached" is given as a 5th argument, the halo is resolved
 //           through HaloCache (read_piece_cached) instead of the per-call scan (read_piece);
 //           results must be identical either way.
+//   nodal: also dump the spectral-element fields and their sub-quads (see dump_nodal).
 #include <cstdlib>
 #include "../soma_reader.hpp"
 
@@ -84,8 +85,35 @@ void dump_block(std::ofstream& out, const MeshPiece& piece, const CellBlock& blo
   for (auto& [name, arr] : block.cell_data) write_f64(out, "cell_data:" + d + ":" + name, arr.data, arr.ncomp);
 }
 
+// The GLL fields on sub-quads, by order: the gid of each point's element and its node (both as
+// nodal.py numbers them), positions, sub-quads and values.
+void dump_nodal(const SomaFile& sf, std::ofstream& out, std::vector<int> parts) {
+  HaloCache hc(sf);
+  const MeshPiece piece = read_piece_cached(sf, hc, parts, {2});
+  const CellBlock& block = piece.blocks.at(2);
+  const double radius = sphere_radius(sf);
+  std::set<int> orders;
+  for (auto& f : sf.fields()) if (f.nodal_on_quads()) orders.insert(f.order);
+  for (int p : orders) {
+    const Subcells sub = subcells(piece, block, p, radius);
+    const std::string tag = ":" + std::to_string(p);
+    std::vector<std::int64_t> gid;
+    for (auto c : sub.cells)
+      for (int k = 0; k < (p + 1) * (p + 1); ++k) gid.push_back(block.gids[static_cast<std::size_t>(c)] * (p + 1) * (p + 1) + k);
+    write_i64(out, "nodal_gid" + tag, gid);
+    write_f64(out, "nodal_xyz" + tag, sub.points, 3);
+    write_i64(out, "nodal_conn" + tag, sub.connectivity, 4);
+    FieldCache cache;
+    for (auto& f : sf.fields()) {
+      if (!f.nodal_on_quads() || f.order != p) continue;
+      const Array a = subcell_values(sf, f, piece, sub, cache);
+      write_f64(out, "nodal_data" + tag + ":" + f.name, a.data, a.ncomp);
+    }
+  }
+}
+
 void dump_mesh(const SomaFile& sf, std::ofstream& out, std::vector<int> parts, std::vector<int> dims, bool cached,
-              bool high_order) {
+              bool high_order, bool nodal) {
   MeshPiece piece;
   ReadOptions opt;
   opt.high_order = high_order;
@@ -104,6 +132,7 @@ void dump_mesh(const SomaFile& sf, std::ofstream& out, std::vector<int> parts, s
   write_i64(out, "piece_parts", parts_out);
   for (auto& [name, arr] : piece.point_data) write_f64(out, "point_data:" + name, arr.data, arr.ncomp);
   for (auto& [d, block] : piece.blocks) dump_block(out, piece, block);
+  if (nodal) dump_nodal(sf, out, parts);
   end_sections(out);
 }
 
@@ -143,24 +172,25 @@ void dump_amr(const SomaFile& sf, std::ofstream& out) {
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::cerr << "usage: cpp_driver <file.soma> <out.bin> [parts=csv] [dims=csv] [cached]\n";
+    std::cerr << "usage: cpp_driver <file.soma> <out.bin> [parts=csv] [dims=csv] [cached] [nodal]\n";
     return 2;
   }
   std::string path = argv[1], outpath = argv[2];
   std::vector<int> parts = argc > 3 && argv[3][0] ? parse_csv_int(argv[3]) : std::vector<int>{};
   std::vector<int> dims = argc > 4 && argv[4][0] ? parse_csv_int(argv[4]) : std::vector<int>{};
-  bool cached = false, high_order = true;
+  bool cached = false, high_order = true, nodal = false;
   for (int i = 5; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "cached") cached = true;
     if (a == "nohi") high_order = false;
+    if (a == "nodal") nodal = true;
   }
   try {
     SomaFile sf(path);
     std::ofstream out(outpath, std::ios::binary);
     if (!out) { std::cerr << "cannot open " << outpath << " for writing\n"; return 3; }
     if (sf.kind() == FileKind::amr) dump_amr(sf, out);
-    else dump_mesh(sf, out, parts, dims, cached, high_order);
+    else dump_mesh(sf, out, parts, dims, cached, high_order, nodal);
   } catch (const std::exception& e) {
     std::cerr << "error: " << e.what() << "\n";
     return 1;

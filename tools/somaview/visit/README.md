@@ -41,6 +41,14 @@ implementation notes.
 - VisIt keys variables by name alone, so a name that several fields share (MOAB's `GLOBAL_ID`,
   written once per dimension) is qualified by where it lives: `nodal/GLOBAL_ID`,
   `mesh/GLOBAL_ID`, `elements_dim1/GLOBAL_ID` (VisIt shows the '/' as a submenu).
+- A spectral-element field (GLL values on quads, as `soma::sem::SemSpace` makes) is nodal on the mesh
+  `mesh_gll_p<order>`, every quad drawn as order x order sub-quads on its GLL points with the stored
+  values; components as above (`tracer0_0` ... for 10 of them). It is read when drawn. Points are not
+  shared between elements. On a sphere (every vertex at one distance from the origin within
+  SemSpace's 1e-8, and not all at z = 0; a file does not say) the points are projected as SemSpace's.
+- Fields that cannot be drawn (variable-length, handles, other element nodes) are named in the
+  database comment (File information, `GetMetaData(f).databaseComment`).
+- VisIt shows a `:` in a name as `_colon_`: `ocean:H` is `ocean_colon_H`.
 - `soma_part` (owning part of each cell) and `set:<name>` (entity-set labels) are zonal scalars
   on the main mesh.
 
@@ -80,7 +88,10 @@ compiler VisIt was built with (a conda compiler in `PATH` links against a differ
    built with `-fsanitize=address`): damaged copies of a mesh file (short root, field or value
    metadata, a part table shorter than its parts, corner counts that do not sum to the
    connectivity) each end with an error, never an out-of-bounds read; 7 cases.
-3. VisIt itself (`tests/visit_test.py`, expectations from `tests/visit_expected.py`, driven by
+3. Spectral-element fields (`tests/compare_nodal.py <cpp_driver> <workdir> [FILE ...]`): files of
+   known positions and values (plane and sphere, orders 1 to 8, 4, 8 and 9 nodes per quad, 1 to 4
+   parts, partial domains), whole and part by part, against those and the Python core; 6 damaged files.
+4. VisIt itself (`tests/visit_test.py`, expectations from `tests/visit_expected.py`, driven by
    `tests/run_visit_tests.sh`): 16 files on a serial engine and on a 4-rank parallel engine, and the
    50,304,352-cell, 48-part CONUS mesh on an 8-rank engine. For every file the zone count of
    the data read equals the Python core's and the MinMax of a field equals the Python core's;

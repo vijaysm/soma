@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "soma_reader.hpp"
@@ -31,6 +32,9 @@ class avtStructuredDomainNesting;
 //      dimensional mesh per other written dimension) and SOMA AMR checkpoints (one
 //      rectilinear grid per box, domain nesting built from the levels/boxes/ratio for
 //      VisIt to blank coarse cells under finer ones).
+//
+//      Spectral-element fields (GLL values on quads) are point data of one mesh of sub-quads
+//      per order, mesh_gll_p<order>.
 //
 //  Domains:
 //      Mesh files: domain == SOMA part index, 0 .. nparts - 1.
@@ -65,6 +69,9 @@ class avtSOMAFileFormat : public avtSTMDFileFormat
     const soma_reader::MeshPiece &CachedPiece(int domain);
     vtkDataArray *FieldArray(int domain, const std::string &varname);
     vtkDataArray *PartArray(int domain);
+    vtkDataSet *GetSubcellMesh(int domain, int order);
+    const soma_reader::Subcells &CachedSubcells(int domain, int order);
+    vtkDataArray *NodalArray(int domain, const std::string &varname);
 
     // -- AMR-checkpoint path -----------------------------------------------------------------
     void   PopulateAmrMetaData(avtDatabaseMetaData *md);
@@ -83,6 +90,11 @@ class avtSOMAFileFormat : public avtSTMDFileFormat
     std::map<std::string, int>                  fieldDim_;     // VisIt variable name -> dim
     std::map<std::string, int>                  fieldComp_;    // "<field>_<comp>" -> component index
     std::map<std::string, std::string>          fieldBase_;    // qualified or per-component name -> SOMA field name
+
+    std::map<std::string, int>                  nodalField_;   // VisIt variable name -> spectral-element field's index
+    std::map<std::pair<int, int>, soma_reader::Subcells> subcellCache_;  // (domain, order) -> its sub-quads
+    soma_reader::FieldCache                     nodalCache_;
+    double                                      radius_ = 0;   // of the sphere the mesh is on, or 0
 
     // AMR-checkpoint state.
     std::unique_ptr<soma_reader::AmrFile>        amr_;
