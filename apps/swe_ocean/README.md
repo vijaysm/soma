@@ -10,7 +10,14 @@ the equations, options, outputs and results are in
 ```sh
 build/apps/swe_ocean/swe_ocean --case kelvin --ne 40 --order 6          # analytic checks
 build/apps/swe_ocean/swe_ocean --case stommel --ne 8 --order 4
-mpiexec -n 8 build/apps/swe_ocean/swe_ocean --case wind --ne 30 --coast-km 50 \
+export OMP_NUM_THREADS=1                                                   # one thread per rank
+mpiexec -n 8 -bind-to core build/apps/swe_ocean/swe_ocean --case wind --ne 30 --coast-km 50 \
     --bathymetry ETOPO1_Ice_g_gmt4.nc --days 5 --report-hours 24 --save-mesh ocean_ne30.soma
-mpiexec -n 8 build/apps/swe_ocean/swe_ocean --case wind --mesh ocean_ne30.soma --days 60 --report-hours 24
+mpiexec -n 8 -bind-to core build/apps/swe_ocean/swe_ocean --case wind --mesh ocean_ne30.soma --days 60 --report-hours 24
 ```
+
+Run one thread per rank and bind each rank to its own core (`-bind-to core` is MPICH's; Open MPI:
+`--bind-to core`, Slurm: `srun --cpu-bind=cores`). Do not set `OMP_PROC_BIND` or `OMP_PLACES`
+unless the launcher binds the ranks: an unbound rank's thread is then pinned to the node's first
+core, with every other rank's. On NFS add `--io-aggregators 1`. See
+[Running on a cluster](../../docs/apps/swe-ocean.md#running-on-a-cluster).

@@ -13,10 +13,13 @@ built with `-DSOMA_ENABLE_APPS=ON`:
 cmake -S . -B build -DSOMA_ENABLE_MPI=ON -DSOMA_ENABLE_HDF5=ON -DSOMA_ENABLE_APPS=ON
 cmake --build build --target swe_ocean
 export OMP_NUM_THREADS=1    # one thread per rank: OpenMP's default oversubscribes the cores
-mpiexec -n 8 build/apps/swe_ocean/swe_ocean --case wind --ne 30 --coast-km 50 \
+mpiexec -n 8 -bind-to core build/apps/swe_ocean/swe_ocean --case wind --ne 30 --coast-km 50 \
     --bathymetry ETOPO1_Ice_g_gmt4.nc --days 5 --report-hours 24 --save-mesh ocean_ne30.soma
-mpiexec -n 8 build/apps/swe_ocean/swe_ocean --case wind --mesh ocean_ne30.soma --days 60
+mpiexec -n 8 -bind-to core build/apps/swe_ocean/swe_ocean --case wind --mesh ocean_ne30.soma --days 60
 ```
+
+The global runs are for a cluster; [Running on a cluster](#running-on-a-cluster) says how to place
+the ranks.
 
 Without HDF5 the analytic cases run, but the global cases cannot read a height file or a saved
 mesh, and nothing can be written as a SOMA file: `--bathymetry`, `--mesh`, `--save-mesh` and
@@ -283,6 +286,32 @@ digest 79882cf93db45b8a
 - Mass changes by $10^{-24}$ of the volume and the tracers by less than $10^{-16}$: rounding.
 - With the land flags, the Drake Passage section runs from 69.3 S to 54.9 S (Tierra del Fuego);
   the transport is spinning up from rest (1.0 Sv after 0.1 day).
+
+## Running on a cluster
+
+Run one thread per rank (`OMP_NUM_THREADS=1`) and have the launcher bind each rank to its own
+core:
+
+```sh
+export OMP_NUM_THREADS=1
+mpiexec -n 64 -bind-to core build/apps/swe_ocean/swe_ocean ...   # MPICH (Hydra)
+mpirun -n 64 --bind-to core build/apps/swe_ocean/swe_ocean ...   # Open MPI
+srun -n 64 --cpu-bind=cores build/apps/swe_ocean/swe_ocean ...   # Slurm
+```
+
+Kokkos then warns that `OMP_PROC_BIND` is not set; with one thread per rank there is nothing for
+it to bind (`OMP_PROC_BIND=false` silences it). Two settings go wrong, both seen on a cluster with
+the ne30 mesh of [A global run](#a-global-run):
+
+| Setting | What happens | 64 ranks: mesh read |
+| --- | --- | --- |
+| `OMP_NUM_THREADS` unset | every rank starts a thread per core of the node | (16 ranks: 47.8 s) |
+| `OMP_PROC_BIND=spread OMP_PLACES=threads`, ranks not bound | each rank's one thread is pinned to the first core of the node, every rank on the same core | 255 s |
+| `OMP_NUM_THREADS=1`, ranks bound to cores | | 1.9 s (the 2-step run with a snapshot: 9.4 s in all) |
+
+On NFS, where parallel HDF5 locks the file for each access, read and write SOMA files through one
+rank with `--io-aggregators 1`. Reports go to standard output line by line, so `tail -f` on a
+redirected log follows the run.
 
 ## Reproducibility
 
