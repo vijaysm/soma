@@ -102,7 +102,7 @@ mpiexec -n 8 pvbatch examples/pv_gallery.py SomaReader.py out_dir conus=conus.so
 
 ## Tests
 
-`tests/test_paraview.py` (run with `pvpython --no-mpi tests/test_paraview.py`) checks the
+`tests/test_paraview.py` (run with `pvpython --dr --no-mpi tests/test_paraview.py`) checks the
 reader's data, not pixels: counts, arrays, values against the core, pieces, time steps, AMR. All
 checks pass with ParaView 6.1.0 (macOS) and 6.1.1 (Linux). Under MPI, `pvbatch` on 1, 2, 4 and 7
 ranks reading SOMA-MPI-written files (hex at 4 and 7 parts, quadrilaterals at 7, MOAB bricks at

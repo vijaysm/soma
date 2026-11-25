@@ -92,7 +92,7 @@ The [CONUS mesh's figures](../apps/conus-200m.md#looking-at-the-mesh) are made t
 
 ## Tests
 
-`paraview/tests/test_paraview.py` (`pvpython --no-mpi paraview/tests/test_paraview.py`) checks
+`paraview/tests/test_paraview.py` (`pvpython --dr --no-mpi paraview/tests/test_paraview.py`) checks
 the reader's data against the core: counts, arrays and values on every test file, the default
 selections, pieces, time series and AMR. `tests/mpi/pv_mpi_check.py` checks under
 `mpiexec pvbatch` that the pieces cover every cell exactly once with the right coordinates, at 1,

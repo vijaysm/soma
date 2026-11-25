@@ -157,7 +157,23 @@ class SomaReader(VTKPythonAlgorithmBase):
     def GetCellArrayStatus(self):
         return self._cell_sel
 
-    @smproperty.dataarrayselection(name="ElementBlocks")
+    # smproperty.dataarrayselection's XML with one hint more: ParaView's "Load All Variables" must not turn
+    # on the blocks, or the sub-quads of a spectral element are drawn over the element itself.
+    @smproperty.xml("""
+        <StringVectorProperty name="ElementBlocksInfo" command="GetElementBlocks"
+                              number_of_elements_per_command="2" information_only="1"
+                              si_class="vtkSIDataArraySelectionProperty"/>
+        <StringVectorProperty name="ElementBlocks" information_property="ElementBlocksInfo"
+                              command="GetElementBlocks" number_of_elements_per_command="2"
+                              element_types="2 0" repeat_command="1"
+                              si_class="vtkSIDataArraySelectionProperty">
+          <ArraySelectionDomain name="array_list">
+            <RequiredProperties>
+              <Property function="ArrayList" name="ElementBlocksInfo"/>
+            </RequiredProperties>
+          </ArraySelectionDomain>
+          <Hints><OmitFromLoadAllVariables/></Hints>
+        </StringVectorProperty>""")
     def GetElementBlocks(self):
         return self._dim_sel
 
