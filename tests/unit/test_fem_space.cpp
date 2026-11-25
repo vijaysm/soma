@@ -21,6 +21,7 @@
 #include "soma/algorithms/csr.hpp"
 #include "soma/algorithms/fem.hpp"
 #include "soma/algorithms/fem_space.hpp"
+#include "soma/algorithms/refine.hpp"
 #include "soma/algorithms/laplacian.hpp"
 #include "soma/algorithms/vertex_graph.hpp"
 #include "soma/core/mesh_builder.hpp"
@@ -716,5 +717,29 @@ TEST(FemSpace, NumberingIsContiguousAndAgreesOnEveryHolder) {
       wrong += by_gid[static_cast<std::size_t>(mesh.gid(0)(v))] == n.index(v) + 1 ? 0 : 1;
     }
     EXPECT_EQ(wrong, 0);
+  }
+}
+
+// Hanging vertices and a hex face against two tets: the space would not be
+// continuous. Refused on every rank; conforming refinement is taken.
+TEST(FemSpace, SidesThatMatchOnlyInPartThrowOnEveryRank) {
+  const Comm c = Comm::world();
+  expect_message(c, fem_test::hexes_against_tets(c, 4), "two triangles tile");
+  for (const Topology t : {Topology::tri, Topology::quad, Topology::tet, Topology::hex}) {
+    for (const bool conforming : {false, true}) {
+      if (conforming && t == Topology::hex) continue;  // pyramids
+      SCOPED_TRACE(testing::Message() << "topology " << static_cast<int>(t) << " conforming " << conforming);
+      soma::HostMesh mesh = box_part(c, spec_of(t, 4), Part{.layers = 0});
+      std::vector<std::int8_t> marks(static_cast<std::size_t>(mesh.segment_table(mesh.dim()).owned_end), 0);
+      const auto v = mesh.view();
+      for (std::size_t e = 0; e < marks.size(); ++e) marks[e] = mesh.coords()(v.vertex(mesh.dim(), static_cast<LO>(e), 0), 0) < 0.4;
+      mesh = soma::refine_marked(c, mesh, marks, {.conforming = conforming}).mesh;
+      if (c.size() > 1) mesh.add_ghosts(c, soma::GhostOptions{1, 0, false});
+      if (conforming) {
+        EXPECT_NO_THROW(Space(c, mesh));
+      } else {
+        expect_message(c, mesh, "hanging vertex");
+      }
+    }
   }
 }

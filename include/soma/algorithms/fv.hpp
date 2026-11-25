@@ -96,7 +96,7 @@ inline bool fv_unlimited = false;
 struct FvPlan {
   bool supported = true;  ///< dimension 2 or 3, tri, quad, tet or hex cells, no nodes
   LO nonmanifold = 0;     ///< owned cells' sides that more than two cells have
-  LO hanging = 0;         ///< edges here of one-sided sides with a vertex of another inside
+  LO hanging = 0;         ///< sides here that tile without matching (detail::nonconforming_sides)
   LO bad_cells = 0;       ///< owned cells of no positive finite volume, or turned
                           ///< against a neighbour
   std::vector<Real> area;      ///< 3 per face, from the left cell to the right
@@ -126,8 +126,9 @@ class FvSpace {
   /// mesh is not of dimension 2 or 3, has edits or high-order nodes, holds a
   /// cell other than a tri, quad, tet or hex, a side more than two cells
   /// share, a cell of no positive volume or turned against a neighbour, or
-  /// hanging vertices (on more than one rank, seen where the ghost layer is
-  /// through vertices), or, on more than one rank, has no ghost layer; or if
+  /// sides that tile without matching: hanging vertices, or a quad against two
+  /// triangles (on more than one rank, seen where the ghost layer is through
+  /// vertices), or, on more than one rank, has no ghost layer; or if
   /// ranks differ in
   /// soma::reproducible() (which makes total() exact).
   FvSpace(const Comm& comm, const Mesh<MemSpace>& mesh, FvScheme scheme = FvScheme::upwind)
@@ -159,7 +160,8 @@ class FvSpace {
     }
     if (flags[5] != 0) {
       throw std::invalid_argument(
-          "FvSpace: a rank holds a hanging vertex; refine with MarkedOptions::conforming, or uniformly");
+          "FvSpace: a rank holds a hanging vertex, or a quad side that two triangles tile (a hex against two tets): "
+          "sides that match only in part would be walls; refine with MarkedOptions::conforming, or uniformly");
     }
     const int dim = mesh.dim();
     rows_ = mesh.segment_table(dim).owned_end;

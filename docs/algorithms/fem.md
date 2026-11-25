@@ -99,6 +99,9 @@ are [`CsrMatrix`](linear-algebra.md) in the same layout.
 - Dimension 2 or 3, cells all triangles, quads, tets or hexes, no high-order nodes, not edited
   (changed by `MeshEdit::apply` and not compressed since).
 - Every cell positively oriented (`least_jacobian > 0`).
+- Conforming: no hanging vertices, and no hex face against the two triangles of two tets. The
+  space would not be continuous there (a linear solution is no longer reproduced exactly); refine
+  with `MarkedOptions::conforming`, or uniformly.
 - On more than one rank, a ghost layer through vertices, `GhostOptions{1, 0}` (see
   [ghosts and halos](../parallel/ghosts-and-halos.md)). Every cell around an owned vertex is
   then present, and owners assemble their rows whole, without messages. The mesh must also

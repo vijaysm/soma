@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "soma/algorithms/conformity.hpp"
 #include "soma/topology/sides.hpp"
 
 namespace soma::detail {
@@ -112,58 +113,6 @@ void cell_geometry(const MeshView<Kokkos::HostSpace>& m, int dim, LO cells, LO o
       for (std::size_t i = 0; i < 9; ++i) inv[i] = co[i] / det;
     }
   }
-}
-
-// The edges of one-sided sides that have the end of another of them inside:
-// each side of an edge (a, m) on an edge (a, b), m strictly between a and b,
-// as a conforming mesh has none. A refined cell across a coarse side shares
-// its corner a, so a ghost layer through vertices holds the fine edge on the
-// rank that owns the coarse cell.
-template <class Coords, class OneSided>
-LO hanging_edges(const MeshView<Kokkos::HostSpace>& m, int dim, LO cells, const Coords& x, const OneSided& one_sided) {
-  std::vector<std::pair<LO, LO>> ends;  // (a, b) and (b, a) of every edge of a one-sided side
-  for (LO e = 0; e < cells; ++e) {
-    for (int s = 0; s < topology::side_count(m, dim, e, dim - 1); ++s) {
-      const topology::Side sd = topology::side_of(m, dim, e, dim - 1, s);
-      if (!one_sided(sd, e)) continue;
-      for (int k = 0; k < (sd.n == 2 ? 1 : sd.n); ++k) {
-        const LO a = sd.v[k], b = sd.v[(k + 1) % sd.n];
-        ends.emplace_back(a, b);
-        ends.emplace_back(b, a);
-      }
-    }
-  }
-  std::sort(ends.begin(), ends.end());
-  ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
-  LO found = 0;
-  for (std::size_t lo = 0, hi = 0; lo < ends.size(); lo = hi) {
-    const LO a = ends[lo].first;
-    while (hi < ends.size() && ends[hi].first == a) ++hi;
-    for (std::size_t i = lo; i < hi; ++i) {
-      std::array<Real, 3> u{};
-      Real uu = 0, size = 0;
-      for (int q = 0; q < 3; ++q) {
-        u[static_cast<std::size_t>(q)] = x(ends[i].second, q) - x(a, q);
-        uu += u[static_cast<std::size_t>(q)] * u[static_cast<std::size_t>(q)];
-        size = std::max({size, std::abs(x(a, q)), std::abs(x(ends[i].second, q))});
-      }
-      // Off the edge by rounding only: of its length, and of the coordinates.
-      const Real off = 1e-10 * std::sqrt(uu) + 8 * std::numeric_limits<Real>::epsilon() * size;
-      for (std::size_t j = lo; j < hi; ++j) {
-        if (j == i) continue;
-        Real uw = 0, rest = 0;
-        for (int q = 0; q < 3; ++q) uw += u[static_cast<std::size_t>(q)] * (x(ends[j].second, q) - x(a, q));
-        const Real at = uw / uu;
-        if (!(at > 1e-6 && at < 1 - 1e-6)) continue;
-        for (int q = 0; q < 3; ++q) {
-          const Real r = x(ends[j].second, q) - x(a, q) - at * u[static_cast<std::size_t>(q)];
-          rest += r * r;
-        }
-        if (rest <= off * off) ++found;
-      }
-    }
-  }
-  return found;
 }
 
 }  // namespace
@@ -366,8 +315,7 @@ FvPlan fv_plan(const Mesh<Kokkos::HostSpace>& mesh) {
   }
   p.cell_sign.resize(p.cell_faces.size());
   cell_geometry(m, dim, cells, owned, x, gid, p);
-  p.hanging = hanging_edges(m, dim, cells, x,
-                            [&](const topology::Side& sd, LO e) { return neighbour(key_of(sd), e) == -1; });
+  p.hanging = nonconforming_sides(mesh);
   for (LO c = 0; c < owned; ++c) {
     const auto ci = static_cast<std::size_t>(c);
     for (Offset k = p.cell_offsets[ci]; k < p.cell_offsets[ci + 1]; ++k) {

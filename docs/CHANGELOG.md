@@ -21,7 +21,9 @@ All notable changes to SOMA are recorded here. The format follows
 - Fixed: on an edited mesh with removed vertices, sides derived again named the wrong vertices until it was compressed.
 - Fixed: an edit of a 3D mesh that held edges and faces could be refused after cells had been removed ("explicit
   entity ... is no side of any element").
-- `FvSpace` refuses a mesh with hanging vertices. It took one, and its coarse-fine faces were walls.
+- `FvSpace` and `FemSpace` refuse meshes whose sides tile without matching: hanging vertices, or a hex face against
+  two tets' triangles. `FvSpace` took them and such faces were walls; `FemSpace` took them and was not continuous
+  there (a linear solution off by 4e-2 on a mixed cube of 4^3 cells, halving as the mesh halves).
 
 ### Visualization
 

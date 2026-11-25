@@ -50,6 +50,7 @@
 
 #include <Kokkos_Core.hpp>
 
+#include "soma/algorithms/conformity.hpp"
 #include "soma/algorithms/csr.hpp"
 #include "soma/algorithms/fem.hpp"
 #include "soma/algorithms/to_space.hpp"
@@ -272,8 +273,10 @@ class FemSpace {
   /// Collective. Throws std::invalid_argument on every rank if any rank's
   /// mesh is not of dimension 2 or 3, has unremoved edits, holds a cell
   /// without elements here (only tri, quad, tet, hex) or one whose Jacobian
-  /// is not positive throughout, or, on more than one rank, has no ghost
-  /// layer through vertices, or if ranks differ in soma::reproducible().
+  /// is not positive throughout, sides that tile without matching (hanging
+  /// vertices, a quad against two triangles: detail::nonconforming_sides),
+  /// or, on more than one rank, has no ghost layer through vertices, or if
+  /// ranks differ in soma::reproducible().
   /// `assembly` is how laplacian() assembles, gather when reproducible.
   FemSpace(const Comm& comm, const Mesh<MemSpace>& mesh, Assembly assembly = Assembly::gather)
       : view_(mesh.view()), reproducible_(soma::reproducible()) {
@@ -292,12 +295,13 @@ class FemSpace {
     if (!bad) p = detail::fem_plan(*host, assembly_);
     const bool usable = !bad && p.fits;
     const Real exact = reproducible_ ? Real{1} : Real{0};
-    Real flags[6] = {bad ? Real{1} : Real{0},
+    Real flags[7] = {bad ? Real{1} : Real{0},
                      p.fits ? Real{0} : Real{1},
                      static_cast<Real>(p.orphans),
                      usable ? static_cast<Real>(detail::bad_cells(view_)) : Real{0},
                      exact,
-                     -exact};
+                     -exact,
+                     bad ? Real{0} : static_cast<Real>(detail::nonconforming_sides(*host))};
     comm.allreduce(std::span<Real>(flags), Op::max);
     if (flags[4] != -flags[5]) throw std::invalid_argument("FemSpace: ranks differ in soma::reproducible()");
     if (flags[0] != 0) {
@@ -308,6 +312,11 @@ class FemSpace {
     if (flags[1] != 0) throw std::invalid_argument("FemSpace: a rank's element matrices do not fit Offset");
     if (flags[2] != 0) throw std::invalid_argument("FemSpace: a rank owns a vertex that no cell there has");
     if (flags[3] != 0) throw std::invalid_argument("FemSpace: a rank holds an inverted or degenerate cell");
+    if (flags[6] != 0) {
+      throw std::invalid_argument(
+          "FemSpace: a rank holds a hanging vertex, or a quad side that two triangles tile (a hex against two tets): "
+          "the space would not be continuous there; refine with MarkedOptions::conforming, or uniformly");
+    }
 
     rows_ = mesh.segment_table(0).owned_end;
     cols_ = mesh.count(0);

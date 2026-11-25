@@ -539,3 +539,10 @@ TEST(Fv, HangingVerticesThrowOnEveryRank) {
     }
   }
 }
+
+// A hex face against the two triangles of two tets: no side matches, so it
+// would be a wall. Refused on every rank.
+TEST(Fv, AQuadAgainstTwoTrianglesThrowsOnEveryRank) {
+  const Comm c = Comm::world();
+  expect_message(c, fem_test::hexes_against_tets(c, 4), "two triangles tile");
+}
