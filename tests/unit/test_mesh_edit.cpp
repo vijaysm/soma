@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <functional>
 #include <map>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -721,4 +722,60 @@ TEST(MeshEdit, CompressThresholdsAreChosenPerEditOrPerProcess) {
   MeshEdit e(d);
   EXPECT_THROW(e.set_compress_threshold(2.0), std::invalid_argument);
   EXPECT_EQ(soma::compress_threshold(), 0.25);
+}
+
+// Sides derived again on an edited mesh name its vertices, not those of its
+// compressed copy, which lie elsewhere once a vertex is removed.
+TEST(MeshEdit, SidesDerivedAgainNameTheEditedMeshsVertices) {
+  for (const Topology t : {Topology::quad, Topology::hex}) {
+    SCOPED_TRACE(testing::Message() << "topology " << static_cast<int>(t));
+    soma::HostMesh m = soma::testing::box_mesh({5, 4, t == Topology::hex ? 3 : 1, t});
+    const int d = m.dim();
+    soma::AdjacencyRequest request;
+    for (int k = 1; k < d; ++k) request.add(d, k);
+    soma::build_adjacencies(m, request);
+    // Cell 0 goes with the corner only it has, and the sides at that corner.
+    const auto v = m.view();
+    std::vector<int> uses(static_cast<std::size_t>(m.count(0)), 0);
+    for (LO e = 0; e < m.count(d); ++e) {
+      for (LO k = 0; k < v.num_vertices(d, e); ++k) ++uses[static_cast<std::size_t>(v.vertex(d, e, k))];
+    }
+    LO corner = soma::invalid_lo;
+    for (LO k = 0; k < v.num_vertices(d, 0); ++k) {
+      if (uses[static_cast<std::size_t>(v.vertex(d, 0, k))] == 1) corner = v.vertex(d, 0, k);
+    }
+    ASSERT_NE(corner, soma::invalid_lo);
+    soma::MeshEdit edit(m);
+    edit.set_compress_threshold(0);
+    edit.remove(d, std::vector<LO>{0});
+    for (int s = 1; s < d; ++s) {
+      std::vector<LO> at;
+      for (LO e = 0; e < m.count(s); ++e) {
+        for (LO k = 0; k < v.num_vertices(s, e); ++k) {
+          if (v.vertex(s, e, k) == corner) at.push_back(e);
+        }
+      }
+      edit.remove(s, at);
+    }
+    edit.remove(0, std::vector<LO>{corner});
+    (void)edit.apply();
+    // Every side is a side of the cells that have it, corner by corner.
+    const auto w = m.view();
+    for (int s = 1; s < d; ++s) {
+      const auto down = m.adjacency(d, s);
+      for (LO e = 0; e < m.count(d); ++e) {
+        if (!w.alive(d, e)) continue;
+        std::set<LO> mine;
+        for (LO k = 0; k < w.num_vertices(d, e); ++k) mine.insert(w.vertex(d, e, k));
+        for (auto i = down.offsets(static_cast<std::size_t>(e)); i < down.offsets(static_cast<std::size_t>(e) + 1); ++i) {
+          const LO side = down.targets(static_cast<std::size_t>(i));
+          for (LO k = 0; k < w.num_vertices(s, side); ++k) EXPECT_TRUE(mine.contains(w.vertex(s, side, k)));
+        }
+      }
+    }
+    // A further edit is taken.
+    soma::MeshEdit again(m);
+    again.remove(d, std::vector<LO>{1});
+    EXPECT_NO_THROW((void)again.apply());
+  }
 }

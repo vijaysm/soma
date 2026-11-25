@@ -11,6 +11,7 @@
 
 #include "handles.hpp"
 #include "soma/core/mesh_edit.hpp"
+#include "soma/parallel/merge.hpp"
 
 struct soma_edit {
   std::shared_ptr<soma::c::MeshState> state;  // keeps the mesh the edit points to
@@ -138,6 +139,33 @@ int soma_mesh_compress(soma_mesh_t* mesh, soma_renumbering_t** renumbering) {
     soma::Renumbering result = m.get().compress();
     m.state->changed();
     r = new_renumbering(std::move(result));
+  });
+}
+
+int soma_mesh_needs_sync(const soma_mesh_t* mesh, int* needs) {
+  return call([&] {
+    constexpr const char* what = "soma_mesh_needs_sync";
+    out(needs, what) = need(mesh, what).get().needs_sync() ? 1 : 0;
+  });
+}
+
+int soma_mesh_sync(const soma_comm_t* comm, soma_mesh_t* mesh, double tolerance, int ghosts,
+                   soma_renumbering_t** renumbering) {
+  return call([&] {
+    constexpr const char* what = "soma_mesh_sync";
+    const soma::Comm& c = *need(comm, what).comm;
+    soma_mesh* m = nullptr;
+    soma_renumbering_t** r = nullptr;
+    soma::c::agree(c, what, [&] {
+      m = &need(mesh, what);
+      r = &out(renumbering, what);
+      *r = nullptr;
+    });
+    soma::SyncOptions options;
+    options.tol.tol = tolerance;
+    options.ghosts = ghosts != 0;
+    m->state->changed();
+    *r = new_renumbering(soma::sync_mesh(c, m->get(), options));
   });
 }
 

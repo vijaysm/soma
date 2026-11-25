@@ -132,9 +132,11 @@ class HaloExchange {
   /// Collective: ghost holders tell each owner which of its entities they
   /// hold. Throws std::invalid_argument if the mesh has no sharing fields on
   /// `dim` (it was not built by build_local_part) or `dim` is out of range,
-  /// and on every rank if a rank holds a ghost its owner does not own.
+  /// and on every rank if a rank holds a ghost its owner does not own;
+  /// std::logic_error on every rank if a rank's mesh needs sync_mesh.
   HaloExchange(const Comm& comm, const Mesh<MemSpace>& mesh, int dim) : dim_(dim), me_(comm.rank()) {
     if (dim < 0 || dim > 3) throw std::invalid_argument("HaloExchange: dimension " + std::to_string(dim));
+    detail::require_synced(comm, mesh.needs_sync(), "HaloExchange");
     const SegmentTable& t = mesh.segment_table(dim);
     count_ = mesh.count(dim);
     first_ = t.interior_end;

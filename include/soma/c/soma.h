@@ -277,6 +277,15 @@ void soma_edit_free(soma_edit_t* edit);
 
 /// Drops the removed entities; *renumbering gives each old lid's new one.
 int soma_mesh_compress(soma_mesh_t* mesh, soma_renumbering_t** renumbering);
+/// 1 in *needs for a distributed part edited since its sharing was made.
+int soma_mesh_needs_sync(const soma_mesh_t* mesh, int* needs);
+/// Collective: makes the part whole again after edits on any rank: compressed,
+/// its sharing, graphs and ghosts (layers as before; none where ghosts is 0)
+/// made again; vertices added are matched by place, within tolerance.
+/// *renumbering gives each old lid's new one, for no dimension where no
+/// rank's part needed it.
+int soma_mesh_sync(const soma_comm_t* comm, soma_mesh_t* mesh, double tolerance, int ghosts,
+                   soma_renumbering_t** renumbering);
 /// The new lid of each old lid of dimension d (-1: removed); count of them.
 int soma_renumbering_new_lids(const soma_renumbering_t* renumbering, int d, const soma_lo_t** new_lids,
                               soma_lo_t* count);

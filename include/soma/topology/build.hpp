@@ -65,6 +65,14 @@ struct TopologyAccess {
     return m.ghosts_;
   }
   template <class M>
+  static UnsyncedEdits& edits(Mesh<M>& m) {
+    return m.edits_;
+  }
+  template <class M>
+  static const UnsyncedEdits& edits(const Mesh<M>& m) {
+    return m.edits_;
+  }
+  template <class M>
   static CoordView<M>& coords(Mesh<M>& m) {
     return m.coords_;
   }

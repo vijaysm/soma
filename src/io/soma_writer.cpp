@@ -133,7 +133,7 @@ Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_er
   // the vertices' extent it is recognized by.
   std::array<std::uint64_t, 33> f{};
   f[0] = local_error.empty() ? 0 : 1;
-  f[1] = mesh.edited() && comm.size() > 1 ? 1 : 0;
+  f[1] = (mesh.edited() || mesh.needs_sync()) && comm.size() > 1 ? 1 : 0;
   f[2] = hs;
   f[3] = ~hs;
   f[4] = hf;
@@ -167,7 +167,7 @@ Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_er
     if (!local_error.empty()) throw std::invalid_argument(std::string(who) + ": " + local_error);
     throw std::invalid_argument(std::string(who) + ": another rank cannot write its part");
   }
-  if (f[1] != 0) throw std::logic_error(std::string(who) + ": a rank's mesh holds edits; compress() it first");
+  if (f[1] != 0) throw std::logic_error(std::string(who) + ": a rank's mesh holds edits; call sync_mesh first");
   if (f[2] != ~f[3]) {
     throw std::invalid_argument(std::string(who) +
                                 ": the ranks' sets differ (gids, flags, children, parents or sets they contain)");

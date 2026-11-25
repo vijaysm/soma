@@ -11,6 +11,7 @@
 #include <map>
 #include <numeric>
 #include <optional>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -18,9 +19,11 @@
 #include <vector>
 
 #include "closure.hpp"
+#include "soma/core/mesh_edit.hpp"
 #include "soma/core/mesh_view.hpp"
 #include "soma/fields/domain_mesh.hpp"
 #include "records.hpp"
+#include "soma/parallel/ghosts.hpp"
 #include "soma/parallel/transport/rendezvous.hpp"
 #include "soma/parallel/transport/sort.hpp"
 #include "soma/topology/build.hpp"
@@ -291,7 +294,12 @@ Sharing merge_vertices(const Comm& comm, MeshBuilder& builder, PointTolerance to
                     gids);
 }
 
-Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, const MergeOptions& options) {
+namespace {
+
+// merge_mesh; with `by_gid`, entities are one where their gids are, whatever
+// their places. `known` keeps gids strictly where no rank's part has sharing
+// any more.
+Renumbering merge_live(const Comm& comm, HostMesh& mesh, const MergeOptions& options, bool by_gid, bool known) {
   using Access = detail::TopologyAccess;
   const PointTolerance tol = options.tol;
   const MergeGids how = options.gids;
@@ -332,7 +340,8 @@ Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, const MergeOptions& opt
   const auto added = [&](int d, LO e) { return is_added[static_cast<std::size_t>(d)][static_cast<std::size_t>(e)] != 0; };
   // On a distributed mesh the gids kept must already agree: one naming
   // different points on two ranks is an added entity not named as one.
-  const bool strict = comm.allreduce(static_cast<std::int32_t>(mesh.fields().contains(sharing_field)), Op::max) != 0;
+  const bool strict =
+      comm.allreduce(static_cast<std::int32_t>(known || mesh.fields().contains(sharing_field)), Op::max) != 0;
   std::array<std::vector<std::uint8_t>, 4> trusted;
   std::array<GO, 4> top{};
   for (int d = 0; d <= mesh.dim(); ++d) {
@@ -381,9 +390,14 @@ Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, const MergeOptions& opt
 
   // Merged and numbered as merge_vertices and number_elements, then built.
   std::vector<GO> merged;
-  Sharing vertices = merge_into(comm, b, tol, how, trusted[0], top[0], merged, strict);
-  std::array<std::optional<Sharing>, 4> sharing = number_into(comm, b, how, trusted, top, strict);
-  sharing[0] = std::move(vertices);
+  std::array<std::optional<Sharing>, 4> sharing;
+  if (by_gid) {
+    merged = std::vector<GO>(b.vertex_gids().begin(), b.vertex_gids().end());
+  } else {
+    Sharing vertices = merge_into(comm, b, tol, how, trusted[0], top[0], merged, strict);
+    sharing = number_into(comm, b, how, trusted, top, strict);
+    sharing[0] = std::move(vertices);
+  }
   const AdjacencyRequest graphs = detail::graphs_to_rebuild(comm, mesh);
   HostMesh next;
   if (parts) {
@@ -463,6 +477,63 @@ Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, const MergeOptions& opt
     }
     if (const auto& s = own[static_cast<std::size_t>(d)]) detail::add_sharing_fields(next, d, s->offsets, s->ranks, s->owners);
   }
+  mesh.swap(next);
+  return out;
+}
+
+}  // namespace
+
+Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, const MergeOptions& options) {
+  return merge_live(comm, mesh, options, false, false);
+}
+
+Renumbering sync_mesh(const Comm& comm, HostMesh& mesh, const SyncOptions& options) {
+  using Access = detail::TopologyAccess;
+  const detail::UnsyncedEdits edits = Access::edits(std::as_const(mesh));
+  std::array<std::int32_t, 4> f{edits.unsynced ? 1 : 0, edits.adds ? 1 : 0};
+  const std::array<int, 2> had = edits.ghosts[0] > 0 ? edits.ghosts : std::array{mesh.ghost_layers(), mesh.ghost_bridge_dim()};
+  f[2] = had[0];
+  f[3] = had[1];
+  comm.allreduce(std::span<std::int32_t>(f), Op::max);
+  Renumbering out;
+  if (f[0] == 0) return out;
+
+  // On a copy, so that a throw leaves the mesh as it was. The parts not edited
+  // drop their ghosts too.
+  HostMesh next = mesh.clone();
+  std::exception_ptr failure;
+  Renumbering packed;
+  MergeOptions merge{options.tol, MergeGids::keep, std::array<std::vector<LO>, 4>{}};
+  try {
+    detail::drop_ghosts(next);
+    packed = next.compress();
+    for (int d = 0; d <= 3; ++d) {
+      const auto& chosen = edits.chosen[static_cast<std::size_t>(d)];
+      const std::set<GO> mine(chosen.begin(), chosen.end());
+      if (mine.empty()) continue;
+      for (LO e = 0; e < next.count(d); ++e) {
+        if (mine.contains(next.gid(d)(e))) (*merge.added)[static_cast<std::size_t>(d)].push_back(e);
+      }
+    }
+  } catch (...) {
+    failure = std::current_exception();
+  }
+  if (comm.allreduce(static_cast<std::int32_t>(failure ? 1 : 0), Op::max) != 0) {
+    if (failure) std::rethrow_exception(failure);
+    throw std::runtime_error("sync_mesh: another rank failed");
+  }
+  out = merge_live(comm, next, merge, f[1] == 0, true);
+  for (int d = 0; d <= 3; ++d) {
+    const auto& first = packed.new_lid[static_cast<std::size_t>(d)];
+    auto& then = out.new_lid[static_cast<std::size_t>(d)];
+    if (first.empty()) continue;
+    std::vector<LO> both(first.size(), invalid_lo);
+    for (std::size_t i = 0; i < first.size(); ++i) {
+      if (first[i] != invalid_lo) both[i] = then[static_cast<std::size_t>(first[i])];
+    }
+    then = std::move(both);
+  }
+  if (options.ghosts && f[2] > 0 && comm.size() > 1) next.add_ghosts(comm, GhostOptions{f[2], f[3], options.ghost_sets});
   mesh.swap(next);
   return out;
 }

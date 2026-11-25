@@ -125,6 +125,8 @@ module soma
     procedure, private :: mesh_set_field_f64, mesh_set_field_i32, mesh_set_field_i64
     generic :: set_field => mesh_set_field_f64, mesh_set_field_i32, mesh_set_field_i64
     procedure :: compress => mesh_compress
+    procedure :: needs_sync => mesh_needs_sync
+    procedure :: sync => mesh_sync
     procedure :: add_ghosts => mesh_add_ghosts
     procedure :: remove_ghosts => mesh_remove_ghosts
     procedure :: free => mesh_free
@@ -1286,6 +1288,42 @@ contains
     type(soma_renumbering) :: r
     call finish(c_mesh_compress(self%ptr, r%ptr), ierr)
   end function
+
+  !> True for a distributed part edited since its sharing was made.
+  function mesh_needs_sync(self, ierr) result(needs)
+    class(soma_mesh), intent(in) :: self
+    integer, intent(out), optional :: ierr
+    logical :: needs
+    integer(c_int) :: n
+    integer(c_int) :: status
+    n = 0
+    status = c_mesh_needs_sync(self%ptr, n)
+    needs = n /= 0
+    call finish(status, ierr)
+  end function
+
+  !> Collective, in place: makes the part whole again after edits on any rank:
+  !> compressed, its sharing, graphs and ghost layers (none if ghosts is false)
+  !> made again; vertices added are matched by place, within tolerance (0).
+  subroutine mesh_sync(self, comm, tolerance, ghosts, renumbering, ierr)
+    class(soma_mesh), intent(inout) :: self
+    type(soma_comm), intent(in) :: comm
+    real(c_double), intent(in), optional :: tolerance
+    logical, intent(in), optional :: ghosts
+    type(soma_renumbering), intent(out), optional :: renumbering
+    integer, intent(out), optional :: ierr
+    type(soma_renumbering) :: r
+    real(c_double) :: tol
+    integer(c_int) :: g
+    tol = 0
+    if (present(tolerance)) tol = tolerance
+    g = 1
+    if (present(ghosts)) then
+      if (.not. ghosts) g = 0
+    end if
+    call finish(c_mesh_sync(comm%ptr, self%ptr, tol, g, r%ptr), ierr)
+    if (present(renumbering)) renumbering = r
+  end subroutine
 
   !> The new id of each old id of dimension d (1-based; 0: removed).
   function renumbering_new_ids(self, d, ierr) result(ids)

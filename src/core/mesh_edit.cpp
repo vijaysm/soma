@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
@@ -15,6 +16,7 @@
 #include "soma/core/mesh_builder.hpp"
 #include "soma/runtime/options.hpp"
 #include "soma/fields/domain_mesh.hpp"
+#include "soma/parallel/distributed.hpp"
 #include "soma/topology/build.hpp"
 #include "soma/topology/nodes.hpp"
 #include "soma/topology/sides.hpp"
@@ -34,6 +36,18 @@ View1<T, Host> grown(const View1<T, Host>& old, std::size_t keep, std::size_t n,
   return out;
 }
 
+// The largest fraction, over the dimensions, of slots that hold removed
+// entities, `apart` of them (dropped ghosts) not counted.
+double fraction_gone(const HostMesh& mesh, const std::array<LO, 4>& apart) {
+  double worst = 0;
+  for (int d = 0; d <= 3; ++d) {
+    const LO n = mesh.count(d);
+    if (n == 0) continue;
+    worst = std::max(worst, static_cast<double>(n - mesh.num_live(d) - apart[static_cast<std::size_t>(d)]) / n);
+  }
+  return worst;
+}
+
 // A side by its vertex count and its vertices sorted.
 std::array<LO, 5> side_key(const topology::Side& s) {
   std::array<LO, 5> x{static_cast<LO>(s.n), -1, -1, -1, -1};
@@ -42,13 +56,23 @@ std::array<LO, 5> side_key(const topology::Side& s) {
   return x;
 }
 
-// The sides of dimension k of every live entity above k, sorted.
+// Sides derived alone, no longer complete: those no element has go.
+bool pruned(const HostMesh& mesh, int d) {
+  const auto& b = detail::TopologyAccess::block(mesh, d);
+  return d > 0 && d < mesh.dim() && b.count > 0 && !b.input && !b.derived;
+}
+
+// The sides of dimension k of every live entity above k, sorted; but for
+// entities that go as sides no element has.
 std::vector<std::array<LO, 5>> side_keys(const HostMesh& mesh, int k) {
   const auto m = mesh.view();
   std::vector<std::array<LO, 5>> out;
   for (int d = k + 1; d <= mesh.dim(); ++d) {
+    const bool some_go = pruned(mesh, d);
+    const std::vector<std::array<LO, 5>> had = some_go ? side_keys(mesh, d) : std::vector<std::array<LO, 5>>{};
     for (LO e = 0; e < mesh.count(d); ++e) {
       if (!m.alive(d, e)) continue;
+      if (some_go && !std::binary_search(had.begin(), had.end(), side_key(topology::entity_as_side(m, d, e)))) continue;
       const int n = topology::side_count(m, d, e, k);
       for (int s = 0; s < n; ++s) out.push_back(side_key(topology::side_of(m, d, e, k, s)));
     }
@@ -206,6 +230,42 @@ void MeshEdit::remove(int d, std::span<const LO> lids) {
   r.insert(r.end(), lids.begin(), lids.end());
 }
 
+// The ghosts of the mesh, but for the vertices that its other live elements or
+// added ones use: those stay, as vertices of this part.
+void MeshEdit::add_ghosts_to(std::array<std::vector<LO>, 4>& removed) const {
+  const HostMesh& m = *mesh_;
+  const auto v = m.view();
+  std::vector<std::uint8_t> used(static_cast<std::size_t>(m.count(0)), 0);
+  for (int d = 1; d <= m.dim(); ++d) {
+    const LO first = m.segment_table(d).shared_end;
+    auto& r = removed[static_cast<std::size_t>(d)];
+    const std::vector<LO> mine = r;
+    for (LO e = 0; e < m.count(d); ++e) {
+      if (!v.alive(d, e)) continue;
+      if (e >= first) {
+        r.push_back(e);
+      } else if (!std::binary_search(mine.begin(), mine.end(), e)) {
+        for (LO k = 0; k < v.num_nodes(d, e); ++k) used[static_cast<std::size_t>(v.node(d, e, k))] = 1;
+      }
+    }
+    std::sort(r.begin(), r.end());
+    r.erase(std::unique(r.begin(), r.end()), r.end());
+  }
+  for (const Added& a : added_) {
+    for (const auto* list : {&a.conn, &a.nodes}) {
+      for (const LO x : *list) {
+        if (x < m.count(0)) used[static_cast<std::size_t>(x)] = 1;
+      }
+    }
+  }
+  auto& r = removed[0];
+  for (LO i = m.segment_table(0).shared_end; i < m.count(0); ++i) {
+    if (v.alive(0, i) && used[static_cast<std::size_t>(i)] == 0) r.push_back(i);
+  }
+  std::sort(r.begin(), r.end());
+  r.erase(std::unique(r.begin(), r.end()), r.end());
+}
+
 EditReport MeshEdit::apply() {
   HostMesh& m = *mesh_;
   // Elements above the mesh dimension raise it.
@@ -215,14 +275,23 @@ EditReport MeshEdit::apply() {
   }
   EditReport report;
 
-  // Removed per dimension, as a mask over the existing entities.
-  std::array<std::vector<std::uint8_t>, 4> gone;
+  // Removed per dimension, as a mask over the existing entities; an edit of a
+  // distributed part also drops its ghosts, copies of what other ranks hold.
+  bool any = drop_ghosts_;
   for (int d = 0; d <= 3; ++d) {
     auto& r = removed_[static_cast<std::size_t>(d)];
     std::sort(r.begin(), r.end());
     r.erase(std::unique(r.begin(), r.end()), r.end());
     report.removed[static_cast<std::size_t>(d)] = static_cast<LO>(r.size());
     report.added[static_cast<std::size_t>(d)] = added_[static_cast<std::size_t>(d)].count;
+    any = any || !r.empty() || added_[static_cast<std::size_t>(d)].count > 0;
+  }
+  const bool unsyncs = any && m.fields().contains(sharing_field);
+  std::array<std::vector<LO>, 4> removed = removed_;
+  if (unsyncs) add_ghosts_to(removed);
+  std::array<std::vector<std::uint8_t>, 4> gone;
+  for (int d = 0; d <= 3; ++d) {
+    const auto& r = removed[static_cast<std::size_t>(d)];
     if (r.empty()) continue;
     gone[static_cast<std::size_t>(d)].assign(static_cast<std::size_t>(m.count(d)), 0);
     for (const LO l : r) gone[static_cast<std::size_t>(d)][static_cast<std::size_t>(l)] = 1;
@@ -235,7 +304,7 @@ EditReport MeshEdit::apply() {
   };
 
   // Vertices in use stay: by live existing elements and by added ones.
-  if (!removed_[0].empty() || m.alive(0).extent(0) > 0) {
+  if (!removed[0].empty() || m.alive(0).extent(0) > 0) {
     const auto v = m.view();
     const auto vertex_gid = [&](LO l) { return std::to_string(m.gid(0)(static_cast<std::size_t>(l))); };
     for (int d = 1; d <= D; ++d) {
@@ -289,7 +358,7 @@ EditReport MeshEdit::apply() {
     const EntityBlock<Host>& old = m.ents_[k];
     EntityBlock<Host> b = old;
     const Added& a = added_[k];
-    changed[k] = a.count > 0 || !removed_[k].empty();
+    changed[k] = a.count > 0 || !removed[k].empty();
     if (!changed[k]) {
       blocks[k] = std::move(b);
       continue;
@@ -347,7 +416,7 @@ EditReport MeshEdit::apply() {
       b.segments.owned_end = b.count;
       b.segments.shared_end = b.count;
     }
-    if (!removed_[k].empty() || old.alive.extent(0) > 0) {
+    if (!removed[k].empty() || old.alive.extent(0) > 0) {
       View1<std::uint8_t, Host> alive(Kokkos::view_alloc(std::string("soma::mesh::alive"), Kokkos::WithoutInitializing), n);
       for (std::size_t i = 0; i < n; ++i) alive(i) = i < n0 ? (live(d, static_cast<LO>(i)) ? 1 : 0) : 1;
       b.alive = alive;
@@ -366,6 +435,19 @@ EditReport MeshEdit::apply() {
   next.corner_ends_ = m.corner_ends_;
   next.ordering_ = m.ordering_;
   next.epoch_ = m.epoch_;
+  next.edits_ = m.edits_;
+  if (unsyncs) {
+    next.edits_.unsynced = true;
+    for (std::size_t d = 0; d < 4; ++d) next.edits_.dropped[d] += static_cast<LO>(removed[d].size() - removed_[d].size());
+    if (m.ghosts_[0] > 0) next.edits_.ghosts = m.ghosts_;
+    for (int d = 0; d <= 3; ++d) {
+      const Added& a = added_[static_cast<std::size_t>(d)];
+      next.edits_.adds = next.edits_.adds || a.count > 0;
+      for (std::size_t i = 0; i < a.given.size(); ++i) {
+        if (a.given[i] == 0) next.edits_.chosen[static_cast<std::size_t>(d)].push_back(gids[static_cast<std::size_t>(d)][i]);
+      }
+    }
+  }
   next.ents_ = std::move(blocks);
   next.coords_ = coords;
   next.values_ = m.values_;
@@ -405,7 +487,7 @@ EditReport MeshEdit::apply() {
 
   // Compressed before the swap, so a throw leaves the mesh as it was.
   const double t = threshold_.value_or(compress_threshold());
-  if (t > 0 && removed_fraction(next) >= t) report.compressed = next.compress();
+  if (t > 0 && fraction_gone(next, next.edits_.dropped) >= t) report.compressed = next.compress();
 
   m.swap(next);
   added_ = {};
@@ -418,18 +500,16 @@ void MeshEdit::set_compress_threshold(double t) {
   threshold_ = t;
 }
 
-double removed_fraction(const HostMesh& mesh) {
-  double worst = 0;
-  for (int d = 0; d <= 3; ++d) {
-    const LO n = mesh.count(d);
-    if (n == 0) continue;
-    const double f = static_cast<double>(n - mesh.num_live(d)) / static_cast<double>(n);
-    worst = f > worst ? f : worst;
-  }
-  return worst;
-}
+double removed_fraction(const HostMesh& mesh) { return fraction_gone(mesh, {}); }
 
 namespace detail {
+
+void drop_ghosts(HostMesh& mesh) {
+  MeshEdit edit(mesh);
+  edit.drop_ghosts_ = true;
+  edit.set_compress_threshold(0);
+  (void)edit.apply();
+}
 
 namespace {
 
@@ -452,8 +532,7 @@ HostMesh live_mesh(const HostMesh& mesh) {
   for (int d = 1; d <= 3; ++d) {
     // Sides derived alone that no live element has any more go with it; a
     // side given as input stays, and derivation rejects it if it is no side.
-    using Access = TopologyAccess;
-    const bool prune = d < D && mesh.count(d) > 0 && !Access::block(mesh, d).input && !Access::block(mesh, d).derived;
+    const bool prune = d < D && pruned(mesh, d);
     const std::vector<std::array<LO, 5>> sides = prune ? side_keys(mesh, d) : std::vector<std::array<LO, 5>>{};
     // Live entities by (topology, node count), each group in lid order.
     std::map<std::pair<std::uint8_t, LO>, std::vector<LO>> groups;
@@ -514,6 +593,8 @@ Renumbering compress(HostMesh& mesh) {
   }
   next.sets_ = sets ? std::move(*sets) : mesh.sets_.template mirror<Host>({true, true, true, true}, true);
   next.values_ = mesh.values_;
+  next.edits_ = mesh.edits_;
+  next.edits_.dropped = {};
   next.epoch_ = mesh.epoch_ + 1;
   next.attach_fields();
   mesh.fields_.remap_into(next.fields_, maps, next.epoch_, element_info(next));
@@ -625,6 +706,9 @@ void build_edited(HostMesh& mesh, AdjacencyRequest req) {
     if (!rederived[i]) continue;
     const bool input = mesh.ents_[i].input;
     mesh.ents_[i] = std::move(live.ents_[i]);
+    for (View1<LO, Host>& names : {std::ref(mesh.ents_[i].conn), std::ref(mesh.ents_[i].nodes)}) {  // to the edited lids
+      for (std::size_t j = 0; j < names.extent(0); ++j) names(j) = back[0][static_cast<std::size_t>(names(j))];
+    }
     mesh.ents_[i].input = input;
     for (int s = 0; s < adjacency_slots; ++s) {
       if (topology::detail::touches(s, k)) mesh.adj_.drop(s);

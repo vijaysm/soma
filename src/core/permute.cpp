@@ -231,6 +231,7 @@ void permute_entities(HostMesh& mesh, int dim, std::span<const LO> new_of_old, S
   next.corner_ends_ = corner_ends;
   next.ordering_ = mesh.ordering_;
   next.ghosts_ = mesh.ghosts_;
+  next.edits_ = mesh.edits_;
   next.ents_ = std::move(blocks);
   next.coords_ = coords;
   next.values_ = mesh.values_;

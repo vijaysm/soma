@@ -105,6 +105,27 @@ struct MergeOptions {
 /// the swap leaves the mesh unchanged.
 Renumbering merge_mesh(const Comm& comm, HostMesh& mesh, const MergeOptions& options = {});
 
+struct SyncOptions {
+  PointTolerance tol{};     ///< of the added vertices' places, where some rank added entities
+  bool ghosts = true;       ///< as many layers again as the mesh had
+  bool ghost_sets = false;  ///< GhostOptions::sets
+};
+
+/// Collective: makes a distributed part whole again after MeshEdit changed it
+/// on any rank (Mesh::needs_sync): compressed, its ownership and sharing made
+/// again from what is live, the graphs held (on any rank) built again, and the
+/// ghosts it had before the edits placed again. Where no rank added entities,
+/// entities are known by gid, and every other thing stays as it was. Where
+/// some rank did, merge_mesh matches the vertices by their places (so also
+/// those that coincided before: the two sides of a slit become one) and gives
+/// the entities whose gids MeshEdit chose the gid of what they coincide with,
+/// or a new one; gids the caller gave stay. Returns old lid -> new lid per
+/// dimension (invalid_lo: removed, a ghost, or merged into another), empty
+/// where nothing changed: no rank's mesh needed it. Fields and sets follow,
+/// as merge_mesh; ghosts take their owners' values. A throw (as merge_mesh and
+/// Mesh::add_ghosts, on every rank) leaves the mesh unchanged.
+Renumbering sync_mesh(const Comm& comm, HostMesh& mesh, const SyncOptions& options = {});
+
 /// Collective: merge_vertices, number_elements, then build_local_part given
 /// their sharing, so no gid directory is consulted. Throws as those.
 [[nodiscard]] HostMesh build_merged_part(const Comm& comm, MeshBuilder&& builder, PointTolerance tol = {},

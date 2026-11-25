@@ -285,6 +285,36 @@ TEST(CApiParallel, GhostsInPlace) {
   soma_mesh_free(m);
 }
 
+// An edit on one rank: calls that use the sharing are refused on every rank
+// until soma_mesh_sync.
+TEST(CApiParallel, EditsNeedASync) {
+  World w;
+  soma_mesh_t* m = box(w, 3, 3, 4);
+  ASSERT_EQ(soma_mesh_add_ghosts(w.comm, m, 1, 0, 0), SOMA_OK);
+  const int rank = Comm::world().rank(), size = Comm::world().size();
+  const auto before = owned_totals(m, 3);
+  if (rank == 0) {
+    soma_edit_t* e = nullptr;
+    ASSERT_EQ(soma_edit_create(m, &e), SOMA_OK) << last_error();
+    const soma_lo_t first = 0;
+    ASSERT_EQ(soma_edit_remove(e, 3, 1, &first), SOMA_OK);
+    soma_lo_t added[4], removed[4];
+    ASSERT_EQ(soma_edit_apply(e, added, removed, nullptr), SOMA_OK) << last_error();
+    soma_edit_free(e);
+  }
+  int needs = -1;
+  ASSERT_EQ(soma_mesh_needs_sync(m, &needs), SOMA_OK);
+  EXPECT_EQ(needs, rank == 0 ? 1 : 0);
+  if (size > 1) EXPECT_NE(soma_mesh_add_ghosts(w.comm, m, 1, 0, 0), SOMA_OK);
+  soma_renumbering_t* r = nullptr;
+  ASSERT_EQ(soma_mesh_sync(w.comm, m, 0.0, 1, &r), SOMA_OK) << last_error();
+  ASSERT_EQ(soma_mesh_needs_sync(m, &needs), SOMA_OK);
+  EXPECT_EQ(needs, 0);
+  EXPECT_EQ(owned_totals(m, 3).first, before.first - 1);
+  soma_renumbering_free(r);
+  soma_mesh_free(m);
+}
+
 TEST(CApiParallel, GhostsWithEmptyRanks) {
   World w;
   soma_mesh_t* m = box(w, 2, 2, 2);  // empty ranks at 3 and 4

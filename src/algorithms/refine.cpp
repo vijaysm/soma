@@ -487,7 +487,7 @@ void check(const Comm& comm, const HostMesh& mesh, int levels, const char* who, 
   int bad = 0;
   if (dim != 2 && dim != 3) {
     bad = 1;
-  } else if (mesh.edited() || mesh.has_nodes(dim)) {
+  } else if (mesh.edited() || (comm.size() > 1 && mesh.needs_sync()) || mesh.has_nodes(dim)) {
     bad = 2;
   } else {
     const MeshView<Host> m = mesh.view();

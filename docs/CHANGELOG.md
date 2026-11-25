@@ -14,6 +14,13 @@ All notable changes to SOMA are recorded here. The format follows
 
 ### Algorithms
 
+- `sync_mesh(comm, mesh)` makes a distributed part whole after `MeshEdit` changed it on any rank: sharing, derived
+  sides and ghosts. `Mesh::needs_sync()` says when; until then the calls that use the sharing throw on every rank
+  (they took the part as having no shared entities, and `add_ghosts` placed no ghosts). C: `soma_mesh_sync`, `soma_mesh_needs_sync`; Fortran: `%sync`, `%needs_sync`; Python: `mesh.sync`,
+  `mesh.needs_sync`.
+- Fixed: on an edited mesh with removed vertices, sides derived again named the wrong vertices until it was compressed.
+- Fixed: an edit of a 3D mesh that held edges and faces could be refused after cells had been removed ("explicit
+  entity ... is no side of any element").
 - `FvSpace` refuses a mesh with hanging vertices. It took one, and its coarse-fine faces were walls.
 
 ### Visualization

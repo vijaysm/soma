@@ -807,10 +807,14 @@ void move_fields(const Comm& comm, const HostMesh& mesh, HostMesh& part, const H
 
 void detail::check_movable(const Comm& comm, const HostMesh& mesh, const char* who, bool bad, const char* what) {
   const std::uint64_t hs = set_list_hash(mesh.sets()), hf = field_list_hash(mesh);
-  std::array<std::uint64_t, 6> flags{bad ? 1u : 0u, mesh.edited() ? 1u : 0u, hs, ~hs, hf, ~hf};
+  std::array<std::uint64_t, 7> flags{bad ? 1u : 0u, mesh.edited() ? 1u : 0u, hs, ~hs, hf, ~hf,
+                                      mesh.needs_sync() && comm.size() > 1 ? 1u : 0u};
   comm.allreduce(std::span<std::uint64_t>(flags), Op::max);
   const std::string w(who);
   if (flags[0] != 0) throw std::invalid_argument(w + ": " + what);
+  if (flags[6] != 0) {
+    throw std::logic_error(w + ": a rank's mesh was edited since its sharing was made; call sync_mesh first");
+  }
   if (flags[1] != 0) throw std::logic_error(w + ": a rank's mesh holds edits; compress() it first");
   if (flags[2] != ~flags[3]) {
     throw std::invalid_argument(w + ": the ranks' sets differ (gids, flags, children, parents or sets they contain)");

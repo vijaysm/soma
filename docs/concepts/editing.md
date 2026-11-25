@@ -116,7 +116,8 @@ ask for a compressed mesh, and why distributed parts need the merge described be
 | mirrors and `clone()` | copy the edit state (alive masks and tails) |
 | `write_vtk`, `write_h5m` | write the mesh as its compressed copy would be |
 | `write_soma` | writes the compressed copy on one rank; throws `std::logic_error` on every rank on more |
-| `permute_entities`, `add_ghosts`, `migrate` | throw `std::logic_error`: compress first |
+| `permute_entities` | throws `std::logic_error`: compress first |
+| `add_ghosts`, `migrate`, `build_distributed_adjacencies`, `HaloExchange` | on more than one rank throw `std::logic_error` on every rank until `sync_mesh` (below); `add_ghosts` and `migrate` also on one rank, until compressed |
 | `laplacian_smooth`, `FemSpace`, `FvSpace`, `RemapOperator` | throw `std::invalid_argument` (on every rank, collectively) |
 
 ## Compressing
@@ -175,8 +176,30 @@ edit's threshold to 0 and call `compress()` when done.
 
 `MeshEdit` changes one rank's part and knows nothing of other ranks: the gids it gives are
 chosen by each rank alone, and adding entities resets the dimension's ownership ranges (above),
-so the sharing of a distributed part no longer holds after an edit. The collective
-`merge_mesh(comm, mesh, options)` (`soma/parallel/merge.hpp`) rebuilds it in place: live
+so the sharing of a distributed part no longer holds after an edit. `apply()` marks the part:
+`mesh.needs_sync()` is true, also after `compress()` and in copies, and its ghosts, copies of what
+other ranks hold, are dropped. On more than one rank the calls that use the sharing then throw
+`std::logic_error` on every rank, whichever rank edited. The collective call
+
+```cpp
+soma::Renumbering r = soma::sync_mesh(comm, mesh);   // soma/parallel/merge.hpp
+```
+
+makes the part whole again, on every rank:
+
+- the mesh is compressed, and ownership and sharing are made again from the live entities;
+- the graphs held are built again, and as many ghost layers as the mesh had are placed again
+  (`SyncOptions::ghosts` turns that off);
+- where no rank added entities, entities are known by gid alone: vertices at one place that were
+  different stay different;
+- where some rank did, vertices are matched by place (`SyncOptions::tol`), so a vertex that two
+  ranks added on their common boundary becomes one; gids `MeshEdit` chose give way to one the
+  ranks agree on, and gids the caller gave stay;
+- fields and sets follow, and `r` maps old local ids to new ones (empty when no rank's part
+  needed it).
+
+A throw leaves the mesh unchanged. `sync_mesh` uses `merge_mesh`, which can also be called itself,
+without placing ghosts. The collective `merge_mesh(comm, mesh, options)` (`soma/parallel/merge.hpp`) rebuilds it in place: live
 vertices that match on any rank become one, and entities added since the mesh was built take the
 gid of an entity they coincide with, or new gids above every gid of their dimension, the same on
 every rank holding them. It identifies the added entities by the mesh's tail, which compression
