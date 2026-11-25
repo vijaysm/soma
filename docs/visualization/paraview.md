@@ -41,7 +41,8 @@ reader.UpdatePipeline()
 A mesh file gives a `vtkPartitionedDataSetCollection`, one partitioned data set per element
 dimension read (`dim0`, `dim1`, ...). An AMR checkpoint gives a `vtkOverlappingAMR`, its fields
 chosen by `AMRArrayStatus`, with `AMRBlanking` to blank the coarse cells under finer boxes and
-`AMRNodeValues` to add `<field>:smooth`, [node values](overview.md#block-amr) to contour. A file with
+`AMRNodeValues` to add `<field>:smooth`, [node values](overview.md#block-amr) to contour; with `AMRClosed` it gives one unstructured mesh instead, whose
+3D contours have no seams between levels. A file with
 [spectral-element fields](overview.md#between-the-nodes) has a block `gll_p<order>` per order, read by
 default in place of the quads under it; the fields are chosen by `PointArrayStatus`. The
 kind is read from the file. `FileNames` is a list: several files are the steps of a time series,

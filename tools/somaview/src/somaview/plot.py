@@ -188,7 +188,7 @@ def _plot_amr(path, *, scalars=None, cmap=None, screenshot=None, window_size=(10
 
 
 def to_pyvista_amr(path, fields=None, rank: int = 0, nranks: int = 1, blank: bool = True,
-                   smooth: bool = False):
+                   smooth: bool = False, closed: bool = False):
     """An AMR checkpoint as a nested ``pyvista.MultiBlock``: ``"level<l>"`` -> ``"box<b>"``.
 
     Built from :func:`somaview.amr.to_vtk_amr`. With ``blank`` (default), cells covered by a
@@ -197,7 +197,19 @@ def to_pyvista_amr(path, fields=None, rank: int = 0, nranks: int = 1, blank: boo
     ``pyvista.UnstructuredGrid`` rather than an ``ImageData``; a box with nothing covered stays
     ``ImageData``. With ``smooth``, each field also has node values ``<name>:smooth`` that are
     continuous across boxes and levels (:func:`somaview.amr.smooth`).
+
+    With ``closed``, one ``pyvista.UnstructuredGrid`` instead (:func:`somaview.amr_closed.closed`): the
+    cells no finer ones cover, cut where a finer level is beside them, with the same node values. Contour
+    that in 3D: it has no seams between levels.
     """
+    if closed:
+        import pyvista as pv
+
+        from .amr_closed import closed as _closed
+        from .vtkconv import to_vtk
+
+        with AmrFile(path) as af:
+            return pv.wrap(to_vtk(_closed(af, fields=fields, rank=rank, nranks=nranks)))
     import pyvista as pv
     from vtkmodules.vtkCommonDataModel import vtkDataSetAttributes, vtkImageData
 

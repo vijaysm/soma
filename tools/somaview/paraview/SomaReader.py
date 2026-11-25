@@ -19,7 +19,8 @@ between the GLL points with the values stored (``NodalResolution`` 0), that many
 each element's side with the polynomial's values (within the range of the element's own, unless
 ``BoundedInterpolation`` is off), or one VTK Lagrange cell per element (``LagrangeCells``). ``CloseHangingCells`` closes the cells of a non-conforming mesh at their hanging
 vertices; ``AMRNodeValues`` adds, to each AMR field, node values continuous across boxes and levels
-(``<field>:smooth``), for contours.
+(``<field>:smooth``), for contours; ``AMRClosed`` gives, instead of the boxes, one unstructured mesh
+(block ``dim3`` or ``dim2``) whose cells meet where levels do, so that 3D contours have no seams there.
 
 Distributed reading follows ``UPDATE_PIECE_NUMBER``/``UPDATE_NUMBER_OF_PIECES`` from the output
 information: piece k of P reads the parts ``somaview.parts_for_rank(N, P, k)`` assigns it (an
@@ -79,6 +80,7 @@ from paraview.util.vtkAlgorithm import VTKPythonAlgorithmBase, smdomain, smhint,
 
 import somaview as sv  # noqa: E402
 from somaview.amr import AmrFile, to_vtk_amr  # noqa: E402
+from somaview.amr_closed import closed  # noqa: E402
 from somaview.format import FileKind  # noqa: E402
 from somaview.nodal import nodal_fields  # noqa: E402
 from somaview.vtkconv import to_vtk_collection  # noqa: E402
@@ -129,6 +131,7 @@ class SomaReader(VTKPythonAlgorithmBase):
         self._global_ids = True
         self._amr_blanking = True
         self._amr_nodes = True
+        self._amr_closed = False
         self._close_hanging = True
         self._nodal_resolution = 0
         self._lagrange = False
@@ -229,6 +232,14 @@ class SomaReader(VTKPythonAlgorithmBase):
         v = bool(value)
         if v != self._amr_nodes:
             self._amr_nodes = v
+            self.Modified()
+
+    @smproperty.intvector(name="AMRClosed", default_values=0)
+    @smdomain.boolean()
+    def SetAMRClosed(self, value) -> None:
+        v = bool(value)
+        if v != self._amr_closed:
+            self._amr_closed = v
             self.Modified()
 
     @smproperty.intvector(name="CloseHangingCells", default_values=1)
@@ -365,7 +376,8 @@ class SomaReader(VTKPythonAlgorithmBase):
         if self._kind is None:
             return 1
         info = outInfo.GetInformationObject(0)
-        wanted = vtkOverlappingAMR if self._kind == FileKind.amr else vtkPartitionedDataSetCollection
+        boxes = self._kind == FileKind.amr and not self._amr_closed
+        wanted = vtkOverlappingAMR if boxes else vtkPartitionedDataSetCollection
         current = info.Get(vtkDataObject.DATA_OBJECT()) if info.Has(vtkDataObject.DATA_OBJECT()) else None
         if current is None or not current.IsA(wanted.__name__):
             info.Set(vtkDataObject.DATA_OBJECT(), wanted())
@@ -450,6 +462,11 @@ class SomaReader(VTKPythonAlgorithmBase):
 
     def _request_amr(self, path: str, piece: int, npieces: int, out) -> None:
         names = self._enabled(self._amr_sel)
+        if self._amr_closed:
+            with AmrFile(path) as af:
+                mesh = closed(af, fields=names, rank=piece, nranks=npieces)
+            out.ShallowCopy(to_vtk_collection(mesh, gids=self._global_ids, part=self._part_ids))
+            return
         with AmrFile(path) as af:
             amr = to_vtk_amr(af, fields=names, rank=piece, nranks=npieces, blank=self._amr_blanking,
                              smooth=self._amr_nodes)

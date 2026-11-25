@@ -138,10 +138,16 @@ box they are in, and a node on the level's edge takes the coarser level's values
 coarse edge. Node-centred fields keep their values but for those on a level's edge. Contour
 `<field>:smooth` (ParaView, `sv.plot`, `sv.read_vtk(path, smooth=True)`) or `smooth/<field>` (VisIt).
 
-In 2D the contours close exactly. In 3D the values do too, along every edge, but a coarse face and the
-four fine ones beside it are triangulated separately, which leaves slivers of second order in the
-cell size. A periodic domain's opposite sides are not averaged together. Fields centred on faces or
-edges are not drawn.
+In 2D the contours close exactly. In 3D the values do too, along every edge, but a contour crosses a coarse
+face as one straight segment and the four fine faces on it as several, which leaves slivers of second order
+in the cell size: they are in the drawing, not in the mesh or the solution. To have none, contour the hierarchy as one
+unstructured mesh: `somaview.amr_closed.closed`, or `somaview.plot.to_pyvista_amr(path, closed=True)`, in Python,
+`AMRClosed` in ParaView, the variables `closed/<field>` on `mesh_closed` in VisIt.
+Its cells are those no finer ones cover. A coarse one with finer cells beside it is a polygon with their nodes on
+its sides (2D), or is cut into tets and pyramids from its centre that match the finer faces (3D); every value added is
+the cell's trilinear interpolation. It takes more memory than the boxes, so it is not the default.
+
+A periodic domain's opposite sides are not averaged together. Fields centred on faces or edges are not drawn.
 
 ```{note}
 SOMA's own VTK output (see [VTK output](../io/vtk.md)) writes prisms in stored order, which VTK 9.6

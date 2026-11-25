@@ -312,6 +312,38 @@ def test_amr_smooth(SomaReader, tmp_dir: Path) -> None:
     check("amr: node values off", box.GetPointData().GetArray("c:smooth") is None)
 
 
+def test_amr_closed(SomaReader, tmp_dir: Path) -> None:
+    """The hierarchy as one mesh: its volume, its values, a contour; and back to boxes."""
+    from somaview.amr_closed import closed
+
+    f = tmp_dir / "closed.soma"
+    amr_files.write(f, 3, amr_files.BOXES_3D, {"c": ("cell", 1, lambda x, y, z, l: np.sin(9 * x) * np.cos(7 * y) + np.sin(8 * z + x))})
+    reader = SomaReader(FileNames=[str(f)])
+    reader.AMRClosed = 1
+    reader.UpdatePipeline()
+    g = _named_block(reader, "dim3")
+    with AmrFile(f) as af:
+        want = closed(af)
+    check("amr closed: cells", g.GetNumberOfCells() == len(want.cells))
+    check("amr closed: values", np.array_equal(vtk_to_numpy(g.GetPointData().GetArray("c:smooth")), want.point_data["c:smooth"]))
+    total = smp.IntegrateVariables(Input=reader)
+    total.UpdatePipeline()
+    volume = smp.servermanager.Fetch(total).GetCellData().GetArray("Volume").GetValue(0)
+    check("amr closed: volume", abs(volume - 1) < 1e-12, volume)
+    contour = smp.Contour(Input=reader, ContourBy=["POINTS", "c:smooth"], Isosurfaces=[0.1234])
+    edges = smp.FeatureEdges(Input=smp.MergeBlocks(Input=contour, OutputDataSetType="Polygonal Mesh"))
+    edges.BoundaryEdges, edges.FeatureEdges, edges.ManifoldEdges, edges.NonManifoldEdges = 1, 0, 0, 0
+    edges.UpdatePipeline()
+    out = smp.servermanager.Fetch(edges)
+    x = vtk_to_numpy(out.GetPoints().GetData()).astype(float) if out.GetNumberOfCells() else np.empty((0, 3))
+    side = (np.abs(x) < 1e-6) | (np.abs(x - 1) < 1e-6)
+    check("amr closed: a contour, loose only on the domain's sides",
+          contour.GetDataInformation().GetNumberOfCells() > 100 and bool(side.any(axis=1).all()), int((~side.any(axis=1)).sum()))
+    reader.AMRClosed = 0
+    reader.UpdatePipeline()
+    check("amr closed: back to boxes", reader.GetClientSideObject().GetOutputDataObject(0).GetClassName() == "vtkOverlappingAMR")
+
+
 def main() -> int:
     import tempfile
 
@@ -324,6 +356,7 @@ def main() -> int:
         test_nodal(SomaReader, Path(td))
         test_hanging(SomaReader, Path(td))
         test_amr_smooth(SomaReader, Path(td))
+        test_amr_closed(SomaReader, Path(td))
     test_selection(SomaReader)
     test_amr(SomaReader)
 

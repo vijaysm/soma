@@ -185,6 +185,42 @@ void dump_amr(const SomaFile& sf, std::ofstream& out) {
       write_f64(out, "amr_smooth:" + f.name + ":" + std::to_string(l), flat, 1);
     }
   }
+  // Every box as closed_box makes it, a row per corner of its pieces.
+  std::vector<std::int64_t> type, size, source, corner;
+  std::vector<double> xyz;
+  std::map<std::string, std::vector<double>> values;
+  std::int64_t first = 0;
+  std::vector<std::unique_ptr<AmrNodeValues>> nodes;
+  for (auto& f : af.fields()) nodes.push_back(f.centering(af.dim()) == "mixed" ? nullptr : std::make_unique<AmrNodeValues>(af, f));
+  for (int l = 0; l < af.nlevels(); ++l) {
+    for (std::size_t b = 0; b < af.boxes()[static_cast<std::size_t>(l)].size(); ++b) {
+      const ClosedBox c = closed_box(af, l, static_cast<LO>(b));
+      for (std::size_t k = 0; k < c.types.size(); ++k) {
+        type.push_back(c.types[k]);
+        size.push_back(c.offsets[k + 1] - c.offsets[k]);
+        source.push_back(first + c.source[k]);
+      }
+      for (auto p : c.connectivity) {
+        corner.push_back(c.gids[static_cast<std::size_t>(p)]);
+        for (std::size_t d = 0; d < 3; ++d) xyz.push_back(c.points[3 * static_cast<std::size_t>(p) + d]);
+      }
+      for (std::size_t i = 0; i < nodes.size(); ++i) {
+        if (!nodes[i]) continue;
+        const auto& f = af.fields()[i];
+        const Array a = closed_values(af, l, static_cast<LO>(b), c, nodes[i]->box(l, static_cast<LO>(b)), f.ncomp);
+        for (auto p : c.connectivity)
+          for (int m = 0; m < f.ncomp; ++m) values[f.name].push_back(a.data[static_cast<std::size_t>(p * f.ncomp + m)]);
+      }
+      const auto& box = af.boxes()[static_cast<std::size_t>(l)][b];
+      first += (box.hi[0] - box.lo[0] + 1) * (box.hi[1] - box.lo[1] + 1) * (box.hi[2] - box.lo[2] + 1);
+    }
+  }
+  write_i64(out, "closed_type", type);
+  write_i64(out, "closed_size", size);
+  write_i64(out, "closed_source", source);
+  write_i64(out, "closed_corner", corner);
+  write_f64(out, "closed_xyz", xyz, 3);
+  for (auto& [name, v] : values) write_f64(out, "closed_data:" + name, v, af.field(name).ncomp);
   end_sections(out);
 }
 

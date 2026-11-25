@@ -8,7 +8,7 @@ x86_64, serial and parallel engines). Two layers:
   the same part table, field and layout handling, VTK cell-type mapping (prism corner order by
   VTK version, every quadratic cell, polygon, convex point set), halo by scan, and entity sets as
   cell labels.
-- `SOMA.xml`, `avtSOMAFileFormat.h`, `avtSOMAFileFormat.C`: the STMD (single timestep, multiple
+- `SOMA.xml`, `avtSOMAFileFormat.{h,C}`, `avtSOMAOptions.{h,C}` (read options): the STMD (single timestep, multiple
   domain) database plugin on top of it.
 
 Its user documentation is SOMA's `docs/visualization/visit.md`; this file keeps the details and
@@ -35,7 +35,11 @@ implementation notes.
   built once from the boxes and the refinement ratio. `smooth/<field>` is a field's node values
   continuous across boxes and levels.
 - Cells with hanging vertices (found by the field `refine:birth`) are closed: polygons in 2D, tets and
-  pyramids in 3D, where zone counts and picks are of the pieces and there are no global zone ids.
+  pyramids in 3D, where zone counts and picks are of the pieces and there are no global zone ids. The read option
+  "Close cells at hanging vertices" turns it off.
+- `soma_gid` (and `elements_dim<D>/soma_gid`): the gid of a zone's cell, or of the cell it is a piece of.
+- `mesh_closed` (AMR): per box the cells no finer ones cover, as an unstructured mesh cut where a finer level is beside
+  them (`closed_box`), with `closed/<field>` at its points; no seams between levels in 3D contours.
 
 ## Fields
 
@@ -63,7 +67,7 @@ implementation notes.
 Against a VisIt binary install (no VisIt source tree needed); VisIt's own HDF5 is used:
 
 ```
-mkdir SOMA && cp SOMA.xml avtSOMAFileFormat.* soma_reader.hpp visit_macos.cmake SOMA/ && cd SOMA
+mkdir SOMA && cp SOMA.xml avtSOMA* soma_reader.hpp visit_macos.cmake SOMA/ && cd SOMA
 <visit>/bin/xml2info -clobber SOMA.xml
 <visit>/bin/xml2cmake -clobber SOMA.xml
 cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/usr/bin/g++ .
@@ -97,12 +101,14 @@ compiler VisIt was built with (a conda compiler in `PATH` links against a differ
 3. Spectral-element fields (`tests/compare_nodal.py <cpp_driver> <workdir> [FILE ...]`): files of
    known positions and values (plane and sphere, orders 1 to 8, 4, 8 and 9 nodes per quad, 1 to 4
    parts, partial domains), whole and part by part, against those and the Python core; 6 damaged files.
-4. Hanging vertices and AMR node values (`tests/compare_hanging.py <cpp_driver> <workdir> [FILE ...]`):
+4. Hanging vertices, AMR node values and closed AMR boxes (`tests/compare_hanging.py <cpp_driver> <workdir> [FILE ...]`):
    meshes of quads and hexes in 1 to 5 parts, whole and part by part, against the Python core; damaged
    records; given FILEs.
 5. Ghost zones (`tests/visit_ghosts.py`, in VisIt's CLI): contours of a zonal field of a mesh in 4 or 5
    parts against the same mesh in one.
-6. VisIt itself (`tests/visit_test.py`, expectations from `tests/visit_expected.py`, driven by
+6. Closed AMR meshes, the read option and `soma_gid` (`tests/visit_closed.py`, in VisIt's CLI): contours exported
+   and their loose edges counted, zone counts with closing on and off, picked zones' cells.
+7. VisIt itself (`tests/visit_test.py`, expectations from `tests/visit_expected.py`, driven by
    `tests/run_visit_tests.sh`): 16 files on a serial engine and on a 4-rank parallel engine, and the
    50,304,352-cell, 48-part CONUS mesh on an 8-rank engine. For every file the zone count of
    the data read equals the Python core's and the MinMax of a field equals the Python core's;
@@ -111,6 +117,11 @@ compiler VisIt was built with (a conda compiler in `PATH` links against a differ
    tet, quadrilateral and brick files at 3 to 7 parts, and 2D and 3D AMR checkpoints.
 
 ## Findings
+
+- VisIt 3.5.0's macOS package (arm64) bundles MPICH 3.3.1, whose shared-memory messages are not reliable there:
+  a small program linked to it, with neither VisIt nor SOMA, received wrong values from `MPI_Alltoall` and
+  point-to-point messages on 4 ranks, or stopped in an internal assertion; the same program on MPICH 5 did not. Parallel
+  engines stall now and then, on plain VTK files too. Use a serial engine on such a Mac.
 
 - VisIt 3.5 reads global node and zone ids as 32-bit ints, whatever the array's type. Given 64-bit ids it saw a
   node 0 in every domain and joined domains there: contours of averaged zonal fields had several times

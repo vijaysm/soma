@@ -120,3 +120,22 @@ def test_amr_node_values(reader, tmp_path):
     out = vtkOverlappingAMR()
     reader._request_amr(str(f), 0, 1, out)
     assert out.GetDataSet(1, 0).GetPointData().GetArray("c:smooth") is None
+
+
+def test_amr_closed(reader, tmp_path):
+    from somaview.amr_closed import closed
+
+    f = tmp_path / "a.soma"
+    amr_files.write(f, 3, amr_files.BOXES_3D, {"c": ("cell", 1, lambda x, y, z, l: x * y + z)})
+    reader.AddFileName(str(f))
+    reader.SetAMRClosed(1)
+    with sv.open(f) as af:
+        want = closed(af)
+    ds = blocks(reader)["dim3"]
+    assert ds.GetNumberOfCells() == len(want.cells)
+    np.testing.assert_array_equal(array(ds, "c:smooth"), want.point_data["c:smooth"])
+    n = 0
+    for k in range(3):
+        reader.UpdatePiece(k, 3, 0)
+        n += reader.GetOutputDataObject(0).GetPartitionedDataSet(0).GetPartition(0).GetNumberOfCells()
+    assert n == len(want.cells)

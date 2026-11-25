@@ -27,7 +27,7 @@ mkdir -p "$WORK/img" "$WORK/logs"
 # -- the plugin --------------------------------------------------------------------------------
 P=$WORK/plugin
 rm -rf "$P" && mkdir -p "$P"
-cp "$SV"/visit/avtSOMAFileFormat.C "$SV"/visit/avtSOMAFileFormat.h "$SV"/visit/soma_reader.hpp "$SV"/visit/SOMA.xml \
+cp "$SV"/visit/avtSOMAFileFormat.C "$SV"/visit/avtSOMAFileFormat.h "$SV"/visit/avtSOMAOptions.C "$SV"/visit/avtSOMAOptions.h "$SV"/visit/soma_reader.hpp "$SV"/visit/SOMA.xml \
   "$SV"/visit/visit_macos.cmake "$P"/
 cd "$P"
 env -u CC -u CXX "$VB/xml2info" -clobber SOMA.xml > "$WORK/logs/xml2info.txt" 2>&1
