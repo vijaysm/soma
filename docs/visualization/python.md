@@ -11,10 +11,14 @@ import somaview as sv
 
 sv.plot("mesh.soma", scalars="pressure", clip="x", screenshot="out.png")
 sv.plot("checkpoint.soma", scalars="phi", box_outlines=True)   # an AMR checkpoint
+sv.plot("checkpoint.soma", scalars="phi:smooth")                # its node values, continuous across boxes
+sv.plot("ocean.soma", scalars="eta", nodal=True, resolution=8)  # a spectral-element field's polynomial
+sv.plot("ocean.soma", scalars="eta", nodal="lagrange")          # on VTK Lagrange cells
 grid = sv.read_pyvista("mesh.soma", parts=[0, 1])               # a pyvista.UnstructuredGrid
 ```
 
-`plot` draws the outer surface of a volume mesh, so a mesh of millions of cells stays interactive,
+`plot` closes cells at their [hanging vertices](overview.md#hanging-vertices) (`close_hanging=False` draws them
+as stored); `sv.read` and `sv.read_pyvista` do with `close_hanging=True`. `plot` draws the outer surface of a volume mesh, so a mesh of millions of cells stays interactive,
 and clips the whole volume first when asked, so the cut face shows the field. Integer labels
 (`soma_part`, `set:<name>`) get one colour each. A name that is no point or cell array is an error
 listing the arrays there are. For an AMR checkpoint, `somaview.plot.to_pyvista_amr` gives the
@@ -51,6 +55,7 @@ AMR checkpoint's `u`. `tools/somaview/examples/gallery.py` makes them.
 ```bash
 somaview info mesh.soma                               # parts, dimensions, fields; AMR levels
 somaview render mesh.soma -s pressure -o out.png --clip x
+somaview render ocean.soma -s eta -o out.png --resolution 8   # or --nodal, --lagrange
 somaview convert mesh.soma out.vtkhdf                 # or out.vtu, out.pvtu
 ```
 

@@ -78,8 +78,55 @@ piece = sv.read("mesh.soma", comm=MPI.COMM_WORLD)     # under mpiexec: each rank
   owning each cell and `soma_gid` the global ids (also VTK's GlobalIds).
 - Spectral-element fields (GLL values on quads) on sub-quads: point data of order x order quads per
   element, on the element's GLL points, the stored values untouched. In VisIt a mesh of their own, in
-  Python `sv.read_nodal(path)`; ParaView's reader leaves them out.
-- AMR checkpoints: one grid per box, the coarse cells under finer boxes blanked.
+  ParaView a block `gll_p<order>`, in Python `sv.read_nodal(path)`. See
+  [below](#between-the-nodes) for values between the nodes.
+- AMR checkpoints: one grid per box, the coarse cells under finer boxes blanked; see
+  [below](#block-amr) for contours across boxes and levels.
+
+### Between the nodes
+
+A spectral-element field is a polynomial on each element. All three viewers evaluate it, on $n \times n$ uniform
+sub-quads per element: `sv.read_nodal(path, resolution=n)`, ParaView's `NodalResolution`, VisIt's
+Multires control (its resolution $r$ gives $n = (r + 1)p$). Python and ParaView can also draw one VTK
+Lagrange cell per element (`lagrange=True`, `LagrangeCells`; order at most 10), which VTK subdivides
+itself. Positions are the space's own: on a sphere, points are projected to it.
+
+```{warning}
+Between its nodes the polynomial can pass beyond the stored values. A field that is positive at every
+node may be drawn with negative values near a sharp front: they are the solution's own, not an
+error of the viewer. The default (sub-quads on the GLL points) draws the stored values alone. A field
+of integers, such as a mask, is interpolated piecewise bilinearly and keeps its range.
+```
+
+### Hanging vertices
+
+[Marked refinement](../algorithms/refinement.md) leaves hanging vertices: at the midpoint of an edge, or the
+centre of a quad face, that a coarser cell still has whole. As stored, that cell does not know the
+vertex: values averaged at points leave it out, and contours of them tear. For display the
+coarse cell is closed. In 2D it becomes a polygon with the vertices on its sides. In 3D it is cut into
+tets and pyramids from its centre, each face divided as the finer cells beside it divide it, or else in
+triangles from its hanging vertex of least gid, which the cells on both sides choose. The pieces carry
+their cell's data and gid.
+
+Every vertex keeps its stored value: if a solver wrote a hanging value other than its masters' average,
+it is drawn. The only value made is that at the centre of a cell cut in 3D, the mean of its corners (for an
+integer field, the first corner's). VisIt, ParaView and `sv.plot` close cells by default; `sv.read`
+does with `close_hanging=True`. The hanging vertices are found by the field `refine:birth`; a mesh without
+it is drawn as stored. Conforming refinement (`conforming = true`, `refine_quads`) has nothing to close.
+
+### Block AMR
+
+A cell-centred field has values at cell centres only, so a contour is drawn from node averages. Taken
+box by box, those disagree at every boundary between boxes and between levels. `somaview.amr.smooth` gives node
+values continuous over the hierarchy: a node takes the mean of its level's cells around it, whichever
+box they are in, and a node on the level's edge takes the coarser level's values, linear along the
+coarse edge. Node-centred fields keep their values but for those on a level's edge. Contour
+`<field>:smooth` (ParaView, `sv.plot`, `sv.read_vtk(path, smooth=True)`) or `smooth/<field>` (VisIt).
+
+In 2D the contours close exactly. In 3D the values do too, along every edge, but a coarse face and the
+four fine ones beside it are triangulated separately, which leaves slivers of second order in the
+cell size. A periodic domain's opposite sides are not averaged together. Fields centred on faces or
+edges are not drawn.
 
 ```{note}
 SOMA's own VTK output (see [VTK output](../io/vtk.md)) writes prisms in stored order, which VTK 9.6

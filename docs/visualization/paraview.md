@@ -24,19 +24,25 @@ must be importable by ParaView's Python as well.
 from paraview.simple import SomaReader
 
 reader = SomaReader(FileNames=["mesh.soma"])
-reader.ElementBlocks = ["dim3"]          # element dimensions to read (default: the mesh's own)
+reader.ElementBlocks = ["dim3"]          # element dimensions to read (default: the mesh's own, or gll_p<order>)
 reader.PointArrayStatus = ["pressure"]   # point fields (default: all)
 reader.CellArrayStatus = []              # cell fields (default: all)
 reader.HighOrderCells = 1                # quadratic VTK cells for high-order elements
 reader.SetFieldLabels = 1                # cell arrays set:<name> from entity-set fields
 reader.PartIds = 1                       # cell array soma_part
 reader.GlobalIds = 1                     # GlobalIds from the gids
+reader.CloseHangingCells = 1             # close cells at hanging vertices
+reader.NodalResolution = 0               # spectral-element fields: 0 the GLL points, n > 0 n x n sub-quads
+reader.LagrangeCells = 0                 # spectral-element fields on VTK Lagrange cells instead
 reader.UpdatePipeline()
 ```
 
 A mesh file gives a `vtkPartitionedDataSetCollection`, one partitioned data set per element
 dimension read (`dim0`, `dim1`, ...). An AMR checkpoint gives a `vtkOverlappingAMR`, its fields
-chosen by `AMRArrayStatus`, with `AMRBlanking` to blank the coarse cells under finer boxes. The
+chosen by `AMRArrayStatus`, with `AMRBlanking` to blank the coarse cells under finer boxes and
+`AMRNodeValues` to add `<field>:smooth`, [node values](overview.md#block-amr) to contour. A file with
+[spectral-element fields](overview.md#between-the-nodes) has a block `gll_p<order>` per order, read by
+default in place of the quads under it; the fields are chosen by `PointArrayStatus`. The
 kind is read from the file. `FileNames` is a list: several files are the steps of a time series,
 at the mesh value `time` of each file when they all have one, else at 0, 1, 2, ...
 
@@ -90,4 +96,6 @@ The [CONUS mesh's figures](../apps/conus-200m.md#looking-at-the-mesh) are made t
 the reader's data against the core: counts, arrays and values on every test file, the default
 selections, pieces, time series and AMR. `tests/mpi/pv_mpi_check.py` checks under
 `mpiexec pvbatch` that the pieces cover every cell exactly once with the right coordinates, at 1,
-2, 4 and 7 ranks on files written by 3 to 7 ranks.
+2, 4 and 7 ranks on files written by 3 to 7 ranks. `tests/test_paraview_reader.py` checks the
+spectral-element blocks, closed cells and AMR node values by pytest, through VTK's own Python algorithm
+class without ParaView.
