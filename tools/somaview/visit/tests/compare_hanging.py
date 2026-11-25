@@ -24,6 +24,7 @@ import amr_files  # noqa: E402
 import hanging_files as hf  # noqa: E402
 from compare_with_python import read_sections  # noqa: E402
 from somaview.amr import AmrFile, smooth  # noqa: E402
+from somaview.amr_closed import closed  # noqa: E402
 from somaview.format import FileKind, SomaFile, detect  # noqa: E402
 from somaview.mesh import read_piece  # noqa: E402
 
@@ -79,6 +80,16 @@ def mesh(driver, path, work):
     return closed
 
 
+def in_order(types, sizes, cells, corners):
+    """The pieces' order by cell, then by their corners as listed, and the corners' that goes with it."""
+    start = np.cumsum(sizes) - sizes
+    rows = np.full((len(sizes), int(sizes.max())), -1, np.int64)
+    k = np.arange(len(corners)) - np.repeat(start, sizes)
+    rows[np.repeat(np.arange(len(sizes)), sizes), k] = corners
+    order = np.lexsort((*rows.T[::-1], cells))
+    return order, np.concatenate([np.arange(sizes[o]) + start[o] for o in order])
+
+
 def amr(driver, path, work):
     rc, err = drive(driver, path, work / "a.bin")
     check(rc == 0, f"{path.name}: {err[-300:]}")
@@ -91,6 +102,21 @@ def amr(driver, path, work):
                 want = np.concatenate([v.ravel() for v in smooth(af, f.name, l)])
                 got = sec[f"amr_smooth:{f.name}:{l}"].ravel()
                 check(got.shape == want.shape and np.abs(got - want).max() <= 1e-14 * np.abs(want).max(), f"{path.name}: {f.name} level {l}")
+        p = closed(af)
+        b = p.cells
+        theirs = [sec["closed_type"].ravel(), sec["closed_size"].ravel(), sec["closed_source"].ravel(), sec["closed_corner"].ravel()]
+        mine = [b.types, np.diff(b.offsets), b.gids, p.point_gids[b.connectivity]]
+        if [len(x) for x in mine] != [len(x) for x in theirs]:
+            check(False, f"{path.name}: closed cells")
+            return
+        a, c = in_order(*mine), in_order(*theirs)  # the two list the pieces in orders of their own
+        for what, x, y in zip(("types", "sizes", "cells", "corners"), mine, theirs):
+            k = int(what == "corners")
+            check(np.array_equal(x[a[k]], y[c[k]]), f"{path.name}: closed {what}")
+        check(np.abs(p.points[b.connectivity][a[1]] - sec["closed_xyz"][c[1]]).max() <= 1e-14 * np.abs(p.points).max(), f"{path.name}: closed points")
+        for name, v in p.point_data.items():
+            got = sec["closed_data:" + name[:-len(":smooth")]]
+            check(np.abs(v[b.connectivity].reshape(got.shape)[a[1]] - got[c[1]]).max() <= 1e-13 * np.abs(v).max(), f"{path.name}: closed {name}")
 
 
 def damaged(driver, work):
@@ -132,6 +158,15 @@ def main():
         bumpy = lambda x, y, z, l: np.sin(9 * x) * np.cos(7 * y) + z * z + 0.3 * l  # noqa: E731
         amr_files.write(f, dim, boxes, {"c": ("cell", 2, lambda x, y, z, l: np.stack([bumpy(x, y, z, l), x - y])), "n": ("node", 1, bumpy)})
         amr(driver, f, work)
+    f = work / "amr4.soma"  # a ratio of 4, and a level that stops short of the domain's sides
+    amr_files.write(f, 3, [amr_files.BOXES_3D[0], [((8, 8, 8), (23, 23, 23))]], {"n": ("node", 1, bumpy)}, ratio=4)
+    amr(driver, f, work)
+    f = work / "amr_three.soma"
+    amr_files.write(f, 3, [*amr_files.BOXES_3D, [((12, 12, 12), (19, 19, 19))]], {"c": ("cell", 1, bumpy)})
+    amr(driver, f, work)
+    amr_files.write(f, 3, [amr_files.BOXES_3D[0], [((5, 4, 4), (11, 11, 11))]], {"c": ("cell", 1, bumpy)})
+    rc, err = drive(driver, f, work / "a.bin")
+    check(rc == 1 and "covers parts" in err, f"a box that covers half a cell: {rc} {err[-300:]}")
     damaged(driver, work)
     for path in map(pathlib.Path, sys.argv[3:]):
         (amr if detect(path) == FileKind.amr else mesh)(driver, path, work)

@@ -6,7 +6,7 @@ files, mesh files and AMR checkpoints, tested with VisIt 3.5:
 - `soma_reader.hpp`, a header-only C++17 reader over the HDF5 C API, with no VTK or VisIt in it,
   that reads what the [somaview core](overview.md#one-reading-core) reads and is tested against
   it;
-- `SOMA.xml`, `avtSOMAFileFormat.h` and `avtSOMAFileFormat.C`, the plugin itself: single
+- `SOMA.xml`, `avtSOMAFileFormat.{h,C}` and `avtSOMAOptions.{h,C}` (read options), the plugin itself: single
   timestep, multiple domains (STMD).
 
 ## Building it
@@ -14,7 +14,7 @@ files, mesh files and AMR checkpoints, tested with VisIt 3.5:
 Against a VisIt binary install, with VisIt's own HDF5:
 
 ```bash
-mkdir SOMA && cp tools/somaview/visit/{SOMA.xml,avtSOMAFileFormat.*,soma_reader.hpp,visit_macos.cmake} SOMA/ && cd SOMA
+mkdir SOMA && cp tools/somaview/visit/{SOMA.xml,avtSOMA*,soma_reader.hpp,visit_macos.cmake} SOMA/ && cd SOMA
 <visit>/bin/xml2info -clobber SOMA.xml
 <visit>/bin/xml2cmake -clobber SOMA.xml
 cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/usr/bin/g++ .
@@ -42,7 +42,11 @@ them. Build with the compiler VisIt was built with, not one from another environ
   32 bits, so a node's id is its row among the file's vertices, not its gid; a mesh of more than
   $2^{31}$ vertices (in 3D with hanging vertices, vertices and cells) gets no ghost zones.
 - Cells with [hanging vertices](overview.md#hanging-vertices) are closed. In 3D each becomes several zones,
-  which have no global zone ids, and picks and zone counts are of those.
+  which have no global zone ids, and picks and zone counts are of those. The read option "Close cells at
+  hanging vertices" (File, Open file, or `SetDefaultFileOpenOptions("SOMA", ...)`), on by default, turns it off.
+- `soma_gid` is the gid of a zone's cell, also of each piece of one closed, so a Pick that lists it
+  (`PickByNode`/`PickByZone(..., vars=("soma_gid",))`, or in the Pick window) names the SOMA cell;
+  `elements_dim<D>/soma_gid` on the lower meshes. It is exact up to $2^{53}$.
 - A knife is given as a degenerate hexahedron, corners [0 1 2 3 4 5 6 5], which has the knife's
   faces and volume: VisIt 3.5's filters cannot take VTK polyhedra.
 - A field with one row per entity is a scalar (1 component), a vector (2 or 3) or one scalar per
@@ -60,7 +64,8 @@ them. Build with the compiler VisIt was built with, not one from another environ
 - An AMR checkpoint's domains are its boxes over every level, grouped by level, each a
   rectilinear grid; coarse cells under finer boxes are blanked through VisIt's domain nesting. Beside
   each field, `smooth/<field>` has [node values](overview.md#block-amr) continuous across boxes and levels,
-  for contours. Fields on faces or edges are named in the database comment.
+  for contours, and `closed/<field>` the same on `mesh_closed`, the hierarchy as one unstructured mesh, for 3D
+  contours without seams between levels. Fields on faces or edges are named in the database comment.
 
 ```{figure} ../figures/img/visualization-visit.png
 :alt: Six VisIt renders with VisIt's rainbow colour bars: a hex box and a tet box coloured by pressure with their meshes, five linear cell types in a row, an ocean mesh of the globe coloured by node id with continents missing, a square coloured from blue to red, and a globe coloured by cell size with a refined region over North America
@@ -70,6 +75,9 @@ VisIt 3.5 on a 4-rank engine: SOMA-written hex (7 parts) and tet (4 parts) meshe
 every kind, the knife last; an ocean mesh (3 parts) by node id; a 2D AMR checkpoint; and the CONUS 200 m mesh,
 50.3 million cells, on an 8-rank engine, by grid spacing.
 ```
+
+On macOS (arm64) use a serial engine: VisIt 3.5.0's package bundles an MPICH, 3.3.1, that loses or corrupts messages
+between ranks there, with any file format.
 
 ## Tests
 
@@ -83,6 +91,8 @@ every kind, the knife last; an ocean mesh (3 parts) by node id; a 2D AMR checkpo
   on files with hanging vertices whole and part by part, and that damaged records are harmless.
 - `visit/tests/visit_ghosts.py`, run in VisIt's CLI, checks that contours of a zonal field do not depend
   on how many parts a file has, with and without hanging vertices.
+- `visit/tests/visit_closed.py`, run in VisIt's CLI, checks that contours on `mesh_closed` have no seams
+  between levels, the read option that leaves cells with hanging vertices as stored, and the gid of a picked zone.
 - `visit/tests/run_visit_tests.sh` builds the plugin against a VisIt install and runs
   `visit_test.py` in `visit -nowin -cli` on a serial engine and a 4-rank engine (and a large file
   on 8 ranks): the zones read and a field's range must equal the core's, and each file is

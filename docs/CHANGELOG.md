@@ -14,6 +14,10 @@ All notable changes to SOMA are recorded here. The format follows
 
 ### Visualization
 
+- AMR hierarchies as one unstructured mesh, closed where levels meet, so that 3D contours have no slivers there:
+  `somaview.amr_closed.closed`, ParaView's `AMRClosed`, VisIt's `mesh_closed` and `closed/<field>`.
+- VisIt: a read option turns off the closing of cells with hanging vertices, and `soma_gid` is the gid of a
+  zone's cell, for picks.
 - Values drawn between the nodes of a spectral element are kept within the range of its own (on a side, the
   side's): no overshoot, and continuous fields stay so. `bounded=False` and ParaView's
   `BoundedInterpolation` turn it off.

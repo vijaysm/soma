@@ -77,7 +77,8 @@ Parts are assigned as SOMA assigns them: at P ranks, part q goes to rank floor(q
   the ParaView and VisIt readers).
 * `soma_part` (owning part of each cell) and `soma_gid` (global ids, also VTK GlobalIds).
 * AMR checkpoints: one grid per box, coarse cells covered by finer boxes blanked; node values continuous
-  across boxes and levels (`somaview.amr.smooth`, arrays `<field>:smooth`).
+  across boxes and levels (`somaview.amr.smooth`, arrays `<field>:smooth`), and one unstructured mesh without seams between levels
+  (`somaview.amr_closed.closed`).
 
 ## pyvista, yt, command line, VTKHDF
 

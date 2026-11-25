@@ -48,7 +48,7 @@ selected element dimension, named `dim0`, `dim1`, ... (matching `somaview.vtkcon
 naming) in a `vtkDataAssembly`. An AMR checkpoint's output is a `vtkOverlappingAMR`; its field
 selection is the separate `AMRArrayStatus` property, `AMRBlanking` toggles coarse-cell
 blanking under finer boxes, and `AMRNodeValues` (on) adds `<field>:smooth`, node values continuous across
-boxes and levels. Spectral-element fields are point data of blocks `gll_p<order>`, read by default in place
+boxes and levels; `AMRClosed` (off) gives one unstructured mesh, closed where levels meet, instead of the boxes. Spectral-element fields are point data of blocks `gll_p<order>`, read by default in place
 of `dim2`. The kind is read from the file itself (`somaview.detect`); loading a
 different file on the same reader instance switches the output type if needed.
 

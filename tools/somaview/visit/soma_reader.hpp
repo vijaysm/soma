@@ -1864,6 +1864,222 @@ class AmrNodeValues {
 };
 
 // -------------------------------------------------------------------------------------------
+// The cells of one AMR box that no finer ones cover, as a mesh without seams between levels
+// (amr_closed.py): a cell with finer cells beside it is a polygon with their nodes on its sides (2D), or
+// tets and pyramids from its centre (3D), a face divided as the finer cells behind it are, into triangles
+// from its own centre when it only has finer nodes on its edges, or not at all. Every point added has the
+// cell's trilinear value, which is what the finer level takes at its nodes there.
+// -------------------------------------------------------------------------------------------
+struct ClosedBox {
+  struct Place {
+    std::array<LO, 3> cell;     // of the box
+    std::array<int, 3> local;   // 0 .. 2 ratio along the cell
+  };
+  std::vector<Place> places;         // of each point
+  std::vector<std::int64_t> gids;    // place on the finest lattice, the same in every box
+  std::vector<double> points;
+  std::vector<int> types;
+  std::vector<LO> offsets{0}, connectivity;
+  std::vector<LO> source;            // per piece, its cell in the box, i fastest
+  LO size() const { return static_cast<LO>(types.size()); }
+};
+
+namespace amr_closed {
+
+using P3 = std::array<int, 3>;
+struct Piece { int type; std::vector<P3> points; };
+
+// The pieces of a cell when the neighbours `refined` says are refined by r.
+template <class F>
+std::vector<Piece> pieces(int dim, int r, F&& refined) {
+  static const int corner[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+  static const int faces[6][4] = {{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
+  auto at = [&](int c) { return P3{2 * r * corner[c][0], 2 * r * corner[c][1], 2 * r * corner[c][2]}; };
+  // The points from corner a up to, not including, corner b: with finer nodes on the edge, those too.
+  auto chain = [&](const P3& a, const P3& b, std::vector<P3>& out) {
+    bool fine = false;
+    for (int s = 1; s < 4; ++s) {  // the cells on the edge, other than this one
+      P3 n{0, 0, 0};
+      int bit = 0;
+      for (int d = 0; d < dim; ++d)
+        if (a[static_cast<std::size_t>(d)] == b[static_cast<std::size_t>(d)] && (s >> bit++ & 1) != 0)
+          n[static_cast<std::size_t>(d)] = a[static_cast<std::size_t>(d)] > 0 ? 1 : -1;
+      fine = fine || (n != P3{0, 0, 0} && refined(n));
+    }
+    const int m = fine ? r : 1;
+    for (int i = 0; i < m; ++i) {
+      P3 p;
+      for (std::size_t d = 0; d < 3; ++d) p[d] = a[d] + (b[d] - a[d]) * i / m;
+      out.push_back(p);
+    }
+  };
+  std::vector<Piece> out;
+  if (dim == 2) {
+    Piece c{vtk_type::QUAD, {}};
+    for (int i = 0; i < 4; ++i) chain(at(i), at((i + 1) % 4), c.points);
+    if (c.points.size() > 4) c.type = vtk_type::POLYGON;
+    out.push_back(std::move(c));
+    return out;
+  }
+  const P3 centre{r, r, r};
+  bool any = false;
+  std::vector<std::vector<P3>> tiles;
+  for (const auto& f : faces) {
+    const P3 q[4] = {at(f[0]), at(f[1]), at(f[2]), at(f[3])};
+    P3 normal{0, 0, 0};
+    std::vector<P3> loop;
+    for (std::size_t d = 0; d < 3; ++d)
+      if (q[0][d] == q[1][d] && q[0][d] == q[2][d]) normal[d] = q[0][d] > 0 ? 1 : -1;
+    for (int i = 0; i < 4; ++i) chain(q[i], q[(i + 1) % 4], loop);
+    if (refined(normal)) {
+      auto on = [&](int a, int b) {
+        P3 p;
+        for (std::size_t d = 0; d < 3; ++d) p[d] = q[0][d] + ((q[1][d] - q[0][d]) * a + (q[3][d] - q[0][d]) * b) / r;
+        return p;
+      };
+      for (int b = 0; b < r; ++b)
+        for (int a = 0; a < r; ++a) tiles.push_back({on(a, b), on(a + 1, b), on(a + 1, b + 1), on(a, b + 1)});
+    } else if (loop.size() == 4) {
+      tiles.push_back(loop);
+      continue;
+    } else {
+      P3 middle;
+      for (std::size_t d = 0; d < 3; ++d) middle[d] = (q[0][d] + q[2][d]) / 2;
+      for (std::size_t i = 0; i < loop.size(); ++i) tiles.push_back({middle, loop[i], loop[(i + 1) % loop.size()]});
+    }
+    any = true;
+  }
+  if (!any) {
+    Piece c{vtk_type::HEXAHEDRON, {}};
+    for (int i = 0; i < 8; ++i) c.points.push_back(at(i));
+    out.push_back(std::move(c));
+    return out;
+  }
+  for (auto& t : tiles) {  // a cone's base is counterclockwise seen from its apex, inside
+    std::reverse(t.begin(), t.end());
+    t.push_back(centre);
+    out.push_back({t.size() == 4 ? vtk_type::TETRA : vtk_type::PYRAMID, std::move(t)});
+  }
+  return out;
+}
+
+}  // namespace amr_closed
+
+inline ClosedBox closed_box(const AmrFile& af, int level, LO b) {
+  const int dim = af.dim(), r = static_cast<int>(af.ratio()), nlevels = af.nlevels();
+  const AmrBox& box = af.boxes()[static_cast<std::size_t>(level)][static_cast<std::size_t>(b)];
+  std::array<LO, 3> n, grown;
+  for (std::size_t d = 0; d < 3; ++d) {
+    n[d] = box.hi[d] - box.lo[d] + 1;
+    grown[d] = n[d] + (static_cast<int>(d) < dim ? 2 : 0);
+  }
+  auto used = [&](std::size_t d) { return static_cast<int>(d) < dim ? LO{1} : LO{0}; };
+  // Which cells of the box, and of one layer about it, finer boxes cover.
+  std::vector<char> covered(static_cast<std::size_t>(grown[0] * grown[1] * grown[2]), 0);
+  auto index = [&](const std::array<LO, 3>& c) { return static_cast<std::size_t>((c[0] + used(0)) + grown[0] * ((c[1] + used(1)) + grown[1] * (c[2] + used(2)))); };
+  if (level + 1 < nlevels) {
+    for (const AmrBox& f : af.boxes()[static_cast<std::size_t>(level) + 1]) {
+      std::array<LO, 3> lo, hi;
+      bool meet = true, aligned = true;
+      for (std::size_t d = 0; d < 3; ++d) {
+        const LO s = used(d) ? r : 1;
+        const LO first = (box.lo[d] - used(d)) * s, end = (box.hi[d] + 1 + used(d)) * s;
+        meet = meet && f.lo[d] < end && f.hi[d] >= first;
+        lo[d] = std::max(f.lo[d], first);
+        hi[d] = std::min(f.hi[d] + 1, end);
+        aligned = aligned && f.lo[d] % s == 0 && (f.hi[d] + 1) % s == 0;
+      }
+      if (!meet) continue;
+      if (!aligned)
+        throw io_error("a box of AMR level " + std::to_string(level + 1) + " covers parts of level " +
+                       std::to_string(level) + "'s cells");
+      std::array<LO, 3> c;
+      const std::array<LO, 3> s{used(0) ? r : 1, used(1) ? r : 1, used(2) ? r : 1};
+      for (c[2] = lo[2] / s[2] - box.lo[2]; c[2] < hi[2] / s[2] - box.lo[2]; ++c[2])
+        for (c[1] = lo[1] / s[1] - box.lo[1]; c[1] < hi[1] / s[1] - box.lo[1]; ++c[1])
+          for (c[0] = lo[0] / s[0] - box.lo[0]; c[0] < hi[0] / s[0] - box.lo[0]; ++c[0]) covered[index(c)] = 1;
+    }
+  }
+  std::int64_t scale = 1, step = 1;  // of this level's indices; finest cells along one of this level's
+  for (int l = 0; l < level; ++l) scale *= r;
+  for (int l = level; l + 1 < nlevels; ++l) step *= r;
+  const std::int64_t size = 2 * step;
+  std::array<std::int64_t, 3> extent;
+  for (std::size_t d = 0; d < 3; ++d) extent[d] = used(d) ? (af.domain_hi()[d] - af.domain_lo()[d] + 1) * size * scale + 1 : 1;
+  const auto dx = af.spacing(0);
+  const double unit = 1.0 / static_cast<double>(size * scale);
+  ClosedBox out;
+  std::unordered_map<std::int64_t, LO> point;
+  std::map<std::vector<bool>, std::vector<amr_closed::Piece>> known;
+  std::array<LO, 3> c;
+  for (c[2] = 0; c[2] < n[2]; ++c[2])
+    for (c[1] = 0; c[1] < n[1]; ++c[1])
+      for (c[0] = 0; c[0] < n[0]; ++c[0]) {
+        if (covered[index(c)]) continue;
+        auto refined = [&](const amr_closed::P3& s) { return covered[index({c[0] + s[0], c[1] + s[1], c[2] + s[2]})] != 0; };
+        std::vector<bool> pattern;
+        for (int k = -static_cast<int>(used(2)); k <= static_cast<int>(used(2)); ++k)
+          for (int j = -1; j <= 1; ++j)
+            for (int i = -1; i <= 1; ++i) pattern.push_back(refined({i, j, k}));
+        auto it = known.find(pattern);
+        if (it == known.end()) it = known.emplace(pattern, amr_closed::pieces(dim, r, refined)).first;
+        for (const auto& piece : it->second) {
+          for (const auto& p : piece.points) {
+            std::int64_t gid = 0, stride = 1;
+            std::array<double, 3> x{0, 0, 0};
+            for (std::size_t d = 0; d < 3; ++d) {
+              if (!used(d)) continue;
+              const std::int64_t at = (c[d] + box.lo[d] - af.domain_lo()[d] * scale) * size + p[d] * size / (2 * r);
+              gid += stride * at;
+              stride *= extent[d];
+              x[d] = af.lo()[d] + static_cast<double>(at) * (dx[d] * unit);
+            }
+            const auto [where, fresh] = point.emplace(gid, static_cast<LO>(out.gids.size()));
+            if (fresh) {
+              out.gids.push_back(gid);
+              out.points.insert(out.points.end(), x.begin(), x.end());
+              out.places.push_back({c, p});
+            }
+            out.connectivity.push_back(where->second);
+          }
+          out.offsets.push_back(static_cast<LO>(out.connectivity.size()));
+          out.types.push_back(piece.type);
+          out.source.push_back(c[0] + n[0] * (c[1] + n[1] * c[2]));
+        }
+      }
+  return out;
+}
+
+// Values at the points of a closed box, by point then component, from its node values (AmrNodeValues::box).
+inline Array closed_values(const AmrFile& af, int level, LO b, const ClosedBox& closed, const std::vector<double>& nodes, int ncomp) {
+  const AmrBox& box = af.boxes()[static_cast<std::size_t>(level)][static_cast<std::size_t>(b)];
+  const auto nc = static_cast<std::size_t>(ncomp);
+  std::array<LO, 3> n;
+  for (std::size_t d = 0; d < 3; ++d) n[d] = box.hi[d] - box.lo[d] + 1 + (static_cast<int>(d) < af.dim() ? 1 : 0);
+  const auto all = static_cast<std::size_t>(n[0] * n[1] * n[2]);
+  const double whole = 2.0 * static_cast<double>(af.ratio());
+  Array out;
+  out.ncomp = ncomp;
+  out.data.assign(closed.places.size() * nc, 0.0);
+  for (std::size_t p = 0; p < closed.places.size(); ++p) {
+    const auto& [cell, local] = closed.places[p];
+    for (int s = 0; s < 1 << af.dim(); ++s) {
+      double w = 1;
+      std::array<LO, 3> at = cell;
+      for (int d = 0; d < af.dim(); ++d) {
+        const double t = local[static_cast<std::size_t>(d)] / whole;
+        w *= (s >> d & 1) != 0 ? t : 1 - t;
+        at[static_cast<std::size_t>(d)] += s >> d & 1;
+      }
+      if (w == 0) continue;
+      const auto node = static_cast<std::size_t>(at[0] + n[0] * (at[1] + n[1] * at[2]));
+      for (std::size_t c = 0; c < nc; ++c) out.data[p * nc + c] += w * nodes[c * all + node];
+    }
+  }
+  return out;
+}
+
+// -------------------------------------------------------------------------------------------
 // HaloCache: the sharing tables read and inverted once per process, so that reading the halo
 // of one part (one VisIt domain) afterwards costs only that part's own interface, not a rescan
 // of every other part. Built lazily on first use; reused across every GetMesh call a database
