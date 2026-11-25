@@ -106,6 +106,7 @@ io/vtk_writer
 
 algorithms/arborx_index
 algorithms/cg
+algorithms/components
 algorithms/csr
 algorithms/fem
 algorithms/fem_space
@@ -116,6 +117,7 @@ algorithms/laplacian
 algorithms/quality_smooth
 algorithms/petsc
 algorithms/refine
+algorithms/refine_graded
 algorithms/remap
 ```
 
@@ -124,6 +126,7 @@ algorithms/remap
 ```{toctree}
 :maxdepth: 1
 
+sem/boundary
 sem/cubed_sphere
 sem/gll
 sem/operators

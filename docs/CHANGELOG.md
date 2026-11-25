@@ -16,12 +16,17 @@ All notable changes to SOMA are recorded here. The format follows
 
 - `sync_mesh(comm, mesh)` makes a distributed part whole after `MeshEdit` changed it on any rank: sharing, derived
   sides and ghosts. `Mesh::needs_sync()` says when; until then the calls that use the sharing throw on every rank
-  (they took the part as having no shared entities, and `add_ghosts` placed no ghosts). C: `soma_mesh_sync`, `soma_mesh_needs_sync`; Fortran: `%sync`, `%needs_sync`; Python: `mesh.sync`,
-  `mesh.needs_sync`.
+  (they took the part as having no shared entities, and `add_ghosts` placed no ghosts). C: `soma_mesh_sync`,
+  `soma_mesh_needs_sync`; Fortran: `%sync`, `%needs_sync`; Python: `mesh.sync`, `mesh.needs_sync`.
 - Fixed: on an edited mesh with removed vertices, sides derived again named the wrong vertices until it was compressed.
 - Fixed: an edit of a 3D mesh that held edges and faces could be refused after cells had been removed ("explicit
   entity ... is no side of any element").
 - `FvSpace` refuses a mesh with hanging vertices. It took one, and its coarse-fine faces were walls.
+- `soma::refine_graded` (`soma/algorithms/refine_graded.hpp`): the graded refinement of
+  `examples/regional_refine`, moved into the library with its target given by a callback ("is this
+  cell within g of the target"); `regional_refine`'s outputs are unchanged.
+- `soma::edge_reachable` (`soma/algorithms/components.hpp`): the elements joined to a seed through
+  shared edges, over a distributed mesh.
 
 ### Visualization
 
@@ -46,6 +51,34 @@ All notable changes to SOMA are recorded here. The format follows
   fields: VisIt reads global ids as 32-bit integers and the plugin gave it 64-bit ones.
 - Fixed: `sv.plot` failed when `somaview.plot` had been imported, so when called a second time.
 - The VisIt plugin builds against VisIt 3.5.0's macOS package (`visit_macos.cmake`).
+
+### Spectral elements
+
+- `soma::sem::divergence_weak` (`soma/sem/operators.hpp`): the weak divergence, HOMME's
+  `divergence_sphere_wk`, assembled; zero flux through the mesh boundary is built in.
+- `soma::sem::make_boundary` and `remove_normal` (`soma/sem/boundary.hpp`): a space's boundary
+  points with unit normals from their skin edges, the same on any number of ranks; velocity loses
+  its normal component at the coast and vanishes at corners of 90 degrees or more and at pinch
+  points.
+
+### Barotropic ocean
+
+- `apps/swe_ocean` (`SOMA_ENABLE_APPS=ON`): the barotropic ocean on the spectral elements, with
+  coasts, wind stress, quadratic or linear drag and hyperviscosity, the same bits on any number of
+  ranks and threads. Land points of coastal elements take no wind stress and a linear drag of
+  $10^{-2}$ s$^{-1}$, so they stay nearly still.
+- The mesh: the cubed sphere refined toward ETOPO1's coastline, the bathymetry averaged over each
+  GLL point's footprint (each rank reading only its windows of the NetCDF-4 file), land and closed
+  basins removed, the remaining land points held at 10 m and $\ln H$ smoothed until the slope
+  factor is at most 0.2 or a sweep limit is reached (reported). It can be saved as a SOMA file and read
+  back at any number of ranks.
+- Passive tracers on K levels of ROMS's terrain-following coordinate or of z-star levels with
+  vanished bottom layers, conserved to rounding.
+- Cases `stommel` and `kelvin` (analytic, in the plane), `rest` and `wind` (global, with the Drake
+  Passage transport). Stommel's error at order 4 falls from 5.5e-3 to 4.0e-4 from 4 to 8 elements
+  a side; Kelvin's from 2.2e-2 to 3.7e-7 from order 2 to 6.
+- Output: SOMA snapshots and `.npy` latitude-longitude fields (NaN over land).
+  `--io-aggregators M` reads and writes SOMA files through M ranks, for filesystems such as NFS.
 
 ## [0.1.0] - 2026-11-23
 

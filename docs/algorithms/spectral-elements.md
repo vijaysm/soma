@@ -12,6 +12,7 @@ is in namespace `soma::sem`.
 | [`soma/sem/cubed_sphere.hpp`](../reference/api/sem/cubed_sphere.md) | the equiangular cubed sphere, split across the ranks |
 | [`soma/sem/sem_space.hpp`](../reference/api/sem/sem_space.md) | `SemSpace`: points, geometry, `dss`, `mass`, `integral` |
 | [`soma/sem/operators.hpp`](../reference/api/sem/operators.md) | gradient, divergence, vorticity, tangent projection, Laplacian, hyperviscosity |
+| [`soma/sem/boundary.hpp`](../reference/api/sem/boundary.md) | `SemBoundary`: coast and no-slip points, outward normals; `remove_normal` |
 
 ```cpp
 soma::sem::CubedSphereSpec spec;

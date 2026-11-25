@@ -77,6 +77,8 @@ add_test(NAME test_sem_dss.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:
   -P ${CMAKE_CURRENT_SOURCE_DIR}/unit/compare_threads.cmake)
 set_tests_properties(test_sem_dss.threads PROPERTIES TIMEOUT 300)
 soma_add_test(test_sem_operators SOURCES unit/test_sem_operators.cpp RANKS 1 2 3 4 8)
+soma_add_test(test_sem_weak_divergence SOURCES unit/test_sem_weak_divergence.cpp RANKS 1 2 3 4)
+soma_add_test(test_sem_boundary SOURCES unit/test_sem_boundary.cpp RANKS 1 2 3 4 8)
 soma_add_test(test_cg SOURCES unit/test_cg.cpp RANKS 1 2 3 4 5 7 8)
 # Reproducible CG is the same bit for bit at any number of threads.
 add_test(NAME test_cg.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_cg> -DFILTER=Cg.SolutionDigests
@@ -111,6 +113,8 @@ soma_add_test(test_remap_sphere SOURCES unit/test_remap_sphere.cpp RANKS 1 2 3 4
 soma_add_test(test_refine SOURCES unit/test_refine.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_refine_marked SOURCES unit/test_refine_marked.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_refine_quads SOURCES unit/test_refine_quads.cpp RANKS 1 2 3 4 5 7 8)
+soma_add_test(test_refine_graded SOURCES unit/test_refine_graded.cpp RANKS 1 2 4)
+soma_add_test(test_components SOURCES unit/test_components.cpp RANKS 1 2 3 4 8)
 soma_add_test(test_fv SOURCES unit/test_fv.cpp RANKS 1 2 3 4 5 7 8)
 # Upwind steps are the same bit for bit at any number of threads.
 add_test(NAME test_fv.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_fv> -DFILTER=Fv.SolutionDigests
