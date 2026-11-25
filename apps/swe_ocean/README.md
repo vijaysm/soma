@@ -21,3 +21,6 @@ Run one thread per rank and bind each rank to its own core (`-bind-to core` is M
 unless the launcher binds the ranks: an unbound rank's thread is then pinned to the node's first
 core, with every other rank's. On NFS add `--io-aggregators 1`. See
 [Running on a cluster](../../docs/apps/swe-ocean.md#running-on-a-cluster).
+
+Frames of the snapshots (`--output-reports`), vorticity and speed on a map: `render_ocean.py`; see
+[Movies](../../docs/apps/swe-ocean.md#movies).
