@@ -437,6 +437,8 @@ int run_global(const soma::Comm& comm, Options o) {
 }  // namespace
 
 int main(int argc, char** argv) {
+  // Line-buffered, so that each report reaches a file or a batch log as it is printed, not at exit.
+  std::setvbuf(stdout, nullptr, _IOLBF, 0);
   soma::ScopeGuard guard(argc, argv);
   const soma::Comm comm = soma::Comm::world();
   try {
