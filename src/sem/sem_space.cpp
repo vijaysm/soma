@@ -14,6 +14,7 @@
 #include <utility>
 #include <vector>
 
+#include "soma/core/mesh_geometry.hpp"
 #include "soma/core/topology.hpp"
 #include "soma/fields/layout.hpp"
 #include "soma/fields/node_tables.hpp"
@@ -254,6 +255,11 @@ SemDssPlan sem_dss_plan(const Mesh<Kokkos::HostSpace>& mesh, int order) {
     plan.edge_offsets.push_back(static_cast<Offset>(plan.edge_base.size()));
   }
   return plan;
+}
+
+void declare_geometry(MeshValues& values, const SemGeometry& g) {
+  if (values.contains(geometry_value)) return;
+  set_geometry(values, g.kind == SemGeometry::Kind::sphere ? MeshGeometry::sphere(g.radius) : MeshGeometry::affine());
 }
 
 void check_sem_geometry(const Comm& comm, const SemGeometryData& data, int dim, int order) {

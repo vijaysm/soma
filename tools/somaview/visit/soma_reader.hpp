@@ -546,6 +546,13 @@ class SomaFile {
     return nullptr;
   }
 
+  // The words of soma:geometry, the surface the file says its mesh is on, if it says.
+  std::optional<std::vector<double>> geometry() const {
+    const auto at = values_.find("soma:geometry");
+    if (at == values_.end() || !at->second.has_value) return std::nullopt;
+    return at->second.value;
+  }
+
   std::optional<double> time() const {
     for (auto& [name, v] : values_) {
       std::string lower = name;
@@ -2416,8 +2423,9 @@ inline MeshPiece read_piece_cached(const SomaFile& sf, const HaloCache& halo_cac
 // point data, nothing averaged or interpolated; points are not shared between elements, so a field
 // that jumps from one to the next is drawn as it is. With a resolution n every quad is n x n uniform
 // sub-quads instead, the values between GLL points those of the element's polynomial (a field of
-// integers, a mask or a flag, is piecewise bilinear, so within its range). The points are where SemSpace puts them:
-// bilinear in the corners (biquadratic with 8 or 9 nodes), on a sphere projected to it.
+// integers, a mask or a flag, is piecewise bilinear, so within its range), kept within the range of the
+// element's own values. The points are where SemSpace puts them: bilinear in the corners (biquadratic
+// with 8 or 9 nodes), on a sphere projected to it.
 // -------------------------------------------------------------------------------------------
 
 // SemSpace takes a corner to be on its sphere within this relative distance; two corners may
@@ -2498,23 +2506,43 @@ inline void quad_shape(int n, double s, double t, double* f) {
   }
 }
 
-// The radius of the sphere about the origin the mesh is on, 0 for any other mesh: a file does not
-// say. Decided from the file's first vertices, so the same for every part of it: all at one distance
-// from the origin, within SemSpace's tolerance, and not all in the plane z = 0.
-inline double sphere_radius(const SomaFile& sf) {
+// The sphere the mesh is on (radius 0: none): what the file says (soma:geometry); one that does not
+// say is looked at: its first vertices, so the same for every part of it, all at one distance from the
+// origin, within SemSpace's tolerance, and not all at one z.
+struct Sphere {
+  double center[3] = {0, 0, 0};
+  double radius = 0;
+  bool unknown = false;  // the file names a surface of a kind not known here
+};
+
+inline Sphere sphere(const SomaFile& sf) {
+  Sphere out;
+  if (const auto g = sf.geometry()) {
+    const auto& w = *g;
+    if (w.size() < 3) throw io_error(sf.path() + ": soma:geometry is cut short");
+    out.unknown = w[0] != 1 || (w[1] != 0 && w[1] != 1);
+    if (out.unknown || w[1] == 0) return out;
+    if (w.size() < 7 || !(w[6] > 0) || !std::all_of(w.begin() + 3, w.begin() + 7, [](double v) { return std::isfinite(v); }))
+      throw io_error(sf.path() + ": soma:geometry gives no sphere");
+    std::copy(w.begin() + 3, w.begin() + 6, out.center);
+    out.radius = w[6];
+    return out;
+  }
   const hsize_t n = std::min(h5detail::dataset_extent(sf.raw(), "dim0/coords").first, SPHERE_SAMPLE);
-  if (n == 0) return 0;
+  if (n == 0) return out;
   hsize_t width = 0;
   const auto x = h5detail::read_rows<double>(sf.raw(), "dim0/coords", 0, n, &width);
   if (width != 3) throw io_error(sf.path() + ": dim0/coords has " + std::to_string(width) + " columns");
   auto radius = [&](hsize_t i) { return std::sqrt(x[3 * i] * x[3 * i] + x[3 * i + 1] * x[3 * i + 1] + x[3 * i + 2] * x[3 * i + 2]); };
   const double r = radius(0), tol = 2 * SPHERE_TOLERANCE * r;
-  double z = 0;
+  double top = x[2], bottom = x[2];
   for (hsize_t i = 0; i < n; ++i) {
-    if (!(std::fabs(radius(i) - r) <= tol)) return 0;
-    z = std::max(z, std::fabs(x[3 * i + 2]));
+    if (!(std::fabs(radius(i) - r) <= tol)) return out;
+    top = std::max(top, x[3 * i + 2]);
+    bottom = std::min(bottom, x[3 * i + 2]);
   }
-  return z > tol ? r : 0;
+  if (top - bottom > tol) out.radius = r;
+  return out;
 }
 
 struct Subcells {
@@ -2528,9 +2556,9 @@ struct Subcells {
   LO num_points() const { return static_cast<LO>(points.size() / 3); }
 };
 
-// The sub-quads of order `p` of the quads of `block`, on the sphere of `radius` (0: none), between
+// The sub-quads of order `p` of the quads of `block`, on the sphere where they are on it, between
 // the GLL points or, with `resolution` > 0, that many uniform ones along a side.
-inline Subcells subcells(const MeshPiece& piece, const CellBlock& block, int p, double radius, int resolution = 0) {
+inline Subcells subcells(const MeshPiece& piece, const CellBlock& block, int p, const Sphere& s, int resolution = 0) {
   Subcells out;
   out.order = p;
   out.resolution = resolution;
@@ -2549,20 +2577,23 @@ inline Subcells subcells(const MeshPiece& piece, const CellBlock& block, int p, 
     if (n == 0) continue;
     const auto& shape = n == 4 ? shape4 : n == 8 ? shape8 : shape9;
     double node[9][3];
-    bool ball = radius > 0;
+    bool ball = s.radius > 0;
     for (int a = 0; a < n; ++a) {
       const auto v = static_cast<std::size_t>(block.connectivity[static_cast<std::size_t>(block.offsets[uc] + a)]);
       for (int d = 0; d < 3; ++d) node[a][d] = piece.points[3 * v + static_cast<std::size_t>(d)];
-      const double r = std::sqrt(node[a][0] * node[a][0] + node[a][1] * node[a][1] + node[a][2] * node[a][2]);
-      if (a < 4 && !(std::fabs(r - radius) <= 2 * SPHERE_TOLERANCE * radius)) ball = false;
+      const double r = std::hypot(node[a][0] - s.center[0], node[a][1] - s.center[1], node[a][2] - s.center[2]);
+      if (a < 4 && !(std::fabs(r - s.radius) <= 2 * SPHERE_TOLERANCE * s.radius)) ball = false;
     }
     const LO first = out.num_points();
     for (int k = 0; k < np * np; ++k) {
       double y[3] = {0, 0, 0};
       for (int a = 0; a < n; ++a)
         for (int d = 0; d < 3; ++d) y[d] += shape[static_cast<std::size_t>(k * n + a)] * node[a][d];
-      const double s = ball ? radius / std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]) : 1;
-      for (double v : y) out.points.push_back(s * v);
+      if (ball) {
+        const double f = s.radius / std::hypot(y[0] - s.center[0], y[1] - s.center[1], y[2] - s.center[2]);
+        for (int d = 0; d < 3; ++d) y[d] = s.center[d] + f * (y[d] - s.center[d]);
+      }
+      out.points.insert(out.points.end(), y, y + 3);
     }
     for (int j = 0; j < side; ++j)
       for (int i = 0; i < side; ++i)
@@ -2571,6 +2602,34 @@ inline Subcells subcells(const MeshPiece& piece, const CellBlock& block, int p, 
     out.cells.push_back(c);
   }
   return out;
+}
+
+// Clips `to` (side x side samples of `width` components of an element's polynomial) inside the element to
+// the range of its values `from` (np x np), on a side of it to the range of the side's, which the element
+// across it has too, so what is continuous stays so.
+inline void bound_samples(const double* from, std::size_t np, double* to, std::size_t side, std::size_t width) {
+  auto clip = [&](std::size_t c, std::size_t f0, std::size_t fi, std::size_t fj, std::size_t nj, std::size_t t0,
+                  std::size_t ti, std::size_t tj, std::size_t mi, std::size_t mj) {
+    double lo = std::numeric_limits<double>::quiet_NaN(), hi = lo;
+    for (std::size_t j = 0; j < nj; ++j)
+      for (std::size_t i = 0; i < np; ++i) {
+        const double v = from[(f0 + fi * i + fj * j) * width + c];
+        lo = std::fmin(lo, v);
+        hi = std::fmax(hi, v);
+      }
+    for (std::size_t j = 0; j < mj; ++j)
+      for (std::size_t i = 0; i < mi; ++i) {
+        double& v = to[(t0 + ti * i + tj * j) * width + c];
+        v = v < lo ? lo : v > hi ? hi : v;
+      }
+  };
+  for (std::size_t c = 0; c < width; ++c) {
+    if (side > 2) clip(c, 0, 1, np, np, side + 1, 1, side, side - 2, side - 2);
+    clip(c, 0, 1, 0, 1, 0, 1, 0, side, 1);
+    clip(c, np * (np - 1), 1, 0, 1, side * (side - 1), 1, 0, side, 1);
+    clip(c, 0, np, 0, 1, 0, side, 0, side, 1);
+    clip(c, np - 1, np, 0, 1, side - 1, side, 0, side, 1);
+  }
 }
 
 // Values of `info` at the points of `sub`, NaN on elements off its domain. `piece` holds the
@@ -2654,6 +2713,7 @@ inline Array subcell_values(const SomaFile& sf, const FieldInfo& info, const Mes
     for (std::size_t q = 0; q < side; ++q)
       for (std::size_t j = 0; j < np; ++j)
         for (std::size_t r = 0; r < side * width; ++r) to[q * side * width + r] += basis[q * np + j] * half[j * side * width + r];
+    if (!integer) bound_samples(from, np, to, side, width);
   }
   return out;
 }

@@ -68,7 +68,7 @@ def _cmd_render(args) -> int:
     if args.dims is not None:
         kw["dims"] = args.dims
     if args.nodal or args.lagrange or args.resolution is not None:
-        kw.update(nodal="lagrange" if args.lagrange else True, resolution=args.resolution)
+        kw.update(nodal="lagrange" if args.lagrange else True, resolution=args.resolution, bounded=not args.unbounded)
     plot(args.file, scalars=args.scalars, clip=clip, screenshot=args.output, off_screen=True, **kw)
     print(f"wrote {args.output}")
     return 0
@@ -142,6 +142,7 @@ def build_parser() -> argparse.ArgumentParser:
     render.add_argument("--nodal", action="store_true", help="draw a spectral-element field, on sub-quads")
     render.add_argument("--lagrange", action="store_true", help="draw it on VTK Lagrange cells")
     render.add_argument("--resolution", type=int, default=None, help="draw it on N x N sub-quads per element")
+    render.add_argument("--unbounded", action="store_true", help="with --resolution, the polynomial beyond its element's values")
     render.add_argument("--clip", default=None, help="clip plane normal: x, y, z, or -x, -y, -z")
     render.set_defaults(func=_cmd_render)
 

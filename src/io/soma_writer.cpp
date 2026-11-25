@@ -14,6 +14,7 @@
 #include <deque>
 #include <filesystem>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -22,6 +23,7 @@
 #include "../parallel/closure.hpp"
 #include "hdf5.hpp"
 #include "soma/core/handle_ref.hpp"
+#include "soma/core/mesh_geometry.hpp"
 #include "soma/core/mesh_values.hpp"
 #include "soma/fields/data_type.hpp"
 #include "soma/fields/domain_mesh.hpp"
@@ -103,17 +105,33 @@ struct Agreed {
   std::array<bool, 4> input{};
   std::array<bool, 4> nodes{};
   std::uint32_t graphs = 0;
+  MeshValues values;
 };
 
+// The mesh's values, the geometry among them as the options have it: the one
+// held (declared, or of a kind not known here), else the one recognized.
+MeshValues values_to_write(const MeshValues& held, bool geometry, const std::optional<MeshGeometry>& recognized) {
+  MeshValues out = held;
+  bool keep = held.contains(geometry_value) && geometry;
+  if (keep) {
+    const auto g = soma::geometry(held);
+    keep = !g || g->declared;
+  }
+  if (!keep) out.erase(geometry_value);
+  if (!keep && geometry && recognized) set_geometry(out, *recognized);
+  return out;
+}
+
 Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_error, bool derived,
-             std::uint64_t access) {
+             bool geometry, std::uint64_t access) {
   const std::uint64_t hs = detail::sets_hash(mesh), hf = detail::fields_hash(mesh);
   // Maxima: flags, then each hash and its complement (equal on every rank
   // only when the maxima are complements), the dimension, then per
   // dimension input, set members, high-order nodes, the graphs held, and
   // per dimension whether any entity is held, then the hash of the access
-  // options and its complement.
-  std::array<std::uint64_t, 26> f{};
+  // options and its complement, whether geometry is and is not written, and
+  // the vertices' extent it is recognized by.
+  std::array<std::uint64_t, 33> f{};
   f[0] = local_error.empty() ? 0 : 1;
   f[1] = mesh.edited() && comm.size() > 1 ? 1 : 0;
   f[2] = hs;
@@ -135,6 +153,15 @@ Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_er
   f[19] = mesh.adjacencies().bits();
   f[24] = access;
   f[25] = ~access;
+  f[26] = geometry ? 1 : 0;
+  f[27] = geometry ? 0 : 1;
+  detail::GeometryExtent extent;
+  if (geometry && local_error.empty() && mesh.dim() == 2) {
+    const auto view = mesh.view();
+    const LO owned = mesh.segment_table(0).owned_end;
+    for (LO v = 0; v < owned; ++v) extent.add(view.x(v, 0), view.x(v, 1), view.x(v, 2));
+  }
+  std::copy(extent.order_keys.begin(), extent.order_keys.end(), f.begin() + 28);
   comm.allreduce(std::span<std::uint64_t>(f), Op::max);
   if (f[0] != 0) {
     if (!local_error.empty()) throw std::invalid_argument(std::string(who) + ": " + local_error);
@@ -152,8 +179,13 @@ Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_er
   if (f[24] != ~f[25]) {
     throw std::invalid_argument(std::string(who) + ": the ranks' aggregators or MPI-IO hints differ");
   }
+  if (f[26] != 0 && f[27] != 0) {
+    throw std::invalid_argument(std::string(who) + ": the ranks differ in whether they write the geometry");
+  }
   Agreed a;
   a.dim = static_cast<int>(f[6]);
+  std::copy(f.begin() + 28, f.end(), extent.order_keys.begin());
+  a.values = values_to_write(mesh.values(), geometry, a.dim == 2 ? extent.recognize() : std::nullopt);
   for (std::size_t d = 0; d < 4; ++d) {
     a.input[d] = f[7 + d] != 0;
     a.written[d] = d == 0 || static_cast<int>(d) == a.dim || f[7 + d] != 0 || f[11 + d] != 0;
@@ -355,7 +387,7 @@ void lay_out_field(const HostMesh& mesh, const FieldInfo& info, std::size_t inde
   }
 }
 
-void lay_out_fields(const Comm& comm, const HostMesh& mesh, Image& img) {
+void lay_out_fields(const Comm& comm, const HostMesh& mesh, const MeshValues& all, Image& img) {
   std::vector<const FieldInfo*> fields;
   const auto list = mesh.fields().list();
   for (const FieldInfo& f : list) {
@@ -383,9 +415,9 @@ void lay_out_fields(const Comm& comm, const HostMesh& mesh, Image& img) {
     dispatch_data_type(fields[i]->type, [&]<class T>() { lay_out_field<T>(mesh, *fields[i], i, f, img); });
   }
   img.groups.push_back("values");
-  const auto names = mesh.values().names();
+  const auto names = all.names();
   for (std::size_t i = 0; i < names.size(); ++i) {
-    const MeshValue& v = mesh.values().at(names[i]);
+    const MeshValue& v = all.at(names[i]);
     const std::string g = value_group(i);
     img.groups.push_back(g);
     img.text(g, "name", names[i]);
@@ -669,7 +701,7 @@ void write_part(const Created& c, const Image& img, const Placement& at, std::ui
 Image lay_out(const Comm& comm, const HostMesh& mesh, const Agreed& a) {
   Image img;
   lay_out_entities(mesh, a, img);
-  lay_out_fields(comm, mesh, img);
+  lay_out_fields(comm, mesh, a.values, img);
   lay_out_sets(comm, mesh, img);
   std::int64_t written = 0, input = 0, nodes = 0;
   for (std::size_t d = 0; d < 4; ++d) {
@@ -681,7 +713,7 @@ Image lay_out(const Comm& comm, const HostMesh& mesh, const Agreed& a) {
   for (const FieldInfo& f : mesh.fields().list()) fields += internal(f.name) ? 0 : 1;
   img.ints("", "meta",
            {soma_file::format_version, a.dim, comm.size(), written, input, nodes, static_cast<std::int64_t>(a.graphs),
-            mesh.sets().count(), fields, static_cast<std::int64_t>(mesh.values().size()),
+            mesh.sets().count(), fields, static_cast<std::int64_t>(a.values.size()),
             static_cast<std::int64_t>(mesh.ordering())});
   return img;
 }
@@ -866,7 +898,7 @@ void write_soma(const Comm& comm, const HostMesh& mesh, const fs::path& path, co
     error = soma_file::access_error(options.hints, options.aggregators, comm.size());
   }
   const Agreed agreed =
-      agree(comm, mesh, error, options.derived, soma_file::access_hash(options.hints, options.aggregators));
+      agree(comm, mesh, error, options.derived, options.geometry, soma_file::access_hash(options.hints, options.aggregators));
   Image img = lay_out(comm, mesh, agreed);
 
   soma_file::write_image(comm, path, img, options, who);

@@ -33,6 +33,7 @@ reader.PartIds = 1                       # cell array soma_part
 reader.GlobalIds = 1                     # GlobalIds from the gids
 reader.CloseHangingCells = 1             # close cells at hanging vertices
 reader.NodalResolution = 0               # spectral-element fields: 0 the GLL points, n > 0 n x n sub-quads
+reader.BoundedInterpolation = 1          # ... kept within the range of the element's own values
 reader.LagrangeCells = 0                 # spectral-element fields on VTK Lagrange cells instead
 reader.UpdatePipeline()
 ```

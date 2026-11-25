@@ -240,7 +240,9 @@ struct QuadRefineOptions {
 /// nine children of a cell split fully are one level up, the others keep
 /// their parent's. No other state is kept; a later call takes the result as
 /// a mesh like any other. Fields carry over as refine_uniform carries them,
-/// a new vertex's value weighted as its position is (before projection).
+/// a new vertex's value weighted as its position is (before projection). A
+/// geometry the input has (mesh_geometry.hpp) is the result's where the new
+/// vertices are on it: a sphere with that sphere_radius, affine with none.
 ///
 /// Collective; throws std::invalid_argument on every rank if any rank's mesh
 /// is not of quads alone (dimension 2, no edits, no high-order nodes), if a

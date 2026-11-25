@@ -16,8 +16,8 @@ dimensions, named ``dim1``.. as in the core); ``AMRArrayStatus`` (AMR checkpoint
 
 A file with spectral-element fields has one more element block per order, ``gll_p<order>``: sub-quads
 between the GLL points with the values stored (``NodalResolution`` 0), that many sub-quads along
-each element's side with the polynomial's values, or one VTK Lagrange cell per element
-(``LagrangeCells``). ``CloseHangingCells`` closes the cells of a non-conforming mesh at their hanging
+each element's side with the polynomial's values (within the range of the element's own, unless
+``BoundedInterpolation`` is off), or one VTK Lagrange cell per element (``LagrangeCells``). ``CloseHangingCells`` closes the cells of a non-conforming mesh at their hanging
 vertices; ``AMRNodeValues`` adds, to each AMR field, node values continuous across boxes and levels
 (``<field>:smooth``), for contours.
 
@@ -132,6 +132,7 @@ class SomaReader(VTKPythonAlgorithmBase):
         self._close_hanging = True
         self._nodal_resolution = 0
         self._lagrange = False
+        self._bounded = True
 
     # -- FileNames: a repeatable file list, one entry per time step -----------------------------
     @smproperty.stringvector(name="FileNames", repeat_command="1", clean_command="RemoveAllFileNames",
@@ -244,6 +245,14 @@ class SomaReader(VTKPythonAlgorithmBase):
         v = bool(value)
         if v != self._lagrange:
             self._lagrange = v
+            self.Modified()
+
+    @smproperty.intvector(name="BoundedInterpolation", default_values=1)
+    @smdomain.boolean()
+    def SetBoundedInterpolation(self, value) -> None:
+        v = bool(value)
+        if v != self._bounded:
+            self._bounded = v
             self.Modified()
 
     @smproperty.intvector(name="NodalResolution", default_values=0)
@@ -434,7 +443,7 @@ class SomaReader(VTKPythonAlgorithmBase):
             wanted = [n for n in names if self._point_sel.ArrayIsEnabled(n)]
             mesh = sv.read_nodal(sf, sv.parts_for_rank(sf.nparts, npieces, piece), fields=wanted or names[:1], order=order,
                                  resolution=None if self._lagrange else self._nodal_resolution or None,
-                                 lagrange=self._lagrange)
+                                 lagrange=self._lagrange, bounded=self._bounded)
         if not wanted:
             mesh.point_data = {}
         return mesh

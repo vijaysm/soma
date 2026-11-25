@@ -97,11 +97,11 @@ void dump_nodal(const SomaFile& sf, std::ofstream& out, std::vector<int> parts, 
   HaloCache hc(sf);
   const MeshPiece piece = read_piece_cached(sf, hc, parts, {2});
   const CellBlock& block = piece.blocks.at(2);
-  const double radius = sphere_radius(sf);
+  const Sphere surface = sphere(sf);
   std::set<int> orders;
   for (auto& f : sf.fields()) if (f.nodal_on_quads()) orders.insert(f.order);
   for (int p : orders) {
-    const Subcells sub = subcells(piece, block, p, radius, resolution);
+    const Subcells sub = subcells(piece, block, p, surface, resolution);
     const std::string tag = ":" + std::to_string(p);
     std::vector<std::int64_t> gid;
     for (auto c : sub.cells)

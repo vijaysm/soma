@@ -53,7 +53,7 @@ them. Build with the compiler VisIt was built with, not one from another environ
   [`SemSpace`](../algorithms/spectral-elements.md) makes) is on the mesh `mesh_gll_p<order>`, every
   quad drawn as order x order sub-quads on its GLL points, the stored values at the points. The operator
   Multires control draws the [element's polynomial](overview.md#between-the-nodes) instead: resolution
-  $r$ = 1 to 4 on $(r + 1)$ order sub-quads along a side; 0 is the GLL points.
+  $r$ = 1 to 4 on $(r + 1)$ order sub-quads along a side, bounded by the element's values; 0 is the GLL points.
 - Fields that cannot be drawn are named in the database comment (File information).
 - VisIt shows a `:` in a name as `_colon_`: `ocean:H` is `ocean_colon_H`.
 - `soma_part` and `set:<name>` are zonal scalars on `mesh`.

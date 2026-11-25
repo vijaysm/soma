@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "soma/core/mesh_builder.hpp"
+#include "soma/core/mesh_geometry.hpp"
 #include "soma/core/topology.hpp"
 #include "soma/parallel/distributed.hpp"
 
@@ -108,7 +109,9 @@ HostMesh cubed_sphere_mesh(const Comm& comm, const CubedSphereSpec& spec) {
   } else {
     builder.add_elements(Topology::quad, elements, nodes, 9);
   }
-  return build_local_part(comm, std::move(builder), spec.ordering);
+  HostMesh mesh = build_local_part(comm, std::move(builder), spec.ordering);
+  set_geometry(mesh.values(), MeshGeometry::sphere(spec.radius));
+  return mesh;
 }
 
 }  // namespace soma::sem

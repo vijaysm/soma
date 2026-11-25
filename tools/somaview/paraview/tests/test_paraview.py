@@ -255,6 +255,13 @@ def test_nodal(SomaReader, tmp_dir: Path) -> None:
         check(f"{tag}: points", np.array_equal(vtk_to_numpy(g.GetPoints().GetData()), want.points))
         for name, a in want.point_data.items():
             check(f"{tag}: {name}", np.array_equal(vtk_to_numpy(g.GetPointData().GetArray(name)), a))
+    reader.LagrangeCells = 0
+    reader.NodalResolution = 7
+    for bounded in (0, 1):
+        reader.BoundedInterpolation = bounded
+        reader.UpdatePipeline()
+        step = vtk_to_numpy(_named_block(reader, "gll_p4").GetPointData().GetArray("step"))[:, 0]
+        check(f"nodal: bounded {bounded}", (step.max() == 5 and step.min() == 0) == bool(bounded), (step.min(), step.max()))
     # ParaView's own filters take the Lagrange cells: the patch's area, to the cells' order.
     area = {}
     for lagrange in (0, 1):

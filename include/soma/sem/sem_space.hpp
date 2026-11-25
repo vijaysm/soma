@@ -225,6 +225,10 @@ TransferOptions sem_mirror_options(const Mesh<MemSpace>& mesh) {
   return o;
 }
 
+/// Declares the space's geometry as the mesh's (mesh_geometry.hpp), unless it
+/// has one declared.
+void declare_geometry(MeshValues& values, const SemGeometry& geometry);
+
 /// Collective: throws std::invalid_argument on every rank naming the worst
 /// error any rank found (and the smallest offending gid for the elements').
 void check_sem_geometry(const Comm& comm, const SemGeometryData& data, int dim, int order);
@@ -243,6 +247,8 @@ class SemSpace {
   /// removed entities not yet compressed, or, on more than one
   /// rank, the mesh lacks the ghost layer through vertices or the
   /// distributed edges. On one rank, derives the mesh's edges if it has none.
+  /// Declares the geometry as the mesh's (soma/core/mesh_geometry.hpp) if the
+  /// mesh has none declared.
   SemSpace(const Comm& comm, Mesh<MemSpace>& mesh, int order, SemGeometry geometry)
       : order_(order), geometry_(geometry) {
     if (comm.size() == 1 && mesh.dim() == 2 && !mesh.has_adjacency(2, 1)) {
@@ -270,6 +276,7 @@ class SemSpace {
       if (!distributed || !plan.complete) g.error = detail::SemGeometryData::Error::ghosts;
     }
     detail::check_sem_geometry(comm, g, mesh.dim(), order);
+    detail::declare_geometry(mesh.values(), geometry);
     elements_ = mesh.count(2);
     owned_ = mesh.segment_table(2).owned_end;
     space_ = make_space(mesh, Domain<MemSpace>::all(mesh, 2), Layout::element_nodes(NodeFamily::gll, order));

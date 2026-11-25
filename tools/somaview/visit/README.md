@@ -47,10 +47,11 @@ implementation notes.
 - A spectral-element field (GLL values on quads, as `soma::sem::SemSpace` makes) is nodal on the mesh
   `mesh_gll_p<order>`, every quad drawn as order x order sub-quads on its GLL points with the stored
   values; components as above (`tracer0_0` ... for 10 of them). It is read when drawn. Points are not
-  shared between elements. On a sphere (every vertex at one distance from the origin within
-  SemSpace's 1e-8, and not all at z = 0; a file does not say) the points are projected as SemSpace's.
+  shared between elements. On a sphere (the one the file names by `soma:geometry`; if it names none, every
+  vertex at one distance from the origin within SemSpace's 1e-8, and not all at one z) the points are
+  projected as SemSpace's. A surface of a kind not known is noted in the database comment.
   Multires control's resolution r = 1 .. 4 draws (r + 1) order sub-quads along a side, with the values of
-  the element's polynomial, which may pass beyond the stored ones (an integer field's do not).
+  the element's polynomial, kept within the range of the element's own (`bound_samples`).
 - Fields that cannot be drawn (variable-length, handles, other element nodes) are named in the
   database comment (File information, `GetMetaData(f).databaseComment`).
 - VisIt shows a `:` in a name as `_colon_`: `ocean:H` is `ocean_colon_H`.

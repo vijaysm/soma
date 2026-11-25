@@ -89,14 +89,29 @@ A spectral-element field is a polynomial on each element. All three viewers eval
 sub-quads per element: `sv.read_nodal(path, resolution=n)`, ParaView's `NodalResolution`, VisIt's
 Multires control (its resolution $r$ gives $n = (r + 1)p$). Python and ParaView can also draw one VTK
 Lagrange cell per element (`lagrange=True`, `LagrangeCells`; order at most 10), which VTK subdivides
-itself. Positions are the space's own: on a sphere, points are projected to it.
+itself.
 
-```{warning}
-Between its nodes the polynomial can pass beyond the stored values. A field that is positive at every
-node may be drawn with negative values near a sharp front: they are the solution's own, not an
-error of the viewer. The default (sub-quads on the GLL points) draws the stored values alone. A field
+Between its nodes the polynomial can pass beyond the stored values: near a sharp front, a field that is
+positive at every node is negative somewhere between. Drawn values are therefore bounded: inside an
+element by the least and largest of its own values, on an element's side by those of the side. Both
+elements of a side have its values, so a continuous field is drawn continuous, and no part needs another's
+elements. Each component is bounded alone. `bounded=False` (Python), `--unbounded` (the command line) and
+`BoundedInterpolation = 0` (ParaView) draw the polynomial itself. VTK evaluates its Lagrange cells itself, so
+they are never bounded. The default, sub-quads on the GLL points, draws the stored values alone. A field
 of integers, such as a mask, is interpolated piecewise bilinearly and keeps its range.
-```
+
+Positions are the space's own: on a sphere, points are projected to it. Which sphere is in the file
+([mesh geometry](../io/soma-format.md#mesh-geometry)), about any centre. In a file that does not say, a mesh
+whose vertices are all at one distance from the origin, and not all at one z, is taken to be on that sphere.
+
+### Fields on faces and edges
+
+A field on the faces or edges of a mesh is cell data of those elements: a block `dim2` or `dim1` in ParaView
+(off by default, in `ElementBlocks`), the mesh `elements_dim2` or `elements_dim1` in VisIt,
+`sv.read(path, dims=[2])` in Python. A scalar (a flux, a circulation) colours them. A field of two or three
+components is a vector at each face's or edge's centre, for arrows: Cell Centers then Glyph in ParaView, a
+Vector plot in VisIt, `cell_centers().glyph(...)` in pyvista. A scalar that is one component of a vector (normal
+to its face, along its edge) is drawn as a scalar. Face and edge fields of AMR checkpoints are not drawn.
 
 ### Hanging vertices
 

@@ -240,7 +240,8 @@ declared with values on no entity), are kept in `mesh.values()`, a `soma::MeshVa
 A `MeshValue` holds a `DataType`, `ncomp` (0 for variable length), a handle mark, a `TagFormat`,
 and an optional default and global value as bytes; `default_as<T>()` and `global_as<T>()` read
 them typed (`std::invalid_argument` for the wrong type). Mesh values are host-only and every
-mirror copies them.
+mirror copies them. The surface a mesh is on is one of them
+([mesh geometry](../io/soma-format.md#mesh-geometry)).
 
 `TagFormat` (`soma/fields/tag_format.hpp`) records how a legacy `.h5m` file stores a tag (MOAB
 storage class, plain, bit or opaque values), so that `write_h5m` restores what `read_h5m` read;

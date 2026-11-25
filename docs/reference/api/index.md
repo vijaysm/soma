@@ -17,6 +17,7 @@ core/locality
 core/mesh
 core/mesh_builder
 core/mesh_edit
+core/mesh_geometry
 core/mesh_values
 core/mesh_view
 core/ordering
