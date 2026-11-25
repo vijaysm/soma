@@ -71,9 +71,12 @@ if(SOMA_ENABLE_TESTS)
       target_link_libraries(write_earth PRIVATE swe_ocean_core HDF5::HDF5 soma_warnings)
       set(dir ${CMAKE_CURRENT_BINARY_DIR}/mesh_reuse)
       set(wind "--case wind --ne 4 --order 3 --coast-km 400 --days 0.02")
+      # Built and saved at 2 ranks; read at 3; read again and a snapshot written through one I/O aggregator.
+      set(save "2 ${wind} --bathymetry ${dir}/earth.h5 --save-mesh ${dir}/earth.soma")
+      set(read "3 ${wind} --mesh ${dir}/earth.soma")
       add_test(NAME swe_ocean.mesh_reuse COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean>
         -DMPIEXEC=${MPIEXEC_EXECUTABLE} "-DPREPARE=$<TARGET_FILE:write_earth> ${dir}/earth.h5"
-        "-DRUNS=2 ${wind} --bathymetry ${dir}/earth.h5 --save-mesh ${dir}/earth.soma|3 ${wind} --mesh ${dir}/earth.soma"
+        "-DRUNS=${save}|${read}|${read} --io-aggregators 1 --output ${dir}/aggregated"
         -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/driver_runs.cmake)
       set_tests_properties(swe_ocean.mesh_reuse PROPERTIES TIMEOUT 120 PROCESSORS 3 FIXTURES_SETUP ocean_earth)
       # The start-up report of a built mesh gives the coastline's size.
@@ -91,6 +94,9 @@ if(SOMA_ENABLE_TESTS)
   endif()
   add_test(NAME swe_ocean.bad_option COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean> "-DARGS=--case tides"
     -DCODE=2 "-DMATCH=stommel\\|kelvin\\|rest\\|wind" -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_exit.cmake)
+  add_test(NAME swe_ocean.bad_aggregators COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean>
+    "-DARGS=--case kelvin --io-aggregators -1" -DCODE=2 "-DMATCH=--io-aggregators must be at least 0"
+    -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_exit.cmake)
   add_test(NAME swe_ocean.bad_levels COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:swe_ocean>
     "-DARGS=--case kelvin --levels 0" -DCODE=2 "-DMATCH=--levels must be at least 1"
     -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/expect_exit.cmake)

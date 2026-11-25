@@ -297,7 +297,8 @@ OceanMesh build_ocean_mesh(const soma::Comm& comm, const MeshOptions& o) {
   return out;
 }
 
-void write_ocean_mesh(const soma::Comm& comm, const OceanMesh& ocean, const std::filesystem::path& path) {
+void write_ocean_mesh(const soma::Comm& comm, const OceanMesh& ocean, const std::filesystem::path& path,
+                      int aggregators) {
   HostMesh& mesh = *ocean.mesh;
   const auto& space = ocean.space->space();
   const Bathymetry& b = ocean.bathymetry;
@@ -313,13 +314,17 @@ void write_ocean_mesh(const soma::Comm& comm, const OceanMesh& ocean, const std:
   for (std::size_t r = 0; r < b.land.size(); ++r) l(r, 0) = b.land[r];
   set_value(mesh, land_area_value, ocean.removed_land_km2);
   set_value(mesh, disconnected_area_value, ocean.removed_disconnected_km2);
-  soma::write_soma(comm, mesh, path);
+  soma::SomaWriteOptions w;
+  w.aggregators = aggregators;
+  soma::write_soma(comm, mesh, path, w);
 }
 
-OceanMesh read_ocean_mesh(const soma::Comm& comm, const std::filesystem::path& path, int order) {
+OceanMesh read_ocean_mesh(const soma::Comm& comm, const std::filesystem::path& path, int order, int aggregators) {
   if (order < 1) throw std::invalid_argument("read_ocean_mesh: needs order >= 1");
   OceanMesh out;
-  out.mesh = std::make_unique<HostMesh>(soma::read_soma(comm, path));
+  soma::SomaReadOptions r;
+  r.aggregators = aggregators;
+  out.mesh = std::make_unique<HostMesh>(soma::read_soma(comm, path, r));
   HostMesh& m = *out.mesh;
   prepare(comm, m);
   out.space = make_space(comm, m, order);

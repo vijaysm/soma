@@ -38,7 +38,8 @@ constexpr const char* usage =
     "                 [--bathymetry FILE] [--bathy-var NAME] [--bathy-lat NAME] [--bathy-lon NAME]\n"
     "                 [--mesh FILE] [--save-mesh FILE] [--vertical s|zstar] [--levels K]\n"
     "                 [--theta-s S] [--theta-b B] [--hc M] [--days D] [--dt S] [--nu V] [--tau0 T] [--linear]\n"
-    "                 [--report-hours H] [--output PREFIX] [--output-reports] [--latlon NLAT,NLON]\n";
+    "                 [--report-hours H] [--output PREFIX] [--output-reports] [--latlon NLAT,NLON]\n"
+    "                 [--io-aggregators M]\n";
 
 // A bad command line: usage, exit 2.
 struct BadOption : std::invalid_argument {
@@ -58,6 +59,7 @@ struct Options {
   std::optional<std::string> output;
   bool output_reports = false;
   std::optional<std::array<int, 2>> latlon;
+  int io_aggregators = 0;
 };
 
 double number(std::string_view option, const std::string& text) {
@@ -149,6 +151,11 @@ Options parse(int argc, char** argv) {
       } else {
         throw BadOption("swe_ocean: --vertical takes s or zstar, not '" + value + "'\n" + usage);
       }
+    } else if (key == "--io-aggregators") {
+      o.io_aggregators = integer(key, value);
+      if (o.io_aggregators < 0) {
+        throw BadOption("swe_ocean: --io-aggregators must be at least 0\n" + std::string(usage));
+      }
     } else if (key == "--levels") {
       o.model.vertical.levels = integer(key, value);
       if (o.model.vertical.levels < 1) {
@@ -217,7 +224,7 @@ Options parse(int argc, char** argv) {
 int run_analytic(const soma::Comm& comm, const Options& o) {
   const bool root = comm.rank() == 0;
   const ocean::CaseFinish finish = [&](ocean::OceanModel& m) {
-    if (o.output) ocean::write_snapshot(comm, m, *o.output + ".soma");
+    if (o.output) ocean::write_snapshot(comm, m, *o.output + ".soma", o.io_aggregators);
   };
   const auto start = std::chrono::steady_clock::now();
   ocean::CaseResult r;
@@ -310,12 +317,12 @@ int run_global(const soma::Comm& comm, Options o) {
   o.mesh.order = o.order.value_or(3);
   ocean::OceanMesh mesh;
   if (o.mesh_file) {
-    mesh = ocean::read_ocean_mesh(comm, *o.mesh_file, o.mesh.order);
+    mesh = ocean::read_ocean_mesh(comm, *o.mesh_file, o.mesh.order, o.io_aggregators);
   } else {
     o.mesh.bathymetry.grid.file = *o.bathymetry;
     mesh = ocean::build_ocean_mesh(comm, o.mesh);
   }
-  if (o.save_mesh) ocean::write_ocean_mesh(comm, mesh, *o.save_mesh);
+  if (o.save_mesh) ocean::write_ocean_mesh(comm, mesh, *o.save_mesh, o.io_aggregators);
   const double build_seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - build_start).count();
 
   // What the build did, before the model takes the mesh.
@@ -417,12 +424,12 @@ int run_global(const soma::Comm& comm, Options o) {
     reported = m.steps();
     report();
     if (o.output_reports && m.time() < end) {
-      ocean::write_snapshot(comm, m, *o.output + ".step" + std::to_string(m.steps()) + ".soma");
+      ocean::write_snapshot(comm, m, *o.output + ".step" + std::to_string(m.steps()) + ".soma", o.io_aggregators);
     }
   }
   const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
   if (o.output) {
-    ocean::write_snapshot(comm, m, *o.output + ".soma");
+    ocean::write_snapshot(comm, m, *o.output + ".soma", o.io_aggregators);
     if (o.latlon) ocean::write_latlon(comm, m, sampler, (*o.latlon)[0], (*o.latlon)[1], *o.output);
   }
   const std::uint64_t digest = m.digest(comm);

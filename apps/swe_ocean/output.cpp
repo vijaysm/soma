@@ -35,7 +35,7 @@ void collectively(const soma::Comm& comm, const std::function<void()>& write) {
   throw std::runtime_error(message);
 }
 
-void write_snapshot(const soma::Comm& comm, OceanModel& model, const std::filesystem::path& path) {
+void write_snapshot(const soma::Comm& comm, OceanModel& model, const std::filesystem::path& path, int aggregators) {
   soma::HostMesh& mesh = model.mesh();
   const auto& space = model.space().space();
   const Tracers& tr = model.tracers();
@@ -61,7 +61,9 @@ void write_snapshot(const soma::Comm& comm, OceanModel& model, const std::filesy
                                                     : mesh.fields().add<double>(name, space, nc);
     Kokkos::deep_copy(field.view(), values);
   }
-  soma::write_soma(comm, mesh, path);
+  soma::SomaWriteOptions w;
+  w.aggregators = aggregators;
+  soma::write_soma(comm, mesh, path, w);
 }
 
 void write_latlon(const soma::Comm& comm, const OceanModel& model, const Sampler& sampler, int nlat, int nlon,

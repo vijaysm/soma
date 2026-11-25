@@ -76,13 +76,17 @@ struct OceanMesh {
 // throw (coastline, refine_graded, quality_smooth, average, smooth).
 OceanMesh build_ocean_mesh(const soma::Comm& comm, const MeshOptions& options);
 
-// Collective: writes `path` as described above. Throws what soma::write_soma throws.
-void write_ocean_mesh(const soma::Comm& comm, const OceanMesh& ocean, const std::filesystem::path& path);
+// Collective: writes `path` as described above. aggregators: soma::SomaWriteOptions::aggregators (0: every rank
+// writes; M: only M ranks open the file, for a filesystem such as NFS where many ranks writing one file crawl).
+// Throws what soma::write_soma throws.
+void write_ocean_mesh(const soma::Comm& comm, const OceanMesh& ocean, const std::filesystem::path& path,
+                      int aggregators = 0);
 
 // Collective: reads `path` written by write_ocean_mesh. Throws std::invalid_argument on every rank for order
 // < 1 or when the file's GLL fields are missing or not of (order + 1)^2 points per element; what
-// soma::read_soma throws.
-OceanMesh read_ocean_mesh(const soma::Comm& comm, const std::filesystem::path& path, int order);
+// soma::read_soma throws. aggregators: soma::SomaReadOptions::aggregators, as write_ocean_mesh's.
+OceanMesh read_ocean_mesh(const soma::Comm& comm, const std::filesystem::path& path, int order,
+                          int aggregators = 0);
 
 }  // namespace ocean
 

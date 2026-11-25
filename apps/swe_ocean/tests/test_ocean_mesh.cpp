@@ -365,6 +365,22 @@ TEST_F(OceanMesh, round_trip) {
   c.barrier();
 }
 
+// Through I/O aggregators (only some ranks open the file, as on a filesystem without parallel locking): the
+// file written by one rank and read through two (or one) is the same mesh as written by every rank.
+TEST_F(OceanMesh, round_trip_aggregated) {
+  const Comm c = Comm::world();
+  const fs::path path = dir_ / "ocean_aggregated.soma";
+  ocean::write_ocean_mesh(c, *built_, path, 1);
+  // The whole mesh, read by one rank, is the mesh as built.
+  const std::map<GO, Element> expected = by_gid(ocean::read_ocean_mesh(Comm::self(), path, 3));
+  expect_same(c, by_gid(*built_), expected);
+  const ocean::OceanMesh read = ocean::read_ocean_mesh(c, path, 3, std::min(2, c.size()));
+  expect_same(c, by_gid(read), expected);
+  expect_ghosts(read, expected);
+  EXPECT_EQ(read.removed_land_km2, built_->removed_land_km2);
+  c.barrier();
+}
+
 // The land flags survive the removal by (element gid, point): with no refinement and no vertex smoothing the
 // mesh before the removal is the cubed sphere at ne scaled to the Earth, whose first averaging (on one rank:
 // the result is the same on any number) gives each kept element's flags; the built mesh holds the same flags,

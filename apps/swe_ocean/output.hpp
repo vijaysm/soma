@@ -28,9 +28,10 @@ void collectively(const soma::Comm& comm, const std::function<void()>& write);
 // Collective: writes the model's mesh to `path` in SOMA's format (soma::write_soma) with fields of its GLL space:
 // eta (m), u (m/s, 3 Cartesian components), H (m), h (m, the K level thicknesses) and, for each tracer t,
 // tracer<t> (its K level values T_k = hT_k / h_k). The fields are added to the mesh the first time and
-// overwritten later. Throws what soma::write_soma throws (on every rank), std::runtime_error when SOMA was built
-// without HDF5.
-void write_snapshot(const soma::Comm& comm, OceanModel& model, const std::filesystem::path& path);
+// overwritten later. aggregators: soma::SomaWriteOptions::aggregators, as write_ocean_mesh's. Throws what
+// soma::write_soma throws (on every rank), std::runtime_error when SOMA was built without HDF5.
+void write_snapshot(const soma::Comm& comm, OceanModel& model, const std::filesystem::path& path,
+                    int aggregators = 0);
 
 // Collective: on a model on the sphere, samples eta, H and the eastward and northward velocity on the grid of nlat
 // latitudes -90 + 180 i / (nlat - 1) and nlon longitudes 360 j / nlon (degrees; NaN over land, Sampler::sample)

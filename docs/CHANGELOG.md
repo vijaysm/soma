@@ -39,6 +39,7 @@ All notable changes to SOMA are recorded here. The format follows
   Passage transport). Stommel's error at order 4 falls from 5.5e-3 to 4.0e-4 from 4 to 8 elements
   a side; Kelvin's from 2.2e-2 to 3.7e-7 from order 2 to 6.
 - Output: SOMA snapshots and `.npy` latitude-longitude fields (NaN over land).
+  `--io-aggregators M` reads and writes SOMA files through M ranks, for filesystems such as NFS.
 
 ## [0.1.0] - 2026-11-23
 
