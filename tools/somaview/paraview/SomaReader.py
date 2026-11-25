@@ -14,6 +14,13 @@ every file in the list has one, else the file's position in the list); ``PointAr
 dimensions, named ``dim1``.. as in the core); ``AMRArrayStatus`` (AMR checkpoint fields);
 ``HighOrderCells``, ``SetFieldLabels``, ``PartIds``, ``GlobalIds``, ``AMRBlanking`` booleans.
 
+A file with spectral-element fields has one more element block per order, ``gll_p<order>``: sub-quads
+between the GLL points with the values stored (``NodalResolution`` 0), that many sub-quads along
+each element's side with the polynomial's values, or one VTK Lagrange cell per element
+(``LagrangeCells``). ``CloseHangingCells`` closes the cells of a non-conforming mesh at their hanging
+vertices; ``AMRNodeValues`` adds, to each AMR field, node values continuous across boxes and levels
+(``<field>:smooth``), for contours.
+
 Distributed reading follows ``UPDATE_PIECE_NUMBER``/``UPDATE_NUMBER_OF_PIECES`` from the output
 information: piece k of P reads the parts ``somaview.parts_for_rank(N, P, k)`` assigns it (an
 mpi4py communicator sized P does the halo exchange in one alltoall; otherwise the core scans the
@@ -73,6 +80,7 @@ from paraview.util.vtkAlgorithm import VTKPythonAlgorithmBase, smdomain, smhint,
 import somaview as sv  # noqa: E402
 from somaview.amr import AmrFile, to_vtk_amr  # noqa: E402
 from somaview.format import FileKind  # noqa: E402
+from somaview.nodal import nodal_fields  # noqa: E402
 from somaview.vtkconv import to_vtk_collection  # noqa: E402
 
 
@@ -120,6 +128,10 @@ class SomaReader(VTKPythonAlgorithmBase):
         self._part_ids = True
         self._global_ids = True
         self._amr_blanking = True
+        self._amr_nodes = True
+        self._close_hanging = True
+        self._nodal_resolution = 0
+        self._lagrange = False
 
     # -- FileNames: a repeatable file list, one entry per time step -----------------------------
     @smproperty.stringvector(name="FileNames", repeat_command="1", clean_command="RemoveAllFileNames",
@@ -194,6 +206,38 @@ class SomaReader(VTKPythonAlgorithmBase):
             self._amr_blanking = v
             self.Modified()
 
+    @smproperty.intvector(name="AMRNodeValues", default_values=1)
+    @smdomain.boolean()
+    def SetAMRNodeValues(self, value) -> None:
+        v = bool(value)
+        if v != self._amr_nodes:
+            self._amr_nodes = v
+            self.Modified()
+
+    @smproperty.intvector(name="CloseHangingCells", default_values=1)
+    @smdomain.boolean()
+    def SetCloseHangingCells(self, value) -> None:
+        v = bool(value)
+        if v != self._close_hanging:
+            self._close_hanging = v
+            self.Modified()
+
+    @smproperty.intvector(name="LagrangeCells", default_values=0)
+    @smdomain.boolean()
+    def SetLagrangeCells(self, value) -> None:
+        v = bool(value)
+        if v != self._lagrange:
+            self._lagrange = v
+            self.Modified()
+
+    @smproperty.intvector(name="NodalResolution", default_values=0)
+    @smdomain.intrange(min=0, max=64)
+    def SetNodalResolution(self, value) -> None:
+        v = max(int(value), 0)
+        if v != self._nodal_resolution:
+            self._nodal_resolution = v
+            self.Modified()
+
     # -- time steps (exposed to the animation UI; RequestInformation sets the executive key too) -
     @smproperty.xml("""
         <DoubleVectorProperty name="TimestepValues"
@@ -238,7 +282,13 @@ class SomaReader(VTKPythonAlgorithmBase):
                     self._dim_sel.EnableArray(name)
                 else:
                     self._dim_sel.DisableArray(name)
-            for f in sf.fields_on(0):
+            nodal = nodal_fields(sf)
+            for p in sorted({f.order for f in nodal}):
+                self._dim_sel.AddArray(f"gll_p{p}")
+                self._dim_sel.EnableArray(f"gll_p{p}")
+            if nodal and sf.dim == 2:  # the sub-quads cover its elements
+                self._dim_sel.DisableArray("dim2")
+            for f in [*sf.fields_on(0), *nodal]:
                 self._point_sel.AddArray(f.name)
                 self._point_sel.EnableArray(f.name)
             cell_names = sorted({f.name for d in elem_dims for f in sf.fields_on(d)})
@@ -342,25 +392,42 @@ class SomaReader(VTKPythonAlgorithmBase):
         return 1
 
     def _request_mesh(self, path: str, piece: int, npieces: int, out) -> None:
-        dims = sorted(int(name[3:]) for name in self._enabled(self._dim_sel))
-        if not dims:
+        blocks = self._enabled(self._dim_sel)
+        dims = sorted(int(name[3:]) for name in blocks if name.startswith("dim"))
+        orders = sorted(int(name[5:]) for name in blocks if name.startswith("gll_p"))
+        if not dims and not orders:
             dims = [self._mesh_dim]
         point_fields = self._enabled(self._point_sel)
         cell_fields = self._enabled(self._cell_sel)
         comm = self._mpi_comm_for(npieces)
         kw = dict(dims=dims, point_fields=point_fields, cell_fields=cell_fields,
-                 high_order=self._high_order, set_fields=bool(self._set_labels))
-        if comm is not None:
+                  high_order=self._high_order, set_fields=bool(self._set_labels), close_hanging=self._close_hanging)
+        if not dims:
+            piece_obj = None
+        elif comm is not None:
             piece_obj = sv.read(path, comm=comm, **kw)
         else:
             piece_obj = sv.read(path, rank=piece, nranks=npieces, **kw)
-        collection = to_vtk_collection(piece_obj, gids=self._global_ids, part=self._part_ids)
+        named = {f"gll_p{p}": self._read_nodal(path, p, piece, npieces) for p in orders}
+        collection = to_vtk_collection(piece_obj, named, gids=self._global_ids, part=self._part_ids)
         out.ShallowCopy(collection)
+
+    def _read_nodal(self, path: str, order: int, piece: int, npieces: int):
+        with sv.SomaFile(path) as sf:
+            names = [f.name for f in nodal_fields(sf) if f.order == order]
+            wanted = [n for n in names if self._point_sel.ArrayIsEnabled(n)]
+            mesh = sv.read_nodal(sf, sv.parts_for_rank(sf.nparts, npieces, piece), fields=wanted or names[:1], order=order,
+                                 resolution=None if self._lagrange else self._nodal_resolution or None,
+                                 lagrange=self._lagrange)
+        if not wanted:
+            mesh.point_data = {}
+        return mesh
 
     def _request_amr(self, path: str, piece: int, npieces: int, out) -> None:
         names = self._enabled(self._amr_sel)
         with AmrFile(path) as af:
-            amr = to_vtk_amr(af, fields=names, rank=piece, nranks=npieces, blank=self._amr_blanking)
+            amr = to_vtk_amr(af, fields=names, rank=piece, nranks=npieces, blank=self._amr_blanking,
+                             smooth=self._amr_nodes)
         out.ShallowCopy(amr)
 
     @staticmethod

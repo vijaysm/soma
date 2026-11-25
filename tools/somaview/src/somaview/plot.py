@@ -13,6 +13,8 @@ a hollow shell.
 
 from __future__ import annotations
 
+import sys
+import types
 from typing import Iterable, Sequence
 
 import numpy as np
@@ -22,6 +24,7 @@ from .cells import VTK_CONVEX_POINT_SET, VTK_QUADRATIC_EDGE
 from .format import FileKind, detect
 from .mesh import CellBlock, MeshPiece
 from .mesh import read_piece as _read_piece
+from .nodal import VTK_LAGRANGE_QUAD, read_nodal as _read_nodal
 from .vtkconv import to_vtk
 
 #: cell array names shown with a discrete (categorical) colormap by default, besides every
@@ -38,6 +41,10 @@ def _is_categorical(name: str, array: np.ndarray) -> bool:
 def _has_quadratic(block: CellBlock) -> bool:
     """True if any cell of the block is one of the quadratic (not polyhedral) VTK types."""
     return bool(((block.types >= VTK_QUADRATIC_EDGE) & (block.types < VTK_CONVEX_POINT_SET)).any())
+
+
+#: Subdivisions of a Lagrange quad's sides: 2^level linear pieces each.
+_LAGRANGE_SUBDIVISION = 3
 
 
 def _resolve_off_screen(off_screen, screenshot) -> bool:
@@ -81,7 +88,8 @@ def _block_scalars_kw(grid, scalars):
 def plot(path_or_piece, scalars: str | None = None, *, dims: Iterable[int] | None = None,
          parts: Sequence[int] | None = None, surface: str = "auto", clip=None,
          show_edges: bool | None = None, cmap: str | None = None, screenshot: str | None = None,
-         window_size=(1024, 768), off_screen: bool | None = None, background="white", **kw):
+         window_size=(1024, 768), off_screen: bool | None = None, background="white",
+         nodal: bool | str = False, resolution: int | None = None, close_hanging: bool = True, **kw):
     """Render a SOMA mesh file or AMR checkpoint with pyvista.
 
     Parameters
@@ -99,11 +107,18 @@ def plot(path_or_piece, scalars: str | None = None, *, dims: Iterable[int] | Non
         or ``{"normal": ..., "origin": ...}`` for an off-center plane; applied to the full
         volumetric grid before surface extraction, so the cut face is colored like the rest of
         the mesh.
+    nodal : draw the spectral-element fields (see :func:`somaview.read_nodal`): True on sub-quads,
+        ``"lagrange"`` on VTK Lagrange cells, subdivided for the render.
+    resolution : with ``nodal=True``, the sub-quads along an element's side.
+    close_hanging : close the cells of a non-conforming mesh at their hanging vertices, so that
+        nothing cracks between coarse and fine cells (:mod:`somaview.hanging`); False: the cells as
+        stored.
     screenshot : path to save a PNG to (also returns the rendered image array).
     off_screen : render without a window; default True when ``screenshot`` is given.
 
     For an AMR checkpoint, ``dims``, ``parts``, ``surface`` and ``clip`` do not apply; see
-    :func:`to_pyvista_amr` for AMR-specific keywords (``rank``, ``nranks``, ``box_outlines``).
+    :func:`to_pyvista_amr` for AMR-specific keywords (``rank``, ``nranks``, ``box_outlines``);
+    ``scalars="<field>:smooth"`` colours by node values continuous across boxes and levels.
     """
     kind = FileKind.mesh if isinstance(path_or_piece, MeshPiece) else detect(path_or_piece)
     if kind is None:
@@ -114,7 +129,15 @@ def plot(path_or_piece, scalars: str | None = None, *, dims: Iterable[int] | Non
 
     import pyvista as pv
 
-    piece = path_or_piece if isinstance(path_or_piece, MeshPiece) else _read_piece(path_or_piece, parts, dims=dims)
+    if isinstance(path_or_piece, MeshPiece):
+        piece = path_or_piece
+    elif nodal:
+        if nodal not in (True, "lagrange"):
+            raise ValueError(f"nodal={nodal!r}: True or 'lagrange'")
+        piece = _read_nodal(path_or_piece, parts, fields=None if scalars in (None, "soma_part") else [scalars],
+                            resolution=resolution, lagrange=nodal == "lagrange")
+    else:
+        piece = _read_piece(path_or_piece, parts, dims=dims, close_hanging=close_hanging)
     chosen = sorted(piece.blocks) if dims is None else sorted(set(dims) & set(piece.blocks))
     if not chosen:
         raise ValueError(f"no block of dimension(s) {dims} in {piece.path!r} (have {sorted(piece.blocks)})")
@@ -129,6 +152,8 @@ def plot(path_or_piece, scalars: str | None = None, *, dims: Iterable[int] | Non
             grid = _apply_clip(grid, clip)
         if block.dim == 3 and surface in ("auto", "always"):
             grid = grid.extract_surface(nonlinear_subdivision=2 if _has_quadratic(block) else 1)
+        elif (block.types == VTK_LAGRANGE_QUAD).any():
+            grid = grid.extract_surface(nonlinear_subdivision=_LAGRANGE_SUBDIVISION, algorithm="dataset_surface")
         name, auto_kw = _block_scalars_kw(grid, scalars)
         auto_kw.update(kw)
         edges = show_edges if show_edges is not None else (d == top)
@@ -141,7 +166,8 @@ def _plot_amr(path, *, scalars=None, cmap=None, screenshot=None, window_size=(10
              off_screen=None, background="white", rank=0, nranks=1, box_outlines=False, **kw):
     import pyvista as pv
 
-    mb = to_pyvista_amr(path, rank=rank, nranks=nranks)
+    smooth = scalars is not None and scalars.endswith(":smooth")
+    mb = to_pyvista_amr(path, rank=rank, nranks=nranks, smooth=smooth)
     pl = pv.Plotter(off_screen=_resolve_off_screen(off_screen, screenshot), window_size=window_size)
     pl.background_color = background
     for level in mb.keys():
@@ -160,20 +186,22 @@ def _plot_amr(path, *, scalars=None, cmap=None, screenshot=None, window_size=(10
     return _finish(pl, screenshot, off_screen)
 
 
-def to_pyvista_amr(path, fields=None, rank: int = 0, nranks: int = 1, blank: bool = True):
+def to_pyvista_amr(path, fields=None, rank: int = 0, nranks: int = 1, blank: bool = True,
+                   smooth: bool = False):
     """An AMR checkpoint as a nested ``pyvista.MultiBlock``: ``"level<l>"`` -> ``"box<b>"``.
 
     Built from :func:`somaview.amr.to_vtk_amr`. With ``blank`` (default), cells covered by a
     finer level (marked ``vtkGhostType`` ``REFINEDCELL``, or ``HIDDENCELL``, by
     ``vtkAMRUtilities.BlankCells``) are removed from the box, which then becomes a
     ``pyvista.UnstructuredGrid`` rather than an ``ImageData``; a box with nothing covered stays
-    ``ImageData``.
+    ``ImageData``. With ``smooth``, each field also has node values ``<name>:smooth`` that are
+    continuous across boxes and levels (:func:`somaview.amr.smooth`).
     """
     import pyvista as pv
     from vtkmodules.vtkCommonDataModel import vtkDataSetAttributes, vtkImageData
 
     with AmrFile(path) as af:
-        amr = to_vtk_amr(af, fields=fields, rank=rank, nranks=nranks, blank=blank)
+        amr = to_vtk_amr(af, fields=fields, rank=rank, nranks=nranks, blank=blank, smooth=smooth)
     out = pv.MultiBlock()
     for l in range(amr.GetNumberOfLevels()):
         lvl = pv.MultiBlock()
@@ -219,3 +247,14 @@ def amr_box_outlines(path, rank: int = 0, nranks: int = 1):
     for b in boxes[1:]:
         merged = merged.merge(b)
     return merged
+
+
+class _Callable(types.ModuleType):
+    """Importing this module puts it in the place of the package's function ``somaview.plot``, so it
+    can be called as that function."""
+
+    def __call__(self, *args, **kw):
+        return plot(*args, **kw)
+
+
+sys.modules[__name__].__class__ = _Callable

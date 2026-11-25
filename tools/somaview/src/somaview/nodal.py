@@ -5,8 +5,14 @@
 A field of soma::sem::SemSpace holds (p + 1)^2 values per quad, at its Gauss-Lobatto-Legendre (GLL)
 points: value k = i + (p + 1) j is at (xi_i, eta_j), i along the edge from corner 0 to corner 1, j
 along the edge from corner 0 to corner 3. :func:`read_nodal` makes every quad p x p linear sub-quads
-on those points, and the stored values point data: nothing is averaged or interpolated. Points are
-not shared between elements, so a field that jumps from one element to the next is drawn as it is.
+on those points, and the stored values point data: nothing is averaged or interpolated by default.
+Points are not shared between elements, so a field that jumps from one element to the next is drawn as
+it is.
+
+With ``resolution=n`` every quad is n x n uniform sub-quads instead, and values between the GLL points
+those of the element's polynomial; with ``lagrange=True`` one VTK Lagrange quad of order p, which a
+renderer subdivides itself. A field of integers (a mask, a flag) has no polynomial to speak of: it is
+piecewise bilinear between its GLL values, so within their range, however it is drawn.
 
 The points are where SemSpace puts them: bilinear in the corners (biquadratic with 8 or 9 nodes),
 and on a sphere projected to it. A file does not say whether its mesh is in the plane or on a sphere;
@@ -22,6 +28,10 @@ import numpy as np
 from .cells import VTK_BIQUADRATIC_QUAD, VTK_QUAD, VTK_QUADRATIC_QUAD
 from .format import FieldInfo, SomaFile
 from .mesh import CellBlock, MeshPiece, read_piece
+
+#: ``VTK_LAGRANGE_QUADRILATERAL``, and the largest order VTK evaluates it at.
+VTK_LAGRANGE_QUAD = 70
+VTK_MAX_LAGRANGE_ORDER = 10
 
 #: SemSpace takes a corner to be on its sphere within this relative distance; two corners may
 #: therefore differ by twice as much.
@@ -62,6 +72,30 @@ def quad_shape(n: int, s, t) -> np.ndarray:
     return np.stack(np.broadcast_arrays(*f), axis=-1)
 
 
+def interpolation(p: int, x: np.ndarray, linear: bool = False) -> np.ndarray:
+    """(len(x), p + 1): values at x of the Lagrange basis on the GLL points, or with ``linear`` of the
+    piecewise linear one; exactly 0 and 1 where x is a GLL point."""
+    g = gll_points(p)
+    x = np.asarray(x, float)
+    if linear:
+        return np.stack([np.interp(x, g, row) for row in np.eye(p + 1)], axis=1)
+    out = np.ones((len(x), p + 1))
+    for a in range(p + 1):
+        for b in range(p + 1):
+            if a != b:
+                out[:, a] *= (x - g[b]) / (g[a] - g[b])
+    return out
+
+
+def lagrange_quad_order(p: int) -> np.ndarray:
+    """For each point of a VTK Lagrange quad of order p, its tensor index i + (p + 1) j: the corners, the
+    points inside the edges (bottom, right, top, left; each along +i or +j), then those inside."""
+    k = lambda i, j: i + (p + 1) * j  # noqa: E731
+    inner = range(1, p)
+    return np.array([k(0, 0), k(p, 0), k(p, p), k(0, p)] + [k(i, 0) for i in inner] + [k(p, j) for j in inner]
+                    + [k(i, p) for i in inner] + [k(0, j) for j in inner] + [k(i, j) for j in inner for i in inner])
+
+
 def sphere_radius(sf: SomaFile) -> float:
     """The radius of the sphere about the origin the mesh is on, 0 for any other mesh.
 
@@ -81,10 +115,9 @@ def nodal_fields(sf: SomaFile) -> list[FieldInfo]:
     return [f for f in sf.fields if f.nodal_on_quads]
 
 
-def _subcells(piece: MeshPiece, block: CellBlock, p: int, radius: float):
-    """(cell of the block, positions) of every quad: (quads,), (quads, (p + 1)^2, 3)."""
-    g = gll_points(p)
-    s, t = np.tile(g, p + 1), np.repeat(g, p + 1)
+def _positions(piece: MeshPiece, block: CellBlock, g: np.ndarray, radius: float):
+    """(cell of the block, positions) of every quad at the tensor points of g: (quads,), (quads, len(g)^2, 3)."""
+    s, t = np.tile(g, len(g)), np.repeat(g, len(g))
     cells = np.flatnonzero(np.isin(block.types, (VTK_QUAD, VTK_QUADRATIC_QUAD, VTK_BIQUADRATIC_QUAD)))
     x = np.empty((len(cells), len(s), 3))
     for n, kind in ((4, VTK_QUAD), (8, VTK_QUADRATIC_QUAD), (9, VTK_BIQUADRATIC_QUAD)):
@@ -129,7 +162,7 @@ def _first_rows(sf: SomaFile, info: FieldInfo, parts: Sequence[int], npts: int, 
 
 
 def read_nodal(source: str | SomaFile, parts: Sequence[int] | None = None, *, fields: Iterable[str] | None = None,
-               order: int | None = None) -> MeshPiece:
+               order: int | None = None, resolution: int | None = None, lagrange: bool = False) -> MeshPiece:
     """Spectral-element fields of parts of a SOMA mesh file, on sub-quads.
 
     Parameters
@@ -138,11 +171,18 @@ def read_nodal(source: str | SomaFile, parts: Sequence[int] | None = None, *, fi
     parts : parts to read (default: all).
     fields : names to read (default: every GLL field of the order).
     order : the polynomial order p; needed only when the file has fields of several.
+    resolution : sub-quads along an element's side, evaluating the element's polynomial at their
+        corners (default: p of them, between the GLL points themselves, the values as stored).
+    lagrange : one VTK Lagrange quad per element instead of sub-quads, for orders up to
+        ``VTK_MAX_LAGRANGE_ORDER``; its nodes are equally spaced, as VTK wants them.
 
-    Returns a :class:`MeshPiece` of (p + 1)^2 points and p^2 quads per element, the fields as point
-    data (NaN on elements off a field's domain). With g an element's gid, its point k has the gid
-    g (p + 1)^2 + k and its sub-quad i + p j the gid g p^2 + i + p j.
+    Returns a :class:`MeshPiece` of (n + 1)^2 points and n^2 quads per element, n the resolution or p,
+    the fields as point data (NaN on elements off a field's domain). With g an element's gid, its point
+    k has the gid g (n + 1)^2 + k and its sub-quad i + n j the gid g n^2 + i + n j; a Lagrange quad has
+    its element's, and its points are numbered as sub-quads' of resolution p.
     """
+    if resolution is not None and (lagrange or resolution < 1):
+        raise ValueError(f"resolution {resolution}: at least 1, and not with lagrange")
     own = not isinstance(source, SomaFile)
     sf = SomaFile(source) if own else source
     try:
@@ -159,34 +199,48 @@ def read_nodal(source: str | SomaFile, parts: Sequence[int] | None = None, *, fi
         if order not in orders:
             raise ValueError(f"{sf.path}: no order {order} among the GLL fields on quads (orders {orders})")
         p, npts = order, (order + 1) ** 2
+        if lagrange and p > VTK_MAX_LAGRANGE_ORDER:
+            raise ValueError(f"{sf.path}: order {p} is above VTK's largest for Lagrange cells, "
+                             f"{VTK_MAX_LAGRANGE_ORDER}: give a resolution instead")
+        stored = resolution is None and not lagrange
+        n = p if resolution is None else resolution
+        grid = gll_points(p) if stored else np.linspace(-1, 1, n + 1)
+        m = (n + 1) ** 2
         parts = sorted(set(range(sf.nparts) if parts is None else (int(q) for q in parts)))
         mesh = read_piece(sf, parts, dims=[2], point_fields=(), cell_fields=(), set_fields=False)
         block = mesh.blocks[2]
-        cells, x = _subcells(mesh, block, p, sphere_radius(sf))
-        n = len(cells)
+        cells, x = _positions(mesh, block, grid, sphere_radius(sf))
+        quads = len(cells)
         data = {}
         for f in drawn:
             if f.order != p:
                 continue
-            first = _first_rows(sf, f, parts, npts, cells)[cells]
+            rows = _first_rows(sf, f, parts, npts, cells)[cells]
             values = sf.read(f"{f.group}/dim2/values", parts).reshape(-1, f.ncomp)
-            on = first >= 0
+            on = rows >= 0
             if on.all():
-                v = values[first[:, None] + np.arange(npts)]
+                v = values[rows[:, None] + np.arange(npts)]
             else:
-                v = np.full((n, npts, f.ncomp), np.nan)
-                v[on] = values[first[on][:, None] + np.arange(npts)]
-            data[f.name] = v.reshape(n * npts) if f.ncomp == 1 else v.reshape(n * npts, f.ncomp)
-        i, j = np.tile(np.arange(p), p), np.repeat(np.arange(p), p)
-        k = i + (p + 1) * j
-        quad = np.stack([k, k + 1, k + p + 2, k + p + 1], axis=1)
-        conn = (np.arange(n, dtype=np.int64)[:, None, None] * npts + quad).ravel()
+                v = np.full((quads, npts, f.ncomp), np.nan)
+                v[on] = values[rows[on][:, None] + np.arange(npts)]
+            if not stored:
+                b = interpolation(p, grid, linear=np.issubdtype(f.dtype, np.integer))
+                v = np.einsum("qj,ri,ejic->eqrc", b, b, v.reshape(quads, p + 1, p + 1, f.ncomp), optimize=True)
+            data[f.name] = v.reshape(quads * m) if f.ncomp == 1 else v.reshape(quads * m, f.ncomp)
         gids, part = block.gids[cells], block.part[cells]
-        sub = CellBlock(2, (gids[:, None] * p * p + np.arange(p * p)).ravel(), np.repeat(part, p * p),
-                        np.full(n * p * p, VTK_QUAD, dtype=block.types.dtype),
-                        np.arange(0, 4 * n * p * p + 1, 4, dtype=np.int64), conn)
-        return MeshPiece(sf.path, 2, tuple(parts), x.reshape(-1, 3), (gids[:, None] * npts + np.arange(npts)).ravel(),
-                         np.repeat(part, npts), data, {2: sub}, mesh.field_data, time=sf.time())
+        first = np.arange(quads, dtype=np.int64)[:, None] * m
+        if lagrange:
+            conn = (first + lagrange_quad_order(p)).ravel()
+            sub = CellBlock(2, gids, part, np.full(quads, VTK_LAGRANGE_QUAD, dtype=block.types.dtype),
+                            np.arange(quads + 1, dtype=np.int64) * m, conn)
+        else:
+            k = np.tile(np.arange(n), n) + (n + 1) * np.repeat(np.arange(n), n)
+            quad = np.stack([k, k + 1, k + n + 2, k + n + 1], axis=1).ravel()
+            sub = CellBlock(2, (gids[:, None] * n * n + np.arange(n * n)).ravel(), np.repeat(part, n * n),
+                            np.full(quads * n * n, VTK_QUAD, dtype=block.types.dtype),
+                            np.arange(quads * n * n + 1, dtype=np.int64) * 4, (first + quad).ravel())
+        return MeshPiece(sf.path, 2, tuple(parts), x.reshape(-1, 3), (gids[:, None] * m + np.arange(m)).ravel(),
+                         np.repeat(part, m), data, {2: sub}, mesh.field_data, time=sf.time())
     finally:
         if own:
             sf.close()

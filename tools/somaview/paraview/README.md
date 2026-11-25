@@ -36,14 +36,19 @@ reader.HighOrderCells = 1                # quadratic VTK cells for high-order el
 reader.SetFieldLabels = 1                # cell arrays "set:<name>" from entity-set fields
 reader.PartIds = 1                       # cell array "soma_part"
 reader.GlobalIds = 1                     # GlobalIds point/cell arrays from the gids
+reader.CloseHangingCells = 1             # close cells at hanging vertices (no GlobalIds in 3D then)
+reader.NodalResolution = 0               # gll_p<order> blocks: 0 the GLL points, n > 0 n x n sub-quads
+reader.LagrangeCells = 0                 # gll_p<order> blocks: VTK Lagrange cells instead
 reader.UpdatePipeline()
 ```
 
 A mesh file's output is a `vtkPartitionedDataSetCollection`, one partitioned dataset per
 selected element dimension, named `dim0`, `dim1`, ... (matching `somaview.vtkconv`'s own
 naming) in a `vtkDataAssembly`. An AMR checkpoint's output is a `vtkOverlappingAMR`; its field
-selection is the separate `AMRArrayStatus` property, and `AMRBlanking` toggles coarse-cell
-blanking under finer boxes. The kind is read from the file itself (`somaview.detect`); loading a
+selection is the separate `AMRArrayStatus` property, `AMRBlanking` toggles coarse-cell
+blanking under finer boxes, and `AMRNodeValues` (on) adds `<field>:smooth`, node values continuous across
+boxes and levels. Spectral-element fields are point data of blocks `gll_p<order>`, read by default in place
+of `dim2`. The kind is read from the file itself (`somaview.detect`); loading a
 different file on the same reader instance switches the output type if needed.
 
 ### File series (time steps)

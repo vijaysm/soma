@@ -83,7 +83,8 @@ def write(path, n=4, p=3, radius=None, nodes=4, parts=1, partial=False):
     pos = node_positions(xyz, conn, p, radius)
     scale = radius or 1.0
     f = {"eta": (pos[..., :1] / scale) ** 2 + 3 * pos[..., 1:2] / scale, "u": pos / scale,
-         "T": np.stack([pos[..., 0] / scale * (c + 1) + c for c in range(5)], axis=2)}
+         "T": np.stack([pos[..., 0] / scale * (c + 1) + c for c in range(5)], axis=2),
+         "mask": (pos[..., :1] > 0.1 * scale).astype(float)}  # stored as u8
     elem_part = np.arange(ne) * parts // ne
     vert_part = np.full(nv, parts)
     for e in range(ne):
@@ -137,7 +138,7 @@ def write(path, n=4, p=3, radius=None, nodes=4, parts=1, partial=False):
             g.attrs["name"] = np.bytes_(name)
             full = [bool(member[elem_part == q].all()) for q in range(parts)]
             bits = 15 if all(full) else 11
-            g.attrs["meta"] = np.array([7, nc, 0, 0, 1, 1, p, 1, 0, 0, -1, 0, 0, 0, 0, bits, 1, 2], np.int64)
+            g.attrs["meta"] = np.array([1 if name == "mask" else 7, nc, 0, 0, 1, 1, p, 1, 0, 0, -1, 0, 0, 0, 0, bits, 1, 2], np.int64)
             d = f"fields/f{i}/dim2"
             s.create_dataset(d + "/full", data=np.array(full, np.uint8).reshape(-1, 1))
             dom, dper, mper = [], [], []
@@ -148,7 +149,8 @@ def write(path, n=4, p=3, radius=None, nodes=4, parts=1, partial=False):
                 mper.append(len(loc))
             column(d + "/domain", dom, dper, dtype=np.int64)
             column(d + "/counts", np.full(int(member.sum()), npts), mper, dtype=np.int64)
-            column(d + "/values", v[member], [npts * c for c in mper], nc, np.float64)
+            column(d + "/values", v[member], [npts * c for c in mper], nc,
+                   np.uint8 if name == "mask" else np.float64)
             f[name] = np.where(member[:, None, None], v, np.nan)
         s.attrs["meta"] = np.array([1, 2, parts, 5, 5, 4 if nodes > 4 else 0, 0, 0, len(f), 0, 1], np.int64)
         names = list(cols)

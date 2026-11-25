@@ -83,6 +83,8 @@ class CellBlock:
     offsets: np.ndarray
     connectivity: np.ndarray
     cell_data: dict[str, np.ndarray] = field(default_factory=dict)
+    #: The file's cell each one is (a piece of), when cells with hanging vertices were closed.
+    source: np.ndarray | None = None
 
     def __len__(self) -> int:
         return len(self.types)
@@ -215,7 +217,8 @@ class PieceReader:
 
     def __init__(self, sf: SomaFile, parts: Sequence[int] | None = None, dims: Iterable[int] | None = None,
                  point_fields: Iterable[str] | None = None, cell_fields: Iterable[str] | None = None,
-                 high_order: bool = True, set_fields: Iterable[str] | bool = True, chunk_rows: int = 1 << 22):
+                 high_order: bool = True, set_fields: Iterable[str] | bool = True, chunk_rows: int = 1 << 22,
+                 close_hanging: bool = False):
         if sf.kind.value != "mesh":
             raise ValueError(f"{sf.path}: an AMR checkpoint, not a mesh (use somaview.amr)")
         self.sf = sf
@@ -230,6 +233,7 @@ class PieceReader:
             raise ValueError(f"{sf.path}: dimension(s) {missing} not in the file (written: {written})")
         self.high_order = high_order
         self.chunk_rows = chunk_rows
+        self.close_hanging = close_hanging
         self._cache: dict = {}
         self.skipped: list[str] = []
         self.point_fields = self._choose(0, point_fields)
@@ -351,8 +355,85 @@ class PieceReader:
                 cdata.update(self._set_cell_data(d, c, set_info))
             blocks[d] = CellBlock(d, c["gids"], c["part"], types, offsets, vconn, cdata)
         fdata = {k: v.value for k, v in sf.values.items() if v.value is not None}
-        return MeshPiece(sf.path, sf.dim, tuple(self.parts), points, gids, ppart, pdata, blocks, fdata,
-                         halo_points=len(halo["gid"]), skipped=sorted(set(self.skipped)), time=sf.time())
+        piece = MeshPiece(sf.path, sf.dim, tuple(self.parts), points, gids, ppart, pdata, blocks, fdata,
+                          halo_points=len(halo["gid"]), skipped=sorted(set(self.skipped)), time=sf.time())
+        return self._closed(piece) if self.close_hanging else piece
+
+    # hanging vertices ---------------------------------------------------------------------------
+    def _closed(self, piece: MeshPiece) -> MeshPiece:
+        """``piece`` with its cells closed at their hanging vertices (:mod:`somaview.hanging`)."""
+        from .hanging import BIRTH, close_hanging
+
+        sf = self.sf
+        info = next((f for f in sf.fields if f.name == BIRTH and 0 in f.dims and f.drawable), None)
+        if info is None or sf.dim not in self.dims:
+            return piece
+        owner = piece.point_part.astype(np.int64)
+        starts = sf.part_rows("dim0/gid")
+        mine = np.isin(owner, self.parts)
+        local = np.empty(len(owner), np.int64)
+        local[mine] = self.owned_local
+        # A halo vertex's row is not kept: its record is found with the other parts' below.
+        birth = np.zeros((len(owner), 5), np.int64)
+        own = _values_at(sf, info, 0, owner[mine], local[mine], self._cache)
+        birth[mine] = np.nan_to_num(own).astype(np.int64)
+        index = GidIndex(piece.point_gids)
+        extra_o, extra_l, extra_b = [], [], []
+        for q in self._neighbours(piece) if not self.all_parts else []:
+            n = int(starts[q + 1] - starts[q])
+            rows = np.arange(n)
+            b = np.nan_to_num(_values_at(sf, info, 0, np.full(n, q), rows, self._cache)).astype(np.int64)
+            ok = b[:, 0] >= 2
+            for k in range(4):  # every master here: the vertex may lie on a cell of this piece
+                ok &= (b[:, 0] <= k) | (index.lookup(b[:, 1 + k]) >= 0)
+            rows = rows[ok]
+            gid = sf.read_rows("dim0/gid", starts[q] + rows).astype(np.int64)
+            at = index.lookup(gid)
+            birth[at[at >= 0]] = b[ok][at >= 0]
+            new = at < 0
+            extra_o.append(np.full(int(new.sum()), q))
+            extra_l.append(rows[new])
+            extra_b.append(b[ok][new])
+        if extra_o and sum(len(x) for x in extra_o):
+            o, l = np.concatenate(extra_o), np.concatenate(extra_l)
+            rows = starts[o] + l
+            n = len(piece.points)
+            more = {"points": sf.read_rows("dim0/coords", rows).reshape(-1, 3),
+                    "gids": sf.read_rows("dim0/gid", rows).astype(np.int64), "birth": np.concatenate(extra_b)}
+            data = {f.name: _values_at(sf, f, 0, o, l, self._cache) for f in self.point_fields}
+            whole = MeshPiece(**{**piece.__dict__, "points": np.concatenate([piece.points, more["points"]]),
+                                 "point_gids": np.concatenate([piece.point_gids, more["gids"]]),
+                                 "point_part": np.concatenate([piece.point_part, o.astype(np.int32)]),
+                                 "point_data": {k: _join(a, data[k]) for k, a in piece.point_data.items()}})
+            closed = close_hanging(whole, np.concatenate([birth, more["birth"]]))
+            return _drop_unused(closed, n, n + len(o)) if closed is not whole else piece
+        return close_hanging(piece, birth)
+
+    def _neighbours(self, piece: MeshPiece) -> list[int]:
+        """The other parts with an element at a vertex of this piece's: where the vertices on the
+        sides of its cells are, whichever part owns them."""
+        sf = self.sf
+        mine = np.asarray(self.parts, dtype=np.int64)
+        ours = GidIndex(piece.point_gids)
+        starts, gstart = sf.part_rows("dim0/shared/index"), sf.part_rows("dim0/gid")
+        out = set()
+        for group in _chunks_of_parts(np.arange(sf.nparts), starts, self.chunk_rows):
+            index = sf.read("dim0/shared/index", group).astype(np.int64)
+            if len(index) == 0:
+                continue
+            counts = sf.read("dim0/shared/counts", group).astype(np.int64)
+            dest = sf.read("dim0/shared/parts", group).astype(np.int64)
+            owner = np.repeat(np.asarray(group, np.int64), [int(starts[p + 1] - starts[p]) for p in group])
+            row = np.repeat(np.arange(len(index)), counts)
+            touch = np.isin(owner, mine)  # rows this piece owns or holds copies of
+            touch[row[np.isin(dest, mine)]] = True
+            if touch.any():
+                at = np.flatnonzero(touch)
+                gid = sf.read_rows("dim0/gid", gstart[owner[at]] + index[at]).astype(np.int64)
+                touch[at] = ours.lookup(gid) >= 0
+                out.update(owner[touch].tolist())
+                out.update(dest[touch[row]].tolist())
+        return sorted(out - set(mine.tolist()))
 
     def _parts_text(self) -> str:
         return ", ".join(f"{a}" if b == a + 1 else f"{a}-{b - 1}" for a, b in runs(np.asarray(self.parts)))
@@ -490,6 +571,26 @@ class PieceReader:
         return out
 
 
+def _join(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    return np.concatenate([a, b]) if a.dtype == b.dtype else np.concatenate([a.astype(np.float64), b.astype(np.float64)])
+
+
+def _drop_unused(piece: MeshPiece, lo: int, hi: int) -> MeshPiece:
+    """``piece`` without those of its points lo..hi that no element uses."""
+    used = np.ones(len(piece.points), bool)
+    used[lo:hi] = False
+    for b in piece.blocks.values():
+        used[b.connectivity] = True
+    if used.all():
+        return piece
+    to = np.cumsum(used) - 1
+    piece.points, piece.point_gids, piece.point_part = piece.points[used], piece.point_gids[used], piece.point_part[used]
+    piece.point_data = {k: a[used] for k, a in piece.point_data.items()}
+    for b in piece.blocks.values():
+        b.connectivity = to[b.connectivity]
+    return piece
+
+
 def _local_rows(per_part: np.ndarray) -> np.ndarray:
     """0, 1, ... within each part, for parts of the given sizes laid end to end."""
     per_part = np.asarray(per_part, dtype=np.int64)
@@ -515,7 +616,7 @@ def _chunks_of_parts(parts: np.ndarray, starts: np.ndarray, chunk_rows: int):
 def read_piece(source: str | SomaFile, parts: Sequence[int] | None = None, *, dims: Iterable[int] | None = None,
                point_fields: Iterable[str] | None = None, cell_fields: Iterable[str] | None = None,
                high_order: bool = True, set_fields: Iterable[str] | bool = True, comm=None,
-               rank: int | None = None, nranks: int | None = None) -> MeshPiece:
+               rank: int | None = None, nranks: int | None = None, close_hanging: bool = False) -> MeshPiece:
     """Read parts of a SOMA mesh file as a :class:`MeshPiece`.
 
     Parameters
@@ -530,6 +631,9 @@ def read_piece(source: str | SomaFile, parts: Sequence[int] | None = None, *, di
     set_fields : label cells with the values of fields on entity sets (``MATERIAL_SET`` ...), as
         cell arrays named ``set:<name>``; True for all, False for none, or a list of names.
     comm : an mpi4py communicator; the halo is then exchanged rather than scanned for.
+    close_hanging : close the cells of a non-conforming mesh at their hanging vertices, so that
+        values are continuous between coarse and fine cells (:mod:`somaview.hanging`). For display:
+        a 3D cell with hanging vertices becomes several. False (default): the cells as stored.
     """
     own = not isinstance(source, SomaFile)
     sf = SomaFile(source) if own else source
@@ -541,7 +645,8 @@ def read_piece(source: str | SomaFile, parts: Sequence[int] | None = None, *, di
             rank, nranks = comm.Get_rank(), comm.Get_size()
         if parts is None and rank is not None:
             parts = parts_for_rank(sf.nparts, nranks, rank)
-        reader = PieceReader(sf, parts, dims, point_fields, cell_fields, high_order, set_fields).read_owned()
+        reader = PieceReader(sf, parts, dims, point_fields, cell_fields, high_order, set_fields,
+                             close_hanging=close_hanging).read_owned()
         if comm is not None and nranks > 1:  # collective: every process takes part
             return reader.finish(comm.alltoall(reader.outgoing(nranks, rank)))
         return reader.finish()
