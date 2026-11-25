@@ -109,7 +109,7 @@ class avtSOMAFileFormat : public avtSTMDFileFormat
     std::map<std::tuple<int, int, int>, soma_reader::Subcells> subcellCache_;  // (domain, order, level) -> its sub-quads
     int                                         level_ = 0;    // the resolution Multires control asks for
     soma_reader::FieldCache                     nodalCache_;
-    double                                      radius_ = 0;   // of the sphere the mesh is on, or 0
+    soma_reader::Sphere                         sphere_;       // the mesh is on, if any
 
     // AMR-checkpoint state.
     std::unique_ptr<soma_reader::AmrFile>        amr_;

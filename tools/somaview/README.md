@@ -72,7 +72,7 @@ Parts are assigned as SOMA assigns them: at P ranks, part q goes to rank floor(q
   `set:<name>`. Variable-length, handle and element-node fields are listed as skipped.
 * Spectral-element fields (GLL values on quads) by `sv.read_nodal(path)`: a piece of order x order
   sub-quads per element with the stored values as point data (`sv.plot(piece, scalars="eta")`); with
-  `resolution=n` n x n of the element's polynomial, with `lagrange=True` VTK Lagrange cells.
+  `resolution=n` n x n of the element's polynomial, bounded by its values, with `lagrange=True` VTK Lagrange cells.
 * Cells with hanging vertices, closed at them with `close_hanging=True` (the default of `sv.plot` and
   the ParaView and VisIt readers).
 * `soma_part` (owning part of each cell) and `soma_gid` (global ids, also VTK GlobalIds).

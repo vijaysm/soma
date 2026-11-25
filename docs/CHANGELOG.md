@@ -5,8 +5,20 @@ All notable changes to SOMA are recorded here. The format follows
 
 ## [Unreleased]
 
+### Core and I/O
+
+- `MeshGeometry`: the surface a mesh of dimension 2 is on (a sphere, or none but its elements' own), as the
+  mesh value `soma:geometry`. `cubed_sphere_mesh` and `SemSpace` declare it, `refine_quads` keeps it, and
+  `write_soma` writes it, or recognizes a plane or sphere, unless `SomaWriteOptions::geometry` (Python:
+  `write_file(geometry=False)`) is false. SOMA 0.1.0 reads the files.
+
 ### Visualization
 
+- Values drawn between the nodes of a spectral element are kept within the range of its own (on a side, the
+  side's): no overshoot, and continuous fields stay so. `bounded=False` and ParaView's
+  `BoundedInterpolation` turn it off.
+- The sphere a file names is used to draw spectral elements, about any centre.
+- ParaView's preference "Load All Variables" no longer turns on every block of the reader.
 - somaview draws spectral-element fields (GLL values on quads) on sub-quads: `sv.read_nodal` in
   Python, a mesh `mesh_gll_p<order>` in VisIt, whose database comment names the fields it cannot draw,
   blocks `gll_p<order>` in ParaView; at any resolution by the element's polynomial (Python and ParaView,

@@ -117,6 +117,17 @@ class MeshValue:
 
 
 @dataclass(frozen=True)
+class Geometry:
+    """The surface a mesh is on: ``kind`` "affine" (the elements' own maps), "sphere" or "unknown" (of a
+    kind not known here); ``declared`` by the application, or recognized from the vertices on writing."""
+
+    kind: str
+    center: tuple[float, float, float] = (0.0, 0.0, 0.0)
+    radius: float = 0.0
+    declared: bool = True
+
+
+@dataclass(frozen=True)
 class RootMeta:
     """The words of the ``/soma`` attribute ``meta``."""
 
@@ -353,6 +364,23 @@ class SomaFile:
     def fields_on(self, dim: int, drawable_only: bool = True) -> list[FieldInfo]:
         """The fields with values on entities of ``dim``."""
         return [f for f in self.fields if dim in f.dims and (f.drawable or not drawable_only)]
+
+    @property
+    def geometry(self) -> Geometry | None:
+        """The surface the file says its mesh is on (``soma:geometry``), if it says."""
+        v = self.values.get("soma:geometry")
+        if v is None or v.value is None:
+            return None
+        w = np.asarray(v.value, float).ravel()
+        if len(w) < 3:
+            raise ValueError(f"{self.path}: soma:geometry is cut short")
+        if w[0] != 1 or w[1] not in (0, 1):
+            return Geometry("unknown", declared=bool(w[2]))
+        if w[1] == 0:
+            return Geometry("affine", declared=bool(w[2]))
+        if len(w) < 7 or not np.isfinite(w[3:7]).all() or w[6] <= 0:
+            raise ValueError(f"{self.path}: soma:geometry gives no sphere")
+        return Geometry("sphere", tuple(float(c) for c in w[3:6]), float(w[6]), bool(w[2]))
 
     def time(self) -> float | None:
         """The value of a scalar mesh value named ``time`` (any case), if the file has one."""

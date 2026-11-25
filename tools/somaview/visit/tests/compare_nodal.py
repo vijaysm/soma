@@ -97,6 +97,23 @@ def main(driver, work, files):
                 if code == 0:
                     same(read_sections(out), sv.read_nodal(path, parts, resolution=n), case["p"],
                          f"{label} resolution {n}", stored=False)
+    # The surface the file names: a sphere off the origin, straight elements on one, a kind not known.
+    at = (5.0, -3.0, 1.0)
+    for words, by in (([1, 1, 1, *at, 2.0], at), ([1, 0, 1], (0, 0, 0)), ([1, 42, 1, 7], (0, 0, 0)), ([2, 1, 1], (0, 0, 0))):
+        path = work / "case.soma"
+        nf.write(path, p=4, radius=2.0)
+        nf.shift(path, by)
+        nf.set_geometry(path, words)
+        code, err = drive(driver, path, out)
+        check(code == 0, f"geometry {words}: {err}")
+        if code == 0:
+            same(read_sections(out), sv.read_nodal(path), 4, f"geometry {words}")
+    for words in ([1, 1], [1, 1, 1, 0, 0, 0], [1, 1, 1, 0, 0, 0, -2], [1, 1, 1, np.inf, 0, 0, 2]):
+        path = work / "bad.soma"
+        nf.write(path, radius=2.0)
+        nf.set_geometry(path, words)
+        code, err = drive(driver, path, out)
+        check(code == 1 and "geometry" in err and "AddressSanitizer" not in err, f"damaged geometry {words}: exit {code} {err[:300]}")
     for f in files:
         with sv.SomaFile(f) as sf:
             orders, nparts = sorted({x.order for x in sf.fields if x.nodal_on_quads}), sf.nparts
@@ -105,6 +122,12 @@ def main(driver, work, files):
             check(code == 0, f"{f}: {err}")
             for p in orders if code == 0 else []:
                 same(read_sections(out), sv.read_nodal(f, parts, order=p), p, f"{f} parts {parts}")
+            for n in (2, 6):
+                code, err = drive(driver, f, out, parts, n)
+                check(code == 0, f"{f} resolution {n}: {err}")
+                for p in orders if code == 0 else []:
+                    same(read_sections(out), sv.read_nodal(f, parts, order=p, resolution=n), p,
+                         f"{f} parts {parts} resolution {n}", stored=False)
     for name, (column, change) in DAMAGE.items():
         path = work / "bad.soma"
         nf.write(path, partial=True)

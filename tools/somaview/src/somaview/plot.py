@@ -89,7 +89,7 @@ def plot(path_or_piece, scalars: str | None = None, *, dims: Iterable[int] | Non
          parts: Sequence[int] | None = None, surface: str = "auto", clip=None,
          show_edges: bool | None = None, cmap: str | None = None, screenshot: str | None = None,
          window_size=(1024, 768), off_screen: bool | None = None, background="white",
-         nodal: bool | str = False, resolution: int | None = None, close_hanging: bool = True, **kw):
+         nodal: bool | str = False, resolution: int | None = None, bounded: bool = True, close_hanging: bool = True, **kw):
     """Render a SOMA mesh file or AMR checkpoint with pyvista.
 
     Parameters
@@ -109,7 +109,8 @@ def plot(path_or_piece, scalars: str | None = None, *, dims: Iterable[int] | Non
         the mesh.
     nodal : draw the spectral-element fields (see :func:`somaview.read_nodal`): True on sub-quads,
         ``"lagrange"`` on VTK Lagrange cells, subdivided for the render.
-    resolution : with ``nodal=True``, the sub-quads along an element's side.
+    resolution, bounded : with ``nodal=True``, the sub-quads along an element's side, and whether values
+        on them are kept within the range of the element's own.
     close_hanging : close the cells of a non-conforming mesh at their hanging vertices, so that
         nothing cracks between coarse and fine cells (:mod:`somaview.hanging`); False: the cells as
         stored.
@@ -135,7 +136,7 @@ def plot(path_or_piece, scalars: str | None = None, *, dims: Iterable[int] | Non
         if nodal not in (True, "lagrange"):
             raise ValueError(f"nodal={nodal!r}: True or 'lagrange'")
         piece = _read_nodal(path_or_piece, parts, fields=None if scalars in (None, "soma_part") else [scalars],
-                            resolution=resolution, lagrange=nodal == "lagrange")
+                            resolution=resolution, lagrange=nodal == "lagrange", bounded=bounded)
     else:
         piece = _read_piece(path_or_piece, parts, dims=dims, close_hanging=close_hanging)
     chosen = sorted(piece.blocks) if dims is None else sorted(set(dims) & set(piece.blocks))

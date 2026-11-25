@@ -38,6 +38,7 @@ reader.PartIds = 1                       # cell array "soma_part"
 reader.GlobalIds = 1                     # GlobalIds point/cell arrays from the gids
 reader.CloseHangingCells = 1             # close cells at hanging vertices (no GlobalIds in 3D then)
 reader.NodalResolution = 0               # gll_p<order> blocks: 0 the GLL points, n > 0 n x n sub-quads
+reader.BoundedInterpolation = 1          # ... kept within the range of the element's own values
 reader.LagrangeCells = 0                 # gll_p<order> blocks: VTK Lagrange cells instead
 reader.UpdatePipeline()
 ```

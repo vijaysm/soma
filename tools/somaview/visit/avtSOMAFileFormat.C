@@ -89,7 +89,7 @@ avtSOMAFileFormat::avtSOMAFileFormat(const char *filename)
       if (d != file_->dim() && d > 0) dims_.push_back(d);
     for (const FieldInfo &f : file_->fields())
       if (f.nodal_on_quads()) {
-        radius_ = soma_reader::sphere_radius(*file_);
+        sphere_ = soma_reader::sphere(*file_);
         break;
       }
   } else {
@@ -285,7 +285,12 @@ void avtSOMAFileFormat::PopulateMeshMetaData(avtDatabaseMetaData *md) {
       }
     }
   }
-  if (!skipped.empty()) md->SetDatabaseComment("SOMA: fields of " + path_ + " that cannot be drawn: " + skipped);
+  std::string comment;
+  if (!skipped.empty()) comment = "SOMA: fields of " + path_ + " that cannot be drawn: " + skipped;
+  if (sphere_.unknown)
+    comment += std::string(comment.empty() ? "SOMA: " : "; ") +
+               "the mesh is on a surface of a kind not known here and is drawn off it";
+  if (!comment.empty()) md->SetDatabaseComment(comment);
 
   // soma_part (the owning file part of every cell) and any entity-set labels, as zonal
   // scalars on the main mesh.
@@ -422,7 +427,7 @@ const soma_reader::Subcells &avtSOMAFileFormat::CachedSubcells(int domain, int o
   auto it = subcellCache_.find(key);
   if (it != subcellCache_.end()) return it->second;
   const MeshPiece &piece = CachedPiece(domain, false);
-  return subcellCache_.emplace(key, soma_reader::subcells(piece, piece.blocks.at(2), order, radius_,
+  return subcellCache_.emplace(key, soma_reader::subcells(piece, piece.blocks.at(2), order, sphere_,
                                                           SubcellResolution(order))).first->second;
 }
 

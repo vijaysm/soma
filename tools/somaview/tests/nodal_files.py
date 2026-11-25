@@ -76,6 +76,25 @@ def node_positions(xyz, conn, p, radius=None) -> np.ndarray:
     return x if radius is None else x * (radius / np.linalg.norm(x, axis=2, keepdims=True))
 
 
+def set_geometry(path, words):
+    """Gives a file of no mesh values soma:geometry as write_soma does."""
+    with h5py.File(path, "r+") as h:
+        s = h["soma"]
+        meta = s.attrs["meta"]
+        meta[9] = 1
+        s.attrs["meta"] = meta
+        g = s.require_group("values/v0")
+        g.attrs["name"] = np.bytes_("soma:geometry")
+        g.attrs["meta"] = np.array([7, len(words), 0, 3, 0, 0, 0, 1], np.int64)  # f64, a global value
+        g.attrs["global"] = np.frombuffer(np.array(words, float).tobytes(), np.uint8)
+
+
+def shift(path, by):
+    """Moves every vertex of a file."""
+    with h5py.File(path, "r+") as h:
+        h["soma/dim0/coords"][...] += np.asarray(by, float)
+
+
 def write(path, n=4, p=3, radius=None, nodes=4, parts=1, partial=False):
     """Writes the file; returns (xyz, conn, positions, {field: (elements, nodes, ncomp) or NaN})."""
     xyz, conn = cap_mesh(n, radius, nodes)
@@ -84,7 +103,8 @@ def write(path, n=4, p=3, radius=None, nodes=4, parts=1, partial=False):
     scale = radius or 1.0
     f = {"eta": (pos[..., :1] / scale) ** 2 + 3 * pos[..., 1:2] / scale, "u": pos / scale,
          "T": np.stack([pos[..., 0] / scale * (c + 1) + c for c in range(5)], axis=2),
-         "mask": (pos[..., :1] > 0.1 * scale).astype(float)}  # stored as u8
+         "mask": (pos[..., :1] > 0.1 * scale).astype(float),  # stored as u8
+         "step": np.concatenate([5.0 * (pos[..., :1] + 0.3 * pos[..., 1:2] > 0.07 * scale), pos[..., :1] / scale], axis=2)}
     elem_part = np.arange(ne) * parts // ne
     vert_part = np.full(nv, parts)
     for e in range(ne):
