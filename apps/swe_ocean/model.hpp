@@ -8,22 +8,23 @@
 // mesh's space, over the bathymetry depth H > 0, stepped by SSP-RK3 in the vector-invariant form of swe_atm:
 //
 //   d eta/dt = -div_wk(D u + F),  F = nu grad(L eta)
-//   du/dt    = -(zeta + f) n x u - grad(g eta + |u|^2 / 2) + tau / (rho0 D) - drag - nu del^4 u
+//   du/dt    = -(zeta + f) n x u - grad(g eta + |u|^2 / 2) + tau / (rho0 D) - drag - r_land u - nu del^4 u
 //
 // with D = H + eta the total depth, div_wk the weak divergence (zero flux through the coast, so the integral of
 // eta is conserved to rounding), L the weak Laplacian (soma::sem::laplacian; -div_wk(F) is then -nu del^4 eta,
 // kept as a flux for the tracers that will share it), zeta the vorticity, n the unit normal a_1 x a_2 (outward
 // on the sphere, +z in the plane), f the Coriolis parameter, tau the wind stress, drag C_d |u| u / D
-// (quadratic) or r u (linear) and del^4 HOMME's vector hyperviscosity. The linear mode drops zeta and |u|^2 / 2
-// and takes D = H in the flux, the stress and the drag. Every tendency is made continuous by direct stiffness
-// summation (the weak divergence is assembled); after each stage's update, u loses its normal component at
-// coast points and vanishes at no-slip points (soma::sem::remove_normal). A run has the same bits on any number
-// of ranks and threads.
+// (quadratic) or r u (linear), r_land the land damping (Forcing; 0 off land) and del^4 HOMME's vector
+// hyperviscosity. The linear mode drops zeta and |u|^2 / 2 and takes D = H in the flux, the stress and the drag.
+// Every tendency is made continuous by direct stiffness summation (the weak divergence is assembled); after each
+// stage's update, u loses its normal component at coast points and vanishes at no-slip points
+// (soma::sem::remove_normal). A run has the same bits on any number of ranks and threads.
 //
-// The step (when not given): the smaller of the advective and the hyperviscous limit at t = 0,
+// The step (when not given): the least of the advective, the hyperviscous and the land limit at t = 0,
 //   advective     cfl * min over owned points of gap / (|u| + sqrt(g max(D, 0)))
 //   hyperviscous  2.5 cfl / (nu rho), rho the spectral radius of del^4 (scalar and vector, the larger;
 //                 power iterations as swe_atm's), when nu > 0
+//   land          2.5 cfl / land_damping, when any rank holds a land point and land_damping > 0
 // with gap a point's local GLL gap: the least straight-line distance from the point to its neighbours along
 // its element's i and j lines. Both minima are exact reductions, the same on any number of ranks.
 // The viscosity (when not given): 1e15 (dx_min / dx_30)^3.2 m^4/s, dx_30 = pi a / 60 (the edge of a cubed-
@@ -50,12 +51,16 @@
 namespace ocean {
 
 // wind: fills tau (N/m^2, 3 Cartesian components, every row of the space) once, at construction; the stress is
-// then made continuous and tangent. None: no stress. drag_quadratic: C_d of C_d |u| u / D; drag_linear: r (1/s)
-// of r u, replacing the quadratic drag when set.
+// then made continuous and tangent, and zero at land points. None: no stress. drag_quadratic: C_d of
+// C_d |u| u / D; drag_linear: r (1/s) of r u, replacing the quadratic drag when set. land_damping (1/s): a
+// further linear drag at land points (the land flags of the mesh's bathymetry: points of kept elements that are
+// land, which the model holds as water H_min deep), so that they stay nearly still instead of being the
+// shallowest water the wind drives; 100 s, far shorter than an inertial or a tidal period.
 struct Forcing {
   std::function<void(const Space&, Values tau)> wind;
   double drag_quadratic = C_d;
   std::optional<double> drag_linear;
+  double land_damping = 1.0e-2;
 };
 
 // linear: the linear mode above; cfl, dt (s), nu (m^4/s): the step and the viscosity, as above; coriolis: f

@@ -138,6 +138,9 @@ void check(const ModelOptions& o) {
   if (o.forcing.drag_linear && !(*o.forcing.drag_linear >= 0 && std::isfinite(*o.forcing.drag_linear))) {
     bad = "linear drag " + text(*o.forcing.drag_linear) + " negative";
   }
+  if (!(o.forcing.land_damping >= 0 && std::isfinite(o.forcing.land_damping))) {
+    bad = "land damping " + text(o.forcing.land_damping) + " negative";
+  }
   if (o.nu_tracer && !(*o.nu_tracer >= 0 && std::isfinite(*o.nu_tracer))) {
     bad = "tracer viscosity " + text(*o.nu_tracer) + " negative";
   }
@@ -153,6 +156,10 @@ void check(const OceanMesh& m) {
     throw std::invalid_argument("swe_ocean: H is " + std::to_string(m.bathymetry.H.extent(0)) + " x " +
                                 std::to_string(m.bathymetry.H.extent(1)) + ", not " + std::to_string(rows) + " x 1");
   }
+  if (!m.bathymetry.land.empty() && m.bathymetry.land.size() != rows) {
+    throw std::invalid_argument("swe_ocean: " + std::to_string(m.bathymetry.land.size()) + " land flags, not " +
+                                std::to_string(rows));
+  }
 }
 
 }  // namespace
@@ -161,10 +168,12 @@ struct OceanModel::State {
   ModelOptions options;
   OceanMesh ocean;
   soma::sem::SemBoundary<Host> boundary;
-  Values H, eta, u, f, tau;
+  // land: 1 at land points (the bathymetry's land flags), 0 elsewhere and everywhere without flags.
+  Values H, eta, u, f, tau, land;
   // The step's start, a stage, the tendencies and scratch.
   Values eta0, u0, eta1, u1, deta, du, zeta, phi, lap, grad, nxu, flux, div, hyper_u;
   double time = 0, dt = 0, nu = 0, rho = 0;
+  bool any_land = false;  // over all ranks
   long steps = 0;
   // The tracers, and their state (Tracers::state) at the step's start, at a stage and its explicit tendency.
   std::unique_ptr<Tracers> tracers;
@@ -181,7 +190,13 @@ struct OceanModel::State {
     u1 = make("ocean::u1", 3), deta = make("ocean::deta", 1), du = make("ocean::du", 3);
     zeta = make("ocean::zeta", 1), phi = make("ocean::phi", 1), lap = make("ocean::lap", 1);
     grad = make("ocean::grad", 3), nxu = make("ocean::nxu", 3), flux = make("ocean::flux", 3);
-    div = make("ocean::div", 1), hyper_u = make("ocean::hyper_u", 3);
+    div = make("ocean::div", 1), hyper_u = make("ocean::hyper_u", 3), land = make("ocean::land", 1);
+    std::int32_t mine = 0;
+    for (std::size_t r = 0; r < ocean.bathymetry.land.size(); ++r) {
+      land(r, 0) = ocean.bathymetry.land[r] != 0 ? 1.0 : 0.0;
+      mine = std::max(mine, ocean.bathymetry.land[r] != 0 ? 1 : 0);
+    }
+    any_land = comm.allreduce(mine, soma::Op::max) != 0;
 
     // f and tau, continuous (shared points' positions differ by rounding between elements); tau tangent.
     const auto x = s.x();
@@ -199,6 +214,9 @@ struct OceanModel::State {
       o.forcing.wind(s, tau);
       s.dss(comm, tau);
       soma::sem::project_tangent(s, tau);
+      for (std::size_t r = 0; r < n; ++r) {
+        for (std::size_t c = 0; c < 3; ++c) tau(r, c) *= 1 - land(r, 0);
+      }
     }
 
     if (o.nu) {
@@ -244,7 +262,9 @@ struct OceanModel::State {
     }
     const double advective = options.cfl * comm.allreduce(least, soma::Op::min);
     const double hyperviscous = nu > 0 ? 2.5 * options.cfl / (nu * rho) : std::numeric_limits<double>::infinity();
-    dt = std::min(advective, hyperviscous);
+    const double r_land = options.forcing.land_damping;
+    const double damped = any_land && r_land > 0 ? 2.5 * options.cfl / r_land : std::numeric_limits<double>::infinity();
+    dt = std::min({advective, hyperviscous, damped});
   }
 
   // deta, du and the tracers' explicit tendency dhT from (ee, uu) and their state hT.
@@ -285,7 +305,8 @@ struct OceanModel::State {
     soma::sem::gradient(s, phi, grad);
     soma::sem::cross_normal(s, uu, nxu);
     {
-      const auto h = H, ff = f, ze = zeta, nx = nxu, gr = grad, ta = tau, dv = div, de = deta, dd = du;
+      const auto h = H, ff = f, ze = zeta, nx = nxu, gr = grad, ta = tau, dv = div, de = deta, dd = du, la = land;
+      const double r_land = options.forcing.land_damping;
       const bool has_linear_drag = options.forcing.drag_linear.has_value();
       const double r_drag = has_linear_drag ? *options.forcing.drag_linear : 0.0;
       const double c_drag = options.forcing.drag_quadratic;
@@ -294,7 +315,7 @@ struct OceanModel::State {
             const double depth = linear ? h(r, 0) : h(r, 0) + ee(r, 0);
             const double q = (linear ? 0.0 : ze(r, 0)) + ff(r, 0);
             const double speed = Kokkos::sqrt(uu(r, 0) * uu(r, 0) + uu(r, 1) * uu(r, 1) + uu(r, 2) * uu(r, 2));
-            const double drag = has_linear_drag ? r_drag : c_drag * speed / depth;
+            const double drag = (has_linear_drag ? r_drag : c_drag * speed / depth) + r_land * la(r, 0);
             for (int c = 0; c < 3; ++c) {
               dd(r, c) = -q * nx(r, c) - gr(r, c) + ta(r, c) / (rho0 * depth) - drag * uu(r, c);
             }

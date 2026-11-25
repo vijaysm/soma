@@ -10,6 +10,7 @@
 
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
@@ -21,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include <gtest/gtest.h>
 #include "grid_files.hpp"
@@ -192,6 +194,42 @@ TEST_F(OceanModelTest, no_normal_flow) {
   EXPECT_GT(expect_no_normal_flow(c, m), 0) << "no coast point moves: the check proves nothing";
 }
 
+// Land points of kept elements are 10 m of water to the model: under the westerlies from rest they must stay
+// nearly still while the ocean moves, rather than being the fastest water of the run.
+TEST_F(OceanModelTest, land_stays_still) {
+  const Comm c = Comm::world();
+  ModelOptions o;
+  o.forcing.wind = westerlies;
+  ocean::OceanMesh mesh = earth(c);
+  const std::vector<std::uint8_t> land = mesh.bathymetry.land;
+  OceanModel m(c, std::move(mesh), o);
+  m.advance(c, 200 * m.dt());
+  const auto u = m.u();
+  const auto rows = static_cast<std::size_t>(m.space().owned_elements() * m.space().points_per_element());
+  ASSERT_GE(land.size(), rows);
+  double land_max = 0, ocean_max = 0;
+  std::int64_t land_points = 0;
+  for (std::size_t r = 0; r < rows; ++r) {
+    const double speed = std::hypot(u(r, 0), u(r, 1), u(r, 2));
+    if (land[r] != 0) {
+      land_max = std::max(land_max, speed);
+      ++land_points;
+    } else {
+      ocean_max = std::max(ocean_max, speed);
+    }
+  }
+  land_max = c.allreduce(land_max, soma::Op::max);
+  ocean_max = c.allreduce(ocean_max, soma::Op::max);
+  land_points = c.allreduce(land_points, soma::Op::sum);
+  if (c.rank() == 0) {
+    std::printf("%lld land points: max |u| %.3e m/s, ocean %.3e m/s\n", static_cast<long long>(land_points),
+                land_max, ocean_max);
+  }
+  EXPECT_GT(land_points, 0);
+  EXPECT_GT(ocean_max, 0);
+  EXPECT_LE(land_max, 0.01 * ocean_max);
+}
+
 TEST_F(OceanModelTest, rank_and_thread_independent) {
   const Comm c = Comm::world();
   const OceanModel& m = run();
@@ -348,7 +386,7 @@ TEST(OceanModel, plane_box_rest_stays_at_rest) {
 
 TEST(OceanModel, rejects_bad_options) {
   const Comm c = Comm::world();
-  for (int k = 0; k < 6; ++k) {
+  for (int k = 0; k < 8; ++k) {
     ModelOptions o;
     if (k == 0) o.cfl = 0;
     if (k == 1) o.dt = -1;
@@ -356,6 +394,8 @@ TEST(OceanModel, rejects_bad_options) {
     if (k == 3) o.forcing.drag_quadratic = -1;
     if (k == 4) o.forcing.drag_linear = -1;
     if (k == 5) o.dt = std::nan("");
+    if (k == 6) o.forcing.land_damping = -1;
+    if (k == 7) o.forcing.land_damping = std::nan("");
     EXPECT_THROW(OceanModel(c, box(c), o), std::invalid_argument) << k;
   }
 }

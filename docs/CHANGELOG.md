@@ -26,7 +26,8 @@ All notable changes to SOMA are recorded here. The format follows
 
 - `apps/swe_ocean` (`SOMA_ENABLE_APPS=ON`): the barotropic ocean on the spectral elements, with
   coasts, wind stress, quadratic or linear drag and hyperviscosity, the same bits on any number of
-  ranks and threads.
+  ranks and threads. Land points of coastal elements take no wind stress and a linear drag of
+  $10^{-2}$ s$^{-1}$, so they stay nearly still.
 - The mesh: the cubed sphere refined toward ETOPO1's coastline, the bathymetry averaged over each
   GLL point's footprint (each rank reading only its windows of the NetCDF-4 file), land and closed
   basins removed, the remaining land points held at 10 m and $\ln H$ smoothed until the slope

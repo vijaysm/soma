@@ -12,6 +12,7 @@ built with `-DSOMA_ENABLE_APPS=ON`:
 ```sh
 cmake -S . -B build -DSOMA_ENABLE_MPI=ON -DSOMA_ENABLE_HDF5=ON -DSOMA_ENABLE_APPS=ON
 cmake --build build --target swe_ocean
+export OMP_NUM_THREADS=1    # one thread per rank: OpenMP's default oversubscribes the cores
 mpiexec -n 8 build/apps/swe_ocean/swe_ocean --case wind --ne 30 --coast-km 50 \
     --bathymetry ETOPO1_Ice_g_gmt4.nc --days 5 --report-hours 24 --save-mesh ocean_ne30.soma
 mpiexec -n 8 build/apps/swe_ocean/swe_ocean --case wind --mesh ocean_ne30.soma --days 60
@@ -57,6 +58,13 @@ the drag; the analytic cases run in this mode, with linear drag $r \mathbf u$ an
   degrees or more, and at a pinch point, it is set to zero. The continuity and tracer equations use
   the weak divergence (`soma::sem::divergence_weak`, HOMME's `divergence_sphere_wk`): zero flux
   through the coast is built in, so the integral of $\eta$ is conserved to rounding.
+- **Land points.** An element on the coast keeps its land points (the bathymetry's land flags), as
+  water 10 m deep. They take no wind stress and a further linear drag $r_{\rm land} \mathbf u$,
+  $r_{\rm land} = 10^{-2}$ s$^{-1}$ (`Forcing::land_damping`; 100 s, far shorter than an inertial
+  or a tidal period), so they stay nearly still. Without it the wind drives this thinnest water
+  hardest: in the global run below the fastest water was land, and 40% of the kinetic energy after
+  0.1 day. The step is also at most $2.5\,\mathrm{cfl} / r_{\rm land}$ (100 s at the default
+  cfl of 0.4), far above the 17 s step of the global run below.
 - **Viscosity.** By default $\nu = 10^{15} (\Delta x_{\min} / \Delta x_{30})^{3.2}$ m$^4$ s$^{-1}$,
   $\Delta x_{\min}$ the shortest element edge on any rank and $\Delta x_{30} = \pi a / 60$ the
   edge at ne30: the coast-refined elements set it.
@@ -221,6 +229,7 @@ The tests run under `ctest` (`ctest --test-dir build -R "ocean|swe_ocean"`), eac
 | conservation | $\int \eta$ to $10^{-13}$ of $\int |\eta|$; every tracer's total to rounding in both coordinates |
 | coast | no normal velocity at coast points to rounding; zero at no-slip points |
 | `rest` | $\eta$ and $\mathbf u$ stay exactly 0 |
+| land | under the westerlies from rest (200 steps, synthetic Earth), the land points' largest speed is 4.2e-4 m/s against the ocean's 0.12 m/s (bound: 1%); 0.25 against 0.20 without the land damping |
 | uniform tracer | stays uniform to $10^{-15}$ over the synthetic Earth's bathymetry, in both coordinates; $w_0$ at the surface 3e-15 of $\max|\nabla\cdot(D\mathbf u)|$ |
 | bathymetry | the footprint mean of an analytic field; $r_{x0} \le 0.2$ after smoothing, land points kept at exactly 10 m (a one-element isthmus between a 4000 m basin and a 50 m shelf, the shelf's interior unchanged); each rank reads only its windows (counted) |
 | reproducibility | the same digest at 1 to 8 ranks and 1, 2, 4 threads; the driver's Kelvin run at 1, 2 and 4 ranks (`swe_ocean.kelvin.digests`); a mesh saved at 2 ranks and read at 3 (`swe_ocean.mesh_reuse`) |
@@ -230,31 +239,44 @@ western boundary layer, $r / \beta = 100$ km, is 0.4 of an element at $n_x = 4$)
 
 ## A global run
 
-ETOPO1 at ne30, $p = 3$, coasts refined to 50 km, 8 ranks of 1 thread (M2 Max):
+ETOPO1 at ne30, $p = 3$, coasts refined to 50 km. The mesh build, 8 ranks (M2 Max):
 
 ```text
 swe_ocean: case wind, p 3, 8 rank(s); mesh built at ne 30 in 8.7 s
 cells 36875; removed 1.22307e+08 km^2 of land, 1.80289e+06 km^2 not joined to the world ocean
 bathymetry: rx0 0.2000 (r_max 0.20, smoothed), 1050 smoothing sweeps (50 clipping), peak window 9741600 values, 31463 coastline points
+```
+
+The wind case for 0.1 day on that saved mesh (`--mesh`), 8 ranks of 1 thread each
+(`OMP_NUM_THREADS=1`; with the OpenMP default every rank starts a thread per core and the run is
+three times slower):
+
+```text
+swe_ocean: case wind, p 3, 8 rank(s); mesh read from ../smoke/ocean_ne30.soma in 0.1 s
+cells 36875; removed 1.22307e+08 km^2 of land, 1.80289e+06 km^2 not joined to the world ocean
+bathymetry: rx0 0.2000 (r_max 0.20, as saved), n/a smoothing sweeps, peak window n/a, n/a coastline points
 rx1 of 10 levels: s 3.4066, zstar 1328956.2298
 area 3.859895e+14 m^2, volume 1.203350e+18 m^3; dt 16.7549 s, nu 7.31274e+11 m^4/s, 10 levels (s), 2 tracers
 coast points 6494, no-slip points 717
 t    0.0000 d  step        0  KE 0.0000e+00 J  max|u| 0.000e+00 m/s  mass +0.00e+00  tracers +0.00e+00 +0.00e+00  Drake +0.0000 Sv (-69.34..-54.91)
-t    0.0248 d  step      128  KE 4.3949e+13 J  max|u| 2.243e-02 m/s  mass +2.22e-25  tracers +0.00e+00 +0.00e+00  Drake +0.3213 Sv (-69.34..-54.91)
-t    0.0498 d  step      257  KE 1.6639e+14 J  max|u| 5.218e-02 m/s  mass +6.86e-25  tracers +0.00e+00 +0.00e+00  Drake +0.6139 Sv (-69.34..-54.91)
-t    0.0749 d  step      386  KE 3.4657e+14 J  max|u| 1.227e-01 m/s  mass -1.18e-24  tracers +0.00e+00 +0.00e+00  Drake +0.8501 Sv (-69.34..-54.91)
-t    0.1000 d  step      516  KE 5.6540e+14 J  max|u| 2.560e-01 m/s  mass +1.76e-24  tracers +0.00e+00 +0.00e+00  Drake +1.0129 Sv (-69.34..-54.91)
-simulated 0.1 days in 516 steps, 344.070 s: 1.046 days per hour
-digest 8b71e5f20273fddb
+t    0.0248 d  step      128  KE 2.7628e+13 J  max|u| 2.153e-02 m/s  mass -7.98e-26  tracers +0.00e+00 +0.00e+00  Drake +0.3166 Sv (-69.34..-54.91)
+t    0.0498 d  step      257  KE 1.0178e+14 J  max|u| 4.750e-02 m/s  mass -1.79e-25  tracers +0.00e+00 +0.00e+00  Drake +0.5907 Sv (-69.34..-54.91)
+t    0.0749 d  step      386  KE 2.0594e+14 J  max|u| 8.107e-02 m/s  mass +1.58e-24  tracers -2.02e-16 +0.00e+00  Drake +0.8007 Sv (-69.34..-54.91)
+t    0.1000 d  step      516  KE 3.2717e+14 J  max|u| 1.156e-01 m/s  mass -1.99e-25  tracers +0.00e+00 +0.00e+00  Drake +0.9440 Sv (-69.34..-54.91)
+simulated 0.1 days in 516 steps, 422.591 s: 0.8519 days per hour
+digest 79882cf93db45b8a
 ```
 
-- The mesh build (coastline, refinement, two bathymetry averages, smoothing) takes 9 s and under
-  810 MB per rank; the saved mesh is 13 MB.
+- The mesh build (coastline, refinement, two bathymetry averages, smoothing) takes 9 s and up to
+  1.05 GB per rank at 8 ranks; the saved mesh is 13 MB.
 - The smoothing reaches $r_{x0} = 0.2$: 1000 sweeps of diffusion, then 50 of clipping. All land
   points of the kept elements (24524 element points) stay at 10 m. The coasts shoal: the volume
   is 1.20e18 m$^3$, against 1.34e18 m$^3$ when the smoothing still flooded land points with
   ocean depths, and the shelf seas are shallower than ETOPO1's mean over their water (the Yellow
   Sea 36 m against 44 m, the North Sea 48 m against 72 m, the Persian Gulf 21 m against 33 m).
+- The largest speed grows about linearly, as a spin-up from rest should; the fastest water is the
+  10 m shelf of Foxe Basin and the Gulf of Boothia, where quadratic drag balances the stress near
+  0.2 m/s. The land points' median speed is 5e-4 m/s.
 - The step (17 s) is set by the hyperviscous and advective limits of the 50 km coastal elements;
   at 1 simulated day per hour, 60 days and 10 km coasts are runs for a cluster.
 - Mass changes by $10^{-24}$ of the volume and the tracers by less than $10^{-16}$: rounding.
