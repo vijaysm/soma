@@ -4,9 +4,9 @@
 Python has no pytest). Checks every result against the core (``somaview.read``/``somaview.amr``)
 run in this same pvpython process (it only needs h5py and numpy, both present).
 
-Usage::
+Usage (``--dr``: your ParaView preferences are neither read nor written)::
 
-    /path/to/pvpython --no-mpi --force-offscreen-rendering tests/test_paraview.py
+    /path/to/pvpython --dr --no-mpi --force-offscreen-rendering tests/test_paraview.py
 
 Exits 0 if every check passed, 1 otherwise, printing one line per check.
 """
@@ -24,12 +24,16 @@ HERE = Path(__file__).resolve().parent
 PARAVIEW_DIR = HERE.parent
 ROOT = PARAVIEW_DIR.parent
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
 DATA = Path(os.environ.get("SOMAVIEW_DATA", ROOT / "tests" / "data"))
 _NE20_ENV = os.environ.get("SOMAVIEW_NE20", "")
 NE20 = Path(_NE20_ENV) if _NE20_ENV else None  # optional real multi-part file
 
 import paraview.simple as smp  # noqa: E402
 
+import amr_files  # noqa: E402
+import hanging_files as hf  # noqa: E402
+import nodal_files as nf  # noqa: E402
 import somaview as sv  # noqa: E402
 from somaview.amr import AmrFile  # noqa: E402
 from somaview.format import FileKind  # noqa: E402
@@ -208,6 +212,99 @@ def test_amr(SomaReader) -> None:
     check("amr: field arrays present on a block", any(n in arrs for n in field_names), (arrs, field_names))
 
 
+# -- 6. "Load All Variables" turns on the arrays, not the blocks ------------------------------------
+
+def test_load_all_variables(SomaReader, tmp_dir: Path) -> None:
+    f = tmp_dir / "load_all.soma"
+    nf.write(f, n=3, p=4)
+    settings = smp.GetSettingsProxy("GeneralSettings")
+    before = settings.LoadAllVariables
+    try:
+        for value in (0, 1):
+            settings.LoadAllVariables = value
+            reader = SomaReader(FileNames=[str(f)])
+            reader.UpdatePipelineInformation()
+            check(f"load all variables {value}: blocks", list(reader.ElementBlocks) == ["gll_p4"],
+                 list(reader.ElementBlocks))
+            check(f"load all variables {value}: arrays", "eta" in list(reader.PointArrayStatus))
+    finally:
+        settings.LoadAllVariables = before
+
+
+# -- 7. spectral elements, hanging cells, AMR node values ------------------------------------------
+
+def _named_block(reader, name):
+    out = reader.GetClientSideObject().GetOutputDataObject(0)
+    for k in range(out.GetNumberOfPartitionedDataSets()):
+        if out.GetMetaData(k).Get(out.NAME()) == name:
+            return out.GetPartitionedDataSet(k).GetPartitionAsDataObject(0)
+    return None
+
+
+def test_nodal(SomaReader, tmp_dir: Path) -> None:
+    f = tmp_dir / "nodal.soma"
+    nf.write(f, n=3, p=4, radius=2.0, parts=2)
+    reader = SomaReader(FileNames=[str(f)])
+    for res, lagrange, kw in ((0, 0, {}), (7, 0, {"resolution": 7}), (0, 1, {"lagrange": True})):
+        reader.NodalResolution = res
+        reader.LagrangeCells = lagrange
+        reader.UpdatePipeline()
+        g, want = _named_block(reader, "gll_p4"), sv.read_nodal(f, **kw)
+        tag = f"nodal {kw}"
+        check(f"{tag}: cells", g.GetNumberOfCells() == len(want.cells) and g.GetCellType(0) == want.cells.types[0])
+        check(f"{tag}: points", np.array_equal(vtk_to_numpy(g.GetPoints().GetData()), want.points))
+        for name, a in want.point_data.items():
+            check(f"{tag}: {name}", np.array_equal(vtk_to_numpy(g.GetPointData().GetArray(name)), a))
+    # ParaView's own filters take the Lagrange cells: the patch's area, to the cells' order.
+    area = {}
+    for lagrange in (0, 1):
+        reader.LagrangeCells = lagrange
+        reader.NodalResolution = 0 if lagrange else 40
+        reader.UpdatePipeline()
+        tess = smp.Tessellate(Input=reader, OutputDimension=2, ChordError=1e-5) if lagrange else reader
+        total = smp.IntegrateVariables(Input=tess)
+        total.UpdatePipeline()
+        area[lagrange] = smp.servermanager.Fetch(total).GetCellData().GetArray("Area").GetValue(0)
+    check("nodal: area of the Lagrange cells", abs(area[1] / area[0] - 1) < 1e-3, area)
+
+
+def test_hanging(SomaReader, tmp_dir: Path) -> None:
+    f = tmp_dir / "hanging.soma"
+    boxes = hf.leaves(3, 2, 1, lambda x, l: x[0] < 0.5 and x[1] < 0.5)
+    hf.write(f, 3, boxes, 2, 1, parts=3)
+    reader = SomaReader(FileNames=[str(f)])
+    reader.UpdatePipeline()
+    closed = sv.read(f, close_hanging=True)
+    g = _named_block(reader, "dim3")
+    check("hanging: closed cells", g.GetNumberOfCells() == len(closed.cells) > len(boxes))
+    total = smp.IntegrateVariables(Input=reader)
+    total.UpdatePipeline()
+    volume = smp.servermanager.Fetch(total).GetCellData().GetArray("Volume").GetValue(0)
+    box = np.ptp(sv.read(f).points, axis=0).prod()
+    check("hanging: volume", abs(volume / box - 1) < 1e-12, (volume, box))
+    reader.CloseHangingCells = 0
+    reader.UpdatePipeline()
+    check("hanging: as stored", _named_block(reader, "dim3").GetNumberOfCells() == len(boxes))
+
+
+def test_amr_smooth(SomaReader, tmp_dir: Path) -> None:
+    f = tmp_dir / "amr.soma"
+    amr_files.write(f, 2, amr_files.BOXES_2D, {"c": ("cell", 1, lambda x, y, z, l: x * y + l)})
+    reader = SomaReader(FileNames=[str(f)])
+    reader.UpdatePipeline()
+    box = reader.GetClientSideObject().GetOutputDataObject(0).GetDataSet(1, 0)
+    with sv.open(f) as af:
+        want = sv.amr.smooth(af, "c", 1, [0])[0].ravel()
+    check("amr: node values", np.array_equal(vtk_to_numpy(box.GetPointData().GetArray("c:smooth")), want))
+    contour = smp.Contour(Input=reader, ContourBy=["POINTS", "c:smooth"], Isosurfaces=[float(np.median(want))])
+    contour.UpdatePipeline()
+    check("amr: a contour of them", contour.GetDataInformation().GetNumberOfCells() > 0)
+    reader.AMRNodeValues = 0
+    reader.UpdatePipeline()
+    box = reader.GetClientSideObject().GetOutputDataObject(0).GetDataSet(1, 0)
+    check("amr: node values off", box.GetPointData().GetArray("c:smooth") is None)
+
+
 def main() -> int:
     import tempfile
 
@@ -216,6 +313,10 @@ def main() -> int:
     test_pieces(SomaReader)
     with tempfile.TemporaryDirectory() as td:
         test_file_series(SomaReader, Path(td))
+        test_load_all_variables(SomaReader, Path(td))
+        test_nodal(SomaReader, Path(td))
+        test_hanging(SomaReader, Path(td))
+        test_amr_smooth(SomaReader, Path(td))
     test_selection(SomaReader)
     test_amr(SomaReader)
 

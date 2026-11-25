@@ -71,9 +71,13 @@ Parts are assigned as SOMA assigns them: at P ranks, part q goes to rank floor(q
   entities outside a field's domain get NaN. Fields on entity sets become cell labels
   `set:<name>`. Variable-length, handle and element-node fields are listed as skipped.
 * Spectral-element fields (GLL values on quads) by `sv.read_nodal(path)`: a piece of order x order
-  sub-quads per element with the stored values as point data (`sv.plot(piece, scalars="eta")`).
+  sub-quads per element with the stored values as point data (`sv.plot(piece, scalars="eta")`); with
+  `resolution=n` n x n of the element's polynomial, with `lagrange=True` VTK Lagrange cells.
+* Cells with hanging vertices, closed at them with `close_hanging=True` (the default of `sv.plot` and
+  the ParaView and VisIt readers).
 * `soma_part` (owning part of each cell) and `soma_gid` (global ids, also VTK GlobalIds).
-* AMR checkpoints: one grid per box, coarse cells covered by finer boxes blanked.
+* AMR checkpoints: one grid per box, coarse cells covered by finer boxes blanked; node values continuous
+  across boxes and levels (`somaview.amr.smooth`, arrays `<field>:smooth`).
 
 ## pyvista, yt, command line, VTKHDF
 

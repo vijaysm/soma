@@ -860,6 +860,7 @@ struct CellBlock {
   std::vector<LO> offsets;               // size n + 1
   std::vector<LO> connectivity;          // point-local indices
   std::map<std::string, Array> cell_data;
+  std::vector<LO> source;                // closed at hanging vertices: the file's cell of each, else empty
   LO size() const { return static_cast<LO>(types.size()); }
 };
 
@@ -870,6 +871,7 @@ struct MeshPiece {
   std::vector<double> points;   // n * 3
   std::vector<GO> point_gids;
   std::vector<int> point_part;
+  std::vector<LO> point_row;    // row of the file's vertices (a closed cell's centre: -1 - its cell's row)
   std::map<std::string, Array> point_data;
   std::map<int, CellBlock> blocks;
   LO halo_points = 0;
@@ -886,6 +888,8 @@ struct ReadOptions {
   // 0 = no set fields, 1 (default) = every set-valued field, 2 = only `set_field_names`.
   int set_fields_mode = 1;
   std::set<std::string> set_field_names;
+  // Cells closed at their hanging vertices (read_piece_cached only; see close_hanging).
+  bool close_hanging = false;
 };
 
 // Per-(field, dim) cache of the "full" bit array (one bit per part: does the part's domain cover
@@ -1012,6 +1016,7 @@ struct HaloResult {
   std::vector<GO> gid;
   std::vector<double> xyz;  // n * 3
   std::vector<int> part;
+  std::vector<LO> row;        // of the file's vertices
   std::map<std::string, Array> data;
 };
 
@@ -1122,6 +1127,7 @@ inline HaloResult halo_by_scan(const SomaFile& sf, const std::vector<int>& mine_
   for (std::size_t k = 0; k < final_rows.size(); ++k)
     final_rows[k] = gstart[static_cast<std::size_t>(owner_final[k])] + local_final[k];
   if (!final_rows.empty()) res.xyz = sf.read_rows_at<double>("dim0/coords", final_rows, nullptr);
+  res.row = std::move(final_rows);
   for (auto* f : point_fields) res.data[f->name] = values_at(sf, *f, 0, owner_final, local_final, cache);
   return res;
 }
@@ -1410,6 +1416,10 @@ inline MeshPiece read_piece(const SomaFile& sf, std::vector<int> parts, std::vec
   piece.points.insert(piece.points.end(), halo.xyz.begin(), halo.xyz.end());
   piece.point_part = owned_part;
   piece.point_part.insert(piece.point_part.end(), halo.part.begin(), halo.part.end());
+  const auto row_starts = sf.part_starts("dim0/gid");
+  for (std::size_t k = 0; k < parts.size(); ++k)
+    for (LO r = 0; r < per0_sel[k]; ++r) piece.point_row.push_back(row_starts[static_cast<std::size_t>(parts[k])] + r);
+  piece.point_row.insert(piece.point_row.end(), halo.row.begin(), halo.row.end());
   for (auto* f : point_fields) {
     Array a = owned_data[f->name];
     auto hit = halo.data.find(f->name);
@@ -1661,6 +1671,192 @@ class AmrFile {
 };
 
 // -------------------------------------------------------------------------------------------
+// Node values of an AMR field that are continuous over the hierarchy (amr.py smooth): a cell-centred
+// field's nodes take the mean of the level's cells around them, across boxes, a node-centred one's
+// keep the stored values (of the first box, where several store one). At a node on the level's edge
+// with a coarser level both take the coarser level's node values, linear along its edges: those
+// nodes hang there, and any other value opens a crack.
+// -------------------------------------------------------------------------------------------
+class AmrNodeValues {
+ public:
+  AmrNodeValues(const AmrFile& af, const AmrField& f) : af_(af), f_(f), centering_(f.centering(af.dim())) {
+    if (centering_ == "mixed") throw std::invalid_argument("AMR field '" + f.name + "' is centred on faces or edges");
+  }
+
+  // Values (ncomp, nk, nj, ni) on the nodes of a box, i fastest.
+  const std::vector<double>& box(int level, LO b) {
+    const auto key = std::make_pair(level, b);
+    auto it = nodes_.find(key);
+    if (it == nodes_.end()) it = nodes_.emplace(key, compute(level, b)).first;
+    return it->second;
+  }
+
+ private:
+  using I3 = std::array<LO, 3>;
+  // An array's index range: first index, sizes.
+  struct Range {
+    I3 lo, n;
+    std::size_t size() const { return static_cast<std::size_t>(n[0] * n[1] * n[2]); }
+    std::size_t at(LO i, LO j, LO k) const {
+      return static_cast<std::size_t>((i - lo[0]) + n[0] * ((j - lo[1]) + n[1] * (k - lo[2])));
+    }
+  };
+
+  LO used(std::size_t d) const { return static_cast<int>(d) < af_.dim() ? 1 : 0; }
+  const AmrBox& box_at(int level, LO b) const { return af_.boxes()[static_cast<std::size_t>(level)][static_cast<std::size_t>(b)]; }
+
+  Range cells(const AmrBox& b) const { return {b.lo, {b.hi[0] - b.lo[0] + 1, b.hi[1] - b.lo[1] + 1, b.hi[2] - b.lo[2] + 1}}; }
+  Range node_range(const AmrBox& b) const {
+    Range r = cells(b);
+    for (std::size_t d = 0; d < 3; ++d) r.n[d] += used(d);
+    return r;
+  }
+
+  // Calls fn(i, j, k) for the indices in both ranges.
+  template <class F>
+  static void common(const Range& a, const Range& b, F&& fn) {
+    I3 lo, hi;
+    for (std::size_t d = 0; d < 3; ++d) {
+      lo[d] = std::max(a.lo[d], b.lo[d]);
+      hi[d] = std::min(a.lo[d] + a.n[d], b.lo[d] + b.n[d]);
+    }
+    for (LO k = lo[2]; k < hi[2]; ++k)
+      for (LO j = lo[1]; j < hi[1]; ++j)
+        for (LO i = lo[0]; i < hi[0]; ++i) fn(i, j, k);
+  }
+
+  // The boxes of `level` with a cell in the range.
+  std::vector<LO> overlap(int level, const Range& r) const {
+    std::vector<LO> out;
+    const auto& boxes = af_.boxes()[static_cast<std::size_t>(level)];
+    for (std::size_t b = 0; b < boxes.size(); ++b) {
+      bool meet = true;
+      for (std::size_t d = 0; d < 3; ++d) meet = meet && boxes[b].lo[d] < r.lo[d] + r.n[d] && boxes[b].hi[d] >= r.lo[d];
+      if (meet) out.push_back(static_cast<LO>(b));
+    }
+    return out;
+  }
+
+  const std::vector<double>& stored(int level, LO b) {
+    const auto key = std::make_pair(level, b);
+    auto it = stored_.find(key);
+    if (it == stored_.end()) {
+      const std::vector<LO> one{b};
+      it = stored_.emplace(key, std::move(af_.read(f_.name, level, &one)[0])).first;
+    }
+    return it->second;
+  }
+
+  std::vector<double> compute(int level, LO b) {
+    const AmrBox& bx = box_at(level, b);
+    const Range nodes = node_range(bx);
+    Range grown = nodes;  // the cells around the nodes
+    for (std::size_t d = 0; d < 3; ++d) { grown.lo[d] -= used(d); grown.n[d] += used(d); }
+    const bool cell = centering_ == "cell";
+    const auto nc = static_cast<std::size_t>(f_.ncomp);
+    std::vector<char> have(grown.size(), 0);
+    std::vector<double> v(nc * (cell ? grown.size() : 0)), out(nc * nodes.size(), 0.0);
+    auto near = overlap(level, grown);
+    for (auto o = near.rbegin(); o != near.rend(); ++o) {  // last box first: where several store a node, the first one's value
+      const AmrBox& ob = box_at(level, *o);
+      const Range oc = cells(ob), on = node_range(ob);
+      common(grown, oc, [&](LO i, LO j, LO k) { have[grown.at(i, j, k)] = 1; });
+      const auto& values = stored(level, *o);
+      for (std::size_t c = 0; c < nc; ++c) {
+        if (cell)
+          common(grown, oc, [&](LO i, LO j, LO k) { v[c * grown.size() + grown.at(i, j, k)] = values[c * oc.size() + oc.at(i, j, k)]; });
+        else
+          common(nodes, on, [&](LO i, LO j, LO k) { out[c * nodes.size() + nodes.at(i, j, k)] = values[c * on.size() + on.at(i, j, k)]; });
+      }
+    }
+    I3 dlo, dhi;
+    for (std::size_t d = 0; d < 3; ++d) {
+      LO scale = 1;
+      for (int l = 0; l < level; ++l) scale *= af_.ratio();
+      dlo[d] = used(d) ? af_.domain_lo()[d] * scale : grown.lo[d];
+      dhi[d] = used(d) ? (af_.domain_hi()[d] + 1) * scale : grown.lo[d] + 1;
+    }
+    std::vector<char> edge(nodes.size(), 0);  // nodes with a cell beside them that only a coarser level has
+    bool any = false;
+    common(nodes, nodes, [&](LO i, LO j, LO k) {
+      const std::size_t at = nodes.at(i, j, k);
+      double count = 0;
+      for (LO c = -used(2); c <= 0; ++c)
+        for (LO bb = -used(1); bb <= 0; ++bb)
+          for (LO a = -used(0); a <= 0; ++a) {
+            const I3 x{i + a, j + bb, k + c};
+            const std::size_t g = grown.at(x[0], x[1], x[2]);
+            if (have[g]) {
+              ++count;
+              if (cell)
+                for (std::size_t m = 0; m < nc; ++m) out[m * nodes.size() + at] += v[m * grown.size() + g];
+              continue;
+            }
+            bool inside = true;
+            for (std::size_t d = 0; d < 3; ++d) inside = inside && x[d] >= dlo[d] && x[d] < dhi[d];
+            if (inside) edge[at] = 1;
+          }
+      if (cell)
+        for (std::size_t m = 0; m < nc; ++m) out[m * nodes.size() + at] /= count;
+      any = any || edge[at];
+    });
+    if (level > 0 && any) from_coarser(level, b, nodes, edge, out);
+    return out;
+  }
+
+  void from_coarser(int level, LO b, const Range& nodes, const std::vector<char>& edge, std::vector<double>& out) {
+    const LO r = af_.ratio();
+    auto floor_div = [](LO a, LO q) { return a >= 0 ? a / q : -((-a + q - 1) / q); };
+    Range coarse;
+    for (std::size_t d = 0; d < 3; ++d) {
+      const LO last = nodes.lo[d] + nodes.n[d] - 1;
+      coarse.lo[d] = used(d) ? floor_div(nodes.lo[d], r) : nodes.lo[d];
+      coarse.n[d] = (used(d) ? floor_div(last + r - 1, r) : last) - coarse.lo[d] + 1;
+    }
+    const auto nc = static_cast<std::size_t>(f_.ncomp);
+    std::vector<char> have(coarse.size(), 0);
+    std::vector<double> v(nc * coarse.size(), 0.0);
+    Range touching = coarse;
+    for (std::size_t d = 0; d < 3; ++d) { touching.lo[d] -= used(d); touching.n[d] += used(d); }
+    for (LO o : overlap(level - 1, touching)) {
+      const Range on = node_range(box_at(level - 1, o));
+      const std::vector<double>& values = box(level - 1, o);
+      common(coarse, on, [&](LO i, LO j, LO k) {
+        have[coarse.at(i, j, k)] = 1;
+        for (std::size_t c = 0; c < nc; ++c) v[c * coarse.size() + coarse.at(i, j, k)] = values[c * on.size() + on.at(i, j, k)];
+      });
+    }
+    common(nodes, nodes, [&](LO i, LO j, LO k) {
+      const std::size_t at = nodes.at(i, j, k);
+      if (!edge[at]) return;
+      const I3 x{i, j, k};
+      I3 base;
+      std::array<double, 3> t{};
+      for (std::size_t d = 0; d < 3; ++d) {
+        base[d] = used(d) ? floor_div(x[d], r) : x[d];
+        t[d] = used(d) ? static_cast<double>(x[d] - base[d] * r) / static_cast<double>(r) : 0.0;
+      }
+      for (std::size_t m = 0; m < nc; ++m) out[m * nodes.size() + at] = 0;
+      for (LO s = 0; s < 8; ++s) {
+        const I3 y{base[0] + (s & 1), base[1] + ((s >> 1) & 1), base[2] + ((s >> 2) & 1)};
+        double w = 1;
+        for (std::size_t d = 0; d < 3; ++d) w *= y[d] > base[d] ? t[d] : 1 - t[d];
+        if (w == 0) continue;
+        if (!have[coarse.at(y[0], y[1], y[2])])
+          throw std::runtime_error("AMR box " + std::to_string(b) + " of level " + std::to_string(level) +
+                                   " is not inside level " + std::to_string(level - 1));
+        for (std::size_t m = 0; m < nc; ++m) out[m * nodes.size() + at] += w * v[m * coarse.size() + coarse.at(y[0], y[1], y[2])];
+      }
+    });
+  }
+
+  const AmrFile& af_;
+  const AmrField& f_;
+  std::string centering_;
+  std::map<std::pair<int, LO>, std::vector<double>> stored_, nodes_;
+};
+
+// -------------------------------------------------------------------------------------------
 // HaloCache: the sharing tables read and inverted once per process, so that reading the halo
 // of one part (one VisIt domain) afterwards costs only that part's own interface, not a rescan
 // of every other part. Built lazily on first use; reused across every GetMesh call a database
@@ -1692,7 +1888,25 @@ class HaloCache {
         int d = static_cast<int>(dest[k]);
         dest_to_sources_[d].emplace_back(owner_of_row[row], index[row]);
       }
+      const auto last = dest.begin() + static_cast<std::ptrdiff_t>(k);
+      for (auto a = last - static_cast<std::ptrdiff_t>(cnt); a != last; ++a) {
+        neighbours_[owner_of_row[row]].insert(static_cast<int>(*a));
+        neighbours_[static_cast<int>(*a)].insert(owner_of_row[row]);
+        for (auto b = last - static_cast<std::ptrdiff_t>(cnt); b != last; ++b)
+          if (a != b) neighbours_[static_cast<int>(*a)].insert(static_cast<int>(*b));
+      }
     }
+  }
+
+  // The parts that share a vertex with one of `parts`.
+  std::set<int> neighbours(const std::vector<int>& parts) const {
+    ensure_built();
+    std::set<int> out;
+    for (int p : parts) {
+      const auto it = neighbours_.find(p);
+      if (it != neighbours_.end()) out.insert(it->second.begin(), it->second.end());
+    }
+    return out;
   }
 
   // The halo vertices that elements of `parts` need, resolved from the cached inverted index in
@@ -1738,6 +1952,7 @@ class HaloCache {
     for (std::size_t k = 0; k < final_rows.size(); ++k)
       final_rows[k] = gstart[static_cast<std::size_t>(owner_final[k])] + local_final[k];
     if (!final_rows.empty()) res.xyz = sf_.read_rows_at<double>("dim0/coords", final_rows, nullptr);
+    res.row = std::move(final_rows);
     for (auto* f : point_fields) res.data[f->name] = values_at(sf_, *f, 0, owner_final, local_final, cache);
 
     if (gid_final.size() != missing_sorted.size()) {
@@ -1748,6 +1963,7 @@ class HaloCache {
       res.gid.insert(res.gid.end(), fb.gid.begin(), fb.gid.end());
       res.xyz.insert(res.xyz.end(), fb.xyz.begin(), fb.xyz.end());
       res.part.insert(res.part.end(), fb.part.begin(), fb.part.end());
+      res.row.insert(res.row.end(), fb.row.begin(), fb.row.end());
       for (auto* f : point_fields) {
         auto& a = res.data[f->name];
         auto& b = fb.data[f->name];
@@ -1761,7 +1977,304 @@ class HaloCache {
   const SomaFile& sf_;
   mutable bool built_ = false;
   mutable std::map<int, std::vector<std::pair<int, LO>>> dest_to_sources_;
+  mutable std::map<int, std::set<int>> neighbours_;
 };
+
+// -------------------------------------------------------------------------------------------
+// Hanging vertices (hanging.py): the cells of a non-conforming mesh closed for display. A cell of
+// the mesh's dimension with vertices at the midpoints of its edges (found by the vertex field
+// "refine:birth", which names the corners each refined vertex lies between) becomes, in 2D, a polygon
+// with them on its sides; in 3D, tets and pyramids from its centre over its faces, each face divided
+// as the finer cells beside it divide it, or else in triangles from its hanging vertex of least gid,
+// which the cells on both sides choose. The centre takes the mean of the cell's corners (of an
+// integer field, the first corner's value).
+// -------------------------------------------------------------------------------------------
+namespace hanging {
+
+constexpr const char* BIRTH = "refine:birth";
+// Vertices made between vertices made on one edge: one level on a mesh balanced 2:1. The bound is for
+// damaged records, which can name each other.
+constexpr int MAX_DEPTH = 4;
+
+// Faces of the linear 3D cells, normals out (VTK corner orders; the wedge's for VTK >= 9.7).
+inline const std::vector<std::vector<int>>* cell_faces(int type) {
+  static const std::vector<std::vector<int>> tet{{0, 2, 1}, {0, 1, 3}, {1, 2, 3}, {2, 0, 3}},
+      pyramid{{0, 3, 2, 1}, {0, 1, 4}, {1, 2, 4}, {2, 3, 4}, {3, 0, 4}},
+      wedge{{0, 2, 1}, {3, 4, 5}, {0, 1, 4, 3}, {1, 2, 5, 4}, {2, 0, 3, 5}},
+      hex{{0, 3, 2, 1}, {4, 5, 6, 7}, {0, 1, 5, 4}, {1, 2, 6, 5}, {2, 3, 7, 6}, {3, 0, 4, 7}};
+  switch (type) {
+    case vtk_type::TETRA: return &tet;
+    case vtk_type::PYRAMID: return &pyramid;
+    case vtk_type::WEDGE: return &wedge;
+    case vtk_type::HEXAHEDRON: return &hex;
+    default: return nullptr;
+  }
+}
+
+// The vertex made between given corners (local indices; the corners sorted), or -1.
+class Births {
+ public:
+  // `birth` holds 5 values per point: the count, then up to 4 corner gids.
+  Births(const std::vector<GO>& gids, const std::vector<std::int64_t>& birth) {
+    const GidIndex index(gids);
+    for (std::size_t v = 0; v < gids.size(); ++v) {
+      const std::int64_t n = birth[5 * v];
+      if (n != 2 && n != 4) continue;
+      std::array<LO, 4> m{-1, -1, -1, -1};
+      bool have = true;
+      for (std::size_t k = 0; k < static_cast<std::size_t>(n); ++k) have = have && (m[k] = index.lookup_one(birth[5 * v + 1 + k])) >= 0;
+      if (!have) continue;
+      if (n == 2) edge_[std::minmax(m[0], m[1])] = static_cast<LO>(v);
+      else {
+        std::sort(m.begin(), m.end());
+        centre_[m] = static_cast<LO>(v);
+      }
+    }
+  }
+  LO mid(LO a, LO b) const {
+    const auto it = edge_.find(std::minmax(a, b));
+    return it == edge_.end() ? -1 : it->second;
+  }
+  LO centre(const std::vector<LO>& q) const {
+    std::array<LO, 4> m{q[0], q[1], q[2], q[3]};
+    std::sort(m.begin(), m.end());
+    const auto it = centre_.find(m);
+    return it == centre_.end() ? -1 : it->second;
+  }
+  // The points from a up to, not including, b along their edge.
+  void chain(LO a, LO b, std::vector<LO>& out, int depth = 0) const {
+    const LO m = depth < MAX_DEPTH ? mid(a, b) : -1;
+    if (m < 0 || m == a || m == b) { out.push_back(a); return; }
+    chain(a, m, out, depth + 1);
+    chain(m, b, out, depth + 1);
+  }
+  bool empty() const { return edge_.empty(); }
+
+ private:
+  std::map<std::pair<LO, LO>, LO> edge_;
+  std::map<std::array<LO, 4>, LO> centre_;
+};
+
+// A face's triangles and quads, its hanging vertices among their corners.
+inline void face_pieces(const Births& births, const std::vector<GO>& gids, const std::vector<LO>& q,
+                        std::vector<std::vector<LO>>& out, int depth = 0) {
+  const std::size_t k = q.size();
+  std::vector<LO> mids(k);
+  bool all = depth < MAX_DEPTH;
+  for (std::size_t i = 0; i < k; ++i) all = (mids[i] = births.mid(q[i], q[(i + 1) % k])) >= 0 && all;
+  if (all && k == 4) {
+    const LO c = births.centre(q);
+    if (c >= 0) {
+      for (std::size_t i = 0; i < 4; ++i) face_pieces(births, gids, {q[i], mids[i], c, mids[(i + 3) % 4]}, out, depth + 1);
+      return;
+    }
+  }
+  if (all && k == 3) {
+    for (std::size_t i = 0; i < 3; ++i) face_pieces(births, gids, {q[i], mids[i], mids[(i + 2) % 3]}, out, depth + 1);
+    face_pieces(births, gids, mids, out, depth + 1);
+    return;
+  }
+  std::vector<LO> loop;
+  for (std::size_t i = 0; i < k; ++i) births.chain(q[i], q[(i + 1) % k], loop);
+  if (loop.size() == k) { out.push_back(q); return; }
+  std::size_t at = loop.size();
+  for (std::size_t i = 0; i < loop.size(); ++i)
+    if (std::find(mids.begin(), mids.end(), loop[i]) != mids.end() &&
+        (at == loop.size() || gids[static_cast<std::size_t>(loop[i])] < gids[static_cast<std::size_t>(loop[at])])) at = i;
+  if (at == loop.size()) at = 0;
+  std::rotate(loop.begin(), loop.begin() + static_cast<std::ptrdiff_t>(at), loop.end());
+  for (std::size_t i = 1; i + 1 < loop.size(); ++i) out.push_back({loop[0], loop[i], loop[i + 1]});
+}
+
+}  // namespace hanging
+
+// Closes `piece` at its hanging vertices; `birth` holds 5 values per point, `cell_rows` the cells' rows of the
+// file. Points the pieces add (cell
+// centres) come after the others, gid -1, in the order of their cells. False, and nothing changed,
+// when nothing hangs.
+inline bool close_hanging(MeshPiece& piece, const std::vector<std::int64_t>& birth, const std::vector<LO>& cell_rows,
+                          const std::vector<const FieldInfo*>& point_fields, bool legacy_wedge) {
+  auto found = piece.blocks.find(piece.dim);
+  if (found == piece.blocks.end() || piece.dim < 2) return false;
+  const CellBlock& block = found->second;
+  const hanging::Births births(piece.point_gids, birth);
+  if (births.empty()) return false;
+  CellBlock out;
+  out.dim = block.dim;
+  out.offsets.push_back(0);
+  std::vector<std::vector<LO>> centres;
+  std::vector<LO> centre_cell;
+  bool any = false;
+  auto add = [&](int type, const std::vector<LO>& v, LO c) {
+    out.types.push_back(static_cast<std::uint8_t>(type));
+    out.connectivity.insert(out.connectivity.end(), v.begin(), v.end());
+    out.offsets.push_back(static_cast<LO>(out.connectivity.size()));
+    out.source.push_back(c);
+  };
+  for (LO c = 0; c < block.size(); ++c) {
+    const auto uc = static_cast<std::size_t>(c);
+    const int type = block.types[uc];
+    const std::vector<LO> v(block.connectivity.begin() + block.offsets[uc], block.connectivity.begin() + block.offsets[uc + 1]);
+    if (type == vtk_type::TRIANGLE || type == vtk_type::QUAD || type == vtk_type::POLYGON) {
+      std::vector<LO> loop;
+      for (std::size_t i = 0; i < v.size(); ++i) births.chain(v[i], v[(i + 1) % v.size()], loop);
+      const bool hangs = loop.size() != v.size();
+      any = any || hangs;
+      add(hangs ? vtk_type::POLYGON : type, hangs ? loop : v, c);
+      continue;
+    }
+    const auto* faces = hanging::cell_faces(type);
+    bool hangs = false;
+    if (faces)
+      for (const auto& f : *faces)
+        for (std::size_t i = 0; i < f.size() && !hangs; ++i)
+          hangs = births.mid(v[static_cast<std::size_t>(f[i])], v[static_cast<std::size_t>(f[(i + 1) % f.size()])]) >= 0;
+    if (!hangs) { add(type, v, c); continue; }
+    any = true;
+    const LO centre = static_cast<LO>(piece.point_gids.size() + centres.size());
+    centres.push_back(v);
+    centre_cell.push_back(c);
+    for (const auto& f : *faces) {
+      std::vector<LO> q;
+      for (int i : f) q.push_back(v[static_cast<std::size_t>(i)]);
+      if (type == vtk_type::WEDGE && legacy_wedge) std::reverse(q.begin(), q.end());
+      std::vector<std::vector<LO>> parts;
+      hanging::face_pieces(births, piece.point_gids, q, parts);
+      for (auto& p : parts) {
+        std::reverse(p.begin(), p.end());  // a cone's base is counterclockwise seen from its apex, inside
+        const int t = p.size() == 3 ? vtk_type::TETRA : vtk_type::PYRAMID;
+        p.push_back(centre);
+        add(t, p, c);
+      }
+    }
+  }
+  if (!any) return false;
+  auto expand = [&](const auto& a) {
+    auto b = a;
+    b.clear();
+    for (LO c : out.source) b.push_back(a[static_cast<std::size_t>(c)]);
+    return b;
+  };
+  out.gids = expand(block.gids);
+  out.part = expand(block.part);
+  for (auto& [name, a] : block.cell_data) {
+    Array& b = out.cell_data[name];
+    b.ncomp = a.ncomp;
+    const auto nc = static_cast<std::size_t>(a.ncomp);
+    for (LO c : out.source)
+      b.data.insert(b.data.end(), a.data.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(c) * nc),
+                    a.data.begin() + static_cast<std::ptrdiff_t>((static_cast<std::size_t>(c) + 1) * nc));
+  }
+  auto mean = [](std::vector<double>& a, std::size_t nc, const std::vector<LO>& v, bool first, bool zero) {
+    for (std::size_t k = 0; k < nc; ++k) {
+      double s = 0;
+      for (LO i : v) s += a[static_cast<std::size_t>(i) * nc + k];
+      a.push_back(zero ? 0.0 : first ? a[static_cast<std::size_t>(v[0]) * nc + k] : s / static_cast<double>(v.size()));
+    }
+  };
+  std::set<std::string> integers;
+  for (auto* f : point_fields) if (f->dtype != DType::f32 && f->dtype != DType::f64) integers.insert(f->name);
+  for (LO c : centre_cell) piece.point_row.push_back(-1 - cell_rows[static_cast<std::size_t>(c)]);
+  for (const auto& v : centres) {
+    mean(piece.points, 3, v, false, false);
+    piece.point_gids.push_back(-1);
+    piece.point_part.push_back(piece.point_part[static_cast<std::size_t>(v[0])]);
+    for (auto& [name, a] : piece.point_data)
+      mean(a.data, static_cast<std::size_t>(a.ncomp), v, integers.count(name) != 0, name == hanging::BIRTH);
+  }
+  found->second = std::move(out);
+  return true;
+}
+
+// `piece` (of `parts`) closed at its hanging vertices, those of other parts included: their owners
+// have an element at a vertex of the piece's, so they are among HaloCache::neighbours.
+inline void close_hanging(const SomaFile& sf, const HaloCache& halo_cache, MeshPiece& piece,
+                          const std::vector<const FieldInfo*>& point_fields, FieldCache& cache, bool legacy_wedge) {
+  const FieldInfo* info = sf.field(hanging::BIRTH);
+  if (info == nullptr || !info->drawable() || !info->has_dim(0) || !piece.blocks.count(sf.dim())) return;
+  if (info->ncomp != 5) throw io_error(sf.path() + ": \"" + hanging::BIRTH + "\" does not have 5 components");
+  // Gids are exact in the doubles values are read as up to 2^53.
+  auto record = [](double x) { return std::isnan(x) ? std::int64_t{0} : static_cast<std::int64_t>(x); };
+  const std::size_t n = piece.point_gids.size();
+  std::vector<LO> cell_rows;
+  const auto cell_starts = sf.part_starts("dim" + std::to_string(sf.dim()) + "/gid");
+  for (int p : piece.parts)
+    for (LO r = cell_starts[static_cast<std::size_t>(p)]; r < cell_starts[static_cast<std::size_t>(p) + 1]; ++r) cell_rows.push_back(r);
+  std::vector<std::int64_t> birth(5 * n, 0);
+  const GidIndex index(piece.point_gids);
+  const auto starts = sf.part_starts("dim0/gid");
+  std::vector<int> owner;
+  std::vector<LO> local;
+  std::vector<GO> new_gids;
+  const std::set<int> mine(piece.parts.begin(), piece.parts.end());
+  std::vector<int> from(piece.parts);
+  for (int q : halo_cache.neighbours(piece.parts)) if (!mine.count(q)) from.push_back(q);
+  for (int q : from) {
+    std::vector<int> one{q};
+    const LO rows = starts[static_cast<std::size_t>(q) + 1] - starts[static_cast<std::size_t>(q)];
+    std::vector<int> o(static_cast<std::size_t>(rows), q);
+    std::vector<LO> l(static_cast<std::size_t>(rows));
+    std::iota(l.begin(), l.end(), LO{0});
+    const Array a = values_at(sf, *info, 0, o, l, cache);
+    const auto gid = sf.read<std::int64_t>("dim0/gid", &one);
+    for (LO r = 0; r < rows; ++r) {
+      const double* b = a.data.data() + 5 * static_cast<std::size_t>(r);
+      const std::int64_t count = record(b[0]);
+      if (count < 2 || count > 4) continue;
+      bool here = true;  // every corner is in the piece: the vertex may lie on a cell of it
+      for (std::int64_t k = 1; k <= count && here; ++k) here = index.lookup_one(record(b[k])) >= 0;
+      if (!here) continue;
+      LO at = index.lookup_one(gid[static_cast<std::size_t>(r)]);
+      if (at < 0) {
+        at = static_cast<LO>(birth.size() / 5);
+        birth.resize(birth.size() + 5, 0);
+        owner.push_back(q);
+        local.push_back(r);
+        new_gids.push_back(gid[static_cast<std::size_t>(r)]);
+      }
+      for (std::size_t k = 0; k < 5; ++k) birth[5 * static_cast<std::size_t>(at) + k] = record(b[k]);
+    }
+  }
+  if (owner.empty()) {
+    close_hanging(piece, birth, cell_rows, point_fields, legacy_wedge);
+    return;
+  }
+  MeshPiece whole = piece;
+  std::vector<LO> rows(owner.size());
+  for (std::size_t k = 0; k < rows.size(); ++k) rows[k] = starts[static_cast<std::size_t>(owner[k])] + local[k];
+  const auto xyz = sf.read_rows_at<double>("dim0/coords", rows, nullptr);
+  whole.points.insert(whole.points.end(), xyz.begin(), xyz.end());
+  whole.point_gids.insert(whole.point_gids.end(), new_gids.begin(), new_gids.end());
+  whole.point_part.insert(whole.point_part.end(), owner.begin(), owner.end());
+  whole.point_row.insert(whole.point_row.end(), rows.begin(), rows.end());
+  for (auto* f : point_fields) {
+    const Array a = values_at(sf, *f, 0, owner, local, cache);
+    auto& d = whole.point_data[f->name].data;
+    d.insert(d.end(), a.data.begin(), a.data.end());
+  }
+  if (!close_hanging(whole, birth, cell_rows, point_fields, legacy_wedge)) return;
+  // Without those of the other parts' vertices that no cell uses.
+  const std::size_t all = whole.point_gids.size();
+  std::vector<char> used(all, 1);
+  std::fill(used.begin() + static_cast<std::ptrdiff_t>(n), used.begin() + static_cast<std::ptrdiff_t>(n + owner.size()), char{0});
+  for (auto& [d, b] : whole.blocks) for (LO v : b.connectivity) used[static_cast<std::size_t>(v)] = 1;
+  std::vector<LO> to(all, -1);
+  LO next = 0;
+  for (std::size_t v = 0; v < all; ++v) if (used[v]) to[v] = next++;
+  auto keep = [&](auto& a, std::size_t nc) {
+    std::size_t w = 0;
+    for (std::size_t v = 0; v < all; ++v)
+      if (used[v]) for (std::size_t k = 0; k < nc; ++k) a[w++] = a[v * nc + k];
+    a.resize(w);
+  };
+  keep(whole.points, 3);
+  keep(whole.point_gids, 1);
+  keep(whole.point_part, 1);
+  keep(whole.point_row, 1);
+  for (auto& [name, a] : whole.point_data) keep(a.data, static_cast<std::size_t>(a.ncomp));
+  for (auto& [d, b] : whole.blocks) for (LO& v : b.connectivity) v = to[static_cast<std::size_t>(v)];
+  piece = std::move(whole);
+}
 
 // Like read_piece, but resolving the halo from a HaloCache (O(part + its halo) per call once the
 // cache is built) rather than rescanning the sharing tables -- the path a database plugin should
@@ -1847,6 +2360,10 @@ inline MeshPiece read_piece_cached(const SomaFile& sf, const HaloCache& halo_cac
   piece.points.insert(piece.points.end(), halo.xyz.begin(), halo.xyz.end());
   piece.point_part = owned_part;
   piece.point_part.insert(piece.point_part.end(), halo.part.begin(), halo.part.end());
+  const auto row_starts = sf.part_starts("dim0/gid");
+  for (std::size_t k = 0; k < parts.size(); ++k)
+    for (LO r = 0; r < per0_sel[k]; ++r) piece.point_row.push_back(row_starts[static_cast<std::size_t>(parts[k])] + r);
+  piece.point_row.insert(piece.point_row.end(), halo.row.begin(), halo.row.end());
   for (auto* f : point_fields) {
     Array a = owned_data[f->name];
     auto hit = halo.data.find(f->name);
@@ -1888,6 +2405,7 @@ inline MeshPiece read_piece_cached(const SomaFile& sf, const HaloCache& halo_cac
     if (have_sets) apply_set_labels(sets_info, d, c, parts, sf, block);
     piece.blocks[d] = std::move(block);
   }
+  if (opt.close_hanging) close_hanging(sf, halo_cache, piece, point_fields, cache, opt.legacy_wedge);
   return piece;
 }
 
@@ -1896,7 +2414,9 @@ inline MeshPiece read_piece_cached(const SomaFile& sf, const HaloCache& halo_cac
 // values per quad, at its Gauss-Lobatto-Legendre (GLL) points, value k = i + (p + 1) j at
 // (xi_i, eta_j). Every quad becomes p x p linear sub-quads on those points and the stored values
 // point data, nothing averaged or interpolated; points are not shared between elements, so a field
-// that jumps from one to the next is drawn as it is. The points are where SemSpace puts them:
+// that jumps from one to the next is drawn as it is. With a resolution n every quad is n x n uniform
+// sub-quads instead, the values between GLL points those of the element's polynomial (a field of
+// integers, a mask or a flag, is piecewise bilinear, so within its range). The points are where SemSpace puts them:
 // bilinear in the corners (biquadratic with 8 or 9 nodes), on a sphere projected to it.
 // -------------------------------------------------------------------------------------------
 
@@ -1928,6 +2448,39 @@ inline std::vector<double> gll_points(int p) {
     x[static_cast<std::size_t>(i)] = t;
     x[static_cast<std::size_t>(p - i)] = -t;
   }
+  return x;
+}
+
+// (x.size() x (p + 1)) values at x of the Lagrange basis on the GLL points, or with `linear` of the
+// piecewise linear one; exactly 0 and 1 where x is a GLL point.
+inline std::vector<double> gll_interpolation(int p, const std::vector<double>& x, bool linear) {
+  const auto g = gll_points(p);
+  const std::size_t np = g.size();
+  std::vector<double> out(x.size() * np, 0.0);
+  for (std::size_t q = 0; q < x.size(); ++q) {
+    double* row = out.data() + q * np;
+    if (linear) {
+      std::size_t a = 0;
+      while (a + 2 < np && x[q] > g[a + 1]) ++a;
+      const double t = (x[q] - g[a]) / (g[a + 1] - g[a]);
+      row[a] = 1 - t;
+      row[a + 1] = t;
+      continue;
+    }
+    for (std::size_t a = 0; a < np; ++a) {
+      double v = 1;
+      for (std::size_t b = 0; b < np; ++b)
+        if (a != b) v *= (x[q] - g[b]) / (g[a] - g[b]);
+      row[a] = v;
+    }
+  }
+  return out;
+}
+
+// n + 1 equally spaced points on [-1, 1].
+inline std::vector<double> even_points(int n) {
+  std::vector<double> x(static_cast<std::size_t>(n) + 1);
+  for (int i = 0; i <= n; ++i) x[static_cast<std::size_t>(i)] = static_cast<double>(2 * i - n) / n;
   return x;
 }
 
@@ -1966,19 +2519,23 @@ inline double sphere_radius(const SomaFile& sf) {
 
 struct Subcells {
   int order = 0;
-  std::vector<LO> cells;         // the block's cell each group of order^2 sub-quads is of
-  std::vector<double> points;    // (order + 1)^2 per cell, n * 3
+  int resolution = 0;            // sub-quads along an element's side; 0: order, on the GLL points
+  int side() const { return resolution > 0 ? resolution : order; }
+  std::vector<LO> cells;         // the block's cell each group of side^2 sub-quads is of
+  std::vector<double> points;    // (side + 1)^2 per cell, n * 3
   std::vector<LO> connectivity;  // 4 per sub-quad
   LO size() const { return static_cast<LO>(connectivity.size() / 4); }
   LO num_points() const { return static_cast<LO>(points.size() / 3); }
 };
 
-// The sub-quads of order `p` of the quads of `block`, on the sphere of `radius` (0: none).
-inline Subcells subcells(const MeshPiece& piece, const CellBlock& block, int p, double radius) {
+// The sub-quads of order `p` of the quads of `block`, on the sphere of `radius` (0: none), between
+// the GLL points or, with `resolution` > 0, that many uniform ones along a side.
+inline Subcells subcells(const MeshPiece& piece, const CellBlock& block, int p, double radius, int resolution = 0) {
   Subcells out;
   out.order = p;
-  const int np = p + 1;
-  const auto xi = gll_points(p);
+  out.resolution = resolution;
+  const int side = out.side(), np = side + 1;
+  const auto xi = resolution > 0 ? even_points(resolution) : gll_points(p);
   std::vector<double> shape4, shape8, shape9;
   for (auto [n, table] : {std::make_pair(4, &shape4), std::make_pair(8, &shape8), std::make_pair(9, &shape9)}) {
     table->resize(static_cast<std::size_t>(np * np * n));
@@ -2007,8 +2564,8 @@ inline Subcells subcells(const MeshPiece& piece, const CellBlock& block, int p, 
       const double s = ball ? radius / std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]) : 1;
       for (double v : y) out.points.push_back(s * v);
     }
-    for (int j = 0; j < p; ++j)
-      for (int i = 0; i < p; ++i)
+    for (int j = 0; j < side; ++j)
+      for (int i = 0; i < side; ++i)
         for (int k : {i + np * j, i + 1 + np * j, i + 1 + np * (j + 1), i + np * (j + 1)})
           out.connectivity.push_back(first + k);
     out.cells.push_back(c);
@@ -2067,7 +2624,12 @@ inline Array subcell_values(const SomaFile& sf, const FieldInfo& info, const Mes
                    std::to_string(info.ncomp) + " components");
   Array out;
   out.ncomp = info.ncomp;
-  const std::size_t block = static_cast<std::size_t>(npts) * width;
+  const std::size_t side = static_cast<std::size_t>(sub.side()) + 1, np = static_cast<std::size_t>(sub.order) + 1;
+  const std::size_t block = side * side * width;
+  const bool integer = info.dtype != DType::f32 && info.dtype != DType::f64;
+  const auto basis = sub.resolution > 0 ? gll_interpolation(sub.order, even_points(sub.resolution), integer)
+                                        : std::vector<double>{};
+  std::vector<double> half(side * np * width);  // interpolated along i
   out.data.assign(sub.cells.size() * block, std::numeric_limits<double>::quiet_NaN());
   for (std::size_t k = 0; k < sub.cells.size(); ++k) {
     const auto e = static_cast<std::size_t>(sub.cells[k]);
@@ -2076,8 +2638,22 @@ inline Array subcell_values(const SomaFile& sf, const FieldInfo& info, const Mes
       throw io_error(sf.path() + ": " + base + "/counts gives a quad " + std::to_string(size[e]) + " values, not " +
                      std::to_string(npts));
     if (first[e] < 0) continue;
-    const auto from = values.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(first[e]) * width);
-    std::copy(from, from + static_cast<std::ptrdiff_t>(block), out.data.begin() + static_cast<std::ptrdiff_t>(k * block));
+    const double* from = values.data() + static_cast<std::size_t>(first[e]) * width;
+    double* to = out.data.data() + k * block;
+    if (sub.resolution == 0) {
+      std::copy(from, from + block, to);
+      continue;
+    }
+    std::fill(half.begin(), half.end(), 0.0);
+    std::fill(to, to + block, 0.0);
+    for (std::size_t j = 0; j < np; ++j)
+      for (std::size_t r = 0; r < side; ++r)
+        for (std::size_t i = 0; i < np; ++i)
+          for (std::size_t c = 0; c < width; ++c)
+            half[(r + side * j) * width + c] += basis[r * np + i] * from[(i + np * j) * width + c];
+    for (std::size_t q = 0; q < side; ++q)
+      for (std::size_t j = 0; j < np; ++j)
+        for (std::size_t r = 0; r < side * width; ++r) to[q * side * width + r] += basis[q * np + j] * half[j * side * width + r];
   }
   return out;
 }

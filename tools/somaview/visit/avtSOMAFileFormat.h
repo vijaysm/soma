@@ -15,6 +15,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -32,6 +33,9 @@ class avtStructuredDomainNesting;
 //      dimensional mesh per other written dimension) and SOMA AMR checkpoints (one
 //      rectilinear grid per box, domain nesting built from the levels/boxes/ratio for
 //      VisIt to blank coarse cells under finer ones).
+//
+//      Cells with hanging vertices are closed at them; an AMR field has node values continuous
+//      across boxes and levels, smooth/<field>, besides the values stored.
 //
 //      Spectral-element fields (GLL values on quads) are point data of one mesh of sub-quads
 //      per order, mesh_gll_p<order>.
@@ -52,6 +56,12 @@ class avtSOMAFileFormat : public avtSTMDFileFormat
 
     virtual void          FreeUpResources(void);
 
+    // Multires control's resolution r: 0 draws the GLL points, r the (r + 1) order uniform
+    // sub-quads along an element's side.
+    virtual void          RegisterDataSelections(const std::vector<avtDataSelection_p> &selections,
+                                                 std::vector<bool> *applied);
+    virtual std::string   CreateCacheNameIncludingSelections(std::string name);
+
     virtual vtkDataSet   *GetMesh(int domain, const char *meshname);
     virtual vtkDataArray *GetVar(int domain, const char *varname);
     virtual vtkDataArray *GetVectorVar(int domain, const char *varname);
@@ -66,11 +76,15 @@ class avtSOMAFileFormat : public avtSTMDFileFormat
     // -- mesh-file path --------------------------------------------------------------------
     void   PopulateMeshMetaData(avtDatabaseMetaData *md);
     vtkDataSet *GetMeshPiece(int domain, int dim);
-    const soma_reader::MeshPiece &CachedPiece(int domain);
+    const soma_reader::MeshPiece &CachedPiece(int domain, bool closed = true);
+    bool   HasHangingRecords() const;                   // the mesh may have hanging vertices
+    bool   GlobalNodeIdsFit() const;                    // in the 32 bits VisIt has for them
+    bool   SplitsCells() const { return file_->dim() == 3 && HasHangingRecords(); }
     vtkDataArray *FieldArray(int domain, const std::string &varname);
     vtkDataArray *PartArray(int domain);
     vtkDataSet *GetSubcellMesh(int domain, int order);
     const soma_reader::Subcells &CachedSubcells(int domain, int order);
+    int    SubcellResolution(int order) const { return level_ > 0 ? (level_ + 1) * order : 0; }
     vtkDataArray *NodalArray(int domain, const std::string &varname);
 
     // -- AMR-checkpoint path -----------------------------------------------------------------
@@ -86,13 +100,14 @@ class avtSOMAFileFormat : public avtSTMDFileFormat
 
     // Mesh-file state.
     std::vector<int>                            dims_;        // written dims besides the main one
-    std::map<int, soma_reader::MeshPiece>       pieceCache_;   // domain -> last-read piece (every dim)
+    std::map<std::pair<int, bool>, soma_reader::MeshPiece> pieceCache_;  // (domain, closed) -> its piece (every dim)
     std::map<std::string, int>                  fieldDim_;     // VisIt variable name -> dim
     std::map<std::string, int>                  fieldComp_;    // "<field>_<comp>" -> component index
     std::map<std::string, std::string>          fieldBase_;    // qualified or per-component name -> SOMA field name
 
     std::map<std::string, int>                  nodalField_;   // VisIt variable name -> spectral-element field's index
-    std::map<std::pair<int, int>, soma_reader::Subcells> subcellCache_;  // (domain, order) -> its sub-quads
+    std::map<std::tuple<int, int, int>, soma_reader::Subcells> subcellCache_;  // (domain, order, level) -> its sub-quads
+    int                                         level_ = 0;    // the resolution Multires control asks for
     soma_reader::FieldCache                     nodalCache_;
     double                                      radius_ = 0;   // of the sphere the mesh is on, or 0
 
@@ -101,6 +116,9 @@ class avtSOMAFileFormat : public avtSTMDFileFormat
     std::vector<int>                             amrDomainLevel_;
     std::vector<int>                             amrDomainBox_;
     std::vector<std::vector<int>>                amrBoxToDomain_;  // [level][box] -> domain
+    struct AmrVar { int field; bool smooth; int comp; };
+    std::map<std::string, AmrVar>                amrVar_;      // VisIt variable name -> field (and component, or -1)
+    std::map<int, soma_reader::AmrNodeValues>    amrNodes_;    // field index -> its node values
 };
 
 #endif

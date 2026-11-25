@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 #include <map>
 #include <set>
 #include <stdexcept>
@@ -16,6 +17,7 @@
 
 #include <avtDatabaseMetaData.h>
 #include <avtMeshMetaData.h>
+#include <avtResolutionSelection.h>
 #include <avtScalarMetaData.h>
 #include <avtVectorMetaData.h>
 #include <avtStructuredDomainNesting.h>
@@ -47,6 +49,9 @@ namespace {
 const char *kMainMeshName = "mesh";
 const char *kLowerMeshPrefix = "elements_dim";
 const char *kNodalMeshPrefix = "mesh_gll_p";
+const int kNodalLevels = 5;  // Multires control's resolutions 0 .. 4
+
+bool IsNodalMesh(const std::string &name) { return name.compare(0, std::strlen(kNodalMeshPrefix), kNodalMeshPrefix) == 0; }
 
 std::string MeshNameForDim(int mainDim, int d) {
   if (d == mainDim) return kMainMeshName;
@@ -107,7 +112,36 @@ avtSOMAFileFormat::~avtSOMAFileFormat() {}
 
 void avtSOMAFileFormat::FreeUpResources(void) {
   pieceCache_.clear();
+  amrNodes_.clear();
   subcellCache_.clear();
+}
+
+// ****************************************************************************
+//  Method: avtSOMAFileFormat::RegisterDataSelections
+//
+//  Called before each read with what the pipeline's operators ask for: Multires control a
+//  resolution. Only spectral-element meshes have several; the sub-quads of another one are
+//  dropped, and VisIt caches each under a name of its own.
+// ****************************************************************************
+
+void avtSOMAFileFormat::RegisterDataSelections(const std::vector<avtDataSelection_p> &selections,
+                                               std::vector<bool> *applied) {
+  int level = 0;
+  for (std::size_t i = 0; i < selections.size(); ++i) {
+    if (std::strcmp(selections[i]->GetType(), "avtResolutionSelection") != 0) continue;
+    const auto *s = dynamic_cast<const avtResolutionSelection *>(*(selections[i]));
+    if (s == nullptr) continue;
+    level = std::min(std::max(s->resolution(), 0), kNodalLevels - 1);
+    if (!nodalField_.empty()) (*applied)[i] = true;
+  }
+  if (level == level_) return;
+  level_ = level;
+  subcellCache_.clear();
+}
+
+std::string avtSOMAFileFormat::CreateCacheNameIncludingSelections(std::string name) {
+  if (level_ == 0 || nodalField_.empty()) return name;
+  return name + "_resolution" + std::to_string(level_);
 }
 
 void avtSOMAFileFormat::AmrLocation(int domain, int &level, int &box) const {
@@ -139,8 +173,10 @@ void avtSOMAFileFormat::PopulateMeshMetaData(avtDatabaseMetaData *md) {
   mesh->blockOrigin = 0;
   mesh->spatialDimension = 3;
   mesh->topologicalDimension = mainDim;
-  mesh->containsGlobalNodeIds = true;
-  mesh->containsGlobalZoneIds = true;
+  // Cells with hanging vertices are closed (soma_reader's close_hanging): in 3D each is several zones,
+  // with no ids of their own.
+  mesh->containsGlobalNodeIds = GlobalNodeIdsFit();
+  mesh->containsGlobalZoneIds = !SplitsCells();
   md->Add(mesh);
 
   for (int d : dims_) {
@@ -151,7 +187,7 @@ void avtSOMAFileFormat::PopulateMeshMetaData(avtDatabaseMetaData *md) {
     lower->blockOrigin = 0;
     lower->spatialDimension = 3;
     lower->topologicalDimension = d;
-    lower->containsGlobalNodeIds = true;
+    lower->containsGlobalNodeIds = GlobalNodeIdsFit();
     lower->containsGlobalZoneIds = true;
     md->Add(lower);
   }
@@ -229,6 +265,7 @@ void avtSOMAFileFormat::PopulateMeshMetaData(avtDatabaseMetaData *md) {
     sub->blockOrigin = 0;
     sub->spatialDimension = 3;
     sub->topologicalDimension = 2;
+    sub->LODs = kNodalLevels;
     md->Add(sub);
   }
   for (const FieldInfo *f : nodal) {
@@ -267,33 +304,44 @@ void avtSOMAFileFormat::PopulateMeshMetaData(avtDatabaseMetaData *md) {
 // ****************************************************************************
 //  Method: avtSOMAFileFormat::CachedPiece
 //
-//  Reads a domain's part (every written dimension, every field, at once) on first use and
+//  Reads a domain's part (every written dimension, every field, at once; closed: its cells closed
+//  at their hanging vertices, for all but the sub-quads, which are of cells as stored) on first use and
 //  keeps it for the rest of this timestep's GetMesh/GetVar/GetVectorVar/GetAuxiliaryData
 //  calls; FreeUpResources drops the cache between timesteps (there is only one here, but the
 //  override is cheap insurance against a caller that re-activates the format).
 // ****************************************************************************
 
-const MeshPiece &avtSOMAFileFormat::CachedPiece(int domain) {
+bool avtSOMAFileFormat::GlobalNodeIdsFit() const {
+  return file_->count(0) + (SplitsCells() ? file_->count(3) : 0) <= std::numeric_limits<int>::max();
+}
+
+bool avtSOMAFileFormat::HasHangingRecords() const {
+  const FieldInfo *f = file_->field(soma_reader::hanging::BIRTH);
+  return f != nullptr && f->drawable() && f->has_dim(0);
+}
+
+const MeshPiece &avtSOMAFileFormat::CachedPiece(int domain, bool closed) {
   if (domain < 0 || domain >= file_->nparts())
     throw std::out_of_range("avtSOMAFileFormat: domain " + std::to_string(domain) + " of " + path_ + " (" +
                             std::to_string(file_->nparts()) + " parts)");
-  auto it = pieceCache_.find(domain);
+  closed = closed && HasHangingRecords();
+  const auto key = std::make_pair(domain, closed);
+  auto it = pieceCache_.find(key);
   if (it != pieceCache_.end()) return it->second;
   std::vector<int> allDims{file_->dim()};
   allDims.insert(allDims.end(), dims_.begin(), dims_.end());
   ReadOptions opt;
   // VTK <= 9.6 wants a SOMA prism's triangles reversed; VTK >= 9.7 takes it as it is.
   opt.legacy_wedge = VTK_VERSION_NUMBER < VTK_VERSION_CHECK(9, 7, 0);
+  opt.close_hanging = closed;
   MeshPiece piece = soma_reader::read_piece_cached(*file_, *haloCache_, {domain}, allDims, opt);
-  auto res = pieceCache_.emplace(domain, std::move(piece));
+  auto res = pieceCache_.emplace(key, std::move(piece));
   return res.first->second;
 }
 
 vtkDataSet *avtSOMAFileFormat::GetMesh(int domain, const char *meshname) {
   if (file_->kind() == FileKind::amr) return GetAmrBox(domain);
-  const std::string nodalPrefix(kNodalMeshPrefix);
-  if (std::string(meshname).compare(0, nodalPrefix.size(), nodalPrefix) == 0)
-    return GetSubcellMesh(domain, std::atoi(meshname + nodalPrefix.size()));
+  if (IsNodalMesh(meshname)) return GetSubcellMesh(domain, std::atoi(meshname + std::strlen(kNodalMeshPrefix)));
   int dim;
   if (!DimForMeshName(meshname, file_->dim(), dim))
     throw std::invalid_argument(std::string("avtSOMAFileFormat: unknown mesh '") + meshname + "'");
@@ -363,17 +411,19 @@ vtkDataSet *avtSOMAFileFormat::GetMeshPiece(int domain, int dim) {
 // ****************************************************************************
 //  Method: avtSOMAFileFormat::GetSubcellMesh
 //
-//  Every quad of the domain as order x order sub-quads on its GLL points (soma_reader's subcells).
+//  Every quad of the domain as order x order sub-quads on its GLL points, or at a resolution asked
+//  for through Multires control that many uniform ones (soma_reader's subcells).
 //  Points are not shared between elements, and no global ids are given: a field here has a value
 //  at every point of the domain's own elements, so no ghost zones are needed.
 // ****************************************************************************
 
 const soma_reader::Subcells &avtSOMAFileFormat::CachedSubcells(int domain, int order) {
-  const auto key = std::make_pair(domain, order);
+  const auto key = std::make_tuple(domain, order, level_);
   auto it = subcellCache_.find(key);
   if (it != subcellCache_.end()) return it->second;
-  const MeshPiece &piece = CachedPiece(domain);
-  return subcellCache_.emplace(key, soma_reader::subcells(piece, piece.blocks.at(2), order, radius_)).first->second;
+  const MeshPiece &piece = CachedPiece(domain, false);
+  return subcellCache_.emplace(key, soma_reader::subcells(piece, piece.blocks.at(2), order, radius_,
+                                                          SubcellResolution(order))).first->second;
 }
 
 vtkDataSet *avtSOMAFileFormat::GetSubcellMesh(int domain, int order) {
@@ -459,7 +509,7 @@ vtkDataArray *avtSOMAFileFormat::FieldArray(int domain, const std::string &varna
 vtkDataArray *avtSOMAFileFormat::NodalArray(int domain, const std::string &varname) {
   const FieldInfo &f = file_->fields()[static_cast<std::size_t>(nodalField_.at(varname))];
   const soma_reader::Subcells &sub = CachedSubcells(domain, f.order);
-  const Array a = soma_reader::subcell_values(*file_, f, CachedPiece(domain), sub, nodalCache_);
+  const Array a = soma_reader::subcell_values(*file_, f, CachedPiece(domain, false), sub, nodalCache_);
   auto comp = fieldComp_.find(varname);
   return ArrayToVtk(a, comp == fieldComp_.end() ? -1 : comp->second);
 }
@@ -482,7 +532,11 @@ vtkDataArray *avtSOMAFileFormat::GetVectorVar(int domain, const char *varname) {
 //  Method: avtSOMAFileFormat::GetAuxiliaryData
 //
 //  Mesh files: global node/zone ids, per domain, so VisIt's ghost-zone generator can match up
-//  the shared vertices and ghosted cells a domain decomposition creates (`var` is the mesh name
+//  the shared vertices and ghosted cells a domain decomposition creates. VisIt reads them as 32-bit
+//  ints whatever the array: 64-bit ones join domains at a node 0 that is in neither. Gids need not fit,
+//  so a node's id is its row among the file's vertices, the centre of a closed cell's its cell's row
+//  after them: dense, and the same in every domain. Without them (a mesh beyond 2^31) there are no
+//  ghost zones (`var` is the mesh name
 //  GetMesh was asked for; AMR checkpoints answer through the domain-nesting cache entry
 //  PopulateAmrMetaData installs instead, not through this call -- see the note there on why a
 //  once-only cache entry, rather than a lazily-built one per call, is the safe way to share one
@@ -502,20 +556,26 @@ void *avtSOMAFileFormat::GetAuxiliaryData(const char *var, int domain, const cha
   const MeshPiece &piece = CachedPiece(domain);
 
   if (std::strcmp(type, AUXILIARY_DATA_GLOBAL_NODE_IDS) == 0) {
-    vtkIdTypeArray *ids = vtkIdTypeArray::New();
-    ids->SetNumberOfTuples(static_cast<vtkIdType>(piece.point_gids.size()));
-    for (std::size_t i = 0; i < piece.point_gids.size(); ++i)
-      ids->SetValue(static_cast<vtkIdType>(i), static_cast<vtkIdType>(piece.point_gids[i]));
+    if (!GlobalNodeIdsFit()) return nullptr;
+    vtkIntArray *ids = vtkIntArray::New();
+    ids->SetNumberOfTuples(static_cast<vtkIdType>(piece.point_row.size()));
+    const auto vertices = file_->count(0);
+    for (std::size_t i = 0; i < piece.point_row.size(); ++i) {
+      const auto row = piece.point_row[i];
+      ids->SetValue(static_cast<vtkIdType>(i), static_cast<int>(row >= 0 ? row : vertices - 1 - row));
+    }
     df = avtVariableCache::DestructVTKObject;
     return ids;
   }
   if (std::strcmp(type, AUXILIARY_DATA_GLOBAL_ZONE_IDS) == 0) {
     auto bit = piece.blocks.find(dim);
-    if (bit == piece.blocks.end()) return nullptr;
-    vtkIdTypeArray *ids = vtkIdTypeArray::New();
+    if (bit == piece.blocks.end() || (dim == file_->dim() && SplitsCells())) return nullptr;
+    for (auto g : bit->second.gids)
+      if (g < 0 || g > std::numeric_limits<int>::max()) return nullptr;
+    vtkIntArray *ids = vtkIntArray::New();
     ids->SetNumberOfTuples(static_cast<vtkIdType>(bit->second.gids.size()));
     for (std::size_t i = 0; i < bit->second.gids.size(); ++i)
-      ids->SetValue(static_cast<vtkIdType>(i), static_cast<vtkIdType>(bit->second.gids[i]));
+      ids->SetValue(static_cast<vtkIdType>(i), static_cast<int>(bit->second.gids[i]));
     df = avtVariableCache::DestructVTKObject;
     return ids;
   }
@@ -550,16 +610,28 @@ void avtSOMAFileFormat::PopulateAmrMetaData(avtDatabaseMetaData *md) {
   for (int d = 0; d < totalDomains; ++d) groupIds[static_cast<std::size_t>(d)] = amrDomainLevel_[static_cast<std::size_t>(d)];
   md->AddGroupInformation(amr_->nlevels(), totalDomains, groupIds);
 
+  // Each field as stored, and "smooth/<field>": its node values continuous across boxes and levels.
+  auto add = [&](const std::string &name, int index, bool smooth, avtCentering cent, int ncomp) {
+    if (ncomp == 1) md->Add(new avtScalarMetaData(name, kMainMeshName, cent));
+    else if (ncomp == 2 || ncomp == 3) md->Add(new avtVectorMetaData(name, kMainMeshName, cent, ncomp));
+    else
+      for (int c = 0; c < ncomp; ++c) {
+        md->Add(new avtScalarMetaData(name + "_" + std::to_string(c), kMainMeshName, cent));
+        amrVar_[name + "_" + std::to_string(c)] = {index, smooth, c};
+      }
+    if (ncomp <= 3) amrVar_[name] = {index, smooth, -1};
+  };
+  std::string skipped;
   for (const auto &f : amr_->fields()) {
     std::string centering = f.centering(amr_->dim());
-    if (centering == "mixed") continue;
-    avtCentering cent = centering == "node" ? AVT_NODECENT : AVT_ZONECENT;
-    if (f.ncomp == 1) md->Add(new avtScalarMetaData(f.name, kMainMeshName, cent));
-    else if (f.ncomp == 2 || f.ncomp == 3) md->Add(new avtVectorMetaData(f.name, kMainMeshName, cent, f.ncomp));
-    else
-      for (int c = 0; c < f.ncomp; ++c)
-        md->Add(new avtScalarMetaData(f.name + "_" + std::to_string(c), kMainMeshName, cent));
+    if (centering == "mixed") {
+      skipped += (skipped.empty() ? "" : ", ") + f.name + " (on faces or edges)";
+      continue;
+    }
+    add(f.name, f.index, false, centering == "node" ? AVT_NODECENT : AVT_ZONECENT, f.ncomp);
+    add("smooth/" + f.name, f.index, true, AVT_NODECENT, f.ncomp);
   }
+  if (!skipped.empty()) md->SetDatabaseComment("SOMA: fields of " + path_ + " that cannot be drawn: " + skipped);
 
   avtStructuredDomainNesting *nesting = BuildDomainNesting();
   void_ref_ptr vr(nesting, avtStructuredDomainNesting::Destruct);
@@ -602,26 +674,24 @@ vtkDataSet *avtSOMAFileFormat::GetAmrBox(int domain) {
 vtkDataArray *avtSOMAFileFormat::GetAmrVar(int domain, const std::string &varname) {
   int level, box;
   AmrLocation(domain, level, box);
-  std::string base = varname;
-  int comp = -1;
-  auto us = varname.find_last_of('_');
-  const soma_reader::AmrField *field = nullptr;
-  try {
-    field = &amr_->field(varname);
-  } catch (const std::exception &) {
-    if (us != std::string::npos) {
-      base = varname.substr(0, us);
-      comp = std::atoi(varname.c_str() + us + 1);
-      field = &amr_->field(base);
-    } else {
-      throw;
-    }
+  const auto it = amrVar_.find(varname);
+  if (it == amrVar_.end()) throw std::invalid_argument("avtSOMAFileFormat: unknown variable '" + varname + "'");
+  const AmrVar &var = it->second;
+  const int comp = var.comp;
+  const soma_reader::AmrField *field = &amr_->fields()[static_cast<std::size_t>(var.field)];
+  const auto &at = amr_->boxes()[static_cast<std::size_t>(level)][static_cast<std::size_t>(box)];
+  auto shape = amr_->point_shape(*field, at);
+  std::vector<double> flat;  // (ncomp, nk, nj, ni), component-major, i fastest
+  if (var.smooth) {
+    for (int d = 0; d < amr_->dim(); ++d) shape[static_cast<std::size_t>(d)] = at.hi[static_cast<std::size_t>(d)] - at.lo[static_cast<std::size_t>(d)] + 2;
+    auto nodes = amrNodes_.find(var.field);
+    if (nodes == amrNodes_.end()) nodes = amrNodes_.emplace(var.field, soma_reader::AmrNodeValues(*amr_, *field)).first;
+    flat = nodes->second.box(level, box);
+  } else {
+    const std::vector<soma_reader::LO> boxes{box};
+    flat = std::move(amr_->read(field->name, level, &boxes)[0]);
   }
-  auto boxes = std::vector<soma_reader::LO>{box};
-  auto vals = amr_->read(base, level, &boxes);
-  auto shape = amr_->point_shape(*field, amr_->boxes()[static_cast<std::size_t>(level)][static_cast<std::size_t>(box)]);
   std::size_t npts = static_cast<std::size_t>(shape[0]) * static_cast<std::size_t>(shape[1]) * static_cast<std::size_t>(shape[2]);
-  const std::vector<double> &flat = vals[0];  // (ncomp, nk, nj, ni), component-major, i fastest
 
   vtkDoubleArray *out = vtkDoubleArray::New();
   if (comp >= 0) {

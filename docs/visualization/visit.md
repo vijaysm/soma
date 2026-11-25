@@ -38,7 +38,11 @@ them. Build with the compiler VisIt was built with, not one from another environ
   only the parts it is given, with their halo found by scanning.
 - The mesh of the file's own dimension is `mesh`; each lower dimension the file wrote is a mesh
   `elements_dim<D>`. A domain's meshes share one array of points.
-- Global node and zone ids are given, so VisIt builds ghost zones between domains.
+- Global node and zone ids are given, so VisIt builds ghost zones between domains. VisIt holds them in
+  32 bits, so a node's id is its row among the file's vertices, not its gid; a mesh of more than
+  $2^{31}$ vertices (in 3D with hanging vertices, vertices and cells) gets no ghost zones.
+- Cells with [hanging vertices](overview.md#hanging-vertices) are closed. In 3D each becomes several zones,
+  which have no global zone ids, and picks and zone counts are of those.
 - A knife is given as a degenerate hexahedron, corners [0 1 2 3 4 5 6 5], which has the knife's
   faces and volume: VisIt 3.5's filters cannot take VTK polyhedra.
 - A field with one row per entity is a scalar (1 component), a vector (2 or 3) or one scalar per
@@ -47,12 +51,16 @@ them. Build with the compiler VisIt was built with, not one from another environ
   `mesh/GLOBAL_ID`, `elements_dim1/GLOBAL_ID`.
 - A spectral-element field (GLL values on quads, as
   [`SemSpace`](../algorithms/spectral-elements.md) makes) is on the mesh `mesh_gll_p<order>`, every
-  quad drawn as order x order sub-quads on its GLL points, the stored values at the points.
+  quad drawn as order x order sub-quads on its GLL points, the stored values at the points. The operator
+  Multires control draws the [element's polynomial](overview.md#between-the-nodes) instead: resolution
+  $r$ = 1 to 4 on $(r + 1)$ order sub-quads along a side; 0 is the GLL points.
 - Fields that cannot be drawn are named in the database comment (File information).
 - VisIt shows a `:` in a name as `_colon_`: `ocean:H` is `ocean_colon_H`.
 - `soma_part` and `set:<name>` are zonal scalars on `mesh`.
 - An AMR checkpoint's domains are its boxes over every level, grouped by level, each a
-  rectilinear grid; coarse cells under finer boxes are blanked through VisIt's domain nesting.
+  rectilinear grid; coarse cells under finer boxes are blanked through VisIt's domain nesting. Beside
+  each field, `smooth/<field>` has [node values](overview.md#block-amr) continuous across boxes and levels,
+  for contours. Fields on faces or edges are named in the database comment.
 
 ```{figure} ../figures/img/visualization-visit.png
 :alt: Six VisIt renders with VisIt's rainbow colour bars: a hex box and a tet box coloured by pressure with their meshes, five linear cell types in a row, an ocean mesh of the globe coloured by node id with continents missing, a square coloured from blue to red, and a globe coloured by cell size with a refined region over North America
@@ -71,6 +79,10 @@ every kind, the knife last; an ocean mesh (3 parts) by node id; a 2D AMR checkpo
   labels and AMR boxes, in both prism conventions.
 - `visit/tests/compare_nodal.py` checks the sub-quads of spectral-element fields against files of known
   positions and values and against the Python core, and that damaged files are refused.
+- `visit/tests/compare_hanging.py` checks the closed cells and the AMR node values against the Python core,
+  on files with hanging vertices whole and part by part, and that damaged records are harmless.
+- `visit/tests/visit_ghosts.py`, run in VisIt's CLI, checks that contours of a zonal field do not depend
+  on how many parts a file has, with and without hanging vertices.
 - `visit/tests/run_visit_tests.sh` builds the plugin against a VisIt install and runs
   `visit_test.py` in `visit -nowin -cli` on a serial engine and a 4-rank engine (and a large file
   on 8 ranks): the zones read and a field's range must equal the core's, and each file is

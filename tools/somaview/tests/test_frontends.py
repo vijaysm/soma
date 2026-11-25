@@ -529,3 +529,11 @@ def test_render_cli_needs_a_real_display(tmp_path):
         pytest.skip(f"rendering unavailable in this environment (exit {r.returncode}); "
                     "not a somaview bug -- ParaView's own --force-offscreen-rendering fails "
                     "the same way here (no OpenGL context could be created)")
+
+
+def test_plot_can_be_called_again(tmp_path):
+    """Importing the submodule somaview.plot must not leave it in the place of the function."""
+    code = "import somaview as sv\nfor _ in range(2):\n    try:\n        sv.plot('none.soma')\n    except ValueError:\n        pass\n"
+    src = str(ROOT / "src")
+    r = subprocess.run([PY, "-c", code], capture_output=True, text=True, cwd=tmp_path, env=dict(os.environ, PYTHONPATH=src))
+    assert r.returncode == 0, r.stderr

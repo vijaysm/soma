@@ -32,7 +32,10 @@ implementation notes.
 - AMR checkpoints: one domain per box over every level (level-major, `AVT_AMR_MESH`), each a
   `vtkRectilinearGrid` (VisIt's face-list filter crashes on a 2D `vtkUniformGrid`); groups are
   levels. Coarse cells under a finer box are blanked through an `avtStructuredDomainNesting`
-  built once from the boxes and the refinement ratio.
+  built once from the boxes and the refinement ratio. `smooth/<field>` is a field's node values
+  continuous across boxes and levels.
+- Cells with hanging vertices (found by the field `refine:birth`) are closed: polygons in 2D, tets and
+  pyramids in 3D, where zone counts and picks are of the pieces and there are no global zone ids.
 
 ## Fields
 
@@ -46,6 +49,8 @@ implementation notes.
   values; components as above (`tracer0_0` ... for 10 of them). It is read when drawn. Points are not
   shared between elements. On a sphere (every vertex at one distance from the origin within
   SemSpace's 1e-8, and not all at z = 0; a file does not say) the points are projected as SemSpace's.
+  Multires control's resolution r = 1 .. 4 draws (r + 1) order sub-quads along a side, with the values of
+  the element's polynomial, which may pass beyond the stored ones (an integer field's do not).
 - Fields that cannot be drawn (variable-length, handles, other element nodes) are named in the
   database comment (File information, `GetMetaData(f).databaseComment`).
 - VisIt shows a `:` in a name as `_colon_`: `ocean:H` is `ocean_colon_H`.
@@ -91,7 +96,12 @@ compiler VisIt was built with (a conda compiler in `PATH` links against a differ
 3. Spectral-element fields (`tests/compare_nodal.py <cpp_driver> <workdir> [FILE ...]`): files of
    known positions and values (plane and sphere, orders 1 to 8, 4, 8 and 9 nodes per quad, 1 to 4
    parts, partial domains), whole and part by part, against those and the Python core; 6 damaged files.
-4. VisIt itself (`tests/visit_test.py`, expectations from `tests/visit_expected.py`, driven by
+4. Hanging vertices and AMR node values (`tests/compare_hanging.py <cpp_driver> <workdir> [FILE ...]`):
+   meshes of quads and hexes in 1 to 5 parts, whole and part by part, against the Python core; damaged
+   records; given FILEs.
+5. Ghost zones (`tests/visit_ghosts.py`, in VisIt's CLI): contours of a zonal field of a mesh in 4 or 5
+   parts against the same mesh in one.
+6. VisIt itself (`tests/visit_test.py`, expectations from `tests/visit_expected.py`, driven by
    `tests/run_visit_tests.sh`): 16 files on a serial engine and on a 4-rank parallel engine, and the
    50,304,352-cell, 48-part CONUS mesh on an 8-rank engine. For every file the zone count of
    the data read equals the Python core's and the MinMax of a field equals the Python core's;
@@ -100,6 +110,10 @@ compiler VisIt was built with (a conda compiler in `PATH` links against a differ
    tet, quadrilateral and brick files at 3 to 7 parts, and 2D and 3D AMR checkpoints.
 
 ## Findings
+
+- VisIt 3.5 reads global node and zone ids as 32-bit ints, whatever the array's type. Given 64-bit ids it saw a
+  node 0 in every domain and joined domains there: contours of averaged zonal fields had several times
+  the pieces they should. The plugin gives `vtkIntArray`s, a node's id its row among the file's vertices.
 
 - VisIt calls `GetAuxiliaryData` with domain -1 for whole-dataset items; reading part -1 for it
   reads outside the part table (HDF5 "selection + offset not within extent"). Only one valid

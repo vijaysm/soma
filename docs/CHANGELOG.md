@@ -8,7 +8,16 @@ All notable changes to SOMA are recorded here. The format follows
 ### Visualization
 
 - somaview draws spectral-element fields (GLL values on quads) on sub-quads: `sv.read_nodal` in
-  Python, a mesh `mesh_gll_p<order>` in VisIt, whose database comment names the fields it cannot draw.
+  Python, a mesh `mesh_gll_p<order>` in VisIt, whose database comment names the fields it cannot draw,
+  blocks `gll_p<order>` in ParaView; at any resolution by the element's polynomial (Python and ParaView,
+  Multires control in VisIt), or on VTK Lagrange cells (Python and ParaView).
+- Cells with hanging vertices are closed at them for display (2D: polygons; 3D: tets and pyramids), in
+  VisIt, ParaView and `sv.plot`, by `close_hanging=True` in `sv.read`.
+- AMR fields have node values continuous across boxes and levels: `somaview.amr.smooth`,
+  `<field>:smooth` in VTK and ParaView, `smooth/<field>` in VisIt.
+- Fixed: in VisIt, contours and other uses of ghost zones on a file of several parts were wrong for zonal
+  fields: VisIt reads global ids as 32-bit integers and the plugin gave it 64-bit ones.
+- Fixed: `sv.plot` failed when `somaview.plot` had been imported, so when called a second time.
 - The VisIt plugin builds against VisIt 3.5.0's macOS package (`visit_macos.cmake`).
 
 ## [0.1.0] - 2026-11-23

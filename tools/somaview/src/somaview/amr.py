@@ -134,12 +134,136 @@ class AmrFile:
         return out
 
 
-def to_vtk_amr(af: AmrFile, fields=None, rank: int = 0, nranks: int = 1, blank: bool = True):
+def _overlap(af: AmrFile, level: int, lo, hi) -> np.ndarray:
+    """The boxes of ``level`` that share a cell with the inclusive cell range lo..hi."""
+    b = af.boxes[level]
+    return np.flatnonzero(((b[:, :3] <= hi) & (b[:, 3:] >= lo)).all(axis=1))
+
+
+def _window(lo, n, box_lo, box_n):
+    """Slices (array, box) in (k, j, i) order of the part of a box (first index ``box_lo``, sizes
+    ``box_n``) inside an array that starts at ``lo`` with sizes ``n``; None if they do not meet."""
+    a = np.maximum(lo, box_lo)
+    b = np.minimum(np.add(lo, n), np.add(box_lo, box_n))
+    if (a >= b).any():
+        return None
+    return (tuple(slice(int(a[d] - lo[d]), int(b[d] - lo[d])) for d in (2, 1, 0)),
+            tuple(slice(int(a[d] - box_lo[d]), int(b[d] - box_lo[d])) for d in (2, 1, 0)))
+
+
+class _NodeValues:
+    """Node values of one field, remembered box by box (see :func:`smooth`)."""
+
+    def __init__(self, af: AmrFile, name: str):
+        self.af, self.f = af, af.field(name)
+        if self.f.centering(af.dim) == "mixed":
+            raise ValueError(f"{af.sf.path}: field {name!r} is mixed-centred (faces or edges); only cell- and "
+                             "node-centred fields have node values")
+        self.stored: dict = {}
+        self.nodes: dict = {}
+        self.used = np.arange(3) < af.dim
+
+    def read(self, level: int, b: int) -> np.ndarray:
+        if (level, b) not in self.stored:
+            self.stored[level, b] = self.af.read(self.f.name, level, [b])[0]
+        return self.stored[level, b]
+
+    def box(self, level: int, b: int) -> np.ndarray:
+        if (level, b) not in self.nodes:
+            self.nodes[level, b] = self._compute(level, b)
+        return self.nodes[level, b]
+
+    def _compute(self, level: int, b: int) -> np.ndarray:
+        af, used = self.af, self.used
+        box = af.boxes[level][b]
+        lo, hi = box[:3], box[3:]
+        n = hi - lo + 1 + used  # nodes
+        near = _overlap(af, level, lo - used, hi + used)
+        # the cells around the box's nodes: which are in the domain, and which of those the level has
+        glo, gn = lo - used, n + used
+        have = np.zeros(gn[::-1], bool)
+        cells = self.f.centering(af.dim) == "cell"
+        v = np.zeros((self.f.ncomp, *gn[::-1])) if cells else np.zeros((self.f.ncomp, *n[::-1]))
+        for o in near[::-1]:  # descending: at a node several boxes store, the first box's value
+            olo, ohi = af.boxes[level][o][:3], af.boxes[level][o][3:]
+            to, part = _window(glo, gn, olo, ohi - olo + 1)
+            have[to] = True
+            if cells:
+                v[(slice(None), *to)] = self.read(level, o)[(slice(None), *part)]
+            else:
+                w = _window(lo, n, olo, ohi - olo + 1 + used)
+                if w is not None:
+                    v[(slice(None), *w[0])] = self.read(level, o)[(slice(None), *w[1])]
+        scale = af.ratio ** level
+        dlo, dhi = af.domain_lo * scale, (af.domain_hi + 1) * scale - 1
+        axes = [(np.arange(glo[d], glo[d] + gn[d]) >= dlo[d]) & (np.arange(glo[d], glo[d] + gn[d]) <= dhi[d])
+                if used[d] else np.ones(1, bool) for d in range(3)]
+        absent = (axes[2][:, None, None] & axes[1][:, None] & axes[0]) & ~have
+        edge = np.zeros(n[::-1], bool)  # nodes with a cell beside them that only a coarser level has
+        total, count = np.zeros((self.f.ncomp, *n[::-1])), np.zeros(n[::-1])
+        for s in np.ndindex(*(2 if u else 1 for u in used[::-1])):
+            at = tuple(slice(int(s[d]), int(s[d] + n[2 - d])) for d in range(3))
+            edge |= absent[at]
+            if cells:
+                total += np.where(have[at], v[(slice(None), *at)], 0.0)
+                count += have[at]
+        out = total / count if cells else v
+        if level > 0 and edge.any():
+            out[:, edge] = self._from_coarser(level, b, lo, n, edge)[:, edge]
+        return out
+
+    def _from_coarser(self, level: int, b: int, lo, n, edge) -> np.ndarray:
+        """The next coarser level's node values at the box's nodes, linear in each direction."""
+        af, r = self.af, self.af.ratio
+        idx, frac = [], []
+        for d in range(3):
+            k = np.arange(lo[d], lo[d] + n[d])
+            base, rest = (k // r, k % r) if self.used[d] else (k, 0 * k)
+            idx.append((base, base + (rest > 0)))
+            frac.append(rest / r)
+        clo = np.array([i[0][0] for i in idx])
+        cn = np.array([i[1][-1] - i[0][0] + 1 for i in idx])
+        v, have = np.zeros((self.f.ncomp, *cn[::-1])), np.zeros(cn[::-1], bool)
+        for o in _overlap(af, level - 1, clo - self.used, clo + cn - 1):
+            cbox = af.boxes[level - 1][o]
+            w = _window(clo, cn, cbox[:3], cbox[3:] - cbox[:3] + 1 + self.used)
+            if w is not None:
+                v[(slice(None), *w[0])] = self.box(level - 1, o)[(slice(None), *w[1])]
+                have[w[0]] = True
+        for d in range(3):
+            axis, (i0, i1), t = 2 - d, idx[d], frac[d]
+            i0, i1 = i0 - clo[d], i1 - clo[d]
+            t = t.reshape([-1 if a == axis else 1 for a in range(3)])
+            v = np.take(v, i0, axis + 1) * (1 - t) + np.take(v, i1, axis + 1) * t
+            have = np.take(have, i0, axis) & np.take(have, i1, axis)
+        if not have[edge].all():
+            raise ValueError(f"{af.sf.path}: box {b} of level {level} is not inside level {level - 1}")
+        return v
+
+
+def smooth(af: AmrFile, name: str, level: int, boxes=None) -> list[np.ndarray]:
+    """Node values of field ``name`` on ``boxes`` of ``level`` (default: all) that are continuous
+    over the whole hierarchy, each float64 shaped (ncomp, nk, nj, ni) like a node-centred field.
+
+    A cell-centred field's nodes take the mean of the level's cells around them, across boxes; a
+    node-centred field's keep the stored values (of the first box, where several store one). At a
+    node on the level's edge with a coarser level, both take the coarser level's node values,
+    linear along its edges: those nodes hang there, and any other value opens a crack. Beyond the
+    domain (periodic or not) there are no cells to average.
+    """
+    values = _NodeValues(af, name)
+    return [values.box(level, b) for b in (range(len(af.boxes[level])) if boxes is None else boxes)]
+
+
+def to_vtk_amr(af: AmrFile, fields=None, rank: int = 0, nranks: int = 1, blank: bool = True,
+               smooth: bool = False):
     """The checkpoint as a ``vtkOverlappingAMR``: every box's metadata, this process's boxes' data.
 
     Cell-centred fields become cell data, node-centred ones point data of each box's
     ``vtkUniformGrid``; fields centred otherwise (faces, edges) are left out. With ``blank``,
     coarse cells covered by finer boxes are blanked (``vtkAMRUtilities.BlankCells``).
+    With ``smooth``, each field also has point data ``<name>:smooth``, its node values continuous
+    across boxes and levels (the function :func:`smooth`): contour those.
     """
     from vtkmodules.util.numpy_support import numpy_to_vtk
     from vtkmodules.vtkCommonDataModel import vtkAMRBox, vtkAMRUtilities, vtkOverlappingAMR, vtkUniformGrid
@@ -155,6 +279,7 @@ def to_vtk_amr(af: AmrFile, fields=None, rank: int = 0, nranks: int = 1, blank: 
         amr.SetGridDescription(5)  # VTK_XY_PLANE (vtkStructuredData)
     chosen = [f for f in af.fields if (fields is None or f.name in fields) and f.centering(af.dim) != "mixed"]
     owner = af.box_owner(nranks)
+    nodes = {f.name: _NodeValues(af, f.name) for f in chosen} if smooth else {}
     for l in range(af.nlevels):
         dx = af.spacing(l)
         amr.SetSpacing(l, tuple(dx))
@@ -180,6 +305,12 @@ def to_vtk_amr(af: AmrFile, fields=None, rank: int = 0, nranks: int = 1, blank: 
                 va = numpy_to_vtk(arr if f.ncomp > 1 else arr[:, 0], deep=True)
                 va.SetName(f.name)
                 (g.GetPointData() if f.centering(af.dim) == "node" else g.GetCellData()).AddArray(va)
+            for name, values in nodes.items():
+                v = values.box(l, b)
+                arr = np.ascontiguousarray(np.moveaxis(v, 0, -1).reshape(-1, v.shape[0]))
+                va = numpy_to_vtk(arr if v.shape[0] > 1 else arr[:, 0], deep=True)
+                va.SetName(f"{name}:smooth")
+                g.GetPointData().AddArray(va)
             amr.SetDataSet(l, b, g)
     if blank:
         vtkAMRUtilities.BlankCells(amr)

@@ -94,14 +94,18 @@ def block_to_vtk(piece: MeshPiece, block: CellBlock, gids: bool = True, part: bo
         cd.AddArray(_array(name, a))
     if part:
         cd.AddArray(_array(PART, block.part.astype(np.int32)))
-    if gids:
+    if gids and block.source is None:
         cd.SetGlobalIds(_ids(block.gids, GID))
+    elif gids:  # the pieces of one cell have its gid: not ids
+        cd.AddArray(_ids(block.gids, GID))
     if point_data:
         pd = ug.GetPointData()
         for name, a in piece.point_data.items():
             pd.AddArray(_array(name, a))
-        if gids:
+        if gids and (piece.point_gids >= 0).all():
             pd.SetGlobalIds(_ids(piece.point_gids, GID))
+        elif gids:  # points of closed cells have none
+            pd.AddArray(_ids(piece.point_gids, GID))
     fd = ug.GetFieldData()
     for name, a in piece.field_data.items():
         if a is not None and np.asarray(a).size:
@@ -118,8 +122,9 @@ def to_vtk(piece: MeshPiece, dim: int | None = None, **kw) -> vtkUnstructuredGri
 BLOCK_NAMES = {0: "vertices", 1: "edges", 2: "faces", 3: "cells"}
 
 
-def to_vtk_collection(piece: MeshPiece, **kw) -> vtkPartitionedDataSetCollection:
-    """Every cell block as one partitioned dataset of a collection, named by its dimension.
+def to_vtk_collection(piece: MeshPiece | None, named=None, **kw) -> vtkPartitionedDataSetCollection:
+    """Every cell block as one partitioned dataset of a collection, named by its dimension, and after
+    them the ``named`` pieces (name -> :class:`MeshPiece` of :func:`somaview.read_nodal`).
 
     The assembly lists the blocks as ``/elements/<name>``, so ParaView's block selection shows
     the mesh's cells and any lower-dimensional elements read with them.
@@ -128,14 +133,15 @@ def to_vtk_collection(piece: MeshPiece, **kw) -> vtkPartitionedDataSetCollection
     asm = vtkDataAssembly()
     asm.SetRootNodeName("soma")
     node = asm.AddNode("elements")
-    for k, d in enumerate(sorted(piece.blocks, reverse=True)):
+    blocks = [] if piece is None else [(f"dim{d}", piece, piece.blocks[d]) for d in sorted(piece.blocks, reverse=True)]
+    blocks += [(name, p, p.cells) for name, p in (named or {}).items()]
+    for k, (name, p, block) in enumerate(blocks):
         pds = vtkPartitionedDataSet()
         pds.SetNumberOfPartitions(1)
-        pds.SetPartition(0, block_to_vtk(piece, piece.blocks[d], **kw))
+        pds.SetPartition(0, block_to_vtk(p, block, **kw))
         coll.SetPartitionedDataSet(k, pds)
-        name = BLOCK_NAMES.get(d, f"dim{d}") if d != piece.dim else BLOCK_NAMES[3 if d == 3 else d]
-        coll.GetMetaData(k).Set(vtkPartitionedDataSetCollection.NAME(), f"dim{d}")
-        asm.AddDataSetIndex(asm.AddNode(f"dim{d}", node), k)
+        coll.GetMetaData(k).Set(vtkPartitionedDataSetCollection.NAME(), name)
+        asm.AddDataSetIndex(asm.AddNode(name, node), k)
     coll.SetDataAssembly(asm)
     return coll
 
@@ -161,7 +167,8 @@ def split_by_part(piece: MeshPiece, block: CellBlock | None = None, **kw) -> vtk
                               piece.point_part[used], {n: a[used] for n, a in piece.point_data.items()}, {},
                               piece.field_data)
         sub = CellBlock(block.dim, block.gids[cells], block.part[cells], block.types[cells], off,
-                        local.astype(np.int64), {n: a[cells] for n, a in block.cell_data.items()})
+                        local.astype(np.int64), {n: a[cells] for n, a in block.cell_data.items()},
+                        None if block.source is None else block.source[cells])
         out.SetPartition(k, block_to_vtk(sub_piece, sub, **kw))
     return out
 
