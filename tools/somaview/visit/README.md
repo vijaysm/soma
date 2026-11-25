@@ -49,15 +49,21 @@ implementation notes.
 Against a VisIt binary install (no VisIt source tree needed); VisIt's own HDF5 is used:
 
 ```
-mkdir SOMA && cp SOMA.xml avtSOMAFileFormat.* soma_reader.hpp SOMA/ && cd SOMA
+mkdir SOMA && cp SOMA.xml avtSOMAFileFormat.* soma_reader.hpp visit_macos.cmake SOMA/ && cd SOMA
 <visit>/bin/xml2info -clobber SOMA.xml
 <visit>/bin/xml2cmake -clobber SOMA.xml
 cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/usr/bin/g++ .
 make -j
 ```
 
+On macOS, add `-DCMAKE_PROJECT_INCLUDE=$PWD/visit_macos.cmake` to the `cmake` line and use
+`/usr/bin/clang++`: VisIt 3.5.0's own CMake files there give HDF5 no library, misname the VTK
+libraries and take whichever MPI they find, and `visit_macos.cmake` points them at VisIt's own.
+Run `xml2info` first on every platform: it writes the `SOMA*PluginInfo.C` files that the generated
+`CMakeLists.txt` names.
+
 `make` installs `libISOMADatabase.so`, `libMSOMADatabase.so`, `libESOMADatabase_ser.so` and
-`libESOMADatabase_par.so` into `~/.visit/<version>/<arch>/plugins/databases/`. Use the system
+`libESOMADatabase_par.so` (`.dylib` on macOS) into `~/.visit/<version>/<arch>/plugins/databases/`. Use the system
 compiler VisIt was built with (a conda compiler in `PATH` links against a different libstdc++).
 `SOMA.xml` carries `dbtype="STMD"`, `-std=c++17` and VisIt's `${HDF5_INCLUDE_DIR}`,
 `${HDF5_LIBRARY_DIR}` and `${HDF5_LIB}`.

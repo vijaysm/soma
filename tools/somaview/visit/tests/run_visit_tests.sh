@@ -27,11 +27,13 @@ mkdir -p "$WORK/img" "$WORK/logs"
 # -- the plugin --------------------------------------------------------------------------------
 P=$WORK/plugin
 rm -rf "$P" && mkdir -p "$P"
-cp "$SV"/visit/avtSOMAFileFormat.C "$SV"/visit/avtSOMAFileFormat.h "$SV"/visit/soma_reader.hpp "$SV"/visit/SOMA.xml "$P"/
+cp "$SV"/visit/avtSOMAFileFormat.C "$SV"/visit/avtSOMAFileFormat.h "$SV"/visit/soma_reader.hpp "$SV"/visit/SOMA.xml \
+  "$SV"/visit/visit_macos.cmake "$P"/
 cd "$P"
 env -u CC -u CXX "$VB/xml2info" -clobber SOMA.xml > "$WORK/logs/xml2info.txt" 2>&1
 env -u CC -u CXX "$VB/xml2cmake" -clobber SOMA.xml > "$WORK/logs/xml2cmake.txt" 2>&1
-env -u CC -u CXX cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER="${CXX:-/usr/bin/g++}" . > "$WORK/logs/cmake.txt" 2>&1
+env -u CC -u CXX cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER="${CXX:-/usr/bin/g++}" \
+  -DCMAKE_PROJECT_INCLUDE="$P/visit_macos.cmake" . > "$WORK/logs/cmake.txt" 2>&1
 env -u CC -u CXX make -j8 > "$WORK/logs/make.txt" 2>&1
 grep -E "error|Error" "$WORK/logs/make.txt" | head -30
 cd "$WORK"

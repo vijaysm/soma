@@ -14,12 +14,18 @@ files, mesh files and AMR checkpoints, tested with VisIt 3.5:
 Against a VisIt binary install, with VisIt's own HDF5:
 
 ```bash
-mkdir SOMA && cp tools/somaview/visit/{SOMA.xml,avtSOMAFileFormat.*,soma_reader.hpp} SOMA/ && cd SOMA
+mkdir SOMA && cp tools/somaview/visit/{SOMA.xml,avtSOMAFileFormat.*,soma_reader.hpp,visit_macos.cmake} SOMA/ && cd SOMA
 <visit>/bin/xml2info -clobber SOMA.xml
 <visit>/bin/xml2cmake -clobber SOMA.xml
 cmake -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=/usr/bin/g++ .
 make -j
 ```
+
+On macOS, add `-DCMAKE_PROJECT_INCLUDE=$PWD/visit_macos.cmake` to the `cmake` line and use
+`/usr/bin/clang++`: VisIt 3.5.0's own CMake files there give HDF5 no library, misname the VTK
+libraries and take whichever MPI they find, and `visit_macos.cmake` points them at VisIt's own.
+Run `xml2info` first on every platform: it writes the `SOMA*PluginInfo.C` files that the generated
+`CMakeLists.txt` names.
 
 `make` installs `libISOMADatabase`, `libMSOMADatabase`, `libESOMADatabase_ser` and
 `libESOMADatabase_par` into `~/.visit/<version>/<arch>/plugins/databases/`, where VisIt finds
