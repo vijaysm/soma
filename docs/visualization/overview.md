@@ -76,6 +76,9 @@ piece = sv.read("mesh.soma", comm=MPI.COMM_WORLD)     # under mpiexec: each rank
 - Fields with one fixed-size row per entity: point data on vertices, cell data on cells, NaN off a
   field's domain. Fields on entity sets become cell labels `set:<name>`. `soma_part` is the part
   owning each cell and `soma_gid` the global ids (also VTK's GlobalIds).
+- Spectral-element fields (GLL values on quads) on sub-quads: point data of order x order quads per
+  element, on the element's GLL points, the stored values untouched. In VisIt a mesh of their own, in
+  Python `sv.read_nodal(path)`; ParaView's reader leaves them out.
 - AMR checkpoints: one grid per box, the coarse cells under finer boxes blanked.
 
 ```{note}

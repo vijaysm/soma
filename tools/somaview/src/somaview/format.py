@@ -53,6 +53,13 @@ class LayoutKind(enum.IntEnum):
     quadrature = 3
 
 
+#: ``soma::NodeFamily::gll`` and ``soma::NodeOrdering::tensor_lexicographic``.
+FAMILY_GLL = 1
+ORDERING_TENSOR = 1
+#: Largest order of a node table (``soma::max_node_order``).
+MAX_NODE_ORDER = 32
+
+
 class FileKind(enum.Enum):
     mesh = "mesh"
     amr = "amr"
@@ -74,6 +81,9 @@ class FieldInfo:
     dims: tuple[int, ...]
     default: np.ndarray | None = None
     global_value: np.ndarray | None = None
+    family: int = 0
+    ordering: int = 0
+    serendipity: bool = False
 
     @property
     def group(self) -> str:
@@ -83,6 +93,13 @@ class FieldInfo:
     def drawable(self) -> bool:
         """True for fields with one fixed-size row per entity: the ones a renderer can show."""
         return self.layout == LayoutKind.per_entity and not self.variable and not self.handle
+
+    @property
+    def nodal_on_quads(self) -> bool:
+        """True for a spectral-element field: GLL values on quads (see :mod:`somaview.nodal`)."""
+        return (self.layout == LayoutKind.element_nodes and not self.variable and not self.handle
+                and self.family == FAMILY_GLL and self.ordering == ORDERING_TENSOR and not self.serendipity
+                and 1 <= self.order <= MAX_NODE_ORDER and 2 in self.dims)
 
     def full_on(self, dim: int) -> bool:
         """True when every part's domain covers all its owned entities of ``dim``."""
@@ -318,7 +335,8 @@ class SomaFile:
                 index=i, name=_text(g.attrs["name"]), dtype=dtype, ncomp=m[1], variable=bool(m[2]),
                 handle=bool(m[3]), layout=LayoutKind(m[4]), order=m[6], full_bits=m[15], dims=dims,
                 default=_typed(g.attrs.get("default"), dtype) if m[13] else None,
-                global_value=_typed(g.attrs.get("global"), dtype) if m[14] else None))
+                global_value=_typed(g.attrs.get("global"), dtype) if m[14] else None,
+                family=m[5], ordering=m[7], serendipity=bool(m[8])))
         return out
 
     def _read_values(self) -> dict[str, MeshValue]:

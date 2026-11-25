@@ -53,6 +53,9 @@ enum class Topology : int {
 // soma::Layout::Kind: where a field's rows sit on its entities.
 enum class LayoutKind : int { per_entity = 0, element_nodes = 1, shared_nodes = 2, quadrature = 3 };
 
+// soma::NodeFamily::gll, soma::NodeOrdering::tensor_lexicographic and soma::max_node_order.
+constexpr int FAMILY_GLL = 1, ORDERING_TENSOR = 1, MAX_NODE_ORDER = 32;
+
 enum class FileKind { mesh, amr, unknown };
 
 // soma::DataType codes, in enum order (format.py DTYPES).
@@ -276,6 +279,8 @@ struct FieldInfo {
   bool handle = false;
   LayoutKind layout = LayoutKind::per_entity;
   int order = 0;
+  int family = 0, ordering = 0;
+  bool serendipity = false;
   int full_bits = 0;
   std::vector<int> dims;
 
@@ -283,6 +288,12 @@ struct FieldInfo {
 
   // True for fields with one fixed-size row per entity: the ones a renderer can show.
   bool drawable() const { return layout == LayoutKind::per_entity && !variable && !handle; }
+
+  // True for a spectral-element field: GLL values on quads, drawn on sub-quads (see subcells).
+  bool nodal_on_quads() const {
+    return layout == LayoutKind::element_nodes && !variable && !handle && family == FAMILY_GLL &&
+           ordering == ORDERING_TENSOR && !serendipity && order >= 1 && order <= MAX_NODE_ORDER && has_dim(2);
+  }
 
   bool full_on(int dim) const { return ((full_bits >> dim) & 1) != 0; }
 
@@ -562,7 +573,10 @@ class SomaFile {
       f.variable = m[2] != 0;
       f.handle = m[3] != 0;
       f.layout = static_cast<LayoutKind>(m[4]);
+      f.family = static_cast<int>(m[5]);
       f.order = static_cast<int>(m[6]);
+      f.ordering = static_cast<int>(m[7]);
+      f.serendipity = m[8] != 0;
       f.full_bits = static_cast<int>(m[15]);
       int ndims = static_cast<int>(m[16]);
       for (int d = 0; d < ndims; ++d) f.dims.push_back(static_cast<int>(m[17 + d]));
@@ -1875,6 +1889,197 @@ inline MeshPiece read_piece_cached(const SomaFile& sf, const HaloCache& halo_cac
     piece.blocks[d] = std::move(block);
   }
   return piece;
+}
+
+// -------------------------------------------------------------------------------------------
+// Spectral-element fields on sub-quads (nodal.py): a field of soma::sem::SemSpace holds (p + 1)^2
+// values per quad, at its Gauss-Lobatto-Legendre (GLL) points, value k = i + (p + 1) j at
+// (xi_i, eta_j). Every quad becomes p x p linear sub-quads on those points and the stored values
+// point data, nothing averaged or interpolated; points are not shared between elements, so a field
+// that jumps from one to the next is drawn as it is. The points are where SemSpace puts them:
+// bilinear in the corners (biquadratic with 8 or 9 nodes), on a sphere projected to it.
+// -------------------------------------------------------------------------------------------
+
+// SemSpace takes a corner to be on its sphere within this relative distance; two corners may
+// therefore differ by twice as much.
+constexpr double SPHERE_TOLERANCE = 1e-8;
+// Vertices looked at to tell a sphere from a plane.
+constexpr hsize_t SPHERE_SAMPLE = 1 << 16;
+
+// The p + 1 GLL points on [-1, 1]: the ends and the zeros of P_p'.
+inline std::vector<double> gll_points(int p) {
+  std::vector<double> x(static_cast<std::size_t>(p) + 1, 0.0);
+  x.front() = -1;
+  x.back() = 1;
+  const double pi = std::acos(-1.0);
+  for (int i = 1; i <= (p - 1) / 2; ++i) {
+    double t = -std::cos(pi * i / p);
+    for (int it = 0; it < 100; ++it) {
+      double p0 = 1, p1 = t, d0 = 0, d1 = 1;
+      for (int k = 1; k < p; ++k) {
+        const double p2 = ((2 * k + 1) * t * p1 - k * p0) / (k + 1);
+        const double d2 = d0 + (2 * k + 1) * p1;
+        p0 = p1; p1 = p2; d0 = d1; d1 = d2;
+      }
+      const double step = d1 / ((2 * t * d1 - p * (p + 1.0) * p1) / (1 - t * t));
+      t -= step;
+      if (std::fabs(step) < 1e-15) break;
+    }
+    x[static_cast<std::size_t>(i)] = t;
+    x[static_cast<std::size_t>(p - i)] = -t;
+  }
+  return x;
+}
+
+// Shape functions of a quad of n = 4, 8 or 9 nodes (MOAB's order) at (s, t).
+inline void quad_shape(int n, double s, double t, double* f) {
+  static const int ref[9][2] = {{-1, -1}, {1, -1}, {1, 1}, {-1, 1}, {0, -1}, {1, 0}, {0, 1}, {-1, 0}, {0, 0}};
+  auto line = [](int a, double r) { return a == 0 ? 1 - r * r : r * (r + a) / 2; };
+  for (int k = 0; k < n; ++k) {
+    const int a = ref[k][0], b = ref[k][1];
+    if (n == 4) f[k] = (1 + a * s) * (1 + b * t) / 4;
+    else if (n == 9) f[k] = line(a, s) * line(b, t);
+    else if (k < 4) f[k] = (1 + a * s) * (1 + b * t) * (a * s + b * t - 1) / 4;
+    else if (a == 0) f[k] = (1 - s * s) * (1 + b * t) / 2;
+    else f[k] = (1 + a * s) * (1 - t * t) / 2;
+  }
+}
+
+// The radius of the sphere about the origin the mesh is on, 0 for any other mesh: a file does not
+// say. Decided from the file's first vertices, so the same for every part of it: all at one distance
+// from the origin, within SemSpace's tolerance, and not all in the plane z = 0.
+inline double sphere_radius(const SomaFile& sf) {
+  const hsize_t n = std::min(h5detail::dataset_extent(sf.raw(), "dim0/coords").first, SPHERE_SAMPLE);
+  if (n == 0) return 0;
+  hsize_t width = 0;
+  const auto x = h5detail::read_rows<double>(sf.raw(), "dim0/coords", 0, n, &width);
+  if (width != 3) throw io_error(sf.path() + ": dim0/coords has " + std::to_string(width) + " columns");
+  auto radius = [&](hsize_t i) { return std::sqrt(x[3 * i] * x[3 * i] + x[3 * i + 1] * x[3 * i + 1] + x[3 * i + 2] * x[3 * i + 2]); };
+  const double r = radius(0), tol = 2 * SPHERE_TOLERANCE * r;
+  double z = 0;
+  for (hsize_t i = 0; i < n; ++i) {
+    if (!(std::fabs(radius(i) - r) <= tol)) return 0;
+    z = std::max(z, std::fabs(x[3 * i + 2]));
+  }
+  return z > tol ? r : 0;
+}
+
+struct Subcells {
+  int order = 0;
+  std::vector<LO> cells;         // the block's cell each group of order^2 sub-quads is of
+  std::vector<double> points;    // (order + 1)^2 per cell, n * 3
+  std::vector<LO> connectivity;  // 4 per sub-quad
+  LO size() const { return static_cast<LO>(connectivity.size() / 4); }
+  LO num_points() const { return static_cast<LO>(points.size() / 3); }
+};
+
+// The sub-quads of order `p` of the quads of `block`, on the sphere of `radius` (0: none).
+inline Subcells subcells(const MeshPiece& piece, const CellBlock& block, int p, double radius) {
+  Subcells out;
+  out.order = p;
+  const int np = p + 1;
+  const auto xi = gll_points(p);
+  std::vector<double> shape4, shape8, shape9;
+  for (auto [n, table] : {std::make_pair(4, &shape4), std::make_pair(8, &shape8), std::make_pair(9, &shape9)}) {
+    table->resize(static_cast<std::size_t>(np * np * n));
+    for (int k = 0; k < np * np; ++k)
+      quad_shape(n, xi[static_cast<std::size_t>(k % np)], xi[static_cast<std::size_t>(k / np)], table->data() + k * n);
+  }
+  for (LO c = 0; c < block.size(); ++c) {
+    const auto uc = static_cast<std::size_t>(c);
+    const int t = block.types[uc];
+    const int n = t == vtk_type::QUAD ? 4 : t == vtk_type::QUADRATIC_QUAD ? 8 : t == vtk_type::BIQUADRATIC_QUAD ? 9 : 0;
+    if (n == 0) continue;
+    const auto& shape = n == 4 ? shape4 : n == 8 ? shape8 : shape9;
+    double node[9][3];
+    bool ball = radius > 0;
+    for (int a = 0; a < n; ++a) {
+      const auto v = static_cast<std::size_t>(block.connectivity[static_cast<std::size_t>(block.offsets[uc] + a)]);
+      for (int d = 0; d < 3; ++d) node[a][d] = piece.points[3 * v + static_cast<std::size_t>(d)];
+      const double r = std::sqrt(node[a][0] * node[a][0] + node[a][1] * node[a][1] + node[a][2] * node[a][2]);
+      if (a < 4 && !(std::fabs(r - radius) <= 2 * SPHERE_TOLERANCE * radius)) ball = false;
+    }
+    const LO first = out.num_points();
+    for (int k = 0; k < np * np; ++k) {
+      double y[3] = {0, 0, 0};
+      for (int a = 0; a < n; ++a)
+        for (int d = 0; d < 3; ++d) y[d] += shape[static_cast<std::size_t>(k * n + a)] * node[a][d];
+      const double s = ball ? radius / std::sqrt(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]) : 1;
+      for (double v : y) out.points.push_back(s * v);
+    }
+    for (int j = 0; j < p; ++j)
+      for (int i = 0; i < p; ++i)
+        for (int k : {i + np * j, i + 1 + np * j, i + 1 + np * (j + 1), i + np * (j + 1)})
+          out.connectivity.push_back(first + k);
+    out.cells.push_back(c);
+  }
+  return out;
+}
+
+// Values of `info` at the points of `sub`, NaN on elements off its domain. `piece` holds the
+// elements of dimension 2 of whole parts, in file order, as `sub` was made from it.
+inline Array subcell_values(const SomaFile& sf, const FieldInfo& info, const MeshPiece& piece, const Subcells& sub,
+                            FieldCache& cache) {
+  const std::string base = info.group() + "/dim2";
+  const LO npts = static_cast<LO>(sub.order + 1) * (sub.order + 1);
+  const auto& full = detail::full_flags(sf, info, 2, cache);
+  std::vector<LO> first, size;  // per cell: its first row among the parts' values (-1: none), its rows
+  LO start = 0;
+  for (int q : piece.parts) {
+    const std::vector<int> qp{q};
+    const LO n = sf.count(2, &qp);
+    const auto counts = sf.read<std::int64_t>(base + "/counts", &qp);
+    const bool whole = static_cast<std::size_t>(q) < full.size() && full[static_cast<std::size_t>(q)];
+    const auto domain = whole ? std::vector<std::int64_t>{} : sf.read<std::int64_t>(base + "/domain", &qp);
+    const LO members = whole ? n : static_cast<LO>(domain.size());
+    const auto [lo, hi] = sf.part_rows(base + "/values", q);
+    const std::string where = " of part " + std::to_string(q);
+    for (std::size_t m = 0; m < domain.size(); ++m)
+      if (domain[m] < 0 || domain[m] >= n || (m > 0 && domain[m] <= domain[m - 1]))
+        throw io_error(sf.path() + ": " + base + "/domain" + where + " is not increasing rows of its " +
+                       std::to_string(n) + " elements");
+    if (static_cast<LO>(counts.size()) != members)
+      throw io_error(sf.path() + ": " + base + "/counts" + where + " has " + std::to_string(counts.size()) +
+                     " rows for " + std::to_string(members) + " elements");
+    const std::size_t offset = first.size();
+    first.resize(offset + static_cast<std::size_t>(n), -1);
+    size.resize(offset + static_cast<std::size_t>(n), npts);
+    LO at = 0;
+    for (LO m = 0; m < members; ++m) {
+      const LO c = counts[static_cast<std::size_t>(m)];
+      if (c < 0 || c > hi - lo - at)
+        throw io_error(sf.path() + ": " + base + "/counts" + where + " does not add up to its " +
+                       std::to_string(hi - lo) + " values");
+      const std::size_t e = offset + static_cast<std::size_t>(whole ? m : domain[static_cast<std::size_t>(m)]);
+      first[e] = start + at;
+      size[e] = c;
+      at += c;
+    }
+    if (at != hi - lo)
+      throw io_error(sf.path() + ": " + base + "/counts" + where + " does not add up to its " +
+                     std::to_string(hi - lo) + " values");
+    start += hi - lo;
+  }
+  hsize_t width = 0;
+  const auto values = sf.read<double>(base + "/values", &piece.parts, &width);
+  if (static_cast<int>(width) != info.ncomp || values.size() != static_cast<std::size_t>(start) * width)
+    throw io_error(sf.path() + ": " + base + "/values does not hold " + std::to_string(start) + " rows of " +
+                   std::to_string(info.ncomp) + " components");
+  Array out;
+  out.ncomp = info.ncomp;
+  const std::size_t block = static_cast<std::size_t>(npts) * width;
+  out.data.assign(sub.cells.size() * block, std::numeric_limits<double>::quiet_NaN());
+  for (std::size_t k = 0; k < sub.cells.size(); ++k) {
+    const auto e = static_cast<std::size_t>(sub.cells[k]);
+    if (e >= first.size()) throw io_error(sf.path() + ": " + base + " has fewer elements than its mesh");
+    if (size[e] != npts)
+      throw io_error(sf.path() + ": " + base + "/counts gives a quad " + std::to_string(size[e]) + " values, not " +
+                     std::to_string(npts));
+    if (first[e] < 0) continue;
+    const auto from = values.begin() + static_cast<std::ptrdiff_t>(static_cast<std::size_t>(first[e]) * width);
+    std::copy(from, from + static_cast<std::ptrdiff_t>(block), out.data.begin() + static_cast<std::ptrdiff_t>(k * block));
+  }
+  return out;
 }
 
 }  // namespace soma_reader

@@ -5,6 +5,7 @@
 >>> import somaview as sv
 >>> piece = sv.read("restart.soma")                  # every part, merged by gid
 >>> grid = sv.read_pyvista("restart.soma")           # a pyvista.UnstructuredGrid
+>>> sem = sv.read_nodal("ocean.soma")                # spectral-element fields on sub-quads
 >>> amr = sv.read_vtk("run.soma")                    # vtkOverlappingAMR for an AMR checkpoint
 
 Needs h5py and numpy; the VTK conversions need VTK (``vtk`` or ParaView's ``vtkmodules``).
@@ -14,6 +15,7 @@ from __future__ import annotations
 
 from .format import FieldInfo, FileKind, SomaFile, Topology, detect
 from .mesh import CellBlock, MeshPiece, PieceReader, parts_for_rank, read_piece
+from .nodal import read_nodal
 
 __version__ = "0.1.0"
 
@@ -67,4 +69,5 @@ def write_vtkhdf(src, dst, *args, **kw):
 
 
 __all__ = ["CellBlock", "FieldInfo", "FileKind", "MeshPiece", "PieceReader", "SomaFile", "Topology", "detect",
-           "open", "parts_for_rank", "plot", "read", "read_piece", "read_pyvista", "read_vtk", "write_vtkhdf"]
+           "open", "parts_for_rank", "plot", "read", "read_nodal", "read_piece", "read_pyvista", "read_vtk",
+           "write_vtkhdf"]
