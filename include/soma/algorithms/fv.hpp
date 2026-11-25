@@ -96,6 +96,7 @@ inline bool fv_unlimited = false;
 struct FvPlan {
   bool supported = true;  ///< dimension 2 or 3, tri, quad, tet or hex cells, no nodes
   LO nonmanifold = 0;     ///< owned cells' sides that more than two cells have
+  LO hanging = 0;         ///< edges here of one-sided sides with a vertex of another inside
   LO bad_cells = 0;       ///< owned cells of no positive finite volume, or turned
                           ///< against a neighbour
   std::vector<Real> area;      ///< 3 per face, from the left cell to the right
@@ -124,8 +125,10 @@ class FvSpace {
   /// Collective. Throws std::invalid_argument on every rank if any rank's
   /// mesh is not of dimension 2 or 3, has edits or high-order nodes, holds a
   /// cell other than a tri, quad, tet or hex, a side more than two cells
-  /// share, or a cell of no positive volume or turned against a neighbour,
-  /// or, on more than one rank, has no ghost layer; or if ranks differ in
+  /// share, a cell of no positive volume or turned against a neighbour, or
+  /// hanging vertices (on more than one rank, seen where the ghost layer is
+  /// through vertices), or, on more than one rank, has no ghost layer; or if
+  /// ranks differ in
   /// soma::reproducible() (which makes total() exact).
   FvSpace(const Comm& comm, const Mesh<MemSpace>& mesh, FvScheme scheme = FvScheme::upwind)
       : scheme_(scheme), reproducible_(soma::reproducible()) {
@@ -141,8 +144,8 @@ class FvSpace {
     detail::FvPlan p;
     if (!bad) p = detail::fv_plan(*host);
     const Real exact = reproducible_ ? Real{1} : Real{0};
-    Real flags[5] = {bad || !p.supported ? Real{1} : Real{0}, static_cast<Real>(p.nonmanifold),
-                     static_cast<Real>(p.bad_cells), exact, -exact};
+    Real flags[6] = {bad || !p.supported ? Real{1} : Real{0}, static_cast<Real>(p.nonmanifold),
+                     static_cast<Real>(p.bad_cells), exact, -exact, static_cast<Real>(p.hanging)};
     comm.allreduce(std::span<Real>(flags), Op::max);
     if (flags[3] != -flags[4]) throw std::invalid_argument("FvSpace: ranks differ in soma::reproducible()");
     if (flags[0] != 0) {
@@ -153,6 +156,10 @@ class FvSpace {
     if (flags[1] != 0) throw std::invalid_argument("FvSpace: a rank holds a side that more than two cells share");
     if (flags[2] != 0) {
       throw std::invalid_argument("FvSpace: a rank holds a cell of no positive volume or turned against a neighbour");
+    }
+    if (flags[5] != 0) {
+      throw std::invalid_argument(
+          "FvSpace: a rank holds a hanging vertex; refine with MarkedOptions::conforming, or uniformly");
     }
     const int dim = mesh.dim();
     rows_ = mesh.segment_table(dim).owned_end;

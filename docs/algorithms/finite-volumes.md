@@ -210,6 +210,9 @@ mesh:
 - is not of dimension 2 or 3, is edited (changed by `MeshEdit::apply` and not compressed
   since), has high-order nodes, or holds a cell other than a tri, quad, tet or hex;
 - holds a side that more than two cells share;
+- has hanging vertices, as `refine_marked` leaves without `MarkedOptions::conforming`: its coarse sides match no
+  fine one, and would be walls (on more than one rank they are seen where the ghost layer is through vertices,
+  the default);
 - holds a cell of no positive volume, or one turned against a neighbour (folded over it);
 - on more than one rank, has no ghost layer (through any bridge dimension; see
   [ghosts and halos](../parallel/ghosts-and-halos.md)), which is needed so that every face of

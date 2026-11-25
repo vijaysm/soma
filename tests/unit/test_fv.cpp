@@ -25,6 +25,7 @@
 
 #include "fem_box.hpp"
 #include "soma/algorithms/fv.hpp"
+#include "soma/algorithms/refine.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/ghosts.hpp"
@@ -506,4 +507,35 @@ TEST(Fv, BadMeshesThrowOnEveryRank) {
   }
   expect_message(c, one(2, Topology::tri, {1, 2, 3}, {0, 0, 0, 1, 0, 0, 0, 1, 0.5}, {1}, {1, 2, 3}),
                  "no positive volume");
+}
+
+// Non-conforming refinement leaves coarse sides that match no fine one: they
+// would be walls inside the mesh. Refused on every rank, whichever holds
+// them; conforming refinement is taken.
+TEST(Fv, HangingVerticesThrowOnEveryRank) {
+  const Comm c = Comm::world();
+  for (const Topology t : all) {
+    for (const int deal : {0, 1}) {
+      for (const int rounds : {1, 2}) {
+        for (const bool conforming : {false, true}) {
+          if (conforming && t == Topology::hex) continue;  // its pyramids are refused
+          SCOPED_TRACE(testing::Message() << "topology " << static_cast<int>(t) << " deal " << deal << " rounds "
+                                          << rounds << " conforming " << conforming);
+          soma::HostMesh mesh = box_part(c, spec_of(t, 4), Part{.deal = deal, .layers = 0});
+          for (int r = 0; r < rounds; ++r) {
+            const Real reach = r == 0 ? 0.5 : 0.25;
+            std::vector<std::int8_t> marks(static_cast<std::size_t>(mesh.segment_table(mesh.dim()).owned_end), 0);
+            for (std::size_t e = 0; e < marks.size(); ++e) marks[e] = centre(mesh, static_cast<LO>(e))[0] < reach;
+            mesh = soma::refine_marked(c, mesh, marks, {.conforming = conforming}).mesh;
+          }
+          if (c.size() > 1) mesh.add_ghosts(c, soma::GhostOptions{1, 0, false});
+          if (conforming) {
+            EXPECT_NO_THROW(Space(c, mesh));
+            continue;
+          }
+          expect_message(c, mesh, "hanging vertex");
+        }
+      }
+    }
+  }
 }

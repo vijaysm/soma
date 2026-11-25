@@ -12,6 +12,10 @@ All notable changes to SOMA are recorded here. The format follows
   `write_soma` writes it, or recognizes a plane or sphere, unless `SomaWriteOptions::geometry` (Python:
   `write_file(geometry=False)`) is false. SOMA 0.1.0 reads the files.
 
+### Algorithms
+
+- `FvSpace` refuses a mesh with hanging vertices. It took one, and its coarse-fine faces were walls.
+
 ### Visualization
 
 - AMR hierarchies as one unstructured mesh, closed where levels meet, so that 3D contours have no slivers there:
