@@ -13,7 +13,8 @@
 /// owned: per dimension written the owned entities (gids, topology, corners
 /// and nodes as gids, coordinates), and for each owned shared entity the
 /// parts holding copies; per field its options and, per part, its values on
-/// the part's entities; the sets with each part's members; the mesh values.
+/// the part's entities; the sets with each part's members; the mesh values,
+/// the surface the mesh is on among them (SomaWriteOptions::geometry).
 /// Ghosts and copies are not written. Written dimensions: the vertices, the
 /// mesh's dimension, every dimension given to the builder on some rank and
 /// every dimension a field has values on or a set has members of (with
@@ -43,7 +44,8 @@
 /// (which derives dimensions again through the directory). The result equals,
 /// by gid, the mesh written: entities, coordinates, connectivity, nodes, sets
 /// with their order, fields with domains, defaults, global values and
-/// formats, mesh values. A file that is not a SOMA file, a newer
+/// formats, mesh values (but not a geometry only recognized: each write does
+/// that anew). A file that is not a SOMA file, a newer
 /// format_version, or datasets that disagree with the part table throw
 /// std::runtime_error on every rank.
 
@@ -86,6 +88,10 @@ struct SomaWriteOptions {
   /// write, each its group's rows (contiguous in every dataset) at once;
   /// M > 1 needs a parallel HDF5. The file is the same either way.
   int aggregators = 0;
+  /// Write the surface a mesh of dimension 2 is on (mesh_geometry.hpp): the
+  /// one declared, else the one its vertices show (all in one plane of
+  /// constant z, or on one sphere about the origin). false: the file has none.
+  bool geometry = true;
 };
 
 struct SomaReadOptions {

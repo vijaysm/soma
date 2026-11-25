@@ -50,14 +50,17 @@ void bind_io(nb::module_& m) {
   m.def(
       "write_file",
       [](const soma::Comm& comm, const PyMesh& mesh, const std::filesystem::path& path,
-         std::optional<std::vector<std::string>> vtk_fields) {
+         std::optional<std::vector<std::string>> vtk_fields, bool geometry) {
         soma::WriteFileOptions options;
+        options.soma.geometry = geometry;
         options.vtk_fields = std::move(vtk_fields);
         soma::write_file(comm, mesh.get(), path, options);
       },
       nb::arg("comm"), nb::arg("mesh"), nb::arg("path"), nb::arg("vtk_fields") = nb::none(),
+      nb::arg("geometry") = true,
       "Collective: writes the mesh by the path's extension (.h5m, .soma, .vtk). vtk_fields: the fields a "
-      ".vtk file holds (default: every field VTK can hold).");
+      ".vtk file holds (default: every field VTK can hold). geometry: whether a .soma file holds the surface "
+      "a mesh of dimension 2 is on (a sphere, a plane), where it is declared or its vertices show it.");
   m.def(
       "detect_format", [](const std::filesystem::path& path) { return format_name(soma::detect_format(path)); },
       nb::arg("path"), "The format of a file, by content: legacy_h5m, soma, soma_amr, legacy_vtk or unknown.");

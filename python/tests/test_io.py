@@ -56,3 +56,15 @@ def test_empty_ranks_write(shared_tmp):
     m = box_with_gid_field(comm, 2, 2, 2)
     soma.write_file(comm, m, shared_tmp / "small.soma")
     assert totals(soma.read_file(comm, shared_tmp / "small.soma")) == (8, 36)
+
+
+def test_geometry_is_written_unless_turned_off(shared_tmp):
+    comm = comm_world()
+    m = soma.box_mesh(comm, 4, 4, element=soma.Topology.quad)
+    sizes = {}
+    for geometry in (True, False):
+        path = shared_tmp / f"flat{geometry}.soma"
+        soma.write_file(comm, m, path, geometry=geometry)
+        comm.barrier()
+        sizes[geometry] = b"soma:geometry" in path.read_bytes()
+    assert sizes == {True: True, False: False}

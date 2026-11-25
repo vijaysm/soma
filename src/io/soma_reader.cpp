@@ -27,6 +27,7 @@
 #include "../parallel/records.hpp"
 #include "hdf5.hpp"
 #include "soma/core/mesh_builder.hpp"
+#include "soma/core/mesh_geometry.hpp"
 #include "soma/core/mesh_values.hpp"
 #include "soma/core/set_builder.hpp"
 #include "soma/fields/data_type.hpp"
@@ -1301,6 +1302,12 @@ std::vector<std::pair<std::string, MeshValue>> values_of(const File& f, const Me
 
 void install_values(HostMesh& mesh, const File& f, const Meta& m) {
   for (auto& [name, v] : values_of(f, m)) mesh.values().set(name, std::move(v));
+  // One that write_soma only recognized is not the mesh's: it is made anew.
+  try {
+    if (const auto g = geometry(mesh.values()); g && !g->declared) mesh.values().erase(geometry_value);
+  } catch (const std::invalid_argument& e) {
+    bad_file(e.what());
+  }
 }
 
 

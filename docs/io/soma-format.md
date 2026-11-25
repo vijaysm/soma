@@ -54,6 +54,7 @@ call these for SOMA files and for paths ending in `.soma`.
 | `derived` | `false` | Also write every dimension held on some rank (derived edges and faces with their gids and sharing), so that a read at the part count derives nothing and makes no gid directory pass. They are read back as derived. |
 | `hints` | `{}` | MPI-IO hints and dataset alignment (`MpiIoHints`, below). |
 | `aggregators` | `0` | 0: every rank writes its rows. M in [1, P]: rank r sends its rows to the first rank of its group floor(rM/P), and only those M ranks open the file and write, each its group's rows at once. M > 1 needs a parallel HDF5. The file is the same either way. |
+| `geometry` | `true` | Write the surface a mesh of dimension 2 is on ([mesh geometry](#mesh-geometry)). `false`: the file has none. |
 
 ## Read options
 
@@ -122,6 +123,38 @@ The dimensions written are the vertices, the mesh's dimension, every dimension
 given to the builder on some rank, and every dimension a field has values on
 or a set has members of. With `derived = true`, every dimension held on some
 rank is written too. Other dimensions are derived again on read.
+
+## Mesh geometry
+
+The mesh value `soma:geometry` names the analytic surface that a mesh of dimension 2 discretizes, so that a
+viewer, or a refinement after a restart, can put points on it. The application declares it
+(`soma/core/mesh_geometry.hpp`):
+
+```cpp
+soma::set_geometry(mesh.values(), soma::MeshGeometry::sphere(6.371e6));
+if (const auto g = soma::geometry(mesh.values())) use(g->center, g->radius);
+```
+
+`cubed_sphere_mesh` declares its sphere, `SemSpace` its geometry where the mesh has none, and `refine_quads`
+keeps it where its new vertices are on it. When none is declared `write_soma` looks at the vertices: all at
+one z (to 1e-12 of their distance from the origin) is `affine`, all at one distance from the origin (to
+2e-8 of it) that sphere, and anything else is not written. This takes no further communication. What was
+only recognized is marked so, and a read does not give it to the mesh: the next write looks again, at the
+vertices as they are then. A mesh whose vertices happen to be on a sphere, such as the surface of a cube of
+six quads, should be declared `MeshGeometry::affine()`, or written with `geometry = false`.
+
+The value is f64:
+
+| Word | Meaning |
+| --- | --- |
+| 0 | version of this layout, 1 |
+| 1 | kind: 0 affine (the elements' own maps of their nodes), 1 sphere |
+| 2 | 1 declared, 0 recognized from the vertices |
+| 3 .. 6 | sphere: centre, radius |
+
+A library or viewer that does not know the version or the kind takes the mesh to have no geometry, and a
+read and a write keep the value as it is. `format_version` is unchanged: SOMA 0.1.0 reads these files, and
+carries the value as any other.
 
 ## Behaviour of `write_soma`
 

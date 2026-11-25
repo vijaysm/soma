@@ -20,6 +20,7 @@
 
 #include "refine_internal.hpp"
 #include "soma/algorithms/refine.hpp"
+#include "soma/core/mesh_geometry.hpp"
 #include "soma/fields/registry.hpp"
 #include "soma/parallel/halo_exchange.hpp"
 #include "soma/topology/sides.hpp"
@@ -279,6 +280,15 @@ RefineResult refine_quads(const Comm& comm, const HostMesh& mesh, std::span<cons
   out.mesh = std::move(fine.mesh);
   out.parent = std::move(fine.parent);
   out.dropped = std::move(fine.dropped);
+
+  // The new vertices are on the mesh's surface where this put them there.
+  if (const auto g = geometry(mesh.values())) {
+    const MeshGeometry made =
+        options.sphere_radius ? MeshGeometry::sphere(*options.sphere_radius) : MeshGeometry::affine();
+    if (g->kind == made.kind && g->center == made.center && g->radius == made.radius) {
+      set_geometry(out.mesh.values(), *g);
+    }
+  }
 
   // Levels: a full split's children one up.
   std::vector<std::int32_t> level_of(static_cast<std::size_t>(owned), 0);
