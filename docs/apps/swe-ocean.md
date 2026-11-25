@@ -183,7 +183,7 @@ $\mathbf u$ over $1/r$ is below $10^{-7}$, Kelvin until the packet has travelled
 | `--output PREFIX` | | at the end, `PREFIX.soma` (below); for the analytic cases too |
 | `--output-reports` | | also `PREFIX.stepN.soma` at every report but the last |
 | `--latlon NLAT,NLON` | | at the end, `PREFIX_eta.npy`, `PREFIX_H.npy`, `PREFIX_u_east.npy`, `PREFIX_u_north.npy` (NaN over land), `PREFIX_lat.npy` and `PREFIX_lon.npy`, at latitudes from -90 to 90 inclusive and longitudes from 0 every 360/NLON degrees |
-| `--io-aggregators M` | 0 | SOMA files (`--mesh`, `--save-mesh`, `--output`) through M ranks that alone open the file, the others sending them their rows; 0: every rank opens it. On NFS use 1: there 64 ranks took 248 s to read the 13 MB mesh, and a snapshot write did not finish in 3 hours |
+| `--io-aggregators M` | 0 | SOMA files (`--mesh`, `--save-mesh`, `--output`) through M ranks that alone open the file, the others sending them their rows; 0: every rank opens it. On NFS use 1: there 64 ranks took 248 s to read the 13 MB mesh, and a run with snapshots showed no report in 3 hours |
 
 A bad option prints the usage and exits with status 2.
 
