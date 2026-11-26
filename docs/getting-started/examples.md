@@ -210,7 +210,7 @@ soma_app [--n N] [<mesh>] <out>
 through an installed package, as a downstream application does.
 
 ```cmake
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.20...3.24)
 project(soma_app LANGUAGES CXX)
 find_package(soma REQUIRED)
 add_executable(soma_app main.cpp)

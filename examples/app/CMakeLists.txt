@@ -10,7 +10,7 @@
 # find_package(soma) brings in Kokkos and, when SOMA was built with them, MPI
 # and HDF5; nothing else is needed.
 
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.20...3.24)
 project(soma_app LANGUAGES CXX)
 
 find_package(soma REQUIRED)

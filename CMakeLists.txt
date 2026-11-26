@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: BSD-3-Clause
 # Copyright (c) 2022-2026, Vijay Mahadevan.
 
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.20...3.24)
 project(soma VERSION 0.1.0
   DESCRIPTION "Scalable Operators for Mesh Abstractions" LANGUAGES CXX)
 

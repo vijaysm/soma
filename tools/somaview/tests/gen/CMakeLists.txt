@@ -10,7 +10,7 @@
 # make_test_data writes the single-part files; make_mpi_test_data (when SOMA was built with MPI)
 # writes multi-part files, one part per rank. tools/somaview/tests/make_data.sh runs both.
 
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.20...3.24)
 project(somaview_test_data LANGUAGES CXX)
 
 find_package(soma REQUIRED)

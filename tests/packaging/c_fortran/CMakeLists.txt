@@ -4,7 +4,7 @@
 # A C and a Fortran program built against an installed SOMA's C API and
 # Fortran module, through find_package only.
 
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.20...3.24)
 project(soma_c_fortran_consumer LANGUAGES C CXX Fortran)
 
 find_package(soma REQUIRED COMPONENTS c fortran)

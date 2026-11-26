@@ -9,7 +9,7 @@ install SOMA and use it from another CMake project. Every option named here is l
 
 | Requirement | Version | Needed for |
 | --- | --- | --- |
-| CMake | 3.24 or newer | configuring (`cmake_minimum_required(VERSION 3.24)`) |
+| CMake | 3.20 or newer | configuring (`cmake_minimum_required(VERSION 3.20...3.24)`) |
 | C++ compiler | C++20 | everything; the VTK writer also needs floating-point `std::to_chars` (libstdc++ 11+, libc++ 14+, macOS 13.3+) |
 | Kokkos | 5.0 or newer | everything (the only required dependency) |
 | MPI | any with a C++ CMake target | `SOMA_ENABLE_MPI`: more than one rank |
@@ -170,7 +170,7 @@ The package version is compatible within a minor version (`SameMinorVersion`), s
 is the consumer from `tests/packaging/CMakeLists.txt`:
 
 ```cmake
-cmake_minimum_required(VERSION 3.24)
+cmake_minimum_required(VERSION 3.20...3.24)
 project(soma_packaging_test LANGUAGES CXX)
 
 find_package(soma REQUIRED)
