@@ -18,6 +18,7 @@
 #include <gtest/gtest.h>
 #include <Kokkos_Core.hpp>
 
+#include "soma/algorithms/cg.hpp"
 #include "soma/algorithms/csr.hpp"
 #include "soma/algorithms/fem.hpp"
 #include "soma/algorithms/fem_space.hpp"
@@ -720,26 +721,154 @@ TEST(FemSpace, NumberingIsContiguousAndAgreesOnEveryHolder) {
   }
 }
 
-// Hanging vertices and a hex face against two tets: the space would not be
-// continuous. Refused on every rank; conforming refinement is taken.
-TEST(FemSpace, SidesThatMatchOnlyInPartThrowOnEveryRank) {
+// A hex face against two tets' triangles: the space would not be continuous.
+// Refused on every rank.
+TEST(FemSpace, AQuadAgainstTwoTrianglesThrowsOnEveryRank) {
   const Comm c = Comm::world();
   expect_message(c, fem_test::hexes_against_tets(c, 4), "two triangles tile");
+}
+
+namespace {
+
+// The box of n cells a side refined without conformity where x < 0.4 and, a
+// second round, x < 0.2; on more than one rank with `layers` ghost layers
+// through vertices.
+soma::HostMesh refined_box(const Comm& c, Topology t, int n, int rounds, int layers, int deal = 0,
+                           bool perturb = true) {
+  soma::HostMesh mesh = box_part(c, spec_of(t, n), Part{.deal = deal, .layers = 0, .perturb = perturb});
+  for (int r = 0; r < rounds; ++r) {
+    const Real reach = r == 0 ? 0.4 : 0.2;
+    std::vector<std::int8_t> marks(static_cast<std::size_t>(mesh.segment_table(mesh.dim()).owned_end), 0);
+    const auto v = mesh.view();
+    for (std::size_t e = 0; e < marks.size(); ++e) {
+      marks[e] = mesh.coords()(v.vertex(mesh.dim(), static_cast<LO>(e), 0), 0) < reach;
+    }
+    mesh = soma::refine_marked(c, mesh, marks, {}).mesh;
+  }
+  if (c.size() > 1) mesh.add_ghosts(c, soma::GhostOptions{layers, 0, false});
+  return mesh;
+}
+
+}  // namespace
+
+// The linear function 0.5 + x - 2y + 0.75z.
+Real linear(const soma::HostMesh& mesh, LO v) {
+  const auto x = mesh.coords();
+  return 0.5 + x(v, 0) - 2 * x(v, 1) + 0.75 * x(v, 2);
+}
+
+// Laplace's equation with a linear function's boundary values, solved by CG
+// and distributed: every vertex, hanging ones too, the linear function.
+Real linear_error(const Comm& c, const soma::HostMesh& mesh, const Space& space) {
+  Matrix a = space.laplacian(c);
+  Vector b = space.vector();
+  Vector g = space.vector();
+  for (LO v = 0; v < mesh.count(0); ++v) g(v) = linear(mesh, v);
+  soma::apply_dirichlet(a, b, space.boundary(), soma::View1<const Real, Kokkos::HostSpace>(g));
+  Vector x = space.vector();
+  const auto report = soma::cg(c, space, a, soma::View1<const Real, Kokkos::HostSpace>(b), x, {.rtol = 1e-14});
+  EXPECT_TRUE(report.converged);
+  space.distribute(c, x);
+  Real worst = 0;
+  for (LO v = 0; v < mesh.count(0); ++v) worst = std::max(worst, std::abs(x(v) - linear(mesh, v)));
+  return c.allreduce(worst, soma::Op::max);
+}
+
+// Hanging vertices take their masters' values: the space is continuous, so a
+// linear function solves Laplace's equation exactly (the patch test), at
+// every vertex after distribute; the matrix is symmetric to rounding (P^T A P
+// sums the same products in other orders) and, on
+// any partition with two ghost layers, its owned rows and the load are the
+// serial ones bit for bit. Hanging vertices are never boundary vertices.
+TEST(FemSpace, HangingVerticesAreConstrained) {
+  const Comm c = Comm::world();
   for (const Topology t : {Topology::tri, Topology::quad, Topology::tet, Topology::hex}) {
-    for (const bool conforming : {false, true}) {
-      if (conforming && t == Topology::hex) continue;  // pyramids
-      SCOPED_TRACE(testing::Message() << "topology " << static_cast<int>(t) << " conforming " << conforming);
-      soma::HostMesh mesh = box_part(c, spec_of(t, 4), Part{.layers = 0});
-      std::vector<std::int8_t> marks(static_cast<std::size_t>(mesh.segment_table(mesh.dim()).owned_end), 0);
-      const auto v = mesh.view();
-      for (std::size_t e = 0; e < marks.size(); ++e) marks[e] = mesh.coords()(v.vertex(mesh.dim(), static_cast<LO>(e), 0), 0) < 0.4;
-      mesh = soma::refine_marked(c, mesh, marks, {.conforming = conforming}).mesh;
-      if (c.size() > 1) mesh.add_ghosts(c, soma::GhostOptions{1, 0, false});
-      if (conforming) {
-        EXPECT_NO_THROW(Space(c, mesh));
-      } else {
-        expect_message(c, mesh, "hanging vertex");
+    for (const int rounds : {1, 2}) {
+      SCOPED_TRACE(testing::Message() << soma::name(t) << " rounds " << rounds);
+      const soma::HostMesh whole = refined_box(Comm::self(), t, 4, rounds, 0);
+      const Space serial(Comm::self(), whole);
+      ASSERT_TRUE(serial.constrained());
+      EXPECT_EQ(serial.assembly(), soma::Assembly::gather);
+      EXPECT_LE(linear_error(Comm::self(), whole, serial), 1e-10);
+      const Matrix sa = serial.laplacian(Comm::self());
+      const Entries want = by_gid(whole, sa);
+      const auto want_b = owned_by_gid(whole, serial.rows(), serial.load(Comm::self(), Load{}));
+      for (const auto& [ij, v] : want) {
+        const auto it = want.find({ij.second, ij.first});
+        if (it != want.end() && std::abs(it->second - v) > 1e-14 * (1 + std::abs(v))) {
+          ADD_FAILURE() << "asymmetric at " << ij.first << " " << ij.second;
+          break;
+        }
+      }
+      LO hanging = 0, fixed = 0;
+      for (LO v = 0; v < whole.count(0); ++v) {
+        hanging += serial.hanging()(v);
+        fixed += serial.hanging()(v) != 0 && serial.boundary()(v) != 0 ? 1 : 0;
+      }
+      EXPECT_GT(hanging, 0);
+      EXPECT_EQ(fixed, 0);
+      for (const int deal : {0, 1}) {
+        SCOPED_TRACE(testing::Message() << "deal " << deal);
+        const soma::HostMesh mesh = refined_box(c, t, 4, rounds, 2, deal);
+        const Space space(c, mesh, soma::Assembly::colored);
+        EXPECT_EQ(space.assembly(), soma::Assembly::gather);
+        EXPECT_EQ(first_difference(by_gid(mesh, space.laplacian(c)), want), "");
+        EXPECT_EQ(first_difference(owned_by_gid(mesh, space.rows(), space.load(c, Load{})), want_b), "");
+        EXPECT_LE(linear_error(c, mesh, space), 1e-10);
       }
     }
   }
+}
+
+// -lap u = f with u = prod sin(pi x_i) and u = 0 on the boundary, on boxes
+// refined where x < 0.4: the largest error at a vertex falls at second order,
+// as on uniform meshes. Vertices between coarse and fine cells are not taken
+// for boundary (a linear solution would not show it).
+TEST(FemSpace, ConvergesWithHangingVertices) {
+  const Comm c = Comm::world();
+  struct Sines {
+    int d;
+    KOKKOS_INLINE_FUNCTION Real operator()(Real x, Real y, Real z) const {
+      const Real pi = 3.14159265358979323846;
+      return d * pi * pi * Kokkos::sin(pi * x) * Kokkos::sin(pi * y) * (d == 3 ? Kokkos::sin(pi * z) : 1);
+    }
+  };
+  for (const Topology t : {Topology::tri, Topology::quad, Topology::tet, Topology::hex}) {
+    SCOPED_TRACE(soma::name(t));
+    const int d = solid(t) ? 3 : 2;
+    std::vector<Real> errors;
+    for (const int n : solid(t) ? std::vector<int>{4, 8, 16} : std::vector<int>{8, 16, 32}) {
+      const soma::HostMesh mesh = refined_box(c, t, n, 1, 2, 0, false);
+      const Space space(c, mesh);
+      Matrix a = space.laplacian(c);
+      Vector b = space.load(c, Sines{d});
+      Vector zero = space.vector();
+      soma::apply_dirichlet(a, b, space.boundary(), soma::View1<const Real, Kokkos::HostSpace>(zero));
+      Vector x = space.vector();
+      EXPECT_TRUE(soma::cg(c, space, a, soma::View1<const Real, Kokkos::HostSpace>(b), x, {.rtol = 1e-12}).converged);
+      space.distribute(c, x);
+      Real worst = 0;
+      const auto xyz = mesh.coords();
+      const Real pi = 3.14159265358979323846;
+      for (LO v = 0; v < mesh.count(0); ++v) {
+        const Real u = std::sin(pi * xyz(v, 0)) * std::sin(pi * xyz(v, 1)) * (d == 3 ? std::sin(pi * xyz(v, 2)) : 1);
+        worst = std::max(worst, std::abs(x(v) - u));
+      }
+      errors.push_back(c.allreduce(worst, soma::Op::max));
+      if (c.rank() == 0) std::printf("%s n %d hanging: max error %.4e\n", soma::name(t), n, errors.back());
+    }
+    EXPECT_GE(std::log2(errors[0] / errors[1]), 1.8) << errors[0] << " " << errors[1];
+    EXPECT_GE(std::log2(errors[1] / errors[2]), 1.8) << errors[1] << " " << errors[2];
+  }
+}
+
+// Hanging vertices with no record of their birth (the field dropped, as some
+// formats do) are refused; so is, on more than one rank, a ghost layer too
+// thin for a master's row to hold the cells around its hanging vertices.
+TEST(FemSpace, HangingVerticesNeedBirthsAndGhosts) {
+  const Comm c = Comm::world();
+  soma::HostMesh mesh = refined_box(c, Topology::quad, 4, 1, 2);
+  mesh.fields().remove(mesh.fields().get<std::int64_t>("refine:birth", 0).id());
+  expect_message(c, mesh, "without a record of the side it was born on");
+  if (c.size() >= 3) expect_message(c, refined_box(c, Topology::quad, 4, 1, 1), "add a ghost layer");
 }

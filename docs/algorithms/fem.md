@@ -88,7 +88,10 @@ are [`CsrMatrix`](linear-algebra.md) in the same layout.
 | `pattern()` | The sparsity of the owned rows (each owned vertex with the vertices that share a cell with it), values zero. |
 | `laplacian(comm)` | Collective. The stiffness matrix of $-\nabla \cdot \nabla$, without boundary conditions. |
 | `load(comm, f)` | Collective. $b_v = \int f N_v$ for the owned vertices, 0 for the others. `f(x, y, z)` must be device-callable. |
-| `boundary()` | Per vertex, 1 on the mesh's boundary (a corner of a side of dimension `dim - 1` that only one cell has), as its owner finds it. |
+| `boundary()` | Per vertex, 1 on the mesh's boundary (a corner of a side of dimension `dim - 1` that only one cell has; with hanging vertices, one that no other such side lies in or has in it), as its owner finds it. Never a hanging vertex. |
+| `constrained()` | Whether the mesh has hanging vertices (see [hanging vertices](#hanging-vertices)). |
+| `hanging()` | Per vertex, 1 where it hangs; empty when not constrained. |
+| `distribute(comm, x)` | Collective. Each hanging vertex's value from its masters', then each owner's entries to its copies and ghosts (two updates); nothing when not constrained. Call it on a solution. |
 | `update(comm, x)` | Collective. Each owner's entries of `x` overwrite its copies and ghosts. |
 | `multiply(comm, a, x, y)` | Collective. Updates `x`, then $y = A x$ over the owned rows. |
 | `numbering(comm)` | Collective. A global numbering: owned vertices numbered rank by rank, copies and ghosts their owners' numbers (one exscan, one allreduce, one update). |
@@ -99,9 +102,10 @@ are [`CsrMatrix`](linear-algebra.md) in the same layout.
 - Dimension 2 or 3, cells all triangles, quads, tets or hexes, no high-order nodes, not edited
   (changed by `MeshEdit::apply` and not compressed since).
 - Every cell positively oriented (`least_jacobian > 0`).
-- Conforming: no hanging vertices, and no hex face against the two triangles of two tets. The
-  space would not be continuous there (a linear solution is no longer reproduced exactly); refine
-  with `MarkedOptions::conforming`, or uniformly.
+- No hex face against the two triangles of two tets: the space would not be continuous there (a
+  linear solution is no longer reproduced exactly).
+- Hanging vertices, if any, with a record of the side each was born on (`"refine:birth"`, which
+  `refine_marked` writes and `infer_births` recovers); see [hanging vertices](#hanging-vertices).
 - On more than one rank, a ghost layer through vertices, `GhostOptions{1, 0}` (see
   [ghosts and halos](../parallel/ghosts-and-halos.md)). Every cell around an owned vertex is
   then present, and owners assemble their rows whole, without messages. The mesh must also
@@ -109,8 +113,10 @@ are [`CsrMatrix`](linear-algebra.md) in the same layout.
 - Every owned vertex belongs to some cell on its rank.
 
 The constructor is collective and throws `std::invalid_argument` on every rank if any rank's
-mesh breaks one of these, if a rank's element matrices would not fit `Offset`, or if ranks
-differ in `soma::reproducible()`.
+mesh breaks one of these, if a rank's element matrices would not fit `Offset`, if ranks
+differ in `soma::reproducible()`, or, with hanging vertices on more than one rank, if a rank
+lacks a master of a hanging vertex it needs or a cell around one (add a ghost layer: two
+suffice).
 
 A space keeps views into the mesh: it is valid while the mesh is alive and its topology
 unchanged. Coordinates may move between assemblies, provided copies and ghosts hold their
@@ -120,6 +126,57 @@ assemble has become inverted or degenerate since the space was made.
 
 `update()` throws `std::invalid_argument` on a rank whose vector does not hold exactly
 `cols()` entries; that rank leaves the exchange and the others complete it.
+
+## Hanging vertices
+
+`refine_marked` without `MarkedOptions::conforming` leaves vertices on edges and faces that a
+neighbouring cell still has whole. A space of independent values there would not be continuous.
+`FemSpace` constrains them instead, as `hanging_constraints` (`soma/algorithms/refine.hpp`)
+gives them: a vertex born on a side that a cell still has whole takes the average of the side's
+corners,
+
+$$
+u_h = \sum_k w_k\, u_{m_k}, \qquad w_k = 1/n \text{ over the side's } n \text{ corners},
+$$
+
+a corner that hangs itself (one level up) taking its own masters in turn. These are the traces
+of the coarse cell's linear, bilinear or trilinear element at the edge midpoint or face centre,
+so the constrained space is continuous: a linear function is reproduced exactly, and the error
+falls at the uniform meshes' rate.
+
+With $P$ the map from the free vertices to all of them, the space assembles $P^T A P$ and
+$P^T b$ on the free vertices' rows. A hanging vertex's row is the identity's, its load 0, so the
+matrix stays symmetric (to rounding: $P^T A P$ sums the same products in other orders) and
+positive definite after Dirichlet elimination, and CG solves it as before. Hanging vertices are
+never boundary vertices: Dirichlet values reach them through their masters. After solving, call
+`distribute(comm, x)` to set them:
+
+```cpp
+const soma::FemSpace<Kokkos::HostSpace> space(comm, mesh);  // mesh from refine_marked
+soma::CsrMatrix<Kokkos::HostSpace> a = space.laplacian(comm);
+auto b = space.load(comm, f);
+soma::apply_dirichlet(a, b, space.boundary(), g);
+soma::cg(comm, space, a, b, x);
+space.distribute(comm, x);  // hanging vertices from their masters
+```
+
+A constrained space assembles by gather, whatever `Assembly` it was given: each owned row sums
+its terms (its own cells', then each hanging vertex it masters, by gid, weighted, a hanging
+corner spread to its masters) in an order fixed by gid, so the matrix and load are the same bit
+for bit on any number of ranks and threads.
+
+Its row for a master needs the cells around the hanging vertices it masters, which lie one layer
+further out than its own: on more than one rank give the mesh two ghost layers through vertices,
+`GhostOptions{2, 0}`. The constructor checks it: each needed hanging vertex's cell count against
+its owner's, and an exact balance (the sum, over each hanging vertex's owner, of
+$w_k\,\kappa(m_k, h)$ over its masters, less the same over each master's row of the hanging
+vertices it took, for a number $\kappa$ fixed by the two gids) that is zero only when every
+master's row took every hanging vertex. `hanging_constraints` gathers every hanging vertex's
+record on every rank (five gids each), to resolve masters that hang.
+
+Measured (`FemSpace.ConvergesWithHangingVertices`): $-\Delta u = f$ with
+$u = \prod_i \sin(\pi x_i)$ on boxes refined once where $x < 0.4$; the largest error at a vertex
+falls at rates 2.09, 1.96 (tri), 1.93, 1.96 (quad), 2.03, 2.18 (tet), 1.98, 2.02 (hex).
 
 ## Assembly modes
 

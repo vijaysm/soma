@@ -33,7 +33,8 @@ Key key_of(const topology::Side& s) {
 // its corner a, so a ghost layer through vertices holds the fine edge on the
 // rank that owns the coarse cell.
 template <class Coords, class OneSided>
-LO hanging_edges(const MeshView<Kokkos::HostSpace>& m, int dim, LO cells, const Coords& x, const OneSided& one_sided) {
+LO hanging_edges(const MeshView<Kokkos::HostSpace>& m, int dim, LO cells, const Coords& x, const OneSided& one_sided,
+                 std::vector<LO>* inside) {
   std::vector<std::pair<LO, LO>> ends;  // (a, b) and (b, a) of every edge of a one-sided side
   for (LO e = 0; e < cells; ++e) {
     for (int s = 0; s < topology::side_count(m, dim, e, dim - 1); ++s) {
@@ -72,7 +73,10 @@ LO hanging_edges(const MeshView<Kokkos::HostSpace>& m, int dim, LO cells, const 
           const Real r = x(ends[j].second, q) - x(a, q) - at * u[static_cast<std::size_t>(q)];
           rest += r * r;
         }
-        if (rest <= off * off) ++found;
+        if (rest <= off * off) {
+          ++found;
+          if (inside) inside->push_back(ends[j].second);
+        }
       }
     }
   }
@@ -82,8 +86,14 @@ LO hanging_edges(const MeshView<Kokkos::HostSpace>& m, int dim, LO cells, const 
 }  // namespace
 
 LO nonconforming_sides(const Mesh<Kokkos::HostSpace>& mesh) {
+  const Nonconforming n = nonconforming(mesh);
+  return n.hanging + n.split_quads;
+}
+
+Nonconforming nonconforming(const Mesh<Kokkos::HostSpace>& mesh) {
+  Nonconforming out;
   const int dim = mesh.dim();
-  if (dim < 2) return 0;
+  if (dim < 2) return out;
   const MeshView<Kokkos::HostSpace> m = mesh.view();
   const LO cells = m.count(dim);
   std::vector<Key> keys;
@@ -95,7 +105,10 @@ LO nonconforming_sides(const Mesh<Kokkos::HostSpace>& mesh) {
     const auto [lo, hi] = std::equal_range(keys.begin(), keys.end(), k);
     return hi - lo == 1;
   };
-  LO found = hanging_edges(m, dim, cells, mesh.coords(), [&](const topology::Side& sd, LO) { return once(key_of(sd)); });
+  out.hanging = hanging_edges(m, dim, cells, mesh.coords(), [&](const topology::Side& sd, LO) { return once(key_of(sd)); },
+                              &out.vertices);
+  std::sort(out.vertices.begin(), out.vertices.end());
+  out.vertices.erase(std::unique(out.vertices.begin(), out.vertices.end()), out.vertices.end());
   if (dim == 3) {
     // A one-sided quad and a one-sided triangle on three of its corners.
     for (std::size_t i = 0; i < keys.size(); ++i) {
@@ -106,11 +119,110 @@ LO nonconforming_sides(const Mesh<Kokkos::HostSpace>& mesh) {
         for (int j = 0, k = 0; j < 4; ++j) {
           if (j != skip) t[static_cast<std::size_t>(k++)] = q[static_cast<std::size_t>(j)];
         }
-        if (once(t)) ++found;
+        if (once(t)) ++out.split_quads;
       }
     }
   }
-  return found;
+  return out;
+}
+
+std::vector<std::uint8_t> conforming_skin(const Mesh<Kokkos::HostSpace>& mesh) {
+  const int dim = mesh.dim();
+  const MeshView<Kokkos::HostSpace> m = mesh.view();
+  const LO cells = m.count(dim), nv = m.count(0);
+  const auto x = mesh.coords();
+  std::vector<Key> keys;
+  for (LO e = 0; e < cells; ++e) {
+    for (int s = 0; s < topology::side_count(m, dim, e, dim - 1); ++s) keys.push_back(key_of(topology::side_of(m, dim, e, dim - 1, s)));
+  }
+  std::sort(keys.begin(), keys.end());
+  const auto once = [&](const Key& k) {
+    const auto [lo, hi] = std::equal_range(keys.begin(), keys.end(), k);
+    return hi - lo == 1;
+  };
+  struct Lone {
+    topology::Side side;
+    LO cell;
+  };
+  std::vector<Lone> lone;
+  std::vector<std::vector<std::size_t>> at(static_cast<std::size_t>(nv));
+  for (LO e = 0; e < cells; ++e) {
+    for (int s = 0; s < topology::side_count(m, dim, e, dim - 1); ++s) {
+      const topology::Side sd = topology::side_of(m, dim, e, dim - 1, s);
+      if (!once(key_of(sd))) continue;
+      for (int j = 0; j < sd.n; ++j) at[static_cast<std::size_t>(sd.v[j])].push_back(lone.size());
+      lone.push_back({sd, e});
+    }
+  }
+  // Whether vertex v lies on side sd, to rounding of its size (a warped
+  // quad's warp allowed off its mean plane).
+  const auto on_side = [&](const topology::Side& sd, LO v) {
+    const auto p = [&](int j, int i) { return x(sd.v[j], i); };
+    Real size = 0;
+    for (int j = 1; j < sd.n; ++j) {
+      Real d = 0;
+      for (int i = 0; i < 3; ++i) d += (p(j, i) - p(0, i)) * (p(j, i) - p(0, i));
+      size = std::max(size, std::sqrt(d));
+    }
+    const Real tol = 1e-9 * size;
+    if (dim == 2) {
+      const Real u0 = p(1, 0) - p(0, 0), u1 = p(1, 1) - p(0, 1), w0 = x(v, 0) - p(0, 0), w1 = x(v, 1) - p(0, 1);
+      const Real uu = u0 * u0 + u1 * u1, t = (u0 * w0 + u1 * w1) / uu;
+      return t >= -1e-9 && t <= 1 + 1e-9 && std::abs(u0 * w1 - u1 * w0) <= tol * std::sqrt(uu);
+    }
+    std::array<Real, 3> a{}, c{};
+    const int u0 = sd.n == 3 ? 1 : 2, w0 = sd.n == 3 ? 2 : 3, w1 = sd.n == 3 ? 0 : 1;
+    const std::array<Real, 3> u{p(u0, 0) - p(0, 0), p(u0, 1) - p(0, 1), p(u0, 2) - p(0, 2)};
+    const std::array<Real, 3> w{p(w0, 0) - p(w1, 0), p(w0, 1) - p(w1, 1), p(w0, 2) - p(w1, 2)};
+    a = {u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]};
+    const Real norm = std::sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+    for (int i = 0; i < 3; ++i) {
+      Real sum = 0;
+      for (int j = 0; j < sd.n; ++j) sum += p(j, i);
+      c[static_cast<std::size_t>(i)] = sum / sd.n;
+      a[static_cast<std::size_t>(i)] /= norm;
+    }
+    const auto off = [&](LO q) {
+      Real d = 0;
+      for (int i = 0; i < 3; ++i) d += (x(q, i) - c[static_cast<std::size_t>(i)]) * a[static_cast<std::size_t>(i)];
+      return std::abs(d);
+    };
+    Real warp = 0;
+    for (int j = 0; j < sd.n; ++j) warp = std::max(warp, off(sd.v[j]));
+    if (off(v) > warp + tol) return false;
+    for (int j = 0; j < sd.n; ++j) {
+      const int k = (j + 1) % sd.n;
+      std::array<Real, 3> e{}, r{};
+      for (int i = 0; i < 3; ++i) {
+        e[static_cast<std::size_t>(i)] = p(k, i) - p(j, i);
+        r[static_cast<std::size_t>(i)] = x(v, i) - p(j, i);
+      }
+      const std::array<Real, 3> cr{e[1] * r[2] - e[2] * r[1], e[2] * r[0] - e[0] * r[2], e[0] * r[1] - e[1] * r[0]};
+      if (cr[0] * a[0] + cr[1] * a[1] + cr[2] * a[2] < -tol * size) return false;
+    }
+    return true;
+  };
+  // A one-sided side that another lies in, or that lies in another, is
+  // between cells: not skin.
+  std::vector<std::uint8_t> between(lone.size(), 0);
+  for (std::size_t i = 0; i < lone.size(); ++i) {
+    const topology::Side& big = lone[i].side;
+    for (int j = 0; j < big.n; ++j) {
+      for (const std::size_t k : at[static_cast<std::size_t>(big.v[j])]) {
+        if (k == i || lone[k].cell == lone[i].cell) continue;
+        const topology::Side& small = lone[k].side;
+        bool inside = true;
+        for (int q = 0; q < small.n && inside; ++q) inside = on_side(big, small.v[q]);
+        if (inside) between[i] = between[k] = 1;
+      }
+    }
+  }
+  std::vector<std::uint8_t> skin(static_cast<std::size_t>(nv), 0);
+  for (std::size_t i = 0; i < lone.size(); ++i) {
+    if (between[i] != 0) continue;
+    for (int j = 0; j < lone[i].side.n; ++j) skin[static_cast<std::size_t>(lone[i].side.v[j])] = 1;
+  }
+  return skin;
 }
 
 }  // namespace soma::detail

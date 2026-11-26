@@ -274,6 +274,25 @@ struct QuadRefineOptions {
 /// does for tol.
 void infer_births(const Comm& comm, HostMesh& mesh, PointTolerance tol = {});
 
+/// The hanging vertices of a mesh, each as a combination of vertices that do
+/// not hang: a vertex refine_marked made (or infer_births recorded, in
+/// "refine:birth") on an edge or face that some cell still has whole takes
+/// the average of that side's corners, a corner that hangs itself (one level
+/// up) taking its own masters in turn. Exact for the traces of linear,
+/// bilinear and trilinear elements, so a finite element space that so
+/// constrains them is continuous (FemSpace).
+struct HangingConstraints {
+  std::vector<LO> vertex;          ///< the hanging vertices here, owned or not, ascending
+  std::vector<Offset> offsets{0};  ///< vertex i's masters: [offsets[i], offsets[i + 1])
+  std::vector<GO> masters;         ///< by gid, ascending; none hanging
+  std::vector<Real> weights;       ///< adding up to 1
+};
+
+/// Collective: the hanging constraints of the vertices here. Every rank gets
+/// every hanging vertex's record (an allgather of five gids per vertex), to
+/// resolve masters that hang. Empty when no rank's mesh has "refine:birth".
+[[nodiscard]] HangingConstraints hanging_constraints(const Comm& comm, const HostMesh& mesh);
+
 /// Marks for refine_marked from an indicator per owned cell (local id order).
 /// mark_threshold marks the cells whose indicator exceeds `threshold`.
 /// mark_fraction marks the cells of largest indicator whose indicators add up

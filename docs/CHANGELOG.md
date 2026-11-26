@@ -42,8 +42,12 @@ All notable changes to SOMA are recorded here. The format follows
   face between the two cells; before, such faces were walls. Conservative, bit for bit on any partition, second
   order across coarse-fine faces with the limiter off. On more than one rank a ghost layer too thin to hold every
   cell across a coarse side is refused (tets refined so need two), as is any face seen from one side only.
-- `FemSpace` refuses meshes whose sides tile without matching: it took them and was not continuous there (a linear
-  solution off by 4e-2 on a mixed cube of 4^3 cells, halving as the mesh halves).
+- `FemSpace` takes hanging vertices: each is constrained to its masters (`hanging_constraints`, from
+  "refine:birth"), the space assembles P^T A P and P^T b, and `distribute` sets the hanging values after a solve.
+  Continuous (linear solutions exact), second order in the max norm on refined boxes, bit for bit on any
+  partition; on more than one rank it needs two ghost layers and checks them. Hanging vertices without a birth
+  record are refused (`infer_births`). A hex face against two tets' triangles is still refused: it took it and was
+  not continuous there (a linear solution off by 4e-2 on a mixed cube of 4^3 cells, halving as the mesh halves).
 
 ### Visualization
 

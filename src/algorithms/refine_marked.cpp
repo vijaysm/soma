@@ -1229,4 +1229,77 @@ std::vector<std::int8_t> mark_fraction(const Comm& comm, std::span<const Real> i
   return marks;
 }
 
+HangingConstraints hanging_constraints(const Comm& comm, const HostMesh& mesh) {
+  HangingConstraints out;
+  const int dim = mesh.dim();
+  const bool has = mesh.fields().contains(birth_field);
+  if (comm.allreduce(static_cast<std::int32_t>(has ? 1 : 0), Op::max) == 0) return out;
+  const MeshView<Host> m = mesh.view();
+  const auto vg = mesh.gid(0);
+  const LO owned = mesh.segment_table(0).owned_end;
+  // Every owned cell's edges and faces, whole; the births of the owned
+  // vertices born on one.
+  std::vector<std::pair<Key, GO>> whole;
+  {
+    std::vector<Key> keys;
+    for (LO e = 0; e < mesh.segment_table(dim).owned_end; ++e) side_keys(m, dim, e, [&](LO v) { return vg(v); }, keys);
+    std::sort(keys.begin(), keys.end());
+    keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
+    for (const Key& k : keys) whole.emplace_back(k, 0);
+  }
+  std::vector<LO> born;
+  std::vector<Key> births;
+  if (has) {
+    const auto b = mesh.fields().get<std::int64_t>(birth_field, 0).view();
+    for (LO v = 0; v < owned; ++v) {
+      const auto vi = static_cast<std::size_t>(v);
+      const auto n = static_cast<std::size_t>(b(vi, 0));
+      if (n < 2 || n > 4) continue;
+      std::array<GO, 4> g{};
+      for (std::size_t k = 0; k < n; ++k) g[k] = static_cast<GO>(b(vi, k + 1));
+      born.push_back(v);
+      births.push_back(key_of(std::span<const GO>(g.data(), n)));
+    }
+  }
+  const auto found = lookup(comm, whole, births);
+  // The owned hanging vertices' records, every rank's: gid, then its corners.
+  std::vector<GO> mine;
+  for (std::size_t i = 0; i < born.size(); ++i) {
+    if (!found[i]) continue;
+    mine.push_back(vg(born[i]));
+    for (const GO g : births[i]) mine.push_back(g);
+  }
+  const std::vector<GO> all = comm.allgatherv(std::span<const GO>(mine));
+  std::map<GO, Key> direct;
+  for (std::size_t i = 0; i + 4 < all.size(); i += 5) direct[all[i]] = Key{all[i + 1], all[i + 2], all[i + 3], all[i + 4]};
+  // A hanging vertex's free masters: its corners', each weighted 1 / count,
+  // a hanging corner's in turn (its masters lie one level up, so this ends).
+  std::map<GO, std::map<GO, Real>> resolved;
+  const auto resolve = [&](const auto& self, GO g) -> const std::map<GO, Real>& {
+    if (const auto it = resolved.find(g); it != resolved.end()) return it->second;
+    const Key& k = direct.at(g);
+    const int n = key_size(k);
+    std::map<GO, Real> w;
+    for (int i = 0; i < n; ++i) {
+      const GO c = k[static_cast<std::size_t>(i)];
+      if (direct.count(c) == 0) {
+        w[c] += Real{1} / n;
+        continue;
+      }
+      for (const auto& [mg, mw] : self(self, c)) w[mg] += mw / n;
+    }
+    return resolved.emplace(g, std::move(w)).first->second;
+  };
+  for (LO v = 0; v < mesh.count(0); ++v) {
+    if (direct.count(vg(v)) == 0) continue;
+    out.vertex.push_back(v);
+    for (const auto& [mg, mw] : resolve(resolve, vg(v))) {
+      out.masters.push_back(mg);
+      out.weights.push_back(mw);
+    }
+    out.offsets.push_back(static_cast<Offset>(out.masters.size()));
+  }
+  return out;
+}
+
 }  // namespace soma
