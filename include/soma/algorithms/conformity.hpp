@@ -5,8 +5,8 @@
 #define SOMA_ALGORITHMS_CONFORMITY_HPP_
 
 /// \file
-/// Sides of a mesh that tile without matching: what FvSpace and FemSpace
-/// refuse.
+/// Sides of a mesh that tile without matching: what FemSpace refuses
+/// (FvSpace takes them, each tile a face).
 
 #include <Kokkos_Core.hpp>
 

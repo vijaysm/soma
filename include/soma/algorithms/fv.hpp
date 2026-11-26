@@ -70,6 +70,7 @@
 /// exchange. Upwind keeps its results bit for bit; bounded is bit for bit
 /// the same on any partition and thread count too.
 
+#include <cmath>
 #include <cstdint>
 #include <limits>
 #include <optional>
@@ -125,7 +126,7 @@ namespace detail {
 struct FvPlan {
   bool supported = true;  ///< dimension 2 or 3, tri, quad, tet or hex cells, no nodes
   LO nonmanifold = 0;     ///< owned cells' sides that more than two cells have
-  LO hanging = 0;         ///< sides here that tile without matching (detail::nonconforming_sides)
+  LO hanging = 0;         ///< owned cells' sides that other sides tile only in part here
   LO bad_cells = 0;       ///< owned cells of no positive finite volume, or turned
                           ///< against a neighbour
   std::vector<Real> area;      ///< 3 per face, from the left cell to the right
@@ -151,15 +152,20 @@ class FvSpace {
  public:
   using Exec = typename MemSpace::execution_space;
 
-  /// Collective. Throws std::invalid_argument on every rank if any rank's
-  /// mesh is not of dimension 2 or 3, has edits or high-order nodes, holds a
-  /// cell other than a tri, quad, tet or hex, a side more than two cells
-  /// share, a cell of no positive volume or turned against a neighbour, or
-  /// sides that tile without matching: hanging vertices, or a quad against two
-  /// triangles (on more than one rank, seen where the ghost layer is through
-  /// vertices), or, on more than one rank, has no ghost layer; or if
-  /// ranks differ in
-  /// soma::reproducible() (which makes total() exact).
+  /// Collective. A side that matches no other cell's side but that other
+  /// cells' sides tile (hanging vertices, as refine_marked leaves without
+  /// MarkedOptions::conforming; a hex's quad against two tets' triangles) is
+  /// replaced by those sides: each is a face between the two cells.
+  ///
+  /// Throws std::invalid_argument on every rank if any rank's mesh is not of
+  /// dimension 2 or 3, has edits or high-order nodes, holds a cell other than
+  /// a tri, quad, tet or hex, a side more than two cells share, a cell of no
+  /// positive volume or turned against a neighbour, a side tiled only in part
+  /// by the sides here, or a face that one of its cells sees and the other
+  /// does not (both: on more than one rank, a ghost layer too thin to hold
+  /// every cell across a side, as for the middle of a triangle split in four;
+  /// add a layer), or, on more than one rank, has no ghost layer; or if ranks
+  /// differ in soma::reproducible() (which makes total() exact).
   FvSpace(const Comm& comm, const Mesh<MemSpace>& mesh, FvScheme scheme = FvScheme::upwind)
       : FvSpace(comm, mesh, FvOptions{.scheme = scheme}) {}
 
@@ -211,8 +217,31 @@ class FvSpace {
     }
     if (flags[5] != 0) {
       throw std::invalid_argument(
-          "FvSpace: a rank holds a hanging vertex, or a quad side that two triangles tile (a hex against two tets): "
-          "sides that match only in part would be walls; refine with MarkedOptions::conforming, or uniformly");
+          "FvSpace: a rank holds a side that the other cells' sides here tile only in part (hanging vertices or a quad "
+          "against triangles across ranks): add a ghost layer");
+    }
+    // Every face between two cells is seen from both: the sum over owned
+    // cells of their outward area vectors' flux of a field v cancels exactly,
+    // face by face (each side computes the face's geometry to the same bits).
+    {
+      ExactSums<1> sums;
+      for (LO c = 0; c < static_cast<LO>(p.volume.size()); ++c) {
+        for (Offset k = p.cell_offsets[static_cast<std::size_t>(c)]; k < p.cell_offsets[static_cast<std::size_t>(c) + 1];
+             ++k) {
+          const auto f = static_cast<std::size_t>(p.cell_faces[static_cast<std::size_t>(k)]);
+          if (p.right[f] < 0) continue;
+          const Real* a = &p.area[3 * f];
+          const Real* xf = &p.centroid[3 * f];
+          const Real v0 = std::sin(3.1 * xf[0] + 1.7 * xf[1] + 0.3), v1 = std::cos(2.3 * xf[1] + 0.9 * xf[2] + 0.1),
+                     v2 = std::sin(1.3 * xf[2] + 2.9 * xf[0] + 0.7);
+          sums.add(0, p.cell_sign[static_cast<std::size_t>(k)] * (a[0] * v0 + a[1] * v1 + a[2] * v2));
+        }
+      }
+      if (allreduce_exact(comm, sums)[0] != 0) {
+        throw std::invalid_argument(
+            "FvSpace: a face is seen by one of its cells and not the other (on more than one rank, a cell across a "
+            "side is not here): add a ghost layer");
+      }
     }
     const int dim = mesh.dim();
     rows_ = mesh.segment_table(dim).owned_end;

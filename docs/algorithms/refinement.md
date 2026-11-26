@@ -187,7 +187,9 @@ faces (or on theirs, one level down), would otherwise be two levels finer than i
 
 Unsplit cells next to split ones keep their edges and faces whole, so the new vertices on
 those edges and faces are hanging. `RefineResult::hanging` lists them, each with its masters
-and weights; a hanging vertex's value is its masters' average.
+and weights; a hanging vertex's value is its masters' average. `FvSpace` takes such meshes,
+each fine side across a coarse one a face between the two cells (see
+[coarse-fine faces](finite-volumes.md#coarse-fine-faces)); `FemSpace` refuses them.
 
 ### Conforming refinement
 

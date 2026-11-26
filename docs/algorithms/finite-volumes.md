@@ -215,6 +215,45 @@ References:
 - J. B. Goodman and R. J. LeVeque, On the accuracy of stable schemes for 2D scalar conservation
   laws, *Math. Comp.* 45 (1985) 15–21.
 
+### Coarse-fine faces
+
+A side that matches no other cell's side but that other cells' sides tile is replaced, in its
+cell's face list, by those sides, each a face between the two cells. This covers the hanging
+vertices `refine_marked` leaves without `MarkedOptions::conforming` (an edge against two edges, a
+quad against four quads, a triangle against four triangles, over any number of levels), and a
+hex face against the two triangles of two tets. Nothing else changes: the faces of a coarse cell
+are more than its sides, and the kernels loop over faces.
+
+- **Which sides.** A side with no exact match is one-sided. The one-sided sides of other cells
+  whose corners all lie on it (to rounding of its size; a warped quad's warp allowed) are its
+  tiles, found from its corners through the tiles' corners, so that a tile touching none of its
+  corners (the middle of a triangle split in four) is found too. It is tiled whole where the
+  tiles' area vectors add up to its own, to $10^{-9}$ of it.
+- **Geometry.** Each such face takes its tile's own area vector and centroid, computed by the
+  tile's corners in gid order, so both cells see the same bits; a coarse cell's volume is summed
+  over its tiles. For any tiling of a side the area vectors add up to the side's, warped or not,
+  so the cells close, the volumes fill the domain, a constant state stays and the total is
+  conserved exactly as on a conforming mesh. A coarse cell's tiles are taken in gid order, and
+  the steps are the serial ones bit for bit on any partition.
+- **The bounded scheme.** A coarse cell's least-squares gradient takes every fine neighbour, and
+  the second-order flux extends the upwind cell's value to each face's own centroid, so nothing
+  else is needed.
+- **Ghost layers.** On more than one rank every cell across a coarse side must be here. A ghost
+  layer through vertices holds them for edges and quads, which every tile touches at a corner of
+  the coarse side; it does not hold the middle tet of a triangle split in four, which touches
+  none: tet meshes refined so need two layers. A rank that holds only part of a tiling throws.
+  And since a rank cannot tell a missing coarse cell from the boundary, the constructor checks
+  that every face is seen from both its cells: the exact sum, over owned cells, of
+  $s_{cf}\,\mathbf{A}_f \cdot \mathbf{v}(\mathbf{x}_f)$ over their faces with a neighbour, for a
+  fixed field $\mathbf{v}$, is zero exactly when it is, the two sides of a face cancelling bit for
+  bit. Otherwise every rank throws, asking for a layer.
+
+Measured (test `Fv.ConvergesAcrossCoarseFineFaces`): the bump of the convergence study carried
+through the interface of a box refined where $x < 1/2$, from and against exact averages. $L^1$
+rates on the finest pair: upwind 0.91 (tri), 0.86 (quad), 0.74 (hex); limiter off 2.10 (tri,
+$n = 32$ to $64$), 2.01 (quad), 1.86 (hex, $n = 16$ to $32$); tets, limited, 1.47 ($n = 6$ to
+$12$). The limited error is below upwind's on every mesh.
+
 ### Why the result does not depend on the partition
 
 A face's geometry is computed from its corners in an order fixed by their gids (from the least
@@ -347,10 +386,9 @@ mesh:
 - is not of dimension 2 or 3, is edited (changed by `MeshEdit::apply` and not compressed
   since), has high-order nodes, or holds a cell other than a tri, quad, tet or hex;
 - holds a side that more than two cells share;
-- has sides that tile without matching: hanging vertices, as `refine_marked` leaves without
-  `MarkedOptions::conforming`, or a hex face against the two triangles of two tets: those sides match no other
-  side and would be walls (on more than one rank they are seen where the ghost layer is through vertices, the
-  default);
+- holds a side that the sides here tile only in part, or a face that one of its cells sees and
+  the other does not: on more than one rank, a ghost layer too thin to hold every cell across a
+  coarse side (see [coarse-fine faces](#coarse-fine-faces); add a layer);
 - holds a cell of no positive volume, or one turned against a neighbour (folded over it);
 - on more than one rank, has no ghost layer (through any bridge dimension; see
   [ghosts and halos](../parallel/ghosts-and-halos.md)), which is needed so that every face of
@@ -372,6 +410,8 @@ rank leaves the exchange and the others complete it.
 - The space keeps the mesh's geometry as it was when made. If the coordinates move, make a
   new space.
 - `inflow` is one value for the whole boundary.
+- With the limiter off, steps are not guaranteed stable: on the tets `refine_marked` makes, they
+  diverge at half `max_dt`, with or without hanging faces (a box of tets built directly does not).
 
 ## Memory spaces
 
