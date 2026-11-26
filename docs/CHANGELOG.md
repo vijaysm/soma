@@ -25,6 +25,9 @@ All notable changes to SOMA are recorded here. The format follows
 - `FvOptions`: `FvSpace(comm, mesh, FvOptions{.scheme, .limit})`; `limit = false` turns the bounded scheme's
   limiter off, to measure its order of convergence (2, from exact cell averages). The finite-volumes page
   documents why the limiter slows the measured rate on coarse meshes, with the measurements and references.
+- `FvOptions::relax`, with `lower` and `upper`: the bounded scheme's bounds relaxed at smooth extrema (Guermond,
+  Nazarov, Popov and Tomas, 2018) within the range u may take; second order in the maximum norm, no overshoot of
+  the range.
 - Refinement keeps integer vertex fields that have a default (new vertices take it) instead of dropping
   them.
 - `sync_mesh(comm, mesh)` makes a distributed part whole after `MeshEdit` changed it on any rank: sharing, derived

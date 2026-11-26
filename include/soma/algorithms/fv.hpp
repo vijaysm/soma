@@ -55,7 +55,9 @@
 /// limiter of strict local bounds does (Guermond, Nazarov, Popov and Tomas,
 /// SIAM J. Sci. Comput. 40 (2018), section 4.7): the L1 rate reaches 2 only
 /// once the extrema are well resolved. FvOptions::limit = false takes every
-/// correction whole, to measure the scheme's own order. A stage exchanges
+/// correction whole, to measure the scheme's own order; FvOptions::relax
+/// loosens the bounds at smooth extrema, within FvOptions::lower and upper,
+/// for second order in the maximum norm too. A stage exchanges
 /// ghosts three times (gradients and u^L, the limiter, u), twice without the
 /// limiter; a step, twice that.
 ///
@@ -69,6 +71,7 @@
 /// the same on any partition and thread count too.
 
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -99,6 +102,21 @@ struct FvOptions {
   /// extrema; for measuring the scheme's order of convergence apart from the
   /// limiter's.
   bool limit = true;
+  /// Bounded, limited only: relax each cell's bounds by the minmod of the
+  /// second differences of u over the cell and its face neighbours (Guermond,
+  /// Nazarov, Popov and Tomas, 2018, section 4.7), O(h^2) where u is smooth and
+  /// zero where they differ in sign, as across a jump; so smooth extrema are
+  /// not clipped and the scheme is second order in the maximum norm too. The
+  /// top of a smeared jump looks smooth, though: without a range below, a
+  /// square wave overshoots by 10-25%, an amount that does not shrink with the
+  /// mesh.
+  bool relax = false;
+  /// The values u may take (relax only): relaxed bounds never pass them, so
+  /// jumps stay within [lower, upper] while extrema inside it are not clipped
+  /// (as 0 <= u <= 1 for a concentration). A strict bound already outside the
+  /// range (u from outside it, as an inflow) is kept.
+  Real lower = -std::numeric_limits<Real>::infinity();
+  Real upper = std::numeric_limits<Real>::infinity();
 };
 
 namespace detail {
@@ -148,7 +166,8 @@ class FvSpace {
   /// As above; also throws std::invalid_argument on every rank if ranks
   /// differ in the options.
   FvSpace(const Comm& comm, const Mesh<MemSpace>& mesh, const FvOptions& options)
-      : scheme_(options.scheme), limit_on_(options.limit), reproducible_(soma::reproducible()) {
+      : scheme_(options.scheme), limit_on_(options.limit), relax_(options.relax), lower_(options.lower),
+        upper_(options.upper), reproducible_(soma::reproducible()) {
     std::optional<Mesh<Kokkos::HostSpace>> mirror;
     const Mesh<Kokkos::HostSpace>* host = nullptr;
     if constexpr (std::is_same_v<MemSpace, Kokkos::HostSpace>) {
@@ -162,11 +181,24 @@ class FvSpace {
     if (!bad) p = detail::fv_plan(*host);
     const Real exact = reproducible_ ? Real{1} : Real{0};
     // The options as one number, so that ranks that differ can be told.
-    const Real key = (options.scheme == FvScheme::bounded ? Real{1} : Real{0}) + (options.limit ? Real{2} : Real{0});
-    Real flags[8] = {bad || !p.supported ? Real{1} : Real{0}, static_cast<Real>(p.nonmanifold),
-                     static_cast<Real>(p.bad_cells), exact, -exact, static_cast<Real>(p.hanging), key, -key};
+    const Real key = (options.scheme == FvScheme::bounded ? Real{1} : Real{0}) + (options.limit ? Real{2} : Real{0}) +
+                     (options.relax ? Real{4} : Real{0});
+    Real flags[12] = {bad || !p.supported ? Real{1} : Real{0},
+                      static_cast<Real>(p.nonmanifold),
+                      static_cast<Real>(p.bad_cells),
+                      exact,
+                      -exact,
+                      static_cast<Real>(p.hanging),
+                      key,
+                      -key,
+                      options.lower,
+                      -options.lower,
+                      options.upper,
+                      -options.upper};
     comm.allreduce(std::span<Real>(flags), Op::max);
-    if (flags[6] != -flags[7]) throw std::invalid_argument("FvSpace: ranks differ in FvOptions");
+    if (flags[6] != -flags[7] || flags[8] != -flags[9] || flags[10] != -flags[11]) {
+      throw std::invalid_argument("FvSpace: ranks differ in FvOptions");
+    }
     if (flags[3] != -flags[4]) throw std::invalid_argument("FvSpace: ranks differ in soma::reproducible()");
     if (flags[0] != 0) {
       throw std::invalid_argument(
@@ -199,7 +231,7 @@ class FvSpace {
       const auto cols = static_cast<std::size_t>(cols_);
       cell_centroid_ = detail::to_space<Real, MemSpace>(p.cell_centroid, "soma::FvSpace::cell_centroid");
       lsq_ = detail::to_space<Real, MemSpace>(p.lsq, "soma::FvSpace::lsq");
-      aux_ = View2<Real, MemSpace>("soma::FvSpace::gradient_low", cols, 4);
+      aux_ = View2<Real, MemSpace>("soma::FvSpace::gradient_low", cols, relax_ ? 5 : 4);
       limit_ = View2<Real, MemSpace>("soma::FvSpace::limit", cols, 2);
       anti_ = View1<Real, MemSpace>("soma::FvSpace::antidiffusive", static_cast<std::size_t>(faces_));
       stage1_ = View1<Real, MemSpace>("soma::FvSpace::stage1", cols);
@@ -213,7 +245,9 @@ class FvSpace {
   LO faces() const noexcept { return faces_; }  // the faces of the owned cells
   bool reproducible() const noexcept { return reproducible_; }
   FvScheme scheme() const noexcept { return scheme_; }
-  FvOptions options() const noexcept { return {.scheme = scheme_, .limit = limit_on_}; }
+  FvOptions options() const noexcept {
+    return {.scheme = scheme_, .limit = limit_on_, .relax = relax_, .lower = lower_, .upper = upper_};
+  }
 
   /// Per owned cell, its volume (area in 2D).
   View1<const Real, MemSpace> volume() const { return volume_; }
@@ -355,7 +389,9 @@ class FvSpace {
     const auto centroid = centroid_;
     const auto cell = cell_centroid_;
     const auto lsq = lsq_;
-    const auto aux = aux_;  // columns: the gradient, then u^L
+    const bool relax = relax_ && limit_on_;
+    const Real lower = lower_, upper = upper_;
+    const auto aux = aux_;  // columns: the gradient, u^L, and (relax) the second difference
     const auto limit = limit_;  // columns: R+, R-
     const auto anti = anti_;
     const auto faces_policy = Kokkos::RangePolicy<Exec, Kokkos::IndexType<LO>>(0, faces_);
@@ -384,6 +420,20 @@ class FvSpace {
             aux(c, q) = lsq(9 * c + 3 * q) * rhs[0] + lsq(9 * c + 3 * q + 1) * rhs[1] + lsq(9 * c + 3 * q + 2) * rhs[2];
           }
           aux(c, 3) = net != 0 ? in(c) - dt * net / volume(c) : in(c);
+          if (relax) {
+            // The second difference sum_n (u_c - u_n), less its linear part
+            // g_c . (x_n - x_c), so that it is O(h^2) on any stencil.
+            Real d2 = 0;
+            for (Offset k = offsets(c); k < offsets(c + 1); ++k) {
+              const LO f = faces(k);
+              const LO n = left(f) == c ? right(f) : left(f);
+              if (n < 0) continue;
+              Real linear = 0;
+              for (int q = 0; q < 3; ++q) linear += aux(c, q) * (cell(3 * n + q) - cell(3 * c + q));
+              d2 += in(c) + linear - in(n);
+            }
+            aux(c, 4) = d2;
+          }
         });
     Exec{}.fence();
     if (halo_) halo_->update(comm, aux);
@@ -407,16 +457,29 @@ class FvSpace {
           "soma::FvSpace::limiter", rows_policy, KOKKOS_LAMBDA(const LO c) {
             const Real low = aux(c, 3);
             Real hi = Kokkos::max(in(c), low), lo = Kokkos::min(in(c), low), gain = 0, loss = 0;
+            // relax: minmod of D2 / 2 over the cell and its face neighbours
+            Real mm = relax ? aux(c, 4) / 2 : Real{0};
             for (Offset k = offsets(c); k < offsets(c + 1); ++k) {
               const LO f = faces(k);
               const LO n = left(f) == c ? right(f) : left(f);
               if (n >= 0) {
                 hi = Kokkos::max(hi, Kokkos::max(in(n), aux(n, 3)));
                 lo = Kokkos::min(lo, Kokkos::min(in(n), aux(n, 3)));
+                if (relax) {
+                  const Real v = aux(n, 4) / 2;
+                  mm = (mm > 0) != (v > 0) || mm == 0 || v == 0 ? Real{0} : (Kokkos::abs(v) < Kokkos::abs(mm) ? v : mm);
+                }
               }
               const Real into = -sign(k) * anti(f);
               if (into > 0) gain += into;
               if (into < 0) loss += into;
+            }
+            if (relax) {
+              // Guermond et al. (4.11): zero where the second differences
+              // differ in sign, as across a jump.
+              const Real r = Kokkos::abs(mm);
+              hi = Kokkos::max(hi, Kokkos::min(hi + r, upper));
+              lo = Kokkos::min(lo, Kokkos::max(lo - r, lower));
             }
             limit(c, 0) = gain > 0 ? Kokkos::min(Real{1}, volume(c) * (hi - low) / gain) : Real{1};
             limit(c, 1) = loss < 0 ? Kokkos::min(Real{1}, volume(c) * (lo - low) / loss) : Real{1};
@@ -447,6 +510,9 @@ class FvSpace {
 
   FvScheme scheme_ = FvScheme::upwind;
   bool limit_on_ = true;
+  bool relax_ = false;
+  Real lower_ = 0;
+  Real upper_ = 0;
   bool reproducible_ = false;
   LO rows_ = 0;
   LO cols_ = 0;

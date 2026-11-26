@@ -162,8 +162,9 @@ Real compact(Real x, Real y, Real z, bool three) {
 // average by O(h^2), as much as a second-order scheme's error. The
 // Gaussian's tail meets the walls, where nothing flows in: an error that does
 // not shrink, below upwind's but not below a second-order scheme's.
+// With linf, also the largest error of a cell, there.
 Real l1_error(const Comm& c, Topology t, int n, const soma::FvOptions& options, bool compact_bump,
-              bool warped = false) {
+              bool warped = false, Real* linf = nullptr) {
   soma::HostMesh mesh =
       box_part(c, {n, n, solid(t) ? n : 1, t, 1.0, 1.0, 1.0}, Part{.perturb = false, .smooth = warped});
   const Uniform a{0.5, 0.25, solid(t) ? 0.125 : 0.0};
@@ -186,10 +187,13 @@ Real l1_error(const Comm& c, Topology t, int n, const soma::FvOptions& options, 
   const int steps = static_cast<int>(std::ceil(end / (0.5 * space.max_dt(c, CVector(phi)))));
   const Real dt = end / steps;
   for (int k = 0; k < steps; ++k) space.step(c, CVector(phi), u, dt);
-  Real local = 0;
+  Real local = 0, most = 0;
   for (LO e = 0; e < space.rows(); ++e) {
-    local += space.volume()(e) * std::abs(u(e) - exact.view()(static_cast<std::size_t>(e), 0));
+    const Real err = std::abs(u(e) - exact.view()(static_cast<std::size_t>(e), 0));
+    local += space.volume()(e) * err;
+    most = std::max(most, err);
   }
+  if (linf) *linf = c.allreduce(most, soma::Op::max);
   return c.allreduce(local, soma::Op::sum);
 }
 
@@ -484,6 +488,12 @@ TEST(Fv, OptionsAreKeptAndAgreedOn) {
   const Space off(c, mesh, {.scheme = FvScheme::bounded, .limit = false});
   EXPECT_FALSE(off.options().limit);
   EXPECT_EQ(off.scheme(), FvScheme::bounded);
+  EXPECT_FALSE(plain.options().relax);
+  EXPECT_TRUE(std::isinf(plain.options().upper));
+  const Space relaxed(c, mesh, {.scheme = FvScheme::bounded, .relax = true, .lower = -1, .upper = 2});
+  EXPECT_TRUE(relaxed.options().relax);
+  EXPECT_EQ(relaxed.options().lower, -1);
+  EXPECT_EQ(relaxed.options().upper, 2);
   if (c.size() > 1) {
     std::string what;
     try {
@@ -492,6 +502,94 @@ TEST(Fv, OptionsAreKeptAndAgreedOn) {
       what = e.what();
     }
     EXPECT_NE(what.find("ranks differ in FvOptions"), std::string::npos) << what;
+    what.clear();
+    try {
+      const Space space(c, mesh, {.scheme = FvScheme::bounded, .relax = true, .upper = c.rank() == 0 ? 1.0 : 2.0});
+    } catch (const std::invalid_argument& e) {
+      what = e.what();
+    }
+    EXPECT_NE(what.find("ranks differ in FvOptions"), std::string::npos) << what;
+  }
+}
+
+// Relaxed within the range of u (Guermond et al.): smooth extrema are not
+// clipped, so the largest error falls at second order, where the strict
+// limiter's does not; the L1 error stays near the strict one's.
+TEST(Fv, RelaxedIsSecondOrderInTheMaximumNorm) {
+  const Comm c = Comm::world();
+  const soma::FvOptions strict{.scheme = FvScheme::bounded};
+  const soma::FvOptions relaxed{.scheme = FvScheme::bounded, .relax = true, .lower = 0, .upper = 1};
+  for (const Topology t : {Topology::tri, Topology::quad}) {
+    SCOPED_TRACE(soma::name(t));
+    std::vector<Real> most;
+    for (const int n : {16, 32, 64}) {
+      Real a = 0, b = 0;
+      const Real l1 = l1_error(c, t, n, relaxed, true, false, &a);
+      const Real l1_strict = l1_error(c, t, n, strict, true, false, &b);
+      if (c.rank() == 0) std::printf("%s n %d relaxed Linf %.4e strict Linf %.4e\n", soma::name(t), n, a, b);
+      EXPECT_LT(a, b);
+      EXPECT_LT(l1, 1.05 * l1_strict);
+      most.push_back(a);
+    }
+    EXPECT_GE(std::log2(most[1] / most[2]), 1.9) << most[1] << " " << most[2];
+  }
+  for (const Topology t : {Topology::tet, Topology::hex}) {
+    Real a = 0, b = 0;
+    (void)l1_error(c, t, 16, relaxed, true, false, &a);
+    (void)l1_error(c, t, 16, strict, true, false, &b);
+    EXPECT_LT(a, b) << soma::name(t);
+  }
+}
+
+// Relaxed within [0, 1], a square wave stays in it; without the range its
+// smeared edges look smooth, and it overshoots.
+TEST(Fv, RelaxedStaysWithinItsRange) {
+  const Comm c = Comm::world();
+  const soma::FvOptions within{.scheme = FvScheme::bounded, .relax = true, .lower = 0, .upper = 1};
+  for (const Topology t : all) {
+    const int n = solid(t) ? 8 : 16;
+    const soma::testing::BoxSpec spec{n, n, solid(t) ? n : 1, t, 1.0, 1.0, 1.0};
+    const soma::HostMesh perturbed = box_part(c, spec);
+    const soma::HostMesh even = box_part(c, spec, Part{.perturb = false});
+    for (const Real inflow : {0.0, 1.0}) {
+      SCOPED_TRACE(testing::Message() << soma::name(t) << " inflow " << inflow);
+      EXPECT_LE(overshoot(c, perturbed, Uniform{}, inflow, within), 1e-14);
+      EXPECT_LE(overshoot(c, even, Rigid{}, inflow, within), 1e-14);
+    }
+  }
+  const soma::HostMesh mesh = box_part(c, {16, 16, 1, Topology::quad, 1.0, 1.0, 1.0});
+  EXPECT_GT(overshoot(c, mesh, Uniform{}, 0.0, {.scheme = FvScheme::bounded, .relax = true}), 1e-2);
+}
+
+// Relaxed steps conserve the total and are the serial ones bit for bit on
+// any partition.
+TEST(Fv, RelaxedConservesAndIsTheSameOnAnyPartition) {
+  const Comm c = Comm::world();
+  const soma::FvOptions relaxed{.scheme = FvScheme::bounded, .relax = true, .lower = 0, .upper = 1};
+  for (const Topology t : {Topology::tri, Topology::hex}) {
+    SCOPED_TRACE(soma::name(t));
+    const soma::testing::BoxSpec spec = spec_of(t, 6);
+    const auto run = [&](const Comm& comm, const soma::HostMesh& mesh, Real& before, Real& after) {
+      const Space space(comm, mesh, relaxed);
+      const auto phi = space.normal_flux(Cellular{});
+      Vector u = bump_on(space, mesh);
+      before = space.total(comm, CVector(u));
+      const Real dt = 0.5 * space.max_dt(comm, CVector(phi));
+      for (int k = 0; k < 30; ++k) space.step(comm, CVector(phi), u, dt);
+      after = space.total(comm, CVector(u));
+      return u;
+    };
+    Real b0 = 0, a0 = 0, b1 = 0, a1 = 0;
+    const soma::HostMesh whole = box_part(Comm::self(), spec);
+    const auto want = by_gid(whole, whole.segment_table(whole.dim()).owned_end, run(Comm::self(), whole, b0, a0));
+    const soma::HostMesh mesh = box_part(c, spec);
+    const Vector u = run(c, mesh, b1, a1);
+    EXPECT_NEAR(a1, b1, 1e-13 * b1);
+    LO differ = 0;
+    for (const auto& [g, v] : by_gid(mesh, mesh.segment_table(mesh.dim()).owned_end, u)) {
+      differ += bits(v) == bits(want.at(g)) ? 0 : 1;
+    }
+    EXPECT_EQ(c.allreduce(static_cast<Real>(differ), soma::Op::sum), 0);
   }
 }
 

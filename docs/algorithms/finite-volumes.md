@@ -6,7 +6,8 @@ triangles, quads, tets or hexes, on any number of ranks, by one of two schemes:
 - `FvScheme::upwind` (the default): first-order upwind and forward Euler;
 - `FvScheme::bounded`: second order where the solution is smooth, with no new extrema (to rounding):
   flux-corrected transport over a linear reconstruction, in two stages. Its limiter can be turned
-  off (`FvOptions::limit`) to measure the scheme's own order of convergence; see
+  off (`FvOptions::limit`) to measure the scheme's own order of convergence, or its bounds relaxed
+  at smooth extrema within a given range (`FvOptions::relax`); see
   [convergence and the limiter](#convergence-and-the-limiter).
 
 It solves
@@ -160,8 +161,47 @@ Two ways of loosening the bounds were measured and are not offered:
   less than 0.3%: at an extremum the cell is itself the greatest (or least) value of any ring
   around it, so wider rings do not lift the bound where the clipping happens.
 
-Guermond et al. relax the bounds instead by an averaged second difference of $u$, $O(h^2)$ where
-$u$ is smooth, which restores second order in the maximum norm; `FvSpace` does not offer it.
+#### Relaxed bounds (Guermond et al.)
+
+`FvOptions::relax` loosens each cell's bounds as Guermond et al. (2018, section 4.7) do, by a
+second difference of $u$ that is $O(h^2)$ where $u$ is smooth. Per cell,
+
+$$
+D_c = \sum_n \bigl(u_c + \mathbf{g}_c \cdot (\mathbf{x}_n - \mathbf{x}_c) - u_n\bigr)
+$$
+
+over its face neighbours $n$: their $\sum_n (u_c - u_n)$ less its linear part, so that $D_c$ is
+$O(h^2)$ on any stencil, not only on symmetric ones (the paper's "linearity-preserving" choice
+of weights). The bounds widen by $r_c = |\operatorname{minmod}\{D_c/2, D_n/2\}|$ over the cell
+and its face neighbours (their formula 4.11): zero where the second differences differ in sign,
+as across a jump. $D_c$ travels with the gradient in the stage's first exchange, so relaxing
+costs no message.
+
+Relaxed bounds no longer guarantee no new extrema, and the top of a smeared jump looks like a
+smooth maximum: each stage lets it rise a little. Without a limit, a square wave overshoots by
+10 to 25% (quads: 0.14 at $n = 16$, 0.21 at $n = 128$), an amount that does not shrink with the
+mesh. The paper's averaged form (4.10) is worse here: without its cap it acts as no limiter at
+all. That cap, $0.99\,\rho^{\min}$, keeps a positive quantity positive; a scalar's
+counterpart is the range its values may take, `FvOptions::lower` and `upper`. Relaxed bounds
+never pass it, and a bound already outside it (from an inflow outside it) is kept:
+
+```cpp
+const soma::FvSpace<Kokkos::HostSpace> space(
+    comm, mesh, soma::FvOptions{.scheme = soma::FvScheme::bounded, .relax = true, .lower = 0, .upper = 1});
+```
+
+Measured as in the table above, within $[0, 1]$:
+
+| Cells | Sizes $n$ | $L^\infty$ rates, strict | $L^\infty$ rates, relaxed | Finest $L^1$ error, strict / relaxed | Square-wave overshoot, relaxed |
+| --- | --- | --- | --- | --- | --- |
+| tri | 16, 32, 64, 128 | 1.38, 1.44, 1.72 | 2.07, 2.14, 2.21 | 5.85e-5 / 5.64e-5 | 5e-17 |
+| quad | 16, 32, 64, 128 | 1.49, 1.53, 1.59 | 1.62, 1.96, 2.06 | 1.99e-4 / 1.97e-4 | 9e-17 |
+| tet | 8, 16, 32 | 0.31, 1.69 | 1.44, 1.42 | 1.67e-4 / 1.66e-4 | 5e-16 |
+| hex | 12, 24, 48 | 0.85, 1.79 | 0.98, 2.00 | 2.60e-4 / 2.59e-4 | 2e-16 |
+
+Relaxed, the largest error is the unlimited scheme's on every mesh (tets need finer meshes for
+it to fall at second order, unlimited too), the $L^1$ error stays the strict limiter's, and the
+square wave stays within $[0, 1]$ to rounding.
 
 References:
 
@@ -230,7 +270,10 @@ space's scratch is shared by copies of the space, so make one step at a time.
 ```cpp
 struct FvOptions {
   FvScheme scheme = FvScheme::upwind;
-  bool limit = true;  // bounded only: Zalesak's limiter; off for convergence studies
+  bool limit = true;   // bounded only: Zalesak's limiter; off for convergence studies
+  bool relax = false;  // limited: relax the bounds at smooth extrema (Guermond et al.)
+  Real lower = -std::numeric_limits<Real>::infinity();  // relax: the values u may take
+  Real upper = std::numeric_limits<Real>::infinity();
 };
 ```
 
