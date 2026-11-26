@@ -55,6 +55,7 @@ fields/domain
 fields/domain_mesh
 fields/errors
 fields/field
+fields/field_rule
 fields/layout
 fields/node_tables
 fields/registry
@@ -118,6 +119,7 @@ algorithms/quality_smooth
 algorithms/petsc
 algorithms/refine
 algorithms/remap
+algorithms/sample
 ```
 
 ## `soma/sem`

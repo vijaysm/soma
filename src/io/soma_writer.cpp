@@ -22,6 +22,7 @@
 
 #include "../parallel/closure.hpp"
 #include "hdf5.hpp"
+#include "soma/algorithms/sample.hpp"
 #include "soma/core/handle_ref.hpp"
 #include "soma/core/mesh_geometry.hpp"
 #include "soma/core/mesh_values.hpp"
@@ -109,9 +110,12 @@ struct Agreed {
 };
 
 // The mesh's values, the geometry among them as the options have it: the one
-// held (declared, or of a kind not known here), else the one recognized.
-MeshValues values_to_write(const MeshValues& held, bool geometry, const std::optional<MeshGeometry>& recognized) {
+// held (declared, or of a kind not known here), else the one recognized; the
+// names of the fields that have a rule now (soma:rules), in place of any read.
+MeshValues values_to_write(const MeshValues& held, bool geometry, const std::optional<MeshGeometry>& recognized,
+                           const std::vector<std::string>& ruled) {
   MeshValues out = held;
+  set_rule_names(out, ruled);
   bool keep = held.contains(geometry_value) && geometry;
   if (keep) {
     const auto g = soma::geometry(held);
@@ -185,7 +189,8 @@ Agreed agree(const Comm& comm, const HostMesh& mesh, const std::string& local_er
   Agreed a;
   a.dim = static_cast<int>(f[6]);
   std::copy(f.begin() + 28, f.end(), extent.order_keys.begin());
-  a.values = values_to_write(mesh.values(), geometry, a.dim == 2 ? extent.recognize() : std::nullopt);
+  a.values = values_to_write(mesh.values(), geometry, a.dim == 2 ? extent.recognize() : std::nullopt,
+                             mesh.fields().rule_names());
   for (std::size_t d = 0; d < 4; ++d) {
     a.input[d] = f[7 + d] != 0;
     a.written[d] = d == 0 || static_cast<int>(d) == a.dim || f[7 + d] != 0 || f[11 + d] != 0;

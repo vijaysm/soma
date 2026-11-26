@@ -121,17 +121,21 @@ struct RefineResult {
 
 Fields carry over where they are dense: one value per entity of a full domain, per-entity
 layout, not variable-length and not handles (see [fields](../concepts/fields.md)). Their
-default and global values come with them.
+default and global values, and their rule, come with them. Vertices and cells the input has
+keep their values. New ones take the field's
+[rule](../concepts/fields.md#rules-values-for-new-entities-and-sampling) when it has one, called
+once with all of them (hanging vertices included). Otherwise:
 
 - A cell field's children take the parent's value, so integrals of cell averages are kept.
-- A vertex field of floating-point values keeps the values of the old vertices and gives a
-  new vertex the average of its corners' values: exact for linear, bilinear and trilinear
-  fields.
+- A vertex field of floating-point values gives a new vertex the average of its corners'
+  values: exact for linear, bilinear and trilinear fields; for a hanging vertex, the coarse
+  side's interpolation.
+- An integer vertex field gives new vertices its default.
 
 Vertex values are read wherever a rank holds them, shared copies and ghosts included, so these
-must hold their owners' values (update them first) for ranks to agree. Other fields, edge and
-face fields, and integer vertex fields are dropped and named in `dropped`. The internal
-`soma:` fields are rebuilt.
+must hold their owners' values (update them first) for ranks to agree. Integer vertex fields
+with neither a rule nor a default, other fields, and edge and face fields are dropped and
+named in `dropped`. The internal `soma:` fields are rebuilt.
 
 ## Marked refinement
 

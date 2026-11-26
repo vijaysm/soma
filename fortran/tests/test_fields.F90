@@ -3,12 +3,60 @@
 
 ! The Fortran module's fields and halo exchange.
 
+! Field rules, as C functions of the batch.
+module test_fields_rules
+  use, intrinsic :: iso_c_binding, only: c_ptr, c_f_pointer
+  use soma
+  implicit none
+contains
+  ! u = (x + 2y, gid): f64, two components.
+  integer(c_int) function rule_u(batch, ncomp, values, context) bind(C)
+    type(soma_entity_batch), intent(in) :: batch
+    integer(c_int), value :: ncomp
+    type(c_ptr), value :: values, context
+    integer(soma_lo), pointer :: offsets(:)
+    real(c_double), pointer :: xyz(:, :), v(:, :)
+    integer(soma_go), pointer :: gid(:)
+    integer(c_int), pointer :: calls
+    integer :: i
+    call c_f_pointer(context, calls)
+    calls = calls + 1
+    call soma_batch_arrays(batch, offsets, xyz, gid)
+    call c_f_pointer(values, v, [int(ncomp), int(batch%count)])
+    do i = 1, int(batch%count)
+      v(1, i) = xyz(1, offsets(i) + 1) + 2 * xyz(2, offsets(i) + 1)
+      v(2, i) = real(gid(i), c_double)
+    end do
+    rule_u = 0
+  end function
+
+  ! k = 10 * corners: i32.
+  integer(c_int) function rule_k(batch, ncomp, values, context) bind(C)
+    type(soma_entity_batch), intent(in) :: batch
+    integer(c_int), value :: ncomp
+    type(c_ptr), value :: values, context
+    integer(soma_lo), pointer :: offsets(:)
+    real(c_double), pointer :: xyz(:, :)
+    integer(soma_go), pointer :: gid(:)
+    integer(c_int32_t), pointer :: v(:)
+    integer :: i
+    call soma_batch_arrays(batch, offsets, xyz, gid)
+    call c_f_pointer(values, v, [int(batch%count)])
+    do i = 1, int(batch%count)
+      v(i) = int(10 * (offsets(i + 1) - offsets(i)), c_int32_t)
+    end do
+    rule_k = 0
+  end function
+end module
+
 program test_fields
 #if SOMA_TEST_MPI
   use mpi
 #endif
+  use, intrinsic :: iso_c_binding, only: c_loc
   use soma
   use soma_check
+  use test_fields_rules
   implicit none
   integer :: ierr
 
@@ -22,6 +70,7 @@ program test_fields
     call fields(comm)
     call halo(comm)
     call halo_empty_ranks(comm)
+    call rules(comm)
   end block
   call soma_finalize()
   call check_done('test_fields')
@@ -151,5 +200,54 @@ contains
     allsum_real = x
 #endif
   end function
+
+  ! Rules: sampled at vertices and cells, carried to the vertices refinement
+  ! makes; a type other than the field's is an error.
+  subroutine rules(comm)
+    type(soma_comm), intent(in) :: comm
+    type(soma_mesh), target :: m
+    type(soma_mesh) :: fine
+    type(soma_refine) :: r
+    real(c_double), pointer :: u(:, :), x(:, :)
+    integer(c_int32_t), pointer :: k(:, :)
+    integer(soma_go), pointer :: g(:)
+    integer(c_int), target :: calls
+    integer :: v, wrong
+
+    m = soma_box_mesh(comm, 2, 2, 2)
+    call m%add_field('u', 0, 2, u)
+    call m%add_field('k', 3, 1, k)
+    calls = 0
+    call m%set_rule('u', SOMA_F32, rule_u, c_loc(calls), ierr)
+    call check(ierr == SOMA_ERR_TYPE, 'a rule of another type than the field''s')
+    call m%set_rule('u', SOMA_F64, rule_u, c_loc(calls))
+    call m%set_rule('k', SOMA_I32, rule_k)
+    call check(m%has_rule('u') .and. m%has_rule('k', 3), 'the fields have rules')
+    call m%sample('u')
+    call m%sample('k')
+    if (m%count(0) > 0) call check(calls == 1, 'one call for every vertex')
+    call m%field('u', u)
+    call m%field('k', k)
+    x => m%coords()
+    g => m%gids(0)
+    wrong = 0
+    do v = 1, size(u, 1)
+      if (u(v, 1) /= x(v, 1) + 2 * x(v, 2) .or. u(v, 2) /= real(g(v), c_double)) wrong = wrong + 1
+    end do
+    if (size(k) > 0) call check(all(k(:, 1) == 80), 'k is 10 a corner')
+
+    r = soma_refine_uniform(comm, m, 1)
+    fine = r%mesh()
+    call check(fine%has_rule('u'), 'refinement keeps the rule')
+    call fine%field('u', u)
+    x => fine%coords()
+    g => fine%gids(0)
+    do v = 1, size(u, 1)
+      if (u(v, 1) /= x(v, 1) + 2 * x(v, 2) .or. u(v, 2) /= real(g(v), c_double)) wrong = wrong + 1
+    end do
+    call check(wrong == 0, 'every vertex holds the rule''s values')
+    call fine%clear_rule('u', SOMA_F64)
+    call check(.not. fine%has_rule('u'), 'cleared')
+  end subroutine
 
 end program

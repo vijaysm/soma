@@ -24,6 +24,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "soma/algorithms/remap.hpp"
+#include "soma/algorithms/sample.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/io/mesh_file.hpp"
 #include "soma/parallel/comm.hpp"
@@ -94,21 +95,15 @@ soma::HostMesh grid(const soma::Comm& comm, int dim, int n, const double* lo, co
   return soma::build_local_part(comm, std::move(b));
 }
 
-// Each owned cell's value at its corners' mean.
-View values(const soma::HostMesh& mesh) {
-  const auto m = mesh.view();
-  const auto x = mesh.coords();
+// Each owned cell's value at its corners' mean: soma::sample with a
+// pointwise rule, which evaluates at each cell's centre.
+View values(soma::HostMesh& mesh) {
   const int d = mesh.dim();
+  const auto f = mesh.fields().add_tag<double>("u0", d, 1);
+  soma::sample(mesh, f, soma::pointwise([](double x, double y, double) { return 2 + std::sin(x) * std::cos(y); }));
   View u("u", static_cast<std::size_t>(mesh.segment_table(d).owned_end));
-  for (soma::LO e = 0; e < static_cast<soma::LO>(u.extent(0)); ++e) {
-    double cx = 0, cy = 0;
-    const soma::LO n = m.num_vertices(d, e);
-    for (soma::LO k = 0; k < n; ++k) {
-      cx += x(m.vertex(d, e, k), 0) / static_cast<double>(n);
-      cy += x(m.vertex(d, e, k), 1) / static_cast<double>(n);
-    }
-    u(e) = 2 + std::sin(cx) * std::cos(cy);
-  }
+  for (std::size_t e = 0; e < u.extent(0); ++e) u(e) = f.view()(e, 0);
+  mesh.fields().remove(f.id());
   return u;
 }
 
@@ -144,7 +139,7 @@ int main(int argc, char** argv) {
     return 2;
   }
   try {
-    const soma::HostMesh source = soma::read_file(comm, in);
+    soma::HostMesh source = soma::read_file(comm, in);
     // The source's bounding box, a little wider so that no corner sits on its edge.
     const auto x = source.coords();
     double lo[3], hi[3];

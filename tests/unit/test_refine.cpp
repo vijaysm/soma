@@ -26,6 +26,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "soma/algorithms/refine.hpp"
+#include "soma/algorithms/sample.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/ghosts.hpp"
@@ -287,6 +288,69 @@ TEST(Refine, FieldsCarryOver) {
     EXPECT_EQ(ff.default_value(), std::vector<float>{-1});
     for (LO v = 0; v < fine.mesh.count(0); ++v) wrong += ff.view()(static_cast<std::size_t>(v), 0) == 0.25f ? 0 : 1;
     EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-14);
+    EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
+  }
+}
+
+// Rules give new entities their values: every vertex of an analytic field
+// and of an integer one is the rule at its point, every cell the rule at its
+// centre, two levels down; an integer vertex field without a rule keeps its
+// default for the new vertices and its values for the old; one without a
+// default is dropped.
+TEST(Refine, RulesAndDefaultsGiveNewEntitiesTheirValues) {
+  const Comm c = Comm::world();
+  const auto f = [](Real x, Real y, Real z) { return std::sin(3 * x) * std::cos(2 * y) + z * z; };
+  const auto bin = [](Real x, Real y, Real z) {
+    return static_cast<std::int32_t>(std::floor(4 * x) + 10 * std::floor(4 * y) + 100 * std::floor(4 * z));
+  };
+  for (const Case& k : cases()) {
+    SCOPED_TRACE(k.name);
+    if (!k.twice) continue;
+    soma::HostMesh mesh = build(c, k.cells, 0);
+    const int d = mesh.dim();
+    soma::FieldOptions<double> fo;
+    fo.rule = soma::pointwise(f);
+    auto u = mesh.fields().add_tag<double>("u", 0, 1, std::move(fo)).view();
+    soma::FieldOptions<std::int32_t> bo;
+    bo.rule = soma::pointwise(bin);
+    auto b = mesh.fields().add_tag<std::int32_t>("bin", 0, 1, std::move(bo)).view();
+    auto keep = mesh.fields().add_tag<std::int32_t>("keep", 0, 1, {.default_value = std::vector<std::int32_t>{-1}});
+    soma::FieldOptions<double> co;
+    co.rule = soma::pointwise([&](Real x, Real y, Real z) { return 2 * f(x, y, z); });
+    auto q = mesh.fields().add_tag<double>("q", d, 1, std::move(co)).view();
+    (void)mesh.fields().add_tag<std::int32_t>("flag", 0, 1);
+    for (LO v = 0; v < mesh.count(0); ++v) {
+      const auto p = point(mesh, v);
+      u(static_cast<std::size_t>(v), 0) = f(p[0], p[1], p[2]);
+      b(static_cast<std::size_t>(v), 0) = bin(p[0], p[1], p[2]);
+      keep.view()(static_cast<std::size_t>(v), 0) = static_cast<std::int32_t>(mesh.gid(0)(v));
+    }
+    const auto fine = soma::refine_uniform(c, mesh, {.levels = 2});
+    EXPECT_EQ(fine.dropped, std::vector<std::string>{"flag"});
+    const auto& fm = fine.mesh;
+    EXPECT_TRUE(fm.fields().has_rule(fm.fields().get<double>("u").id()));
+    const auto fu = fm.fields().get<double>("u").view();
+    const auto fb = fm.fields().get<std::int32_t>("bin").view();
+    const auto fk = fm.fields().get<std::int32_t>("keep").view();
+    const auto fq = fm.fields().get<double>("q").view();
+    std::vector<GO> old;
+    for (LO v = 0; v < mesh.count(0); ++v) old.push_back(mesh.gid(0)(v));
+    std::sort(old.begin(), old.end());
+    Real wrong = 0;
+    for (LO v = 0; v < fm.count(0); ++v) {
+      const auto vi = static_cast<std::size_t>(v);
+      const auto p = point(fm, v);
+      wrong += fu(vi, 0) == f(p[0], p[1], p[2]) ? 0 : 1;
+      wrong += fb(vi, 0) == bin(p[0], p[1], p[2]) ? 0 : 1;
+      const GO g = fm.gid(0)(v);
+      const bool was = std::binary_search(old.begin(), old.end(), g);
+      wrong += fk(vi, 0) == (was ? static_cast<std::int32_t>(g) : -1) ? 0 : 1;
+    }
+    const auto cells = soma::entity_batch(fm, d);
+    for (LO e = 0; e < fm.count(d); ++e) {
+      const auto p = cells.batch().center(static_cast<std::size_t>(e));
+      wrong += fq(static_cast<std::size_t>(e), 0) == 2 * f(p[0], p[1], p[2]) ? 0 : 1;
+    }
     EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
   }
 }

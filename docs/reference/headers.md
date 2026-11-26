@@ -71,6 +71,7 @@ Fields on entities. Documented in [fields](../concepts/fields.md).
 | [`soma/fields/space.hpp`](api/fields/space.md) | `Space` = domain × layout: the row numbering of every field defined on it |
 | [`soma/fields/domain_mesh.hpp`](api/fields/domain_mesh.md) | mesh-aware construction of domains and spaces (`SegmentFilter`, `make_space`) |
 | [`soma/fields/field.hpp`](api/fields/field.md) | `Field<T, MemSpace>` (typed handle on one field), `FieldOptions`, `FieldInfo` |
+| [`soma/fields/field_rule.hpp`](api/fields/field_rule.md) | `FieldRule<T>`, `EntityBatch`, `pointwise`: values for new entities and for sampling |
 | [`soma/fields/var_field.hpp`](api/fields/var_field.md) | `VarField<T, MemSpace>`: a variable-length field, a CSR over a per-entity space |
 | [`soma/fields/registry.hpp`](api/fields/registry.md) | `FieldRegistry`, the host-side owner of a mesh's fields and their families |
 | [`soma/fields/resolver.hpp`](api/fields/resolver.md) | entity-to-value lookup across the members of a field family |
@@ -131,6 +132,7 @@ Files. See [input and output](../io/overview.md).
 | [`soma/algorithms/grid_index.hpp`](api/algorithms/grid_index.md) | `GridIndex`: a uniform grid of bins for the boxes a query box meets. See [spatial search](../algorithms/spatial-search.md) |
 | [`soma/algorithms/arborx_index.hpp`](api/algorithms/arborx_index.md) | `ArborXIndex`: the same queries by ArborX's bounding volume hierarchy (`SOMA_ENABLE_ARBORX`). See [spatial search](../algorithms/spatial-search.md) |
 | [`soma/algorithms/remap.hpp`](api/algorithms/remap.md) | `RemapOperator`, `RemapOptions`: first-order conservative remap between plane, volume or sphere meshes. See [remap](../algorithms/remap.md) |
+| [`soma/algorithms/sample.hpp`](api/algorithms/sample.md) | `sample`: a field from a rule at points, or as cell averages or integrals by quadrature; `entity_batch`, `missing_rules` |
 | [`soma/algorithms/refine.hpp`](api/algorithms/refine.md) | `refine_uniform`, `refine_marked`, `mark_fraction`, `mark_threshold`, `infer_births`, `RefineOptions`, `MarkedOptions`, `RefineResult`. See [refinement](../algorithms/refinement.md) |
 | `soma/algorithms/polygon.hpp` | **internal**: plane polygons for intersection (clipping, triangulation), callable in kernels. See [remap](../algorithms/remap.md) |
 | `soma/algorithms/tet_clip.hpp` | **internal**: the overlap of two tetrahedra, for volume remap. See [remap](../algorithms/remap.md) |

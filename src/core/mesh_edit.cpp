@@ -8,11 +8,13 @@
 #include <functional>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <optional>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
+#include "soma/algorithms/sample.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/runtime/options.hpp"
 #include "soma/fields/domain_mesh.hpp"
@@ -481,6 +483,14 @@ EditReport MeshEdit::apply() {
     maps[static_cast<std::size_t>(d)] = std::move(r);
   }
   m.fields_.remap_into(next.fields_, maps, m.epoch_, element_info(next));
+  // Added entities take the fields' rules, where they have one.
+  for (int d = 0; d <= 3; ++d) {
+    const LO n = added_[static_cast<std::size_t>(d)].count;
+    if (n == 0) continue;
+    std::vector<LO> lids(static_cast<std::size_t>(n));
+    std::iota(lids.begin(), lids.end(), m.count(d));
+    (void)fill_by_rules(next, d, lids);
+  }
   // Graphs touching edited dimensions, built again over the live entities.
   const AdjacencyRequest dropped = AdjacencyRequest::from_bits(m.adjacencies().bits() & ~next.adjacencies().bits());
   if (!dropped.empty()) build_adjacencies(next, dropped);

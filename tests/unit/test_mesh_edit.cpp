@@ -292,6 +292,55 @@ TEST(MeshEdit, FieldsSetsAndGraphsFollow) {
   EXPECT_EQ(m.epoch(), epoch);
 }
 
+// Added entities take their fields' rules, all at once; fields without a
+// rule take their default; entities that were there keep their values.
+TEST(MeshEdit, AddedEntitiesTakeTheRules) {
+  HostMesh m = soma::testing::box_mesh({2, 1, 1, Topology::quad});
+  soma::FieldOptions<double> xo;
+  xo.default_value = std::vector<double>{-5, -5};
+  std::size_t calls = 0, seen = 0;
+  xo.rule = [&](const soma::EntityBatch& b) {
+    ++calls;
+    seen += b.size();
+    std::vector<double> v(2 * b.size());
+    for (std::size_t i = 0; i < b.size(); ++i) {
+      v[2 * i] = b.x(i, 0, 0);
+      v[2 * i + 1] = static_cast<double>(b.gid[i]);
+    }
+    return v;
+  };
+  auto x = m.fields().add_tag<double>("x", 0, 2, std::move(xo));
+  for (std::size_t i = 0; i < 6; ++i) x.view()(i, 0) = x.view()(i, 1) = 100;
+  soma::FieldOptions<std::int32_t> co;
+  co.rule = [](const soma::EntityBatch& b) {
+    std::vector<std::int32_t> v(b.size());
+    for (std::size_t i = 0; i < b.size(); ++i) v[i] = static_cast<std::int32_t>(b.corners(i)) * 10;
+    return v;
+  };
+  (void)m.fields().add_tag<std::int32_t>("c", 2, 1, std::move(co));
+  (void)m.fields().add_tag<double>("plain", 0, 1, {.default_value = std::vector<double>{7}});
+
+  MeshEdit edit(m);
+  edit.set_compress_threshold(0);
+  const LO v = edit.add_vertices(std::vector<Real>{3, 0, 0, 3, 1, 0});
+  edit.add_elements(Topology::tri, std::vector<LO>{2, v, 5});
+  edit.add_elements(Topology::tri, std::vector<LO>{5, v, v + 1});
+  edit.apply();
+
+  EXPECT_EQ(calls, 1u);
+  EXPECT_EQ(seen, 2u);
+  const auto fx = m.fields().get<double>("x").view();
+  for (std::size_t i = 0; i < 6; ++i) EXPECT_DOUBLE_EQ(fx(i, 0), 100.0);
+  EXPECT_DOUBLE_EQ(fx(6, 0), 3.0);
+  EXPECT_DOUBLE_EQ(fx(6, 1), static_cast<double>(m.gid(0)(6)));
+  EXPECT_DOUBLE_EQ(fx(7, 1), static_cast<double>(m.gid(0)(7)));
+  const auto fc = m.fields().get<std::int32_t>("c").view();
+  EXPECT_EQ(fc(0, 0), 0);
+  EXPECT_EQ(fc(2, 0), 30);
+  EXPECT_EQ(fc(3, 0), 30);
+  EXPECT_DOUBLE_EQ(m.fields().get<double>("plain").view()(7, 0), 7.0);
+}
+
 // Additions alone leave every entity live, so graphs build as on any mesh.
 TEST(MeshEdit, GraphsBuildOnAMeshWithAdditionsOnly) {
   HostMesh m = soma::testing::box_mesh({2, 1, 1, Topology::quad});

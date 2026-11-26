@@ -17,6 +17,7 @@
 #include "soma/core/types.hpp"
 #include "soma/core/view_types.hpp"
 #include "soma/fields/data_type.hpp"
+#include "soma/fields/field_rule.hpp"
 #include "soma/fields/tag_format.hpp"
 #include "soma/fields/space.hpp"
 
@@ -33,11 +34,15 @@ inline constexpr FamilyId invalid_family = std::numeric_limits<FamilyId>::max();
 /// a variable-length field either may have any length. A handle field holds
 /// handles of entities or sets (make_handle; 0 for none) and needs T = GO; it
 /// has a family of its own, apart from plain GO fields of the same name.
+/// rule, when set, gives values to entities the field has none for yet
+/// (soma/fields/field_rule.hpp); it belongs to the field's family, so every
+/// field of that name, value type, ncomp and layout shares it.
 template <class T>
 struct FieldOptions {
   std::optional<std::vector<T>> default_value;
   std::optional<std::vector<T>> global_value;
   bool handle = false;
+  FieldRule<T> rule{};
 };
 
 struct FieldInfo {

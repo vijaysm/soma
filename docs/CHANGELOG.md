@@ -14,6 +14,16 @@ All notable changes to SOMA are recorded here. The format follows
 
 ### Algorithms
 
+- Field rules (`FieldOptions::rule`, `FieldRegistry::set_rule`): a function of the entities' corners,
+  called once with all of them, that gives new entities their values in refinement and `MeshEdit`, in
+  place of the parent's value, the corners' average or the default. Its value type is checked at compile
+  time. Copies, mirrors, migration and ghosts carry it; `write_soma` records which fields had one
+  (`missing_rules`). C: `soma_mesh_set_rule`; Fortran: `%set_rule`; Python: `mesh.set_rule`.
+- `sample(mesh, field, rule)`: a field's values from a rule at its entities or element nodes, or as
+  cell averages or integrals by quadrature of any degree on every cell type, on the sphere for meshes on
+  one. C: `soma_mesh_sample`; Fortran: `%sample`; Python: `mesh.sample`.
+- Refinement keeps integer vertex fields that have a default (new vertices take it) instead of dropping
+  them.
 - `sync_mesh(comm, mesh)` makes a distributed part whole after `MeshEdit` changed it on any rank: sharing, derived
   sides, ghosts and owners' field values (`SyncOptions::ghosts`, `fields`). `Mesh::needs_sync()` says when; until then the calls that use the sharing throw on every rank
   (they took the part as having no shared entities, and `add_ghosts` placed no ghosts). C: `soma_mesh_sync`, `soma_mesh_needs_sync`; Fortran: `%sync`, `%needs_sync`; Python: `mesh.sync`,

@@ -322,6 +322,46 @@ int soma_mesh_get_field_interleaved(const soma_mesh_t* mesh, const char* name, i
 int soma_mesh_set_field_interleaved(soma_mesh_t* mesh, const char* name, int dim, int dtype, soma_lo_t rows,
                                     const void* values);
 
+/* ---- Field rules and sampling ------------------------------------------ */
+
+/// Entities a rule gives values to (soma::EntityBatch): count of them, of
+/// dimension dim; entity i has the corners offsets[i] .. offsets[i + 1] of
+/// xyz (three coordinates each). For dim 0 each is a point (a vertex, an
+/// element node or a quadrature point). topology (soma::Topology codes) is
+/// NULL for points; gid is NULL when the points are not entities of the mesh.
+typedef struct soma_entity_batch_t {
+  int dim;
+  soma_lo_t count;
+  const uint8_t* topology;
+  const soma_lo_t* offsets;
+  const double* xyz;
+  const soma_go_t* gid;
+} soma_entity_batch_t;
+
+/// A rule writes count * ncomp values of the field's type into values,
+/// interleaved (values[c + ncomp i]), and returns 0; any other return fails
+/// the call that ran it (SOMA_ERR_RUNTIME). context is the pointer given with
+/// the rule, which the caller keeps alive while the rule is set.
+typedef int (*soma_rule_fn)(const soma_entity_batch_t* batch, int ncomp, void* values, void* context);
+
+/// Sets the rule of every field named name, replacing any (rule NULL clears
+/// it): refinement, MeshEdit and sampling give new entities its values.
+/// dtype declares the values rule writes and must be every such field's
+/// type (SOMA_ERR_TYPE otherwise; C cannot check the function itself).
+int soma_mesh_set_rule(soma_mesh_t* mesh, const char* name, int dtype, soma_rule_fn rule, void* context);
+/// Whether the field named name (on dimension dim, or -1) has a rule.
+int soma_mesh_has_rule(const soma_mesh_t* mesh, const char* name, int dim, int* has);
+
+/* Sampling modes (soma::Sampling). */
+enum { SOMA_SAMPLE_POINT = 0, SOMA_SAMPLE_AVERAGE = 1, SOMA_SAMPLE_INTEGRAL = 2 };
+
+/// Gives the field named name (on dimension dim, or -1) the values of rule
+/// (of values of type dtype), or of the field's own rule when rule is NULL
+/// (dtype then unused), on every member: at points, or cell averages or
+/// integrals by a quadrature exact for polynomials of degree (soma::sample).
+int soma_mesh_sample(soma_mesh_t* mesh, const char* name, int dim, int dtype, soma_rule_fn rule, void* context,
+                     int mode, int degree);
+
 /* ---- Halo exchange ---------------------------------------------------- */
 
 /// Collective: the exchange of the shared copies and ghosts of dimension dim.

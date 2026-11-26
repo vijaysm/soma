@@ -685,6 +685,7 @@ void move_field(const Comm& comm, const HostMesh& mesh, const FieldInfo& info, H
   if (f.has_default()) options.default_value = f.default_value();
   if (f.has_global()) options.global_value = f.global_value();
   options.handle = info.handle;
+  options.rule = mesh.fields().template rule<T>(info.id);
   const auto g = part.fields().template add<T>(
       info.name, make_space(part, part_domain(comm, part, dom, arrived), info.layout), f.ncomp(), options);
   for (std::size_t i = 0; i < in.size(); ++i) {

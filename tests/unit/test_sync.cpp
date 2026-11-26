@@ -6,6 +6,7 @@
 // part a build of the live entities gives, with the ghosts the mesh had.
 
 #include <algorithm>
+#include <cmath>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -426,6 +427,49 @@ TEST(Sync, OwnersValuesReachTheCopies) {
       } else {
         EXPECT_GT(off, 0);
       }
+    }
+  }
+}
+
+// Midpoints added on both sides of part boundaries take the rule where they
+// are made, so after sync_mesh every copy, ghosts included, holds the rule
+// at its point, with or without the owners' values sent.
+TEST(Sync, RulesGiveAddedEntitiesTheSameValuesOnEveryRank) {
+  const Comm c = Comm::world();
+  const auto f = [](Real x, Real y, Real z) { return std::exp(x) * std::sin(5 * y) + z; };
+  for (const bool fields : {true, false}) {
+    for (const int layers : {0, 1}) {
+      SCOPED_TRACE(testing::Message() << "fields " << fields << " layers " << layers);
+      soma::HostMesh m = box_part(c, spec_of(Topology::quad, 4), Part{.layers = layers});
+      soma::FieldOptions<Real> o;
+      o.rule = soma::pointwise(f);
+      auto u = m.fields().add_tag<Real>("u", 0, 1, std::move(o)).view();
+      for (LO i = 0; i < m.count(0); ++i) {
+        u(static_cast<std::size_t>(i), 0) = f(m.coords()(i, 0), m.coords()(i, 1), m.coords()(i, 2));
+      }
+      {
+        const auto v = m.view();
+        soma::MeshEdit edit(m);
+        std::vector<LO> old;
+        for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
+          const LO a = v.vertex(2, e, 0), b = v.vertex(2, e, 1), q = v.vertex(2, e, 2), r = v.vertex(2, e, 3);
+          std::vector<Real> p;
+          for (int k = 0; k < 3; ++k) p.push_back((m.coords()(a, k) + m.coords()(b, k)) / 2);
+          const LO x = edit.add_vertices(p);
+          edit.add_elements(Topology::tri, std::vector<LO>{a, x, r, x, b, q, x, q, r});
+          old.push_back(e);
+        }
+        edit.remove(2, old);
+        (void)edit.apply();
+      }
+      (void)soma::sync_mesh(c, m, {.tol = {1e-12, soma::PointNorm::l2}, .fields = fields});
+      const auto w = m.fields().get<Real>("u", 0).view();
+      std::int64_t off = 0;
+      for (LO i = 0; i < m.count(0); ++i) {
+        off += w(static_cast<std::size_t>(i), 0) != f(m.coords()(i, 0), m.coords()(i, 1), m.coords()(i, 2));
+      }
+      EXPECT_EQ(c.allreduce(off, Op::sum), 0);
+      EXPECT_TRUE(m.fields().has_rule(m.fields().get<Real>("u", 0).id()));
     }
   }
 }

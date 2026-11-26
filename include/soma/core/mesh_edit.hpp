@@ -53,8 +53,9 @@ double removed_fraction(const HostMesh& mesh);
 /// the elements of the old dimension become explicit sides, which deriving
 /// sides then requires to be sides of some element.
 /// Removed entities leave every set. Fields over every entity of a dimension
-/// grow, the added entities at the field's default; other fields keep their
-/// members. Graphs the mesh holds are built again over the live entities (rows
+/// grow: the added entities take the field's rule (soma/fields/field_rule.hpp;
+/// one call per field and dimension, with all of them) or else its default;
+/// other fields keep their members. Graphs the mesh holds are built again over the live entities (rows
 /// of removed entities are empty). Sides lose their completeness when elements
 /// or sides are added or removed, so a held graph touching them derives them
 /// again: sides keep their gids (new ones take the next gids, and those that

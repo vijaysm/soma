@@ -24,6 +24,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "soma/algorithms/refine.hpp"
+#include "soma/algorithms/sample.hpp"
 #include "soma/fields/registry.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/halo_exchange.hpp"
@@ -389,6 +390,49 @@ TEST(RefineMarked, FieldsCarryOver) {
   EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
   EXPECT_TRUE(fine.mesh.fields().contains("refine:level"));
   EXPECT_TRUE(fine.mesh.fields().contains("refine:birth"));
+}
+
+// A cell field with a rule: the cells not split keep their values, the
+// children take the rule at their centres; a vertex field's hanging vertices
+// take the rule too, and so does every new vertex.
+TEST(RefineMarked, RulesGiveOnlyNewEntitiesValues) {
+  const Comm c = Comm::world();
+  for (const bool conforming : {false, true}) {
+    SCOPED_TRACE(conforming ? "conforming" : "hanging");
+    soma::HostMesh mesh = build(c, volume(3, 3, 3, Topology::hex), 0);
+    soma::FieldOptions<double> o;
+    o.rule = soma::pointwise([](Real x, Real y, Real z) { return 1000 + x + 10 * y + 100 * z; });
+    auto q = mesh.fields().add_tag<double>("q", 3, 1, std::move(o)).view();
+    for (LO e = 0; e < mesh.count(3); ++e) q(static_cast<std::size_t>(e), 0) = static_cast<Real>(mesh.gid(3)(e));
+    soma::FieldOptions<double> vo;
+    vo.rule = soma::pointwise([](Real x, Real y, Real z) { return x - y + z; });
+    auto u = mesh.fields().add_tag<double>("u", 0, 1, std::move(vo)).view();
+    for (LO v = 0; v < mesh.count(0); ++v) u(static_cast<std::size_t>(v), 0) = -7;
+    const auto fine = soma::refine_marked(c, mesh, near_origin(mesh, radii[0]), {.conforming = conforming});
+    const auto fq = fine.mesh.fields().get<double>("q", 3).view();
+    const auto fu = fine.mesh.fields().get<double>("u", 0).view();
+    const auto cells = soma::entity_batch(fine.mesh, 3);
+    Real wrong = 0, kept = 0, made = 0;
+    for (LO e = 0; e < fine.mesh.count(3); ++e) {
+      const auto p = static_cast<std::size_t>(fine.parent[static_cast<std::size_t>(e)]);
+      const LO siblings = static_cast<LO>(fine.child_offsets[p + 1] - fine.child_offsets[p]);
+      const auto x = cells.batch().center(static_cast<std::size_t>(e));
+      const Real want = siblings == 1 ? q(p, 0) : 1000 + x[0] + 10 * x[1] + 100 * x[2];
+      wrong += fq(static_cast<std::size_t>(e), 0) == want ? 0 : 1;
+      (siblings == 1 ? kept : made) += 1;
+    }
+    std::vector<GO> old;
+    for (LO v = 0; v < mesh.count(0); ++v) old.push_back(mesh.gid(0)(v));
+    std::sort(old.begin(), old.end());
+    for (LO v = 0; v < fine.mesh.count(0); ++v) {
+      const auto x = point(fine.mesh, v);
+      const bool was = std::binary_search(old.begin(), old.end(), fine.mesh.gid(0)(v));
+      wrong += fu(static_cast<std::size_t>(v), 0) == (was ? -7 : x[0] - x[1] + x[2]) ? 0 : 1;
+    }
+    EXPECT_EQ(c.allreduce(wrong, soma::Op::sum), 0);
+    EXPECT_GT(c.allreduce(kept, soma::Op::sum), 0);
+    EXPECT_GT(c.allreduce(made, soma::Op::sum), 0);
+  }
 }
 
 // Conforming: no hanging vertex is left, the boundary keeps its measure and
