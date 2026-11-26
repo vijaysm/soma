@@ -356,8 +356,9 @@ int soma_mesh_has_rule(const soma_mesh_t* mesh, const char* name, int dim, int* 
 enum { SOMA_SAMPLE_POINT = 0, SOMA_SAMPLE_AVERAGE = 1, SOMA_SAMPLE_INTEGRAL = 2 };
 
 /// Gives the field named name (on dimension dim, or -1) the values of rule
-/// (of values of type dtype), or of the field's own rule when rule is NULL
-/// (dtype then unused), on every member: at points, or cell averages or
+/// (of values of type dtype, or of the field's own type when dtype is
+/// negative), or of the field's own rule when rule is NULL (dtype then
+/// unused), on every member: at points, or cell averages or
 /// integrals by a quadrature exact for polynomials of degree (soma::sample).
 int soma_mesh_sample(soma_mesh_t* mesh, const char* name, int dim, int dtype, soma_rule_fn rule, void* context,
                      int mode, int degree);

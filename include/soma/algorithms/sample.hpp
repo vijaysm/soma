@@ -163,6 +163,10 @@ void sample(const HostMesh& mesh, const Field<T, Kokkos::HostSpace>& field,
           sum += b.weights[p] * static_cast<Real>(v[p * ncomp + k]);
           measure += b.weights[p];
         }
+        if (options.mode == Sampling::average && !(measure != 0)) {
+          throw std::invalid_argument("sample: field '" + info.name + "': an average over a cell of no measure (row " +
+                                      std::to_string(b.rows[i]) + ")");
+        }
         to(static_cast<std::size_t>(b.rows[i]), k) =
             static_cast<T>(options.mode == Sampling::average ? sum / measure : sum);
       }

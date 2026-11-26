@@ -1350,7 +1350,8 @@ contains
   end function
 
   !> Gives the field named name (on dimension dim, if given) the values of
-  !> rule (of values of type dtype), or of its own rule when rule is absent:
+  !> rule (of values of type dtype, by default the field's own), or of its
+  !> own rule when rule is absent:
   !> mode SOMA_SAMPLE_POINT (default) at the entities or element nodes,
   !> SOMA_SAMPLE_AVERAGE or SOMA_SAMPLE_INTEGRAL over each cell by a
   !> quadrature exact for polynomials of degree (default 4).

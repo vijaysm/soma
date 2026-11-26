@@ -61,7 +61,9 @@ double removed_fraction(const HostMesh& mesh);
 /// again: sides keep their gids (new ones take the next gids, and those that
 /// no live element has any more go), lids are renumbered, and sets and fields
 /// follow through the gids. The epoch does not change.
-/// apply() then compresses the mesh when removed_fraction reaches the
+/// apply() then compresses the mesh when the fraction of slots holding
+/// removed entities, as removed_fraction counts it but without the ghosts an
+/// edit of a distributed part drops (sync_mesh places them again), reaches the
 /// compress threshold (the process-wide compress_threshold() of
 /// soma/runtime/options.hpp unless set_compress_threshold gave another; 0
 /// never compresses), and reports the renumbering.

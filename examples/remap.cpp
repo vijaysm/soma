@@ -99,7 +99,7 @@ soma::HostMesh grid(const soma::Comm& comm, int dim, int n, const double* lo, co
 // pointwise rule, which evaluates at each cell's centre.
 View values(soma::HostMesh& mesh) {
   const int d = mesh.dim();
-  const auto f = mesh.fields().add_tag<double>("u0", d, 1);
+  const auto f = mesh.fields().add_tag<double>("remap example: u0", d, 1);  // a name no file's field has
   soma::sample(mesh, f, soma::pointwise([](double x, double y, double) { return 2 + std::sin(x) * std::cos(y); }));
   View u("u", static_cast<std::size_t>(mesh.segment_table(d).owned_end));
   for (std::size_t e = 0; e < u.extent(0); ++e) u(e) = f.view()(e, 0);

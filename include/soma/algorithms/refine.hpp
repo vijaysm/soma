@@ -63,7 +63,8 @@
 /// first) for ranks to agree. Fields that have no way to give new vertices
 /// values (integer vertex fields with neither a rule nor a default), other
 /// fields, and edge and face fields are dropped and named in `dropped`; the
-/// internal soma: fields are rebuilt.
+/// internal soma: fields are rebuilt. Rules are each rank's own: set the same
+/// rules on every rank, or ranks may keep different fields.
 ///
 /// Each level is refine_marked (below) with every cell marked, so it keeps the
 /// refinement state: "refine:level" one up, "refine:birth" recorded for each

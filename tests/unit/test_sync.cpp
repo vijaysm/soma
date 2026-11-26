@@ -473,3 +473,25 @@ TEST(Sync, RulesGiveAddedEntitiesTheSameValuesOnEveryRank) {
     }
   }
 }
+
+// A dense field on derived edges, after removals: sync_mesh derives the
+// edges again with their sharing, so the field's owners' values are sent
+// on every rank alike (none throws for want of sharing on edges).
+TEST(Sync, FieldsOnDerivedEdgesAreSentWithTheirSharing) {
+  const Comm c = Comm::world();
+  soma::HostMesh m = box_part(c, spec_of(Topology::quad, 4), Part{.layers = 0});
+  soma::build_adjacencies(m, AdjacencyRequest{}.add(2, 1));
+  ASSERT_GT(m.count(1), 0);
+  (void)m.fields().add_tag<Real>("e", 1, 1);
+  std::vector<LO> gone;
+  for (LO e = 0; e < m.segment_table(2).owned_end; ++e) {
+    if (m.gid(2)(e) % 3 == 0) gone.push_back(e);
+  }
+  soma::MeshEdit edit(m);
+  edit.remove(2, gone);
+  (void)edit.apply();
+  ASSERT_NO_THROW((void)soma::sync_mesh(c, m, {.fields = true}));
+  EXPECT_GT(m.count(1), 0);
+  EXPECT_TRUE(m.fields().contains("e"));
+  EXPECT_NO_THROW((void)m.fields().get_var<int>("soma:sharing", 1));
+}

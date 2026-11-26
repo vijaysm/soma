@@ -19,6 +19,7 @@
 
 #include "refine_meshes.hpp"
 #include "soma/algorithms/sample.hpp"
+#include "soma/core/mesh_builder.hpp"
 #include "soma/core/mesh_geometry.hpp"
 #include "soma/parallel/distributed.hpp"
 #include "soma/parallel/ghosts.hpp"
@@ -260,4 +261,25 @@ TEST(Sample, TheFieldsRuleAndWhatSampleRefuses) {
   EXPECT_THROW(soma::sample(m, plain, ones), std::logic_error);
   soma::HostMesh other = m.clone();
   EXPECT_THROW(soma::sample(other, plain, twice), std::logic_error);
+}
+
+// An average over a cell of no measure (a quad folded flat, two corners on
+// two others) is refused, naming the field, rather than left NaN.
+TEST(Sample, AnAverageOverACellOfNoMeasureIsRefused) {
+  soma::MeshBuilder b(2);
+  const std::vector<GO> vg{1, 2, 3, 4}, cell{1};
+  const std::vector<Real> xyz{0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0};
+  b.add_vertices(vg, xyz);
+  b.add_elements(Topology::quad, cell, vg);
+  soma::HostMesh m = std::move(b).build();
+  const auto u = m.fields().add_tag<Real>("u", 2, 1);
+  const soma::FieldRule<Real> one = soma::pointwise([](Real, Real, Real) { return Real{1}; });
+  try {
+    soma::sample(m, u, one, {.mode = Sampling::average});
+    ADD_FAILURE() << "accepted";
+  } catch (const std::invalid_argument& e) {
+    EXPECT_NE(std::string(e.what()).find("no measure"), std::string::npos) << e.what();
+  }
+  soma::sample(m, u, one, {.mode = Sampling::integral});  // 0, as it should be
+  EXPECT_EQ(u.view()(0, 0), 0);
 }

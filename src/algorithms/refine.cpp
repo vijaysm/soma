@@ -198,7 +198,8 @@ std::vector<LO> same_entities(const HostMesh& in, const HostMesh& out, int d) {
 
 // Whether carry keeps a dense field of dimension d: a vertex field needs a
 // way to give new vertices values (a rule, floating values to interpolate, or
-// a default). The same on every rank, whatever each holds.
+// a default). The same on every rank when the ranks set the same rules, as
+// refine.hpp asks: rules are each rank's own.
 bool carried(const HostMesh& in, const FieldInfo& info, int d) {
   if (d != 0 || info.type == DataType::f32 || info.type == DataType::f64 || in.fields().has_rule(info.id)) {
     return true;

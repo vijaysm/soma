@@ -198,8 +198,8 @@ soma_add_test(test_field_rule SOURCES unit/test_field_rule.cpp)
 add_library(soma_compile_fail_rule_type OBJECT EXCLUDE_FROM_ALL compile_fail/rule_wrong_type.cpp)
 target_link_libraries(soma_compile_fail_rule_type PRIVATE soma)
 add_test(NAME compile_fail.rule_type
-  COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --target soma_compile_fail_rule_type)
-set_tests_properties(compile_fail.rule_type PROPERTIES
+  COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --config $<CONFIG> --target soma_compile_fail_rule_type)
+set_tests_properties(compile_fail.rule_type PROPERTIES RUN_SERIAL TRUE
   PASS_REGULAR_EXPRESSION "must return std::vector<T>, T being exactly the field's value type")
 soma_add_test(test_var_field SOURCES unit/test_var_field.cpp)
 soma_add_test(test_handle_ref SOURCES unit/test_handle_ref.cpp)

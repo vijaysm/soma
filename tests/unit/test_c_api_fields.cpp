@@ -341,6 +341,8 @@ TEST(CApiFields, RulesSampleAndRefine) {
   EXPECT_EQ(soma_mesh_sample(m, "xm", -1, 0, nullptr, nullptr, SOMA_SAMPLE_POINT, 0), SOMA_ERR_INVALID_ARGUMENT);
   EXPECT_EQ(soma_mesh_sample(m, "xm", -1, SOMA_I32, rule_x, nullptr, SOMA_SAMPLE_AVERAGE, 2), SOMA_ERR_TYPE);
   ASSERT_EQ(soma_mesh_sample(m, "xm", -1, SOMA_F64, rule_x, nullptr, SOMA_SAMPLE_AVERAGE, 1), SOMA_OK);
+  // A negative dtype: the field's own (Fortran's mesh%sample without dtype).
+  ASSERT_EQ(soma_mesh_sample(m, "xm", -1, -1, rule_x, nullptr, SOMA_SAMPLE_AVERAGE, 1), SOMA_OK) << last_error();
   if (count(m, 3) > 0) {
     EXPECT_EQ(soma_mesh_sample(m, "xm", -1, SOMA_F64, rule_fails, nullptr, SOMA_SAMPLE_POINT, 0), SOMA_ERR_RUNTIME);
     EXPECT_NE(last_error().find("returned 7"), std::string::npos) << last_error();

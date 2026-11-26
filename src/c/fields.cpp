@@ -393,7 +393,8 @@ int soma_mesh_sample(soma_mesh_t* mesh, const char* name, int dim, int dtype, so
     soma::HostMesh& m = need(mesh, what).get();
     const soma::FieldInfo f = soma::c::find(m, soma::c::name_of(name, what), dim);
     if (f.variable) throw soma::c::TypeError(std::string(what) + ": field '" + f.name + "' has variable length");
-    if (rule != nullptr && soma::c::dtype_of(dtype, what) != f.type) {
+    // A negative dtype: the values are the field's own type (Fortran's dtype absent).
+    if (rule != nullptr && dtype >= 0 && soma::c::dtype_of(dtype, what) != f.type) {
       throw soma::c::TypeError(std::string(what) + ": field '" + f.name + "' holds " + soma::name(f.type) +
                                " values, not " + soma::name(static_cast<soma::DataType>(dtype)));
     }
