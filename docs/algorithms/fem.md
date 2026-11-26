@@ -12,20 +12,22 @@ The elements are P1 on triangles and tets and Q1 on quads and hexes, with corner
 canonical order. The reference cells are the unit triangle $(0,0), (1,0), (0,1)$ and tet
 $(0,0,0), (1,0,0), (0,1,0), (0,0,1)$, and $[-1, 1]^d$ for quads and hexes. Cells of
 dimension 2 must lie in a plane $z = \text{const}$. No other topology, and no high-order
-nodes, are supported.
+nodes, are supported. A hex some of whose faces the triangles of two tets tile is a composite
+element (see [hexes against tets](#hexes-against-tets)).
 
 Everything in `fem.hpp` is in namespace `soma::fem`, device-callable and allocation-free:
 
 | Function | What it gives |
 | --- | --- |
-| `quadrature(Topology t, int degree)` | The smallest rule exact for polynomials of `degree` on the reference cell: Gauss-Legendre products on quads and hexes (up to degree 5), rules up to degree 4 on triangles and tets. |
-| `shape(t, xi, n, dn)` | Shape function values and reference gradients at `xi`; the node count. |
+| `quadrature(Topology t, int degree)` | The smallest rule exact for polynomials of `degree` on the reference cell: Gauss-Legendre products on quads and hexes (up to degree 5), rules up to degree 4 on triangles and tets; on the pyramid (base $[-1,1]^2$ at $\xi_3 = 0$, apex $(0,0,1)$), the collapsed rule of 27 points, exact to degree 3, whatever `degree`. |
+| `shape(t, xi, n, dn)` | Shape function values and reference gradients at `xi`; the node count. On the pyramid, the rational basis (not at the apex), for the composite hex. |
 | `cell_of(view, dim, e)` | A `fem::Cell`: topology, dimension, node count and corner coordinates of cell `e` of a `MeshView`. |
 | `at_point(c, xi, n, g)` | Shape values, physical gradients and the Jacobian determinant at `xi`. |
 | `least_jacobian(c)` | The smallest Jacobian determinant over the corners and Gauss points. |
 | `stiffness(c, k)` | $k_{ab} = \int \nabla N_a \cdot \nabla N_b$. |
 | `mass(c, m)` | $m_{ab} = \int N_a N_b$, exact on affine cells. |
 | `load(c, f, r)` | $r_a = \int f N_a$ by the degree-2 rule; `f(x, y, z)` device-callable. |
+| `stiffness(c, split, k)`, `load(c, split, f, r)` | The composite hex's, its faces split as `split` says; with `split` 0, the hex's own. |
 | `squared_error(c, u, exact)` | $\int (\sum_a u_a N_a - u_\text{exact})^2$ by a degree-4 rule (5 on quads and hexes). |
 
 The stiffness matrix is exact for simplices and for parallelogram-shaped quads and hexes.
@@ -91,6 +93,8 @@ are [`CsrMatrix`](linear-algebra.md) in the same layout.
 | `boundary()` | Per vertex, 1 on the mesh's boundary (a corner of a side of dimension `dim - 1` that only one cell has; with hanging vertices, one that no other such side lies in or has in it), as its owner finds it. Never a hanging vertex. |
 | `constrained()` | Whether the mesh has hanging vertices (see [hanging vertices](#hanging-vertices)). |
 | `hanging()` | Per vertex, 1 where it hangs; empty when not constrained. |
+| `composite()` | Whether a hex on any rank is a composite element (see [hexes against tets](#hexes-against-tets)). |
+| `split_sides()` | Per cell, its split code, 0 for a cell that is not composite. |
 | `distribute(comm, x)` | Collective. Each hanging vertex's value from its masters', then each owner's entries to its copies and ghosts (two updates); nothing when not constrained. Call it on a solution. |
 | `update(comm, x)` | Collective. Each owner's entries of `x` overwrite its copies and ghosts. |
 | `multiply(comm, a, x, y)` | Collective. Updates `x`, then $y = A x$ over the owned rows. |
@@ -102,8 +106,9 @@ are [`CsrMatrix`](linear-algebra.md) in the same layout.
 - Dimension 2 or 3, cells all triangles, quads, tets or hexes, no high-order nodes, not edited
   (changed by `MeshEdit::apply` and not compressed since).
 - Every cell positively oriented (`least_jacobian > 0`).
-- No hex face against the two triangles of two tets: the space would not be continuous there (a
-  linear solution is no longer reproduced exactly).
+- A quad face that triangles tile, they tile it as two halves of a diagonal (a hex face against
+  two tets, which makes the hex a [composite element](#hexes-against-tets)); one triangle on
+  half of it and something else on the other half is refused.
 - Hanging vertices, if any, with a record of the side each was born on (`"refine:birth"`, which
   `refine_marked` writes and `infer_births` recovers); see [hanging vertices](#hanging-vertices).
 - On more than one rank, a ghost layer through vertices, `GhostOptions{1, 0}` (see
@@ -177,6 +182,40 @@ record on every rank (five gids each), to resolve masters that hang.
 Measured (`FemSpace.ConvergesWithHangingVertices`): $-\Delta u = f$ with
 $u = \prod_i \sin(\pi x_i)$ on boxes refined once where $x < 0.4$; the largest error at a vertex
 falls at rates 2.09, 1.96 (tri), 1.93, 1.96 (quad), 2.03, 2.18 (tet), 1.98, 2.02 (hex).
+
+## Hexes against tets
+
+A hex face against the two triangles of two tets, with no pyramid between, would leave a
+space of Q1 hexes and P1 tets discontinuous there: the hex's trace on the face is bilinear, the
+tets' piecewise linear. Such a hex becomes a composite element instead. It is cut about its
+centre $c$ (the mean of its corners) into six pyramids, one on each face, and the pyramid on a
+split face into the two tets of that face's diagonal. The space on it is the rational pyramid
+basis and P1 on those tets:
+
+- across a whole face its trace is bilinear, as a neighbouring hex's;
+- across a split face it is linear on each triangle, as the tets';
+- inside, the sub-cells meet on triangles, where every trace is linear.
+
+So it is continuous, and it holds linear functions: the pyramids are isoparametric.
+
+The centre's value is tied to the mean of the corners', $u_c = \tfrac18 \sum_a u_a$, exact for
+linear functions. The element's $9 \times 9$ matrix and load reduce to $8 \times 8$,
+$k = T^T k_9 T$ and $r = T^T r_9$, with $T$ the identity on the corners and $\tfrac18$ each
+for the centre. The sparsity is the hex's, and every assembly mode works unchanged. The
+pyramids are integrated by the collapsed rule of 27 points, exact for a pyramid with a
+parallelogram base. A hex that no split face touches stays Q1.
+
+The split codes hold 2 bits a face, in canonical face order: 0 for a whole face, 1 for one split
+by the diagonal through the face's corners 0 and 2, and 2 for the other diagonal. They are
+found on each hex's owner, from the one-sided triangles on its one-sided quads
+(`detail::split_sides`), and sent to its ghosts: a ghost hex may lack the tets against its far
+faces. A side two triangles tile is between cells, so its corners are not boundary.
+
+Measured (`FemSpace.HexesAgainstTetsAreCompositeElements` and `ConvergesOnHexesAgainstTets`):
+on the unit cube, hexes where $x < 1/2$ and six tets a cell elsewhere, a linear function solves
+Laplace's equation to rounding, perturbed or not. The matrix and load are the serial ones bit
+for bit on 1 to 8 ranks. For $-\Delta u = f$ with $u = \prod_i \sin(\pi x_i)$, the largest
+error at a vertex falls at rates 2.07 and 2.05 over $n = 6, 12, 24$ cells a side.
 
 ## Assembly modes
 

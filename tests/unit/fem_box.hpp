@@ -118,7 +118,9 @@ inline soma::HostMesh box_part(const Comm& c, const soma::testing::BoxSpec& spec
 // elsewhere, by diagonals that alternate cell by cell; dealt in blocks of
 // cell gids, a ghost layer through vertices on more than one rank. Its hex
 // faces at x = 1/2 meet two triangles each: sides that tile without matching.
-inline soma::HostMesh hexes_against_tets(const Comm& c, int n) {
+// `perturb` moves each vertex off the box's faces by up to a sixth of a cell
+// in each direction, from its gid alone.
+inline soma::HostMesh hexes_against_tets(const Comm& c, int n, bool perturb = false) {
   const auto id = [&](int i, int j, int k) { return static_cast<GO>(1 + i + (n + 1) * (j + (n + 1) * k)); };
   std::vector<GO> hex_gids, hexes, tet_gids, tets;
   GO cell = 1;
@@ -166,7 +168,12 @@ inline soma::HostMesh hexes_against_tets(const Comm& c, int n) {
   std::vector<Real> xyz;
   for (const GO g : vg) {
     const GO z = (g - 1) / ((n + 1) * (n + 1)), y = (g - 1) / (n + 1) % (n + 1), x = (g - 1) % (n + 1);
-    xyz.insert(xyz.end(), {static_cast<Real>(x) / n, static_cast<Real>(y) / n, static_cast<Real>(z) / n});
+    const GO at[3] = {x, y, z};
+    for (int q = 0; q < 3; ++q) {
+      const bool face = at[q] == 0 || at[q] == n;
+      const auto k = static_cast<Real>((g * 7919 + q * 104729) % 1000) / 1000;
+      xyz.push_back((static_cast<Real>(at[q]) + (perturb && !face ? (2 * k - 1) / 6 : 0)) / n);
+    }
   }
   soma::MeshBuilder b(3);
   b.add_vertices(vg, xyz);

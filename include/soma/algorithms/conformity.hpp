@@ -5,9 +5,11 @@
 #define SOMA_ALGORITHMS_CONFORMITY_HPP_
 
 /// \file
-/// Sides of a mesh that tile without matching: what FemSpace refuses
-/// (FvSpace takes them, each tile a face).
+/// Sides of a mesh that tile without matching: FvSpace makes each tile a
+/// face; FemSpace constrains hanging vertices and makes a hex whose faces two
+/// triangles tile a composite element.
 
+#include <cstdint>
 #include <vector>
 
 #include <Kokkos_Core.hpp>
@@ -34,6 +36,19 @@ struct Nonconforming {
   std::vector<LO> vertices;
 };
 Nonconforming nonconforming(const Mesh<Kokkos::HostSpace>& mesh);
+
+/// Per cell, the sides of a hex that two triangles of other cells tile, as
+/// fem::stiffness(c, split, k) takes them: 2 bits a side in canonical order,
+/// 0 whole, 1 split by the diagonal through the side's corners 0 and 2, 2 by
+/// that through 1 and 3; 0 for other cells. `odd` counts the one-sided quads
+/// of owned cells with a one-sided triangle on three of their corners that
+/// is not one of two such halves. Not collective: a ghost's code is this
+/// rank's view, its owner's taken by a halo update.
+struct SplitSides {
+  std::vector<std::uint16_t> code;
+  LO odd = 0;
+};
+SplitSides split_sides(const Mesh<Kokkos::HostSpace>& mesh);
 
 /// Per vertex, 1 on the mesh's skin: a corner of a one-sided side (one cell
 /// has it) that neither lies in another one-sided side nor has one in it, so

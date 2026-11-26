@@ -721,11 +721,45 @@ TEST(FemSpace, NumberingIsContiguousAndAgreesOnEveryHolder) {
   }
 }
 
-// A hex face against two tets' triangles: the space would not be continuous.
-// Refused on every rank.
-TEST(FemSpace, AQuadAgainstTwoTrianglesThrowsOnEveryRank) {
+// A quad side one triangle covers half of, the other half two triangles
+// about the middle of the diagonal: the space would not be continuous there.
+// Refused on every rank (the mesh on rank 0, nothing elsewhere).
+TEST(FemSpace, AQuadTiledByTrianglesOnlyInPartIsRefused) {
   const Comm c = Comm::world();
-  expect_message(c, fem_test::hexes_against_tets(c, 4), "two triangles tile");
+  soma::MeshBuilder b(3);
+  std::vector<GO> hex_gid, hex, tet_gid, tet;
+  if (c.rank() == 0) {
+    // The unit cube, then against its side x = 1 (corners 2 3 7 6 below):
+    // triangle 2 3 7 and, about m = 10 (the middle of 2-7), 2 10 6 and 10 7 6.
+    const std::vector<Real> xyz = {0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1,
+                                   2, 0.5, 0.5, 1, 0.5, 0.5};
+    const std::vector<GO> vg = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10};
+    b.add_vertices(vg, xyz);
+    hex_gid = {1};
+    hex = {1, 2, 3, 4, 5, 6, 7, 8};
+    const std::vector<std::array<GO, 4>> tets = {{2, 3, 7, 9}, {2, 10, 6, 9}, {10, 7, 6, 9}};
+    for (std::size_t t = 0; t < tets.size(); ++t) {
+      std::array<GO, 4> g = tets[t];
+      // Positively oriented: (b - a) x (c - a) . (d - a) > 0.
+      Real p[4][3];
+      for (int k = 0; k < 4; ++k) {
+        for (int q = 0; q < 3; ++q) p[k][q] = xyz[static_cast<std::size_t>(3 * (g[static_cast<std::size_t>(k)] - 1) + q)];
+      }
+      const Real u[3] = {p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]};
+      const Real v[3] = {p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]};
+      const Real w[3] = {p[3][0] - p[0][0], p[3][1] - p[0][1], p[3][2] - p[0][2]};
+      const Real det = (u[1] * v[2] - u[2] * v[1]) * w[0] + (u[2] * v[0] - u[0] * v[2]) * w[1] +
+                       (u[0] * v[1] - u[1] * v[0]) * w[2];
+      if (det < 0) std::swap(g[2], g[3]);
+      tet_gid.push_back(static_cast<GO>(t + 2));
+      tet.insert(tet.end(), g.begin(), g.end());
+    }
+    b.add_elements(Topology::hex, hex_gid, hex);
+    b.add_elements(Topology::tet, tet_gid, tet);
+  }
+  soma::HostMesh mesh = soma::build_local_part(c, std::move(b));
+  if (c.size() > 1) mesh.add_ghosts(c, soma::GhostOptions{1, 0, false});
+  expect_message(c, mesh, "tile only in part");
 }
 
 namespace {
@@ -871,4 +905,75 @@ TEST(FemSpace, HangingVerticesNeedBirthsAndGhosts) {
   mesh.fields().remove(mesh.fields().get<std::int64_t>("refine:birth", 0).id());
   expect_message(c, mesh, "without a record of the side it was born on");
   if (c.size() >= 3) expect_message(c, refined_box(c, Topology::quad, 4, 1, 1), "add a ghost layer");
+}
+
+// Hexes against tets, no pyramid between: each hex with a side two
+// triangles tile is a composite element, the space continuous, so a linear
+// function solves Laplace's equation exactly (the patch test). On any
+// partition the owned rows and the load are the serial ones bit for bit
+// (each hex's split its owner's verdict); atomic and colored assembly agree
+// to rounding.
+TEST(FemSpace, HexesAgainstTetsAreCompositeElements) {
+  const Comm c = Comm::world();
+  constexpr int n = 4;
+  const soma::HostMesh whole = fem_test::hexes_against_tets(Comm::self(), n, true);
+  const Space serial(Comm::self(), whole);
+  ASSERT_TRUE(serial.composite());
+  LO split = 0;
+  for (LO e = 0; e < whole.count(3); ++e) split += serial.split_sides()(e) != 0 ? 1 : 0;
+  EXPECT_EQ(split, n * n);  // the hexes at x = 1/2, one split side each
+  EXPECT_LE(linear_error(Comm::self(), whole, serial), 1e-10);
+  const Entries want = by_gid(whole, serial.laplacian(Comm::self()));
+  const auto want_b = owned_by_gid(whole, serial.rows(), serial.load(Comm::self(), Load{}));
+  const soma::HostMesh mesh = fem_test::hexes_against_tets(c, n, true);
+  const Space space(c, mesh);
+  EXPECT_TRUE(space.composite());
+  const Entries here = by_gid(mesh, space.laplacian(c));
+  EXPECT_EQ(first_difference(here, want), "");
+  EXPECT_EQ(first_difference(owned_by_gid(mesh, space.rows(), space.load(c, Load{})), want_b), "");
+  EXPECT_LE(linear_error(c, mesh, space), 1e-10);
+  for (const soma::Assembly how : {soma::Assembly::atomic, soma::Assembly::colored}) {
+    const Space other(c, mesh, how);
+    if (other.reproducible()) continue;
+    const Entries got = by_gid(mesh, other.laplacian(c));
+    ASSERT_EQ(got.size(), here.size());
+    LO far = 0;
+    for (const auto& [ij, v] : got) far += std::abs(v - here.at(ij)) <= 1e-13 * (1 + std::abs(v)) ? 0 : 1;
+    EXPECT_EQ(far, 0) << static_cast<int>(how);
+  }
+}
+
+// -lap u = f with u = prod sin(pi x_i), u = 0 on the boundary, on hexes
+// against tets: the largest error at a vertex falls at second order.
+TEST(FemSpace, ConvergesOnHexesAgainstTets) {
+  const Comm c = Comm::world();
+  struct Sines {
+    KOKKOS_INLINE_FUNCTION Real operator()(Real x, Real y, Real z) const {
+      const Real pi = 3.14159265358979323846;
+      return 3 * pi * pi * Kokkos::sin(pi * x) * Kokkos::sin(pi * y) * Kokkos::sin(pi * z);
+    }
+  };
+  std::vector<Real> errors;
+  for (const int n : {6, 12, 24}) {
+    const soma::HostMesh mesh = fem_test::hexes_against_tets(c, n);
+    const Space space(c, mesh);
+    Matrix a = space.laplacian(c);
+    Vector b = space.load(c, Sines{});
+    Vector zero = space.vector();
+    soma::apply_dirichlet(a, b, space.boundary(), soma::View1<const Real, Kokkos::HostSpace>(zero));
+    Vector x = space.vector();
+    EXPECT_TRUE(soma::cg(c, space, a, soma::View1<const Real, Kokkos::HostSpace>(b), x, {.rtol = 1e-12}).converged);
+    space.update(c, x);
+    Real worst = 0;
+    const auto xyz = mesh.coords();
+    const Real pi = 3.14159265358979323846;
+    for (LO v = 0; v < mesh.count(0); ++v) {
+      const Real u = std::sin(pi * xyz(v, 0)) * std::sin(pi * xyz(v, 1)) * std::sin(pi * xyz(v, 2));
+      worst = std::max(worst, std::abs(x(v) - u));
+    }
+    errors.push_back(c.allreduce(worst, soma::Op::max));
+    if (c.rank() == 0) std::printf("hexes against tets n %d: max error %.4e\n", n, errors.back());
+  }
+  EXPECT_GE(std::log2(errors[0] / errors[1]), 1.8) << errors[0] << " " << errors[1];
+  EXPECT_GE(std::log2(errors[1] / errors[2]), 1.8) << errors[1] << " " << errors[2];
 }

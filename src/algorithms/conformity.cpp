@@ -126,6 +126,50 @@ Nonconforming nonconforming(const Mesh<Kokkos::HostSpace>& mesh) {
   return out;
 }
 
+SplitSides split_sides(const Mesh<Kokkos::HostSpace>& mesh) {
+  SplitSides out;
+  const int dim = mesh.dim();
+  const MeshView<Kokkos::HostSpace> m = mesh.view();
+  const LO cells = m.count(dim);
+  out.code.assign(static_cast<std::size_t>(cells), 0);
+  if (dim != 3) return out;
+  std::vector<Key> keys;
+  for (LO e = 0; e < cells; ++e) {
+    for (int s = 0; s < topology::side_count(m, dim, e, dim - 1); ++s) keys.push_back(key_of(topology::side_of(m, dim, e, dim - 1, s)));
+  }
+  std::sort(keys.begin(), keys.end());
+  const auto once = [&](const Key& k) {
+    const auto [lo, hi] = std::equal_range(keys.begin(), keys.end(), k);
+    return hi - lo == 1;
+  };
+  const auto triangle = [&](LO a, LO b, LO c) {
+    topology::Side t;
+    t.n = 3;
+    t.v[0] = a;
+    t.v[1] = b;
+    t.v[2] = c;
+    return once(key_of(t));
+  };
+  const LO owned = mesh.segment_table(dim).owned_end;
+  for (LO e = 0; e < cells; ++e) {
+    if (m.topology(dim, e) != Topology::hex) continue;
+    for (int s = 0; s < 6; ++s) {
+      const topology::Side q = topology::side_of(m, dim, e, dim - 1, s);
+      if (!once(key_of(q))) continue;
+      const LO* v = q.v;
+      const bool a = triangle(v[0], v[1], v[2]), b = triangle(v[0], v[2], v[3]);
+      const bool c = triangle(v[0], v[1], v[3]), d = triangle(v[1], v[2], v[3]);
+      const bool by02 = a && b && !c && !d, by13 = c && d && !a && !b;
+      if (by02 || by13) {
+        out.code[static_cast<std::size_t>(e)] |= static_cast<std::uint16_t>((by02 ? 1u : 2u) << (2 * s));
+      } else if ((a || b || c || d) && e < owned) {
+        ++out.odd;
+      }
+    }
+  }
+  return out;
+}
+
 std::vector<std::uint8_t> conforming_skin(const Mesh<Kokkos::HostSpace>& mesh) {
   const int dim = mesh.dim();
   const MeshView<Kokkos::HostSpace> m = mesh.view();

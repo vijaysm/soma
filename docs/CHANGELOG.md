@@ -46,8 +46,11 @@ All notable changes to SOMA are recorded here. The format follows
   "refine:birth"), the space assembles P^T A P and P^T b, and `distribute` sets the hanging values after a solve.
   Continuous (linear solutions exact), second order in the max norm on refined boxes, bit for bit on any
   partition; on more than one rank it needs two ghost layers and checks them. Hanging vertices without a birth
-  record are refused (`infer_births`). A hex face against two tets' triangles is still refused: it took it and was
-  not continuous there (a linear solution off by 4e-2 on a mixed cube of 4^3 cells, halving as the mesh halves).
+  record are refused (`infer_births`).
+- `FemSpace` takes a hex face against two tets' triangles, which it refused: such a hex is a composite element,
+  six pyramids about its centre and two tets on each split face, the centre tied to the mean of the corners
+  (`fem::stiffness(c, split, k)`, `fem::load(c, split, f, r)`). Continuous (linear solutions exact), second order
+  in the max norm, bit for bit on any partition; a quad that triangles tile only in part is refused.
 
 ### Visualization
 
