@@ -5,7 +5,9 @@ triangles, quads, tets or hexes, on any number of ranks, by one of two schemes:
 
 - `FvScheme::upwind` (the default): first-order upwind and forward Euler;
 - `FvScheme::bounded`: second order where the solution is smooth, with no new extrema (to rounding):
-  flux-corrected transport over a linear reconstruction, in two stages.
+  flux-corrected transport over a linear reconstruction, in two stages. Its limiter can be turned
+  off (`FvOptions::limit`) to measure the scheme's own order of convergence; see
+  [convergence and the limiter](#convergence-and-the-limiter).
 
 It solves
 
@@ -49,7 +51,7 @@ orientation.
 Upwinding is monotone, but its error is first order: it spreads a bump and lowers its peak at
 every step (the figure below). The bounded scheme keeps upwind's two good properties, exact
 conservation and no new extrema, and is second order where $u$ is smooth. It is flux-corrected
-transport (Boris and Book) with Zalesak's limiter. One stage from $u$:
+transport (Boris and Book, 1973) with Zalesak's limiter (Zalesak, 1979). One stage from $u$:
 
 1. The upwind result $u^L$, as above. It has no new extrema.
 2. Each owned cell's gradient $\mathbf{g}_c$, by least squares over its face neighbours:
@@ -87,10 +89,91 @@ What it guarantees, with $\Delta t \le$ `max_dt`:
   must. Strict TVD is not the aim: in more than one dimension, a TVD scheme is at most first
   order (Goodman and LeVeque, 1985).
 
+With `FvOptions::limit = false` every correction is taken whole ($\alpha_f = 1$): the scheme is
+the unlimited second-order one, which makes new extrema (an overshoot of about 0.2 on a square
+wave), and has neither guarantee above but conservation. It is for convergence studies.
+
 A stage exchanges ghosts three times: the gradients with $u^L$, the limiter's $R^\pm$, and the
-new $u$. A step does six exchanges, and about three times the arithmetic of an upwind step. The
+new $u$ (twice without the limiter). A step does six exchanges, and about three times the
+arithmetic of an upwind step. The
 space holds its scratch (the gradients, $u^L$, $R^\pm$, the corrections and the two stages)
 only when made bounded.
+
+### Convergence and the limiter
+
+A limiter that holds each cell within the values around it is known to cost accuracy at smooth
+extrema: there the exact cell average can rise above every neighbour's value, the bounds forbid
+it, and the scheme is first order near the extremum. Guermond, Nazarov, Popov and Tomas (2018,
+section 4.7) note that "it is well known that, when applied to scalar conservation equations,
+limitation (in some broad sense) reduces the accuracy to first-order near maxima and minima of
+the solution";
+the clipping of peaks by flux-corrected transport goes back to Boris and Book (1973) and
+Zalesak (1979). The region concerned shrinks with the mesh, so in the $L^1$ norm the order is
+still 2 once the extrema are well resolved, and only the maximum norm stays first order
+(Guermond et al., remark 4.18). On coarse meshes the limiter acts on much of a bump that spans a
+few cells, and the measured $L^1$ rate is below 2.
+
+To measure the scheme's order apart from the limiter, turn it off:
+
+```cpp
+const soma::FvSpace<Kokkos::HostSpace> space(comm, mesh, soma::FvOptions{.scheme = soma::FvScheme::bounded,
+                                                                         .limit = false});
+```
+
+and start from, and compare with, exact cell averages, not centre values: a centre value is off
+the cell's average by $O(h^2)$, as much as the error being measured. `soma::sample` with
+`Sampling::average` gives them (see [rules and sampling](../concepts/fields.md#rules-values-for-new-entities-and-sampling)).
+
+The test `Fv.BoundedConvergesAtSecondOrder` does this. It carries a bump of compact support,
+$\cos^4$ of the distance from $(0.3, 0.3, 0.3)$ scaled to a quarter turn at radius $0.25$, by a
+uniform flow $(0.5, 0.25, 0.125)$ to $t = 0.4$, at half the largest step, on boxes of $n$ cells a
+side. The $L^1$ rates, $\log_2$ of the ratio of successive errors, on unwarped boxes:
+
+| Cells | Sizes $n$ | Limited (default) | Limiter off |
+| --- | --- | --- | --- |
+| tri | 16, 32, 64, 128 | 1.95, 2.00, 2.03 | 2.12, 2.11, 2.02 |
+| quad | 16, 32, 64, 128 | 1.56, 1.76, 1.99 | 1.78, 2.01, 2.01 |
+| tet | 8, 16, 32 | 1.60, 1.74 | 1.83, 1.97 |
+| hex | 8, 16, 32 | 1.40, 1.56 | 1.40, 1.78 |
+| hex | 12, 24, 48 | 1.62, 1.58 | 1.63, 1.97 |
+| hex | 16, 32, 64 | 1.56, 1.72 | 1.78, 2.03 |
+
+So:
+
+- Unlimited, the rate is 2 once the bump is resolved: from 16 to 32 cells a side on triangles and
+  tets, from 32 to 64 on quads, from 24 to 48 on hexes. Hexes have the fewest cells across the
+  bump, so they get there last.
+- Limited, the rate reaches 2 later (quads from 64 to 128). On the coarser meshes its error is the
+  smaller of the two (the unlimited scheme's largest errors are its undershoots at the foot of the
+  bump, where $u$ is zero); on the finest triangles it is up to 4% larger. It is below upwind's on
+  every mesh.
+- The quadrature of the averages is not a factor: averages at degree 6 and at degree 14 give
+  errors that agree to 5 digits.
+
+Two ways of loosening the bounds were measured and are not offered:
+
+- Widening a cell's bounds by the values at its faces on which both sides' linear
+  reconstructions agree (the upper bound taking the lesser of the two, the lower the greater)
+  left the hex rates as they were (1.56 at $n$ = 16 to 32) and let a square wave overshoot by
+  0.14 to 0.30.
+- Taking the bounds over 2 or 3 rings of face neighbours instead of 1 changed the errors by
+  less than 0.3%: at an extremum the cell is itself the greatest (or least) value of any ring
+  around it, so wider rings do not lift the bound where the clipping happens.
+
+Guermond et al. relax the bounds instead by an averaged second difference of $u$, $O(h^2)$ where
+$u$ is smooth, which restores second order in the maximum norm; `FvSpace` does not offer it.
+
+References:
+
+- J. P. Boris and D. L. Book, Flux-corrected transport. I. SHASTA, a fluid transport algorithm
+  that works, *J. Comput. Phys.* 11 (1973) 38–69.
+- S. T. Zalesak, Fully multidimensional flux-corrected transport algorithms for fluids,
+  *J. Comput. Phys.* 31 (1979) 335–362.
+- J.-L. Guermond, M. Nazarov, B. Popov and I. Tomas, Second-order invariant domain preserving
+  approximation of the Euler equations using convex limiting, *SIAM J. Sci. Comput.* 40 (2018)
+  A3211–A3239.
+- J. B. Goodman and R. J. LeVeque, On the accuracy of stable schemes for 2D scalar conservation
+  laws, *Math. Comp.* 45 (1985) 15–21.
 
 ### Why the result does not depend on the partition
 
@@ -111,7 +194,9 @@ template <class MemSpace>
 class FvSpace {
  public:
   FvSpace(const Comm& comm, const Mesh<MemSpace>& mesh, FvScheme scheme = FvScheme::upwind);
+  FvSpace(const Comm& comm, const Mesh<MemSpace>& mesh, const FvOptions& options);
   FvScheme scheme() const noexcept;
+  FvOptions options() const noexcept;
   LO rows() const noexcept;    // owned cells
   LO cols() const noexcept;    // all cells here
   LO faces() const noexcept;   // the faces of the owned cells
@@ -140,7 +225,16 @@ class FvSpace {
 `cols()` entries, or call `update()` first. `step` leaves them updated for the next step. The
 space's scratch is shared by copies of the space, so make one step at a time.
 
-`enum class FvScheme { upwind, bounded };` is in `soma/algorithms/fv.hpp` too.
+`enum class FvScheme { upwind, bounded };` and
+
+```cpp
+struct FvOptions {
+  FvScheme scheme = FvScheme::upwind;
+  bool limit = true;  // bounded only: Zalesak's limiter; off for convergence studies
+};
+```
+
+are in `soma/algorithms/fv.hpp` too.
 
 ## Usage
 
@@ -219,7 +313,7 @@ mesh:
   [ghosts and halos](../parallel/ghosts-and-halos.md)), which is needed so that every face of
   an owned cell is present;
 
-or if ranks differ in `soma::reproducible()`, which makes `total()` exact.
+or if ranks differ in `soma::reproducible()`, which makes `total()` exact, or in the options.
 
 Vectors must hold exactly `cols()` entries and flux views exactly `faces()`. A rank whose
 vectors are of the wrong size throws `std::invalid_argument`; in the collective calls that

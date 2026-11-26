@@ -22,6 +22,9 @@ All notable changes to SOMA are recorded here. The format follows
 - `sample(mesh, field, rule)`: a field's values from a rule at its entities or element nodes, or as
   cell averages or integrals by quadrature of any degree on every cell type, on the sphere for meshes on
   one. C: `soma_mesh_sample`; Fortran: `%sample`; Python: `mesh.sample`.
+- `FvOptions`: `FvSpace(comm, mesh, FvOptions{.scheme, .limit})`; `limit = false` turns the bounded scheme's
+  limiter off, to measure its order of convergence (2, from exact cell averages). The finite-volumes page
+  documents why the limiter slows the measured rate on coarse meshes, with the measurements and references.
 - Refinement keeps integer vertex fields that have a default (new vertices take it) instead of dropping
   them.
 - `sync_mesh(comm, mesh)` makes a distributed part whole after `MeshEdit` changed it on any rank: sharing, derived

@@ -25,6 +25,7 @@
 
 #include "fem_box.hpp"
 #include "soma/algorithms/fv.hpp"
+#include "soma/algorithms/sample.hpp"
 #include "soma/algorithms/refine.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/parallel/distributed.hpp"
@@ -123,8 +124,9 @@ Vector advected(const Comm& c, const soma::HostMesh& mesh, int steps, FvScheme s
 // The largest excursion of the owned u outside [0, 1] over 200 bounded steps
 // at 0.9 of the largest step, from a square wave: 1 in [0.2, 0.45]^d.
 template <class F>
-Real overshoot(const Comm& c, const soma::HostMesh& mesh, const F& a, Real inflow) {
-  const Space space(c, mesh, FvScheme::bounded);
+Real overshoot(const Comm& c, const soma::HostMesh& mesh, const F& a, Real inflow,
+               const soma::FvOptions& options = {.scheme = FvScheme::bounded}) {
+  const Space space(c, mesh, options);
   const auto phi = space.normal_flux(a);
   Vector u = space.vector();
   for (LO e = 0; e < space.cols(); ++e) {
@@ -155,30 +157,38 @@ Real compact(Real x, Real y, Real z, bool three) {
 }
 
 // The L1 error of a bump (Gaussian, or of compact support) carried by a
-// uniform flow to t = 0.4 on an n-cell box, unperturbed or warped. The
+// uniform flow to t = 0.4 on an n-cell box, unperturbed or warped, from and
+// against exact cell averages (soma::sample): a centre value is off the
+// average by O(h^2), as much as a second-order scheme's error. The
 // Gaussian's tail meets the walls, where nothing flows in: an error that does
 // not shrink, below upwind's but not below a second-order scheme's.
-Real l1_error(const Comm& c, Topology t, int n, FvScheme scheme, bool compact_bump, bool warped = false) {
-  const soma::HostMesh mesh =
+Real l1_error(const Comm& c, Topology t, int n, const soma::FvOptions& options, bool compact_bump,
+              bool warped = false) {
+  soma::HostMesh mesh =
       box_part(c, {n, n, solid(t) ? n : 1, t, 1.0, 1.0, 1.0}, Part{.perturb = false, .smooth = warped});
-  const Space space(c, mesh, scheme);
   const Uniform a{0.5, 0.25, solid(t) ? 0.125 : 0.0};
+  const Real end = 0.4;
+  const auto at = [&](Real shift) {
+    return soma::pointwise([&, shift](Real x, Real y, Real z) {
+      const Real p[3] = {x - a.a * shift, y - a.b * shift, z - a.c * shift};
+      return compact_bump ? compact(p[0], p[1], p[2], solid(t)) : bump(p[0], p[1], p[2], solid(t));
+    });
+  };
+  const int d = mesh.dim();
+  const auto start = mesh.fields().add_tag<Real>("start", d, 1);
+  const auto exact = mesh.fields().add_tag<Real>("exact", d, 1);
+  soma::sample(mesh, start, at(0), {.mode = soma::Sampling::average, .degree = 6});
+  soma::sample(mesh, exact, at(end), {.mode = soma::Sampling::average, .degree = 6});
+  const Space space(c, mesh, options);
   const auto phi = space.normal_flux(a);
   Vector u = space.vector();
-  for (LO e = 0; e < space.cols(); ++e) {
-    const auto x = centre(mesh, e);
-    u(e) = compact_bump ? compact(x[0], x[1], x[2], solid(t)) : bump(x[0], x[1], x[2], solid(t));
-  }
-  const Real end = 0.4;
+  for (LO e = 0; e < space.cols(); ++e) u(e) = start.view()(static_cast<std::size_t>(e), 0);
   const int steps = static_cast<int>(std::ceil(end / (0.5 * space.max_dt(c, CVector(phi)))));
   const Real dt = end / steps;
   for (int k = 0; k < steps; ++k) space.step(c, CVector(phi), u, dt);
   Real local = 0;
   for (LO e = 0; e < space.rows(); ++e) {
-    const auto x = centre(mesh, e);
-    const Real y[3] = {x[0] - a.a * end, x[1] - a.b * end, x[2] - a.c * end};
-    local += space.volume()(e) * std::abs(u(e) - (compact_bump ? compact(y[0], y[1], y[2], solid(t))
-                                                              : bump(y[0], y[1], y[2], solid(t))));
+    local += space.volume()(e) * std::abs(u(e) - exact.view()(static_cast<std::size_t>(e), 0));
   }
   return c.allreduce(local, soma::Op::sum);
 }
@@ -383,7 +393,7 @@ TEST(Fv, UpwindConvergesAtFirstOrder) {
     SCOPED_TRACE(soma::name(t));
     std::vector<Real> errors;
     for (const int n : solid(t) ? std::vector<int>{8, 16, 32} : std::vector<int>{16, 32, 64}) {
-      errors.push_back(l1_error(c, t, n, FvScheme::upwind, false));
+      errors.push_back(l1_error(c, t, n, {}, false));
       if (c.rank() == 0) std::printf("%s n %d L1 error %.4e\n", soma::name(t), n, errors.back());
     }
     for (std::size_t k = 1; k < errors.size(); ++k) {
@@ -394,25 +404,33 @@ TEST(Fv, UpwindConvergesAtFirstOrder) {
   }
 }
 
-// The bump of compact support, bounded: second order (the clipped peak slows
-// the coarse meshes), and always below upwind's error; on box meshes and on
-// their images under a smooth map, where cells are not parallelograms and
-// their corners' mean is off their centroid by O(h^2).
+// The bump of compact support, bounded with the limiter off, to measure the
+// scheme's own order: second order; on box meshes and on their images under a
+// smooth map, where cells are not parallelograms and their corners' mean is
+// off their centroid by O(h^2). Hexes need 48 cells a side before the rate
+// is 2. With the limiter (the default) the error is below upwind's; its rate reaches 2 only once the bump is well resolved (the
+// limiter clips smooth extrema), so it is not held to one here.
 TEST(Fv, BoundedConvergesAtSecondOrder) {
   const Comm c = Comm::world();
+  const soma::FvOptions unlimited{.scheme = FvScheme::bounded, .limit = false};
+  const soma::FvOptions limited{.scheme = FvScheme::bounded};
   for (const Topology t : all) {
     for (const bool warped : {false, true}) {
       SCOPED_TRACE(testing::Message() << soma::name(t) << " warped " << warped);
+      const std::vector<int> sizes = t == Topology::hex   ? std::vector<int>{12, 24, 48}
+                                     : solid(t)            ? std::vector<int>{8, 16, 32}
+                                                           : std::vector<int>{16, 32, 64};
       std::vector<Real> errors;
-      for (const int n : solid(t) ? std::vector<int>{8, 16, 32} : std::vector<int>{16, 32, 64}) {
-        errors.push_back(l1_error(c, t, n, FvScheme::bounded, true, warped));
+      for (const int n : sizes) {
+        errors.push_back(l1_error(c, t, n, unlimited, true, warped));
         if (c.rank() == 0) {
-          std::printf("%s n %d warped %d bounded L1 error %.4e\n", soma::name(t), n, warped, errors.back());
+          std::printf("%s n %d warped %d unlimited L1 error %.4e\n", soma::name(t), n, warped, errors.back());
         }
-        EXPECT_LT(errors.back(), l1_error(c, t, n, FvScheme::upwind, true, warped));
+        if (n == sizes.back()) continue;  // the finest is the costliest
+        EXPECT_LT(l1_error(c, t, n, limited, true, warped), l1_error(c, t, n, {}, true, warped));
       }
-      EXPECT_GE(std::log2(errors[0] / errors[1]), 1.3) << errors[0] << " " << errors[1];
-      EXPECT_GE(std::log2(errors[1] / errors[2]), 1.6) << errors[1] << " " << errors[2];
+      EXPECT_GE(std::log2(errors[0] / errors[1]), 1.5) << errors[0] << " " << errors[1];
+      EXPECT_GE(std::log2(errors[1] / errors[2]), 1.9) << errors[1] << " " << errors[2];
     }
   }
 }
@@ -434,9 +452,7 @@ TEST(Fv, BoundedStaysWithinTheInitialRange) {
     }
   }
   const soma::HostMesh mesh = box_part(c, {16, 16, 1, Topology::quad, 1.0, 1.0, 1.0});
-  soma::detail::fv_unlimited = true;
-  const Real unlimited = overshoot(c, mesh, Uniform{}, 0.0);
-  soma::detail::fv_unlimited = false;
+  const Real unlimited = overshoot(c, mesh, Uniform{}, 0.0, {.scheme = FvScheme::bounded, .limit = false});
   EXPECT_GT(unlimited, 1e-3);
 }
 
@@ -453,6 +469,30 @@ TEST(Fv, SolutionDigests) {
   }
   std::printf("digest reproducible %016llx\n", static_cast<unsigned long long>(h));
   std::printf("concurrency %d\n", Kokkos::DefaultHostExecutionSpace().concurrency());
+}
+
+// The options are kept; the limiter is on unless asked off, and without it
+// bounded steps of a square wave overshoot; ranks that differ in the options
+// are refused on every rank.
+TEST(Fv, OptionsAreKeptAndAgreedOn) {
+  const Comm c = Comm::world();
+  const soma::HostMesh mesh = box_part(c, {8, 8, 1, Topology::quad, 1.0, 1.0, 1.0});
+  EXPECT_TRUE(soma::FvOptions{}.limit);
+  const Space plain(c, mesh, FvScheme::bounded);
+  EXPECT_EQ(plain.options().scheme, FvScheme::bounded);
+  EXPECT_TRUE(plain.options().limit);
+  const Space off(c, mesh, {.scheme = FvScheme::bounded, .limit = false});
+  EXPECT_FALSE(off.options().limit);
+  EXPECT_EQ(off.scheme(), FvScheme::bounded);
+  if (c.size() > 1) {
+    std::string what;
+    try {
+      const Space space(c, mesh, {.scheme = FvScheme::bounded, .limit = c.rank() != 0});
+    } catch (const std::invalid_argument& e) {
+      what = e.what();
+    }
+    EXPECT_NE(what.find("ranks differ in FvOptions"), std::string::npos) << what;
+  }
 }
 
 // Meshes the space cannot take, refused on every rank.

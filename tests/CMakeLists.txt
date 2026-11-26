@@ -113,6 +113,12 @@ soma_add_test(test_refine_marked SOURCES unit/test_refine_marked.cpp RANKS 1 2 3
 soma_add_test(test_sample SOURCES unit/test_sample.cpp RANKS 1 2 3 4)
 soma_add_test(test_refine_quads SOURCES unit/test_refine_quads.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_fv SOURCES unit/test_fv.cpp RANKS 1 2 3 4 5 7 8)
+# The convergence studies take most of a minute on 8 ranks of one machine.
+foreach(np 1 2 3 4 5 7 8)
+  if(TEST test_fv.np${np})
+    set_tests_properties(test_fv.np${np} PROPERTIES TIMEOUT 180)
+  endif()
+endforeach()
 # Upwind steps are the same bit for bit at any number of threads.
 add_test(NAME test_fv.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_fv> -DFILTER=Fv.SolutionDigests
   -P ${CMAKE_CURRENT_SOURCE_DIR}/unit/compare_threads.cmake)
