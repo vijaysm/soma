@@ -65,6 +65,9 @@ module soma
                                 SOMA_SPHERE_CLIP_GREAT_CIRCLE = 1
   ! Marked refinement: how new vertices on rank boundaries match.
   integer, parameter, public :: SOMA_VERTICES_RECORDED = 0, SOMA_VERTICES_COORDINATES = 1
+  !> Sampling modes (mesh%sample).
+  integer, parameter, public :: SOMA_SAMPLE_POINT = 0, SOMA_SAMPLE_AVERAGE = 1, SOMA_SAMPLE_INTEGRAL = 2
+  public :: soma_entity_batch, soma_rule, soma_batch_arrays
 
   !> A communicator: the ranks a collective call runs on.
   type, public :: soma_comm
@@ -120,11 +123,17 @@ module soma
     generic :: field => mesh_field_f64, mesh_field_i32, mesh_field_i64
     procedure :: field_names => mesh_field_names
     procedure :: remove_field => mesh_remove_field
+    procedure :: set_rule => mesh_set_rule
+    procedure :: clear_rule => mesh_clear_rule
+    procedure :: has_rule => mesh_has_rule
+    procedure :: sample => mesh_sample
     procedure, private :: mesh_get_field_f64, mesh_get_field_i32, mesh_get_field_i64
     generic :: get_field => mesh_get_field_f64, mesh_get_field_i32, mesh_get_field_i64
     procedure, private :: mesh_set_field_f64, mesh_set_field_i32, mesh_set_field_i64
     generic :: set_field => mesh_set_field_f64, mesh_set_field_i32, mesh_set_field_i64
     procedure :: compress => mesh_compress
+    procedure :: needs_sync => mesh_needs_sync
+    procedure :: sync => mesh_sync
     procedure :: add_ghosts => mesh_add_ghosts
     procedure :: remove_ghosts => mesh_remove_ghosts
     procedure :: free => mesh_free
@@ -1286,6 +1295,135 @@ contains
     type(soma_renumbering) :: r
     call finish(c_mesh_compress(self%ptr, r%ptr), ierr)
   end function
+
+  !> True for a distributed part edited since its sharing was made.
+  function mesh_needs_sync(self, ierr) result(needs)
+    class(soma_mesh), intent(in) :: self
+    integer, intent(out), optional :: ierr
+    logical :: needs
+    integer(c_int) :: n
+    integer(c_int) :: status
+    n = 0
+    status = c_mesh_needs_sync(self%ptr, n)
+    needs = n /= 0
+    call finish(status, ierr)
+  end function
+
+  !> Sets the rule of every field named name: rule(batch, ncomp, values,
+  !> context) gives values to the entities refinement, edits and sampling give
+  !> the field. dtype (SOMA_F64, ...) declares the values rule writes and must
+  !> be the fields' type. context is passed to rule as it is; keep what it
+  !> points to alive while the rule is set.
+  subroutine mesh_set_rule(self, name, dtype, rule, context, ierr)
+    class(soma_mesh), intent(inout) :: self
+    character(*), intent(in) :: name
+    integer, intent(in) :: dtype
+    procedure(soma_rule) :: rule
+    type(c_ptr), intent(in), optional :: context
+    integer, intent(out), optional :: ierr
+    type(c_ptr) :: ctx
+    ctx = c_null_ptr
+    if (present(context)) ctx = context
+    call finish(c_mesh_set_rule(self%ptr, c_str(name), int(dtype, c_int), c_funloc(rule), ctx), ierr)
+  end subroutine
+
+  !> Clears the rule of every field named name.
+  subroutine mesh_clear_rule(self, name, dtype, ierr)
+    class(soma_mesh), intent(inout) :: self
+    character(*), intent(in) :: name
+    integer, intent(in) :: dtype
+    integer, intent(out), optional :: ierr
+    call finish(c_mesh_set_rule(self%ptr, c_str(name), int(dtype, c_int), c_null_funptr, c_null_ptr), ierr)
+  end subroutine
+
+  !> Whether the field named name (on dimension dim, if given) has a rule.
+  function mesh_has_rule(self, name, dim, ierr) result(has)
+    class(soma_mesh), intent(in) :: self
+    character(*), intent(in) :: name
+    integer, intent(in), optional :: dim
+    integer, intent(out), optional :: ierr
+    logical :: has
+    integer(c_int) :: h
+    h = 0
+    call finish(c_mesh_has_rule(self%ptr, c_str(name), int(dim_or_any(dim), c_int), h), ierr)
+    has = h /= 0
+  end function
+
+  !> Gives the field named name (on dimension dim, if given) the values of
+  !> rule (of values of type dtype, by default the field's own), or of its
+  !> own rule when rule is absent:
+  !> mode SOMA_SAMPLE_POINT (default) at the entities or element nodes,
+  !> SOMA_SAMPLE_AVERAGE or SOMA_SAMPLE_INTEGRAL over each cell by a
+  !> quadrature exact for polynomials of degree (default 4).
+  subroutine mesh_sample(self, name, dim, mode, degree, rule, dtype, context, ierr)
+    class(soma_mesh), intent(inout) :: self
+    character(*), intent(in) :: name
+    integer, intent(in), optional :: dim, mode, degree, dtype
+    procedure(soma_rule), optional :: rule
+    type(c_ptr), intent(in), optional :: context
+    integer, intent(out), optional :: ierr
+    type(c_funptr) :: f
+    type(c_ptr) :: ctx
+    integer(c_int) :: md, dg, t
+    f = c_null_funptr
+    if (present(rule)) f = c_funloc(rule)
+    ctx = c_null_ptr
+    if (present(context)) ctx = context
+    md = SOMA_SAMPLE_POINT
+    if (present(mode)) md = int(mode, c_int)
+    dg = 4
+    if (present(degree)) dg = int(degree, c_int)
+    t = -1
+    if (present(dtype)) t = int(dtype, c_int)
+    call finish(c_mesh_sample(self%ptr, c_str(name), int(dim_or_any(dim), c_int), t, f, ctx, md, dg), ierr)
+  end subroutine
+
+  !> A rule's batch as Fortran arrays: offsets(count + 1) (0-based, as
+  !> given), xyz(3, corners), and gid(count) (size 0 for points that are not
+  !> entities of the mesh).
+  subroutine soma_batch_arrays(batch, offsets, xyz, gid)
+    type(soma_entity_batch), intent(in) :: batch
+    integer(soma_lo), pointer, intent(out) :: offsets(:)
+    real(c_double), pointer, intent(out) :: xyz(:, :)
+    integer(soma_go), pointer, intent(out) :: gid(:)
+    integer :: n
+    call c_f_pointer(batch%offsets, offsets, [int(batch%count) + 1])
+    n = int(offsets(int(batch%count) + 1))
+    call c_f_pointer(batch%xyz, xyz, [3, n])
+    if (c_associated(batch%gid)) then
+      call c_f_pointer(batch%gid, gid, [int(batch%count)])
+    else
+      gid => empty_go
+    end if
+  end subroutine
+
+  !> Collective, in place: makes the part whole again after edits on any rank:
+  !> compressed, its sharing, graphs and ghost layers (none if ghosts is false)
+  !> made again; vertices added are matched by place, within tolerance (0); with
+  !> fields (true), owners' values of whole-dimension fields reach every copy.
+  subroutine mesh_sync(self, comm, tolerance, ghosts, fields, renumbering, ierr)
+    class(soma_mesh), intent(inout) :: self
+    type(soma_comm), intent(in) :: comm
+    real(c_double), intent(in), optional :: tolerance
+    logical, intent(in), optional :: ghosts, fields
+    type(soma_renumbering), intent(out), optional :: renumbering
+    integer, intent(out), optional :: ierr
+    type(soma_renumbering) :: r
+    real(c_double) :: tol
+    integer(c_int) :: g, f
+    tol = 0
+    if (present(tolerance)) tol = tolerance
+    g = 1
+    if (present(ghosts)) then
+      if (.not. ghosts) g = 0
+    end if
+    f = 1
+    if (present(fields)) then
+      if (.not. fields) f = 0
+    end if
+    call finish(c_mesh_sync(comm%ptr, self%ptr, tol, g, f, r%ptr), ierr)
+    if (present(renumbering)) renumbering = r
+  end subroutine
 
   !> The new id of each old id of dimension d (1-based; 0: removed).
   function renumbering_new_ids(self, d, ierr) result(ids)

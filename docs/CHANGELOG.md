@@ -12,6 +12,49 @@ All notable changes to SOMA are recorded here. The format follows
   `write_soma` writes it, or recognizes a plane or sphere, unless `SomaWriteOptions::geometry` (Python:
   `write_file(geometry=False)`) is false. SOMA 0.1.0 reads the files.
 
+### Algorithms
+
+- Field rules (`FieldOptions::rule`, `FieldRegistry::set_rule`): a function of the entities' corners,
+  called once with all of them, that gives new entities their values in refinement and `MeshEdit`, in
+  place of the parent's value, the corners' average or the default. Its value type is checked at compile
+  time. Copies, mirrors, migration and ghosts carry it; `write_soma` records which fields had one
+  (`missing_rules`). C: `soma_mesh_set_rule`; Fortran: `%set_rule`; Python: `mesh.set_rule`.
+- `sample(mesh, field, rule)`: a field's values from a rule at its entities or element nodes, or as
+  cell averages or integrals by quadrature of any degree on every cell type, on the sphere for meshes on
+  one. C: `soma_mesh_sample`; Fortran: `%sample`; Python: `mesh.sample`.
+- `FvOptions`: `FvSpace(comm, mesh, FvOptions{.scheme, .limit})`; `limit = false` turns the bounded scheme's
+  limiter off, to measure its order of convergence (2, from exact cell averages). The finite-volumes page
+  documents why the limiter slows the measured rate on coarse meshes, with the measurements and references.
+- `FvOptions::relax`, with `lower` and `upper`: the bounded scheme's bounds relaxed at smooth extrema (Guermond,
+  Nazarov, Popov and Tomas, 2018) within the range u may take; second order in the maximum norm, no overshoot of
+  the range.
+- Refinement keeps integer vertex fields that have a default (new vertices take it) instead of dropping
+  them.
+- `sync_mesh(comm, mesh)` makes a distributed part whole after `MeshEdit` changed it on any rank: sharing, derived
+  sides, ghosts and owners' field values (`SyncOptions::ghosts`, `fields`). `Mesh::needs_sync()` says when; until then the calls that use the sharing throw on every rank
+  (they took the part as having no shared entities, and `add_ghosts` placed no ghosts). C: `soma_mesh_sync`, `soma_mesh_needs_sync`; Fortran: `%sync`, `%needs_sync`; Python: `mesh.sync`,
+  `mesh.needs_sync`.
+- Fixed: on an edited mesh with removed vertices, sides derived again named the wrong vertices until it was compressed.
+- Fixed: an edit of a 3D mesh that held edges and faces could be refused after cells had been removed ("explicit
+  entity ... is no side of any element").
+- `FvSpace` takes meshes whose sides tile without matching: hanging vertices (`refine_marked` without
+  `conforming`, any number of levels) and a hex face against two tets' triangles. Each tile of a coarse side is a
+  face between the two cells; before, such faces were walls. Conservative, bit for bit on any partition, second
+  order across coarse-fine faces with the limiter off. On more than one rank a ghost layer too thin to hold every
+  cell across a coarse side is refused (tets refined so need two), as is any face seen from one side only.
+- `FemSpace` takes hanging vertices: each is constrained to its masters (`hanging_constraints`, from
+  "refine:birth"), the space assembles P^T A P and P^T b, and `distribute` sets the hanging values after a solve.
+  Continuous (linear solutions exact), second order in the max norm on refined boxes, bit for bit on any
+  partition; on more than one rank it needs two ghost layers and checks them. Hanging vertices without a birth
+  record are refused (`infer_births`).
+- `FemSpace` takes a hex face against two tets' triangles, which it refused: such a hex is a composite element,
+  six pyramids about its centre and two tets on each split face, the centre tied to the mean of the corners
+  (`fem::stiffness(c, split, k)`, `fem::load(c, split, f, r)`). Continuous (linear solutions exact), second order
+  in the max norm, bit for bit on any partition; a quad that triangles tile only in part is refused.
+- Documentation: what `FvSpace` and `FemSpace` take of refined and mixed meshes (a table in mesh refinement),
+  `hanging_constraints`, and figures of hanging constraints, coarse-fine faces and the composite hex, drawn from
+  a new figure data set (`nonconforming`) that runs the library on them.
+
 ### Visualization
 
 - AMR hierarchies as one unstructured mesh, closed where levels meet, so that 3D contours have no slivers there:

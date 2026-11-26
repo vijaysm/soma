@@ -18,6 +18,7 @@
 #include <hdf5.h>
 
 #include "sem_meshes.hpp"
+#include "soma/algorithms/sample.hpp"
 #include "soma/core/mesh_geometry.hpp"
 #include "soma/io/soma_file.hpp"
 #include "soma/parallel/comm.hpp"
@@ -186,4 +187,26 @@ TEST(GeometryFile, RanksMustAgree) {
   const HostMesh m = sem_test::box(c, 4, 4, 1, 1);
   EXPECT_THROW(soma::write_soma(c, m, dir.path(), {.geometry = c.rank() == 0}), std::invalid_argument);
   EXPECT_FALSE(fs::exists(dir.path()));
+}
+
+// Rules are functions, which files cannot hold: the file names the fields
+// that had one, so the mesh read back says which rules to set again.
+TEST(GeometryFile, FilesNameTheFieldsThatHadRules) {
+  const Comm c = Comm::world();
+  HostMesh m = soma::testing::box_mesh(c, {2, 2, 1, soma::Topology::quad});
+  soma::FieldOptions<Real> o;
+  o.rule = soma::pointwise([](Real x, Real, Real) { return x; });
+  (void)m.fields().add_tag<Real>("u", 0, 1, std::move(o));
+  (void)m.fields().add_tag<Real>("w", 2, 1);
+  EXPECT_TRUE(soma::missing_rules(m).empty());
+  const Scratch dir(c);
+  soma::write_soma(c, m, dir.path());
+  HostMesh back = soma::read_soma(c, dir.path());
+  EXPECT_EQ(soma::missing_rules(back), std::vector<std::string>{"u"});
+  back.fields().set_rule<Real>("u", soma::pointwise([](Real x, Real, Real) { return 2 * x; }));
+  EXPECT_TRUE(soma::missing_rules(back).empty());
+  // Written again without the rule: the file names none.
+  back.fields().set_rule<Real>("u", soma::FieldRule<Real>{});
+  soma::write_soma(c, back, dir.path());
+  EXPECT_FALSE(soma::read_soma(c, dir.path()).values().contains(soma::rules_value));
 }

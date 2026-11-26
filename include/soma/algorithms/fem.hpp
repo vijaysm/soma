@@ -8,7 +8,9 @@
 /// Linear finite elements on single cells: P1 triangles and tets, Q1 quads and
 /// hexes, with corners in MOAB's canonical order. Reference cells: the unit
 /// triangle (0,0) (1,0) (0,1) and tet (0,0,0) (1,0,0) (0,1,0) (0,0,1); [-1, 1]^d
-/// for quads and hexes. Cells of dimension 2 lie in a plane z = const.
+/// for quads and hexes. Cells of dimension 2 lie in a plane z = const. A hex
+/// some of whose sides two triangles tile is a composite element of pyramids
+/// and tets about its centre (stiffness and load with a split code).
 ///
 /// ```
 ///   fem::Cell c = fem::cell_of(view, dim, e);  // view = mesh.view()
@@ -26,6 +28,7 @@
 #include "soma/core/mesh_view.hpp"
 #include "soma/core/topology.hpp"
 #include "soma/core/types.hpp"
+#include "soma/topology/canonical.hpp"
 
 namespace soma::fem {
 
@@ -73,9 +76,24 @@ KOKKOS_INLINE_FUNCTION void gauss(int m, Real* x, Real* w) {
 }  // namespace detail
 
 /// The smallest rule here exact for polynomials of `degree` (at most 5 for
-/// quads and hexes, 4 for triangles and tets) on the reference cell.
+/// quads and hexes, 4 for triangles and tets) on the reference cell. On the
+/// pyramid (base [-1, 1]^2 at xi_3 = 0, apex (0, 0, 1)), whatever the degree,
+/// the collapsed rule of 3 Gauss points along each direction: exact for the
+/// stiffness and load of a pyramid with a parallelogram base, f of degree 2.
 KOKKOS_INLINE_FUNCTION Quadrature quadrature(Topology t, int degree) {
   Quadrature q;
+  if (t == Topology::pyramid) {
+    // xi = ((1 - z) a, (1 - z) b, z), dxi = (1 - z)^2 da db dz.
+    Real x[3], w[3];
+    detail::gauss(3, x, w);
+    for (int k = 0; k < 3; ++k) {
+      const Real z = (1 + x[k]) / 2, u = 1 - z;
+      for (int j = 0; j < 3; ++j) {
+        for (int i = 0; i < 3; ++i) detail::add(q, w[i] * w[j] * w[k] / 2 * u * u, u * x[i], u * x[j], z);
+      }
+    }
+    return q;
+  }
   if (t == Topology::quad || t == Topology::hex) {
     const int m = degree <= 1 ? 1 : degree <= 3 ? 2 : 3;
     Real x[3], w[3];
@@ -171,6 +189,24 @@ KOKKOS_INLINE_FUNCTION int shape(Topology t, const Real* xi, Real* n, Real (*dn)
       dn[a][2] = hex ? scale * fx * fy * sz[a] : 0;
     }
     return nodes;
+  }
+  if (t == Topology::pyramid) {
+    // The rational basis: bilinear on the base, linear on the triangles;
+    // not defined at the apex, which no rule here has.
+    constexpr Real sx[4] = {-1, 1, 1, -1};
+    constexpr Real sy[4] = {-1, -1, 1, 1};
+    const Real u = 1 - xi[2];
+    for (int a = 0; a < 4; ++a) {
+      const Real fx = u + sx[a] * xi[0], fy = u + sy[a] * xi[1];
+      n[a] = fx * fy / (4 * u);
+      dn[a][0] = sx[a] * fy / (4 * u);
+      dn[a][1] = sy[a] * fx / (4 * u);
+      dn[a][2] = fx * fy / (4 * u * u) - (fx + fy) / (4 * u);
+    }
+    n[4] = xi[2];
+    dn[4][0] = dn[4][1] = 0;
+    dn[4][2] = 1;
+    return 5;
   }
   return 0;
 }
@@ -459,6 +495,118 @@ KOKKOS_INLINE_FUNCTION Real load(const Cell& c, const F& f, Real* r) {
   if (!(least > 0)) {
     for (int a = 0; a < c.n; ++a) r[a] = 0;
   }
+  return least;
+}
+
+namespace detail {
+
+/// Over the sub-cells of a composite hex (see stiffness(c, split, k)), calls
+/// body(w, sub, node, n, g) at each point of their rules, tets' of
+/// `tet_degree`: w the weight times the Jacobian's determinant, sub the
+/// sub-cell, node[a] its corner a among the hex's 9 nodes (8 the centre).
+/// Returns the least determinant met, NaN for a cell unusable here or a split
+/// code of 3; unless it is > 0, body may have run on some points.
+template <class Body>
+KOKKOS_INLINE_FUNCTION Real integrate_composite(const Cell& c, unsigned split, int tet_degree, const Body& body) {
+  if (c.topology != Topology::hex || unusable(c)) return Kokkos::Experimental::quiet_NaN_v<Real>;
+  Real centre[3] = {0, 0, 0};
+  for (int a = 0; a < 8; ++a) {
+    for (int i = 0; i < 3; ++i) centre[i] += c.x[a][i] / 8;
+  }
+  Real least = Kokkos::Experimental::infinity_v<Real>;
+  for (int s = 0; s < 6; ++s) {
+    const canonical::SideDef side = canonical::side(Topology::hex, 2, s);
+    // The side seen from inside, so that the centre is above it.
+    const int b[4] = {side.v[0], side.v[3], side.v[2], side.v[1]};
+    const unsigned code = (split >> (2 * s)) & 3u;
+    if (code == 3) return Kokkos::Experimental::quiet_NaN_v<Real>;
+    int node[2][5] = {{b[0], b[1], b[2], b[3], 8}, {0, 0, 0, 0, 0}};
+    if (code == 1) {  // the diagonal through the side's corners 0 and 2
+      const int t[2][4] = {{b[0], b[1], b[2], 8}, {b[0], b[2], b[3], 8}};
+      for (int k = 0; k < 2; ++k) {
+        for (int a = 0; a < 4; ++a) node[k][a] = t[k][a];
+      }
+    } else if (code == 2) {  // through its corners 1 and 3
+      const int t[2][4] = {{b[0], b[1], b[3], 8}, {b[1], b[2], b[3], 8}};
+      for (int k = 0; k < 2; ++k) {
+        for (int a = 0; a < 4; ++a) node[k][a] = t[k][a];
+      }
+    }
+    const Topology t = code == 0 ? Topology::pyramid : Topology::tet;
+    const Quadrature q = quadrature(t, tet_degree);
+    for (int k = 0; k < (code == 0 ? 1 : 2); ++k) {
+      Cell sub;
+      sub.topology = t;
+      sub.dim = 3;
+      sub.n = code == 0 ? 5 : 4;
+      for (int a = 0; a < sub.n; ++a) {
+        for (int i = 0; i < 3; ++i) sub.x[a][i] = node[k][a] == 8 ? centre[i] : c.x[node[k][a]][i];
+      }
+      for (int p = 0; p < q.n; ++p) {
+        Real n[max_nodes], g[max_nodes][3];
+        const Real det = at_point(sub, q.xi[p], n, g);
+        least = lesser(least, det);
+        if (!(least > 0)) return least;
+        body(q.w[p] * det, sub, node[k], n, g);
+      }
+    }
+  }
+  return least;
+}
+
+}  // namespace detail
+
+/// A hex some of whose sides two triangles tile (a hex against tets, no
+/// pyramid between): the composite element. `split` holds 2 bits a side, in
+/// canonical side order (bits 2s and 2s + 1 for side s): 0 a whole side, 1 one
+/// split by the diagonal through the side's corners 0 and 2, 2 by that
+/// through 1 and 3. The hex is cut about its centre into six pyramids, a
+/// split side's pyramid into its two tets; the space is the rational pyramid
+/// basis and P1 on them, continuous across sides with Q1 hexes (bilinear
+/// traces) and with tets (linear ones), and holds linear functions. The
+/// centre's value is the mean of the corners', so the matrix is 8 x 8, as a
+/// hex's: k = T^T k9 T. Returns the least Jacobian determinant over the
+/// sub-cells' points; unless it is > 0, k is zero and not to be used. With
+/// split 0, stiffness(c, k).
+KOKKOS_INLINE_FUNCTION Real stiffness(const Cell& c, unsigned split, Real (*k)[max_nodes]) {
+  if (split == 0) return stiffness(c, k);
+  Real k9[9][9];
+  for (int a = 0; a < 9; ++a) {
+    for (int b = 0; b < 9; ++b) k9[a][b] = 0;
+  }
+  // The upper triangle of k9, each pair once per point.
+  const Real least = detail::integrate_composite(
+      c, split, 0, [&](Real w, const Cell& sub, const int* node, const Real*, const Real (*g)[3]) {
+        for (int a = 0; a < sub.n; ++a) {
+          for (int b = a; b < sub.n; ++b) {
+            const int i = node[a] < node[b] ? node[a] : node[b], j = node[a] < node[b] ? node[b] : node[a];
+            k9[i][j] += w * (g[a][0] * g[b][0] + g[a][1] * g[b][1] + g[a][2] * g[b][2]);
+          }
+        }
+      });
+  for (int a = 0; a < 8; ++a) {
+    for (int b = a; b < 8; ++b) k[a][b] = k9[a][b] + k9[a][8] / 8 + k9[b][8] / 8 + k9[8][8] / 64;
+  }
+  for (int a = 0; a < 8; ++a) {
+    for (int b = 0; b < 8; ++b) k[a][b] = !(least > 0) ? 0 : b < a ? k[b][a] : k[a][b];
+  }
+  return least;
+}
+
+/// The composite hex's load vector, as stiffness(c, split, k) makes its
+/// matrix: r = T^T r9, the tets' rule of degree 2. With split 0, load(c, f, r).
+template <class F>
+KOKKOS_INLINE_FUNCTION Real load(const Cell& c, unsigned split, const F& f, Real* r) {
+  if (split == 0) return load(c, f, r);
+  Real r9[9] = {0, 0, 0, 0, 0, 0, 0, 0, 0};
+  const Real least = detail::integrate_composite(
+      c, split, 2, [&](Real w, const Cell& sub, const int* node, const Real* n, const Real (*)[3]) {
+        Real x[3];
+        point(sub, n, x);
+        const Real fx = f(x[0], x[1], x[2]);
+        for (int a = 0; a < sub.n; ++a) r9[node[a]] += w * fx * n[a];
+      });
+  for (int a = 0; a < 8; ++a) r[a] = !(least > 0) ? 0 : r9[a] + r9[8] / 8;
   return least;
 }
 

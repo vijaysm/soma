@@ -71,6 +71,7 @@ Fields on entities. Documented in [fields](../concepts/fields.md).
 | [`soma/fields/space.hpp`](api/fields/space.md) | `Space` = domain × layout: the row numbering of every field defined on it |
 | [`soma/fields/domain_mesh.hpp`](api/fields/domain_mesh.md) | mesh-aware construction of domains and spaces (`SegmentFilter`, `make_space`) |
 | [`soma/fields/field.hpp`](api/fields/field.md) | `Field<T, MemSpace>` (typed handle on one field), `FieldOptions`, `FieldInfo` |
+| [`soma/fields/field_rule.hpp`](api/fields/field_rule.md) | `FieldRule<T>`, `EntityBatch`, `pointwise`: values for new entities and for sampling |
 | [`soma/fields/var_field.hpp`](api/fields/var_field.md) | `VarField<T, MemSpace>`: a variable-length field, a CSR over a per-entity space |
 | [`soma/fields/registry.hpp`](api/fields/registry.md) | `FieldRegistry`, the host-side owner of a mesh's fields and their families |
 | [`soma/fields/resolver.hpp`](api/fields/resolver.md) | entity-to-value lookup across the members of a field family |
@@ -93,7 +94,7 @@ Distribution over MPI ranks.
 | [`soma/parallel/ghosts.hpp`](api/parallel/ghosts.md) | ghost layers: `GhostOptions`, `add_ghosts_by_rebuild`. See [ghosts and halos](../parallel/ghosts-and-halos.md) |
 | [`soma/parallel/halo_exchange.hpp`](api/parallel/halo_exchange.md) | `HaloExchange`: `update` (owners to copies and ghosts) and `reduce` over the shared entities of one dimension. See [ghosts and halos](../parallel/ghosts-and-halos.md) |
 | [`soma/parallel/point_match.hpp`](api/parallel/point_match.md) | `match_points`, `PointIds`, `PointTolerance`, `PointNorm`: global ids of points from their coordinates. See [matching and merging](../parallel/matching-and-merging.md) |
-| [`soma/parallel/merge.hpp`](api/parallel/merge.md) | `merge_vertices`, `number_elements`, `merge_mesh`, `MergeOptions`, `MergeGids`: coincident vertices made one. See [matching and merging](../parallel/matching-and-merging.md) |
+| [`soma/parallel/merge.hpp`](api/parallel/merge.md) | `merge_vertices`, `number_elements`, `merge_mesh`, `MergeOptions`, `MergeGids`: coincident vertices made one; `sync_mesh`, `SyncOptions`: a part made whole after edits. See [matching and merging](../parallel/matching-and-merging.md) |
 | [`soma/parallel/exact_sum.hpp`](api/parallel/exact_sum.md) | `ExactSums`, `ExactSumReducer`, `allreduce_exact`: sums of doubles independent of the order of the terms. See [reproducible sums](../parallel/reproducible-sums.md) |
 | [`soma/parallel/transport/route.hpp`](api/parallel/transport/route.md) | `transport::route`, `RecordBatch`, `Strategy`: sparse personalized exchange of fixed-width records. See [transport](../parallel/transport.md) |
 | [`soma/parallel/transport/comm_plan.hpp`](api/parallel/transport/comm_plan.md) | `transport::CommPlan`, `learn_plan`: a routed exchange replayed by point-to-point messages. See [transport](../parallel/transport.md) |
@@ -122,7 +123,8 @@ Files. See [input and output](../io/overview.md).
 | [`soma/algorithms/quality_smooth.hpp`](api/algorithms/quality_smooth.md) | `quality_smooth`, `QualitySmoothOptions`, `QualitySmoothReport`: optimization-based smoothing of surface meshes. See [smoothing](../algorithms/smoothing.md) |
 | [`soma/algorithms/fem.hpp`](api/algorithms/fem.md) | `soma::fem`: P1 and Q1 elements on single cells (`cell_of`, `stiffness`, `mass`, `load`, `Quadrature`). See [finite elements](../algorithms/fem.md) |
 | [`soma/algorithms/fem_space.hpp`](api/algorithms/fem_space.md) | `FemSpace`: linear finite elements over a mesh's vertices (`laplacian`, `load`, `boundary`, `update`). See [finite elements](../algorithms/fem.md) |
-| [`soma/algorithms/fv.hpp`](api/algorithms/fv.md) | `FvSpace`, `FvScheme`: cell-centred finite volumes, first-order upwind or bounded second order (`normal_flux`, `max_dt`, `step`). See [finite volumes](../algorithms/finite-volumes.md) |
+| [`soma/algorithms/fv.hpp`](api/algorithms/fv.md) | `FvSpace`, `FvScheme`, `FvOptions`: cell-centred finite volumes, first-order upwind or bounded second order, its limiter optional (`normal_flux`, `max_dt`, `step`). See [finite volumes](../algorithms/finite-volumes.md) |
+| [`soma/algorithms/conformity.hpp`](api/algorithms/conformity.md) | `detail::nonconforming_sides`, `split_sides`, `conforming_skin`: sides that tile without matching, as `FvSpace` and `FemSpace` take them |
 | [`soma/algorithms/csr.hpp`](api/algorithms/csr.md) | `CsrMatrix`, `apply_dirichlet`: a rank's rows of a sparse matrix over vertices, products the same bit for bit on any number of ranks and threads. See [linear algebra](../algorithms/linear-algebra.md) |
 | [`soma/algorithms/cg.hpp`](api/algorithms/cg.md) | `cg`, `CgOptions`, `CgReport`: Jacobi-preconditioned conjugate gradients over a `FemSpace`. See [linear algebra](../algorithms/linear-algebra.md) |
 | [`soma/algorithms/kokkos_sparse.hpp`](api/algorithms/kokkos_sparse.md) | `to_kokkos_sparse`: a `CsrMatrix` as a `KokkosSparse::CrsMatrix` (`SOMA_ENABLE_KOKKOSKERNELS`). See [linear algebra](../algorithms/linear-algebra.md) |
@@ -130,6 +132,7 @@ Files. See [input and output](../io/overview.md).
 | [`soma/algorithms/grid_index.hpp`](api/algorithms/grid_index.md) | `GridIndex`: a uniform grid of bins for the boxes a query box meets. See [spatial search](../algorithms/spatial-search.md) |
 | [`soma/algorithms/arborx_index.hpp`](api/algorithms/arborx_index.md) | `ArborXIndex`: the same queries by ArborX's bounding volume hierarchy (`SOMA_ENABLE_ARBORX`). See [spatial search](../algorithms/spatial-search.md) |
 | [`soma/algorithms/remap.hpp`](api/algorithms/remap.md) | `RemapOperator`, `RemapOptions`: first-order conservative remap between plane, volume or sphere meshes. See [remap](../algorithms/remap.md) |
+| [`soma/algorithms/sample.hpp`](api/algorithms/sample.md) | `sample`: a field from a rule at points, or as cell averages or integrals by quadrature; `entity_batch`, `missing_rules` |
 | [`soma/algorithms/refine.hpp`](api/algorithms/refine.md) | `refine_uniform`, `refine_marked`, `mark_fraction`, `mark_threshold`, `infer_births`, `RefineOptions`, `MarkedOptions`, `RefineResult`. See [refinement](../algorithms/refinement.md) |
 | `soma/algorithms/polygon.hpp` | **internal**: plane polygons for intersection (clipping, triangulation), callable in kernels. See [remap](../algorithms/remap.md) |
 | `soma/algorithms/tet_clip.hpp` | **internal**: the overlap of two tetrahedra, for volume remap. See [remap](../algorithms/remap.md) |

@@ -7,7 +7,9 @@
 #include <array>
 #include <cmath>
 #include <cstddef>
+#include <limits>
 #include <map>
+#include <utility>
 #include <vector>
 
 #include "soma/topology/sides.hpp"
@@ -191,6 +193,169 @@ FvPlan fv_plan(const Mesh<Kokkos::HostSpace>& mesh) {
       centroid[static_cast<std::size_t>(i)] = sum / sd.n;
     }
   };
+  // Sides that tile without matching. A side of no exact match (one-sided)
+  // that other one-sided sides lie within is coarse; those are its tiles,
+  // found from its corners through the tiles' own corners (a tile need not
+  // touch a coarse corner, as the middle of a triangle split in four). It is
+  // tiled whole where the tiles' area vectors add up to its own: then each
+  // tile is a face between the two cells, in both cells' face lists.
+  struct OneSided {
+    Key key;
+    LO cell;
+    int side;
+  };
+  std::vector<OneSided> lone;
+  std::vector<std::vector<std::size_t>> lone_at(nvs);  // per vertex, the one-sided sides on it
+  for (LO e = 0; e < cells; ++e) {
+    for (int s = 0; s < sides_of(e); ++s) {
+      const Key key = key_of(side(e, s));
+      if (neighbour(key, e) != -1) continue;
+      for (int j = 0; j < 4 && key[static_cast<std::size_t>(j)] >= 0; ++j) {
+        lone_at[static_cast<std::size_t>(key[static_cast<std::size_t>(j)])].push_back(lone.size());
+      }
+      lone.push_back({key, e, s});
+    }
+  }
+  // Whether point v lies on side sd (within rounding of its size; a warped
+  // quad's own warp is allowed off its mean plane).
+  const auto on_side = [&](const topology::Side& sd, LO v) {
+    const Canonical q = canonical(sd, gid);
+    const auto at = [&](int j, int i) { return x(q.v[static_cast<std::size_t>(j)], i); };
+    Real size = 0;
+    for (int j = 1; j < sd.n; ++j) {
+      Real d = 0;
+      for (int i = 0; i < 3; ++i) d += (at(j, i) - at(0, i)) * (at(j, i) - at(0, i));
+      size = std::max(size, std::sqrt(d));
+    }
+    const Real tol = 1e-9 * size;
+    if (dim == 2) {
+      // Along the edge, and off it by the cross product (no cancellation).
+      const Real u0 = at(1, 0) - at(0, 0), u1 = at(1, 1) - at(0, 1);
+      const Real w0 = x(v, 0) - at(0, 0), w1 = x(v, 1) - at(0, 1);
+      const Real uu = u0 * u0 + u1 * u1, t = (u0 * w0 + u1 * w1) / uu;
+      return t >= -1e-9 && t <= 1 + 1e-9 && std::abs(u0 * w1 - u1 * w0) <= tol * std::sqrt(uu);
+    }
+    std::array<Real, 3> area{}, centroid{};
+    geometry(sd, area, centroid);
+    const Real norm = std::sqrt(area[0] * area[0] + area[1] * area[1] + area[2] * area[2]);
+    const std::array<Real, 3> nhat{area[0] / norm, area[1] / norm, area[2] / norm};
+    const auto off_plane = [&](LO w) {
+      Real d = 0;
+      for (int i = 0; i < 3; ++i) d += (x(w, i) - centroid[static_cast<std::size_t>(i)]) * nhat[static_cast<std::size_t>(i)];
+      return std::abs(d);
+    };
+    Real warp = 0;
+    for (int j = 0; j < sd.n; ++j) warp = std::max(warp, off_plane(q.v[static_cast<std::size_t>(j)]));
+    if (off_plane(v) > warp + tol) return false;
+    // Inside every edge, turned as the area vector turns them.
+    for (int j = 0; j < sd.n; ++j) {
+      const int k = (j + 1) % sd.n;
+      std::array<Real, 3> e{}, w{};
+      for (int i = 0; i < 3; ++i) {
+        e[static_cast<std::size_t>(i)] = at(k, i) - at(j, i);
+        w[static_cast<std::size_t>(i)] = x(v, i) - at(j, i);
+      }
+      const std::array<Real, 3> cr{e[1] * w[2] - e[2] * w[1], e[2] * w[0] - e[0] * w[2], e[0] * w[1] - e[1] * w[0]};
+      if (cr[0] * nhat[0] + cr[1] * nhat[1] + cr[2] * nhat[2] < -tol * size) return false;
+    }
+    return true;
+  };
+  std::map<Key, std::vector<std::size_t>> tiles;  // a coarse side tiled whole: its tiles (into lone)
+  std::map<Key, std::size_t> coarse;              // a tile: the coarse side it lies in (into lone)
+  for (std::size_t i = 0; i < lone.size(); ++i) {
+    const OneSided& big = lone[i];
+    const topology::Side sd = side(big.cell, big.side);
+    std::vector<LO> seen(big.key.begin(), big.key.begin() + sd.n);
+    std::vector<std::size_t> found;
+    for (std::size_t at = 0; at < seen.size(); ++at) {
+      for (const std::size_t j : lone_at[static_cast<std::size_t>(seen[at])]) {
+        if (j == i || std::find(found.begin(), found.end(), j) != found.end()) continue;
+        const OneSided& small = lone[j];
+        if (small.cell == big.cell) continue;
+        bool inside = true;
+        for (int k = 0; k < 4 && small.key[static_cast<std::size_t>(k)] >= 0 && inside; ++k) {
+          inside = on_side(sd, small.key[static_cast<std::size_t>(k)]);
+        }
+        if (!inside) continue;
+        found.push_back(j);
+        for (int k = 0; k < 4 && small.key[static_cast<std::size_t>(k)] >= 0; ++k) {
+          const LO w = small.key[static_cast<std::size_t>(k)];
+          if (std::find(seen.begin(), seen.end(), w) == seen.end()) seen.push_back(w);
+        }
+      }
+    }
+    if (found.empty()) continue;
+    std::array<Real, 3> want{}, centroid{}, sum{};
+    geometry(sd, want, centroid);
+    for (const std::size_t j : found) {
+      coarse.emplace(lone[j].key, i);
+      std::array<Real, 3> a{}, c{};
+      geometry(side(lone[j].cell, lone[j].side), a, c);
+      const Real along = a[0] * want[0] + a[1] * want[1] + a[2] * want[2];
+      for (std::size_t q = 0; q < 3; ++q) sum[q] += along < 0 ? -a[q] : a[q];
+    }
+    Real gap = 0, size = 0;
+    for (std::size_t q = 0; q < 3; ++q) {
+      gap += (sum[q] - want[q]) * (sum[q] - want[q]);
+      size += want[q] * want[q];
+    }
+    if (gap <= 1e-18 * size) {
+      // In an order fixed by gid, so that every rank sums them alike.
+      const auto gids = [&](std::size_t j) {
+        std::array<GO, 4> g{-1, -1, -1, -1};
+        for (std::size_t k = 0; k < 4 && lone[j].key[k] >= 0; ++k) g[k] = gid(lone[j].key[k]);
+        std::sort(g.begin(), g.end());
+        return g;
+      };
+      std::sort(found.begin(), found.end(), [&](std::size_t a, std::size_t b) { return gids(a) < gids(b); });
+      tiles.emplace(big.key, std::move(found));
+    } else if (big.cell < owned) {
+      ++p.hanging;  // tiled in part: the rest is not here
+    }
+  }
+  // The faces in place of side s of cell e: (key, the other cell, the side
+  // whose geometry it takes, +1 or -1 for that side's canonical orientation
+  // seen from e).
+  struct Part {
+    Key key;
+    LO other;
+    LO cell;  // the side (cell, side) giving the geometry
+    int side;
+    int sign;
+  };
+  const auto parts_of = [&](LO e, int s) {
+    std::vector<Part> out;
+    const topology::Side sd = side(e, s);
+    const Key key = key_of(sd);
+    const int own = canonical(sd, gid).reversed ? -1 : 1;
+    const LO n = neighbour(key, e);
+    if (n != -1) {
+      out.push_back({key, n, e, s, own});
+      return out;
+    }
+    if (const auto t = tiles.find(key); t != tiles.end()) {
+      std::array<Real, 3> want{}, centroid{};
+      geometry(sd, want, centroid);
+      for (const std::size_t j : t->second) {
+        const OneSided& small = lone[j];
+        std::array<Real, 3> a{}, c{};
+        geometry(side(small.cell, small.side), a, c);
+        const Real along = a[0] * want[0] + a[1] * want[1] + a[2] * want[2];
+        out.push_back({small.key, small.cell, small.cell, small.side, along < 0 ? -own : own});
+      }
+      return out;
+    }
+    // Towards a coarse cell whose side is tiled whole here, or a ghost (its
+    // owner checks the tiling).
+    if (const auto c = coarse.find(key);
+        c != coarse.end() && (tiles.count(lone[c->second].key) != 0 || lone[c->second].cell >= owned)) {
+      out.push_back({key, lone[c->second].cell, e, s, own});
+      return out;
+    }
+    out.push_back({key, -1, e, s, own});
+    return out;
+  };
+
   // +1 where side `key` of cell e, turned as e's volume turns it, runs along
   // the side's gid-ordered area vector; -1 against it. As the owned cells'
   // loop below computes it, for a ghost.
@@ -199,17 +364,17 @@ FvPlan fv_plan(const Mesh<Kokkos::HostSpace>& mesh) {
     Real volume = 0;
     int along = 0;
     for (int s = 0; s < sides_of(e); ++s) {
-      const topology::Side sd = side(e, s);
-      std::array<Real, 3> area{}, centroid{};
-      geometry(sd, area, centroid);
-      const int sign = canonical(sd, gid).reversed ? -1 : 1;
-      Real dot = 0;
-      for (int i = 0; i < 3; ++i) {
-        const auto ii = static_cast<std::size_t>(i);
-        dot += area[ii] * (centroid[ii] - x(x0, i));
+      for (const Part& part : parts_of(e, s)) {
+        std::array<Real, 3> area{}, centroid{};
+        geometry(side(part.cell, part.side), area, centroid);
+        Real dot = 0;
+        for (int i = 0; i < 3; ++i) {
+          const auto ii = static_cast<std::size_t>(i);
+          dot += area[ii] * (centroid[ii] - x(x0, i));
+        }
+        volume += part.sign * dot;
+        if (part.key == key) along = part.sign;
       }
-      volume += sign * dot;
-      if (key_of(sd) == key) along = sign;
     }
     return volume < 0 ? -along : along;
   };
@@ -224,20 +389,21 @@ FvPlan fv_plan(const Mesh<Kokkos::HostSpace>& mesh) {
   std::map<Key, LO> index;
   for (LO c = 0; c < owned; ++c) {
     for (int s = 0; s < sides_of(c); ++s) {
-      const topology::Side sd = side(c, s);
-      const Key key = key_of(sd);
-      const LO n = neighbour(key, c);
-      if (n == -2) {
-        ++p.nonmanifold;
-        continue;
+      for (const Part& part : parts_of(c, s)) {
+        const LO n = part.other;
+        if (n == -2) {
+          ++p.nonmanifold;
+          continue;
+        }
+        if (!(n == -1 || n >= owned || cgid(c) < cgid(n))) continue;
+        if (index.count(part.key) != 0) continue;
+        Face f;
+        f.a = c;
+        f.b = n;
+        geometry(side(part.cell, part.side), f.area, f.centroid);
+        index.emplace(part.key, static_cast<LO>(faces.size()));
+        faces.push_back(f);
       }
-      if (!(n == -1 || n >= owned || cgid(c) < cgid(n))) continue;
-      Face f;
-      f.a = c;
-      f.b = n;
-      geometry(sd, f.area, f.centroid);
-      index.emplace(key, static_cast<LO>(faces.size()));
-      faces.push_back(f);
     }
   }
   if (p.nonmanifold != 0) return p;
@@ -247,7 +413,8 @@ FvPlan fv_plan(const Mesh<Kokkos::HostSpace>& mesh) {
   const auto no = static_cast<std::size_t>(owned);
   p.cell_offsets.assign(no + 1, 0);
   p.volume.assign(no, 0);
-  std::vector<std::int8_t> outward;  // per (cell, side): +1 where A_f leaves the cell
+  std::vector<std::int8_t> outward;  // per (cell, face): +1 where A_f leaves the cell
+  std::vector<Key> entry_key;        // per (cell, face): the face's key
   for (LO c = 0; c < owned; ++c) {
     const auto ci = static_cast<std::size_t>(c);
     // Every corner of a 2D cell in one plane z = const, as the edges' area
@@ -262,18 +429,19 @@ FvPlan fv_plan(const Mesh<Kokkos::HostSpace>& mesh) {
     Real volume = 0;
     const std::size_t first = p.cell_faces.size();
     for (int s = 0; s < sides_of(c); ++s) {
-      const topology::Side sd = side(c, s);
-      const LO f = index.at(key_of(sd));
-      const Face& face = faces[static_cast<std::size_t>(f)];
-      const int sign = canonical(sd, gid).reversed ? -1 : 1;
-      Real dot = 0;
-      for (int i = 0; i < 3; ++i) {
-        const auto ii = static_cast<std::size_t>(i);
-        dot += face.area[ii] * (face.centroid[ii] - x(x0, i));
+      for (const Part& part : parts_of(c, s)) {
+        const LO f = index.at(part.key);
+        const Face& face = faces[static_cast<std::size_t>(f)];
+        Real dot = 0;
+        for (int i = 0; i < 3; ++i) {
+          const auto ii = static_cast<std::size_t>(i);
+          dot += face.area[ii] * (face.centroid[ii] - x(x0, i));
+        }
+        volume += part.sign * dot;
+        p.cell_faces.push_back(f);
+        entry_key.push_back(part.key);
+        outward.push_back(static_cast<std::int8_t>(part.sign));
       }
-      volume += sign * dot;
-      p.cell_faces.push_back(f);
-      outward.push_back(static_cast<std::int8_t>(sign));
     }
     volume /= dim;
     const int turn = volume < 0 ? -1 : 1;
@@ -325,8 +493,7 @@ FvPlan fv_plan(const Mesh<Kokkos::HostSpace>& mesh) {
       // A ghost neighbour's turn is seen here alone: it must leave the face
       // the other way.
       if (const LO g = faces[f].b; g >= owned) {
-        const Key key = key_of(side(c, static_cast<int>(k - p.cell_offsets[ci])));
-        if (outward_of(g, key) == outward[ki]) ++p.bad_cells;
+        if (outward_of(g, entry_key[ki]) == outward[ki]) ++p.bad_cells;
       }
       p.cell_sign[ki] = static_cast<std::int8_t>(is_left ? 1 : -1);
     }

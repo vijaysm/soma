@@ -206,10 +206,13 @@ class RemapOperator {
         hs = &*ms;
         ht = &*mt;
       }
-      const bool usable = !source.edited() && !target.edited();
+      const bool usable = !source.edited() && !target.edited() &&
+                          (comm.size() == 1 || (!source.needs_sync() && !target.needs_sync()));
       Real flags[4] = {usable ? Real{0} : Real{1}, 0, 0, 0};
       comm.allreduce(std::span<Real>(flags, 1), Op::max);
-      if (flags[0] != 0) throw std::invalid_argument("RemapOperator: a rank's source or target mesh has edits");
+      if (flags[0] != 0) {
+        throw std::invalid_argument("RemapOperator: a rank's source or target mesh has edits (sync_mesh it)");
+      }
       p = detail::remap_plan(comm, *hs, *ht, options);
       flags[0] = p.supported ? 0 : 1;
       flags[1] = static_cast<Real>(p.bad_source);

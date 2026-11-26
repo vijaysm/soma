@@ -14,6 +14,11 @@
 
 namespace soma {
 
+namespace detail {
+/// Removes a distributed part's ghosts on this rank alone, as an edit does.
+void drop_ghosts(HostMesh& mesh);
+}  // namespace detail
+
 struct EditReport {
   std::array<LO, 4> added{};
   std::array<LO, 4> removed{};
@@ -48,17 +53,25 @@ double removed_fraction(const HostMesh& mesh);
 /// the elements of the old dimension become explicit sides, which deriving
 /// sides then requires to be sides of some element.
 /// Removed entities leave every set. Fields over every entity of a dimension
-/// grow, the added entities at the field's default; other fields keep their
-/// members. Graphs the mesh holds are built again over the live entities (rows
+/// grow: the added entities take the field's rule (soma/fields/field_rule.hpp;
+/// one call per field and dimension, with all of them) or else its default;
+/// other fields keep their members. Graphs the mesh holds are built again over the live entities (rows
 /// of removed entities are empty). Sides lose their completeness when elements
 /// or sides are added or removed, so a held graph touching them derives them
 /// again: sides keep their gids (new ones take the next gids, and those that
 /// no live element has any more go), lids are renumbered, and sets and fields
 /// follow through the gids. The epoch does not change.
-/// apply() then compresses the mesh when removed_fraction reaches the
+/// apply() then compresses the mesh when the fraction of slots holding
+/// removed entities, as removed_fraction counts it but without the ghosts an
+/// edit of a distributed part drops (sync_mesh places them again), reaches the
 /// compress threshold (the process-wide compress_threshold() of
 /// soma/runtime/options.hpp unless set_compress_threshold gave another; 0
 /// never compresses), and reports the renumbering.
+/// On a distributed part (one with soma:sharing) an edit is this rank's alone:
+/// its ghosts go (not counted in EditReport::removed; a ghost vertex an added
+/// element names stays) and Mesh::needs_sync is true until the collective
+/// sync_mesh (soma/parallel/merge.hpp). The calls that use the sharing throw
+/// std::logic_error on every rank until then.
 /// A throw from apply() leaves the mesh unchanged and the edit as it was.
 class MeshEdit {
  public:
@@ -97,11 +110,14 @@ class MeshEdit {
   };
   LO next_lid(int d) const { return mesh_->count(d) + added_[static_cast<std::size_t>(d)].count; }
   void check_vertex(LO v) const;
+  void add_ghosts_to(std::array<std::vector<LO>, 4>& removed) const;
+  friend void detail::drop_ghosts(HostMesh& mesh);
 
   HostMesh* mesh_;
   std::array<Added, 4> added_{};
   std::array<std::vector<LO>, 4> removed_{};
   std::optional<double> threshold_;
+  bool drop_ghosts_ = false;
 };
 
 }  // namespace soma

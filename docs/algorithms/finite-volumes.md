@@ -5,7 +5,10 @@ triangles, quads, tets or hexes, on any number of ranks, by one of two schemes:
 
 - `FvScheme::upwind` (the default): first-order upwind and forward Euler;
 - `FvScheme::bounded`: second order where the solution is smooth, with no new extrema (to rounding):
-  flux-corrected transport over a linear reconstruction, in two stages.
+  flux-corrected transport over a linear reconstruction, in two stages. Its limiter can be turned
+  off (`FvOptions::limit`) to measure the scheme's own order of convergence, or its bounds relaxed
+  at smooth extrema within a given range (`FvOptions::relax`); see
+  [convergence and the limiter](#convergence-and-the-limiter).
 
 It solves
 
@@ -49,7 +52,7 @@ orientation.
 Upwinding is monotone, but its error is first order: it spreads a bump and lowers its peak at
 every step (the figure below). The bounded scheme keeps upwind's two good properties, exact
 conservation and no new extrema, and is second order where $u$ is smooth. It is flux-corrected
-transport (Boris and Book) with Zalesak's limiter. One stage from $u$:
+transport (Boris and Book, 1973) with Zalesak's limiter (Zalesak, 1979). One stage from $u$:
 
 1. The upwind result $u^L$, as above. It has no new extrema.
 2. Each owned cell's gradient $\mathbf{g}_c$, by least squares over its face neighbours:
@@ -87,10 +90,178 @@ What it guarantees, with $\Delta t \le$ `max_dt`:
   must. Strict TVD is not the aim: in more than one dimension, a TVD scheme is at most first
   order (Goodman and LeVeque, 1985).
 
+With `FvOptions::limit = false` every correction is taken whole ($\alpha_f = 1$): the scheme is
+the unlimited second-order one, which makes new extrema (an overshoot of about 0.2 on a square
+wave), and has neither guarantee above but conservation. It is for convergence studies.
+
 A stage exchanges ghosts three times: the gradients with $u^L$, the limiter's $R^\pm$, and the
-new $u$. A step does six exchanges, and about three times the arithmetic of an upwind step. The
+new $u$ (twice without the limiter). A step does six exchanges, and about three times the
+arithmetic of an upwind step. The
 space holds its scratch (the gradients, $u^L$, $R^\pm$, the corrections and the two stages)
 only when made bounded.
+
+### Convergence and the limiter
+
+A limiter that holds each cell within the values around it is known to cost accuracy at smooth
+extrema: there the exact cell average can rise above every neighbour's value, the bounds forbid
+it, and the scheme is first order near the extremum. Guermond, Nazarov, Popov and Tomas (2018,
+section 4.7) note that "it is well known that, when applied to scalar conservation equations,
+limitation (in some broad sense) reduces the accuracy to first-order near maxima and minima of
+the solution";
+the clipping of peaks by flux-corrected transport goes back to Boris and Book (1973) and
+Zalesak (1979). The region concerned shrinks with the mesh, so in the $L^1$ norm the order is
+still 2 once the extrema are well resolved, and only the maximum norm stays first order
+(Guermond et al., remark 4.18). On coarse meshes the limiter acts on much of a bump that spans a
+few cells, and the measured $L^1$ rate is below 2.
+
+To measure the scheme's order apart from the limiter, turn it off:
+
+```cpp
+const soma::FvSpace<Kokkos::HostSpace> space(comm, mesh, soma::FvOptions{.scheme = soma::FvScheme::bounded,
+                                                                         .limit = false});
+```
+
+and start from, and compare with, exact cell averages, not centre values: a centre value is off
+the cell's average by $O(h^2)$, as much as the error being measured. `soma::sample` with
+`Sampling::average` gives them (see [rules and sampling](../concepts/fields.md#rules-values-for-new-entities-and-sampling)).
+
+The test `Fv.BoundedConvergesAtSecondOrder` does this. It carries a bump of compact support,
+$\cos^4$ of the distance from $(0.3, 0.3, 0.3)$ scaled to a quarter turn at radius $0.25$, by a
+uniform flow $(0.5, 0.25, 0.125)$ to $t = 0.4$, at half the largest step, on boxes of $n$ cells a
+side. The $L^1$ rates, $\log_2$ of the ratio of successive errors, on unwarped boxes:
+
+| Cells | Sizes $n$ | Limited (default) | Limiter off |
+| --- | --- | --- | --- |
+| tri | 16, 32, 64, 128 | 1.95, 2.00, 2.03 | 2.12, 2.11, 2.02 |
+| quad | 16, 32, 64, 128 | 1.56, 1.76, 1.99 | 1.78, 2.01, 2.01 |
+| tet | 8, 16, 32 | 1.60, 1.74 | 1.83, 1.97 |
+| hex | 8, 16, 32 | 1.40, 1.56 | 1.40, 1.78 |
+| hex | 12, 24, 48 | 1.62, 1.58 | 1.63, 1.97 |
+| hex | 16, 32, 64 | 1.56, 1.72 | 1.78, 2.03 |
+
+So:
+
+- Unlimited, the rate is 2 once the bump is resolved: from 16 to 32 cells a side on triangles and
+  tets, from 32 to 64 on quads, from 24 to 48 on hexes. Hexes have the fewest cells across the
+  bump, so they get there last.
+- Limited, the rate reaches 2 later (quads from 64 to 128). On the coarser meshes its error is the
+  smaller of the two (the unlimited scheme's largest errors are its undershoots at the foot of the
+  bump, where $u$ is zero); on the finest triangles it is up to 4% larger. It is below upwind's on
+  every mesh.
+- The quadrature of the averages is not a factor: averages at degree 6 and at degree 14 give
+  errors that agree to 5 digits.
+
+Two ways of loosening the bounds were measured and are not offered:
+
+- Widening a cell's bounds by the values at its faces on which both sides' linear
+  reconstructions agree (the upper bound taking the lesser of the two, the lower the greater)
+  left the hex rates as they were (1.56 at $n$ = 16 to 32) and let a square wave overshoot by
+  0.14 to 0.30.
+- Taking the bounds over 2 or 3 rings of face neighbours instead of 1 changed the errors by
+  less than 0.3%: at an extremum the cell is itself the greatest (or least) value of any ring
+  around it, so wider rings do not lift the bound where the clipping happens.
+
+#### Relaxed bounds (Guermond et al.)
+
+`FvOptions::relax` loosens each cell's bounds as Guermond et al. (2018, section 4.7) do, by a
+second difference of $u$ that is $O(h^2)$ where $u$ is smooth. Per cell,
+
+$$
+D_c = \sum_n \bigl(u_c + \mathbf{g}_c \cdot (\mathbf{x}_n - \mathbf{x}_c) - u_n\bigr)
+$$
+
+over its face neighbours $n$: their $\sum_n (u_c - u_n)$ less its linear part, so that $D_c$ is
+$O(h^2)$ on any stencil, not only on symmetric ones (the paper's "linearity-preserving" choice
+of weights). The bounds widen by $r_c = |\operatorname{minmod}\{D_c/2, D_n/2\}|$ over the cell
+and its face neighbours (their formula 4.11): zero where the second differences differ in sign,
+as across a jump. $D_c$ travels with the gradient in the stage's first exchange, so relaxing
+costs no message.
+
+Relaxed bounds no longer guarantee no new extrema, and the top of a smeared jump looks like a
+smooth maximum: each stage lets it rise a little. Without a limit, a square wave overshoots by
+10 to 25% (quads: 0.14 at $n = 16$, 0.21 at $n = 128$), an amount that does not shrink with the
+mesh. The paper's averaged form (4.10) is worse here: without its cap it acts as no limiter at
+all. That cap, $0.99\,\rho^{\min}$, keeps a positive quantity positive; a scalar's
+counterpart is the range its values may take, `FvOptions::lower` and `upper`. Relaxed bounds
+never pass it, and a bound already outside it (from an inflow outside it) is kept:
+
+```cpp
+const soma::FvSpace<Kokkos::HostSpace> space(
+    comm, mesh, soma::FvOptions{.scheme = soma::FvScheme::bounded, .relax = true, .lower = 0, .upper = 1});
+```
+
+Measured as in the table above, within $[0, 1]$:
+
+| Cells | Sizes $n$ | $L^\infty$ rates, strict | $L^\infty$ rates, relaxed | Finest $L^1$ error, strict / relaxed | Square-wave overshoot, relaxed |
+| --- | --- | --- | --- | --- | --- |
+| tri | 16, 32, 64, 128 | 1.38, 1.44, 1.72 | 2.07, 2.14, 2.21 | 5.85e-5 / 5.64e-5 | 5e-17 |
+| quad | 16, 32, 64, 128 | 1.49, 1.53, 1.59 | 1.62, 1.96, 2.06 | 1.99e-4 / 1.97e-4 | 9e-17 |
+| tet | 8, 16, 32 | 0.31, 1.69 | 1.44, 1.42 | 1.67e-4 / 1.66e-4 | 5e-16 |
+| hex | 12, 24, 48 | 0.85, 1.79 | 0.98, 2.00 | 2.60e-4 / 2.59e-4 | 2e-16 |
+
+Relaxed, the largest error is the unlimited scheme's on every mesh (tets need finer meshes for
+it to fall at second order, unlimited too), the $L^1$ error stays the strict limiter's, and the
+square wave stays within $[0, 1]$ to rounding.
+
+References:
+
+- J. P. Boris and D. L. Book, Flux-corrected transport. I. SHASTA, a fluid transport algorithm
+  that works, *J. Comput. Phys.* 11 (1973) 38–69.
+- S. T. Zalesak, Fully multidimensional flux-corrected transport algorithms for fluids,
+  *J. Comput. Phys.* 31 (1979) 335–362.
+- J.-L. Guermond, M. Nazarov, B. Popov and I. Tomas, Second-order invariant domain preserving
+  approximation of the Euler equations using convex limiting, *SIAM J. Sci. Comput.* 40 (2018)
+  A3211–A3239.
+- J. B. Goodman and R. J. LeVeque, On the accuracy of stable schemes for 2D scalar conservation
+  laws, *Math. Comp.* 45 (1985) 15–21.
+
+### Coarse-fine faces
+
+A side that matches no other cell's side but that other cells' sides tile is replaced, in its
+cell's face list, by those sides, each a face between the two cells. This covers the hanging
+vertices `refine_marked` leaves without `MarkedOptions::conforming` (an edge against two edges, a
+quad against four quads, a triangle against four triangles, over any number of levels), and a
+hex face against the two triangles of two tets. Nothing else changes: the faces of a coarse cell
+are more than its sides, and the kernels loop over faces.
+
+```{figure} ../figures/img/coarse-fine-faces.svg
+:alt: The refined grid of quads with a grey arrow on every face between two cells; one coarse cell above the refined block shaded yellow, its five faces numbered, two of them the halves of its lower side
+:width: 60%
+
+The faces of the mesh of the [hanging vertices figure](fem.md#hanging-vertices), as `FvSpace` makes
+them: each arrow is a face's area vector at its centroid. The coarse cell shaded has four sides and
+five faces: its lower side is tiled by two fine sides, each a face between it and a fine cell.
+```
+
+- **Which sides.** A side with no exact match is one-sided. The one-sided sides of other cells
+  whose corners all lie on it (to rounding of its size; a warped quad's warp allowed) are its
+  tiles, found from its corners through the tiles' corners, so that a tile touching none of its
+  corners (the middle of a triangle split in four) is found too. It is tiled whole where the
+  tiles' area vectors add up to its own, to $10^{-9}$ of it.
+- **Geometry.** Each such face takes its tile's own area vector and centroid, computed by the
+  tile's corners in gid order, so both cells see the same bits; a coarse cell's volume is summed
+  over its tiles. For any tiling of a side the area vectors add up to the side's, warped or not,
+  so the cells close, the volumes fill the domain, a constant state stays and the total is
+  conserved exactly as on a conforming mesh. A coarse cell's tiles are taken in gid order, and
+  the steps are the serial ones bit for bit on any partition.
+- **The bounded scheme.** A coarse cell's least-squares gradient takes every fine neighbour, and
+  the second-order flux extends the upwind cell's value to each face's own centroid, so nothing
+  else is needed.
+- **Ghost layers.** On more than one rank every cell across a coarse side must be here. A ghost
+  layer through vertices holds them for edges and quads, which every tile touches at a corner of
+  the coarse side; it does not hold the middle tet of a triangle split in four, which touches
+  none: tet meshes refined so need two layers. A rank that holds only part of a tiling throws.
+  And since a rank cannot tell a missing coarse cell from the boundary, the constructor checks
+  that every face is seen from both its cells: the exact sum, over owned cells, of
+  $s_{cf}\,\mathbf{A}_f \cdot \mathbf{v}(\mathbf{x}_f)$ over their faces with a neighbour, for a
+  fixed field $\mathbf{v}$, is zero exactly when it is, the two sides of a face cancelling bit for
+  bit. Otherwise every rank throws, asking for a layer.
+
+Measured (test `Fv.ConvergesAcrossCoarseFineFaces`): the bump of the convergence study carried
+through the interface of a box refined where $x < 1/2$, from and against exact averages. $L^1$
+rates on the finest pair: upwind 0.91 (tri), 0.86 (quad), 0.74 (hex); limiter off 2.10 (tri,
+$n = 32$ to $64$), 2.01 (quad), 1.86 (hex, $n = 16$ to $32$); tets, limited, 1.47 ($n = 6$ to
+$12$). The limited error is below upwind's on every mesh.
 
 ### Why the result does not depend on the partition
 
@@ -111,7 +282,9 @@ template <class MemSpace>
 class FvSpace {
  public:
   FvSpace(const Comm& comm, const Mesh<MemSpace>& mesh, FvScheme scheme = FvScheme::upwind);
+  FvSpace(const Comm& comm, const Mesh<MemSpace>& mesh, const FvOptions& options);
   FvScheme scheme() const noexcept;
+  FvOptions options() const noexcept;
   LO rows() const noexcept;    // owned cells
   LO cols() const noexcept;    // all cells here
   LO faces() const noexcept;   // the faces of the owned cells
@@ -140,7 +313,19 @@ class FvSpace {
 `cols()` entries, or call `update()` first. `step` leaves them updated for the next step. The
 space's scratch is shared by copies of the space, so make one step at a time.
 
-`enum class FvScheme { upwind, bounded };` is in `soma/algorithms/fv.hpp` too.
+`enum class FvScheme { upwind, bounded };` and
+
+```cpp
+struct FvOptions {
+  FvScheme scheme = FvScheme::upwind;
+  bool limit = true;   // bounded only: Zalesak's limiter; off for convergence studies
+  bool relax = false;  // limited: relax the bounds at smooth extrema (Guermond et al.)
+  Real lower = -std::numeric_limits<Real>::infinity();  // relax: the values u may take
+  Real upper = std::numeric_limits<Real>::infinity();
+};
+```
+
+are in `soma/algorithms/fv.hpp` too.
 
 ## Usage
 
@@ -210,12 +395,15 @@ mesh:
 - is not of dimension 2 or 3, is edited (changed by `MeshEdit::apply` and not compressed
   since), has high-order nodes, or holds a cell other than a tri, quad, tet or hex;
 - holds a side that more than two cells share;
+- holds a side that the sides here tile only in part, or a face that one of its cells sees and
+  the other does not: on more than one rank, a ghost layer too thin to hold every cell across a
+  coarse side (see [coarse-fine faces](#coarse-fine-faces); add a layer);
 - holds a cell of no positive volume, or one turned against a neighbour (folded over it);
 - on more than one rank, has no ghost layer (through any bridge dimension; see
   [ghosts and halos](../parallel/ghosts-and-halos.md)), which is needed so that every face of
   an owned cell is present;
 
-or if ranks differ in `soma::reproducible()`, which makes `total()` exact.
+or if ranks differ in `soma::reproducible()`, which makes `total()` exact, or in the options.
 
 Vectors must hold exactly `cols()` entries and flux views exactly `faces()`. A rank whose
 vectors are of the wrong size throws `std::invalid_argument`; in the collective calls that
@@ -231,6 +419,8 @@ rank leaves the exchange and the others complete it.
 - The space keeps the mesh's geometry as it was when made. If the coordinates move, make a
   new space.
 - `inflow` is one value for the whole boundary.
+- With the limiter off, steps are not guaranteed stable: on the tets `refine_marked` makes, they
+  diverge at half `max_dt`, with or without hanging faces (a box of tets built directly does not).
 
 ## Memory spaces
 

@@ -114,6 +114,76 @@ inline soma::HostMesh box_part(const Comm& c, const soma::testing::BoxSpec& spec
   return out;
 }
 
+// The unit cube of n^3 cells: hexes where x < 1/2, six tets a cell
+// elsewhere, by diagonals that alternate cell by cell; dealt in blocks of
+// cell gids, a ghost layer through vertices on more than one rank. Its hex
+// faces at x = 1/2 meet two triangles each: sides that tile without matching.
+// `perturb` moves each vertex off the box's faces by up to a sixth of a cell
+// in each direction, from its gid alone.
+inline soma::HostMesh hexes_against_tets(const Comm& c, int n, bool perturb = false) {
+  const auto id = [&](int i, int j, int k) { return static_cast<GO>(1 + i + (n + 1) * (j + (n + 1) * k)); };
+  std::vector<GO> hex_gids, hexes, tet_gids, tets;
+  GO cell = 1;
+  for (int k = 0; k < n; ++k) {
+    for (int j = 0; j < n; ++j) {
+      for (int i = 0; i < n; ++i) {
+        const int corner[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+        const auto at = [&](int r) {  // corner r, mirrored in odd cells
+          return id(i + (i % 2 != 0 ? 1 - corner[r][0] : corner[r][0]), j + (j % 2 != 0 ? 1 - corner[r][1] : corner[r][1]),
+                    k + (k % 2 != 0 ? 1 - corner[r][2] : corner[r][2]));
+        };
+        if (2 * i < n) {
+          hex_gids.push_back(cell++);
+          for (int r = 0; r < 8; ++r) hexes.push_back(id(i + corner[r][0], j + corner[r][1], k + corner[r][2]));
+          continue;
+        }
+        const int six[6][4] = {{0, 1, 2, 6}, {0, 2, 3, 6}, {0, 3, 7, 6}, {0, 7, 4, 6}, {0, 4, 5, 6}, {0, 5, 1, 6}};
+        const bool flip = (i + j + k) % 2 != 0;  // mirrored once or three times: turn back
+        for (const auto& q : six) {
+          tet_gids.push_back(cell++);
+          std::array<GO, 4> g = {at(q[0]), at(q[1]), at(q[2]), at(q[3])};
+          if (flip) std::swap(g[2], g[3]);
+          tets.insert(tets.end(), g.begin(), g.end());
+        }
+      }
+    }
+  }
+  const GO cells = cell - 1;
+  const auto mine = [&](GO g) { return static_cast<int>((g - 1) * c.size() / cells) == c.rank(); };
+  std::set<GO> used;
+  std::vector<GO> hg, hc, tg, tc;
+  for (std::size_t e = 0; e < hex_gids.size(); ++e) {
+    if (!mine(hex_gids[e])) continue;
+    hg.push_back(hex_gids[e]);
+    hc.insert(hc.end(), hexes.begin() + static_cast<std::ptrdiff_t>(8 * e), hexes.begin() + static_cast<std::ptrdiff_t>(8 * e + 8));
+  }
+  for (std::size_t e = 0; e < tet_gids.size(); ++e) {
+    if (!mine(tet_gids[e])) continue;
+    tg.push_back(tet_gids[e]);
+    tc.insert(tc.end(), tets.begin() + static_cast<std::ptrdiff_t>(4 * e), tets.begin() + static_cast<std::ptrdiff_t>(4 * e + 4));
+  }
+  used.insert(hc.begin(), hc.end());
+  used.insert(tc.begin(), tc.end());
+  std::vector<GO> vg(used.begin(), used.end());
+  std::vector<Real> xyz;
+  for (const GO g : vg) {
+    const GO z = (g - 1) / ((n + 1) * (n + 1)), y = (g - 1) / (n + 1) % (n + 1), x = (g - 1) % (n + 1);
+    const GO at[3] = {x, y, z};
+    for (int q = 0; q < 3; ++q) {
+      const bool face = at[q] == 0 || at[q] == n;
+      const auto k = static_cast<Real>((g * 7919 + q * 104729) % 1000) / 1000;
+      xyz.push_back((static_cast<Real>(at[q]) + (perturb && !face ? (2 * k - 1) / 6 : 0)) / n);
+    }
+  }
+  soma::MeshBuilder b(3);
+  b.add_vertices(vg, xyz);
+  if (!hg.empty()) b.add_elements(Topology::hex, hg, hc);
+  if (!tg.empty()) b.add_elements(Topology::tet, tg, tc);
+  soma::HostMesh out = soma::build_local_part(c, std::move(b));
+  if (c.size() > 1) out.add_ghosts(c, soma::GhostOptions{1, 0, false});
+  return out;
+}
+
 }  // namespace fem_test
 
 #endif  // SOMA_TESTS_FEM_BOX_HPP_

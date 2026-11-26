@@ -277,6 +277,16 @@ void soma_edit_free(soma_edit_t* edit);
 
 /// Drops the removed entities; *renumbering gives each old lid's new one.
 int soma_mesh_compress(soma_mesh_t* mesh, soma_renumbering_t** renumbering);
+/// 1 in *needs for a distributed part edited since its sharing was made.
+int soma_mesh_needs_sync(const soma_mesh_t* mesh, int* needs);
+/// Collective: makes the part whole again after edits on any rank: compressed,
+/// its sharing, graphs and ghosts (layers as before; none where ghosts is 0)
+/// made again; vertices added are matched by place, within tolerance. With
+/// fields, owners' values of whole-dimension fields reach every copy.
+/// *renumbering gives each old lid's new one, for no dimension where no
+/// rank's part needed it.
+int soma_mesh_sync(const soma_comm_t* comm, soma_mesh_t* mesh, double tolerance, int ghosts, int fields,
+                   soma_renumbering_t** renumbering);
 /// The new lid of each old lid of dimension d (-1: removed); count of them.
 int soma_renumbering_new_lids(const soma_renumbering_t* renumbering, int d, const soma_lo_t** new_lids,
                               soma_lo_t* count);
@@ -311,6 +321,47 @@ int soma_mesh_get_field_interleaved(const soma_mesh_t* mesh, const char* name, i
                                     void* values);
 int soma_mesh_set_field_interleaved(soma_mesh_t* mesh, const char* name, int dim, int dtype, soma_lo_t rows,
                                     const void* values);
+
+/* ---- Field rules and sampling ------------------------------------------ */
+
+/// Entities a rule gives values to (soma::EntityBatch): count of them, of
+/// dimension dim; entity i has the corners offsets[i] .. offsets[i + 1] of
+/// xyz (three coordinates each). For dim 0 each is a point (a vertex, an
+/// element node or a quadrature point). topology (soma::Topology codes) is
+/// NULL for points; gid is NULL when the points are not entities of the mesh.
+typedef struct soma_entity_batch_t {
+  int dim;
+  soma_lo_t count;
+  const uint8_t* topology;
+  const soma_lo_t* offsets;
+  const double* xyz;
+  const soma_go_t* gid;
+} soma_entity_batch_t;
+
+/// A rule writes count * ncomp values of the field's type into values,
+/// interleaved (values[c + ncomp i]), and returns 0; any other return fails
+/// the call that ran it (SOMA_ERR_RUNTIME). context is the pointer given with
+/// the rule, which the caller keeps alive while the rule is set.
+typedef int (*soma_rule_fn)(const soma_entity_batch_t* batch, int ncomp, void* values, void* context);
+
+/// Sets the rule of every field named name, replacing any (rule NULL clears
+/// it): refinement, MeshEdit and sampling give new entities its values.
+/// dtype declares the values rule writes and must be every such field's
+/// type (SOMA_ERR_TYPE otherwise; C cannot check the function itself).
+int soma_mesh_set_rule(soma_mesh_t* mesh, const char* name, int dtype, soma_rule_fn rule, void* context);
+/// Whether the field named name (on dimension dim, or -1) has a rule.
+int soma_mesh_has_rule(const soma_mesh_t* mesh, const char* name, int dim, int* has);
+
+/* Sampling modes (soma::Sampling). */
+enum { SOMA_SAMPLE_POINT = 0, SOMA_SAMPLE_AVERAGE = 1, SOMA_SAMPLE_INTEGRAL = 2 };
+
+/// Gives the field named name (on dimension dim, or -1) the values of rule
+/// (of values of type dtype, or of the field's own type when dtype is
+/// negative), or of the field's own rule when rule is NULL (dtype then
+/// unused), on every member: at points, or cell averages or
+/// integrals by a quadrature exact for polynomials of degree (soma::sample).
+int soma_mesh_sample(soma_mesh_t* mesh, const char* name, int dim, int dtype, soma_rule_fn rule, void* context,
+                     int mode, int degree);
 
 /* ---- Halo exchange ---------------------------------------------------- */
 

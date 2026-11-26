@@ -121,17 +121,21 @@ struct RefineResult {
 
 Fields carry over where they are dense: one value per entity of a full domain, per-entity
 layout, not variable-length and not handles (see [fields](../concepts/fields.md)). Their
-default and global values come with them.
+default and global values, and their rule, come with them. Vertices and cells the input has
+keep their values. New ones take the field's
+[rule](../concepts/fields.md#rules-values-for-new-entities-and-sampling) when it has one, called
+once with all of them (hanging vertices included). Otherwise:
 
 - A cell field's children take the parent's value, so integrals of cell averages are kept.
-- A vertex field of floating-point values keeps the values of the old vertices and gives a
-  new vertex the average of its corners' values: exact for linear, bilinear and trilinear
-  fields.
+- A vertex field of floating-point values gives a new vertex the average of its corners'
+  values: exact for linear, bilinear and trilinear fields; for a hanging vertex, the coarse
+  side's interpolation.
+- An integer vertex field gives new vertices its default.
 
 Vertex values are read wherever a rank holds them, shared copies and ghosts included, so these
-must hold their owners' values (update them first) for ranks to agree. Other fields, edge and
-face fields, and integer vertex fields are dropped and named in `dropped`. The internal
-`soma:` fields are rebuilt.
+must hold their owners' values (update them first) for ranks to agree. Integer vertex fields
+with neither a rule nor a default, other fields, and edge and face fields are dropped and
+named in `dropped`. The internal `soma:` fields are rebuilt.
 
 ## Marked refinement
 
@@ -183,7 +187,49 @@ faces (or on theirs, one level down), would otherwise be two levels finer than i
 
 Unsplit cells next to split ones keep their edges and faces whole, so the new vertices on
 those edges and faces are hanging. `RefineResult::hanging` lists them, each with its masters
-and weights; a hanging vertex's value is its masters' average.
+and weights; a hanging vertex's value is its masters' average. `FvSpace` takes such meshes,
+each fine side across a coarse one a face between the two cells (see
+[coarse-fine faces](finite-volumes.md#coarse-fine-faces)), and `FemSpace` constrains each hanging
+vertex to its masters (see [hanging vertices](fem.md#hanging-vertices)), as
+`hanging_constraints(comm, mesh)` gives them ([below](#hanging-constraints)). The table
+[what the spaces take](#what-the-spaces-take) sums up which meshes each space accepts.
+
+### Hanging constraints
+
+```cpp
+struct HangingConstraints {
+  std::vector<LO> vertex;          // the hanging vertices here, owned or not, ascending
+  std::vector<Offset> offsets{0};  // vertex i's masters: [offsets[i], offsets[i + 1])
+  std::vector<GO> masters;         // by gid, ascending; none hanging
+  std::vector<Real> weights;       // adding up to 1
+};
+
+[[nodiscard]] HangingConstraints hanging_constraints(const Comm& comm, const HostMesh& mesh);
+```
+
+`hanging_constraints` gives each hanging vertex here as a combination of vertices that do not
+hang. A vertex born (by its `refine:birth` record) on an edge or face that some cell still has
+whole takes the average of that side's corners; a corner that hangs itself takes its own masters
+in turn, so masters never hang. The weights are the traces of linear, bilinear and trilinear
+elements, so a space that so constrains its hanging vertices is continuous. It is collective:
+every rank gets every hanging vertex's record (an allgather of five gids per vertex), to resolve
+masters that hang on other ranks. It is empty when no rank's mesh has `refine:birth`; call
+`infer_births` first on a mesh read from a format that dropped it.
+
+### What the spaces take
+
+| Mesh | `FvSpace` | `FemSpace` |
+| --- | --- | --- |
+| Conforming (`refine_uniform`, `refine_marked` with `conforming`, `refine_quads`) | yes | yes |
+| Hanging vertices, 2D (tri, quad), any number of levels | yes: each fine side across a coarse one a face ([coarse-fine faces](finite-volumes.md#coarse-fine-faces)) | yes: constrained to their masters ([hanging vertices](fem.md#hanging-vertices)); needs `refine:birth` |
+| Hanging vertices, 3D (tet, hex) | yes; tets need two ghost layers on more than one rank | yes; two ghost layers on more than one rank |
+| A hex face against two tets' triangles (no pyramid between) | yes: each triangle a face | yes: the hex a [composite element](fem.md#hexes-against-tets) |
+| A side that other sides tile only in part (here, or a ghost layer too thin) | refused | refused |
+| Pyramids, prisms, polygons, high-order nodes | refused | refused |
+
+Ghost layers are through vertices (`GhostOptions{layers, 0}`). Both spaces give the serial
+result bit for bit on any partition, and both check their ghost layers, throwing on every rank
+when one is too thin.
 
 ### Conforming refinement
 

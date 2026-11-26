@@ -6,7 +6,8 @@
 
 /// \file
 /// Linear finite elements over a mesh's vertices: one unknown per vertex, P1
-/// on triangles and tets, Q1 on quads and hexes (soma/algorithms/fem.hpp).
+/// on triangles and tets, Q1 on quads and hexes (soma/algorithms/fem.hpp);
+/// hanging vertices constrained to their masters (see the constructor).
 ///
 /// ```
 ///   mesh.add_ghosts(comm, soma::GhostOptions{1, 0});  // on more than one rank
@@ -40,6 +41,7 @@
 /// rank; a rank whose do not throws std::invalid_argument and leaves the
 /// others in the exchange.
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <span>
@@ -50,8 +52,10 @@
 
 #include <Kokkos_Core.hpp>
 
+#include "soma/algorithms/conformity.hpp"
 #include "soma/algorithms/csr.hpp"
 #include "soma/algorithms/fem.hpp"
+#include "soma/algorithms/refine.hpp"
 #include "soma/algorithms/to_space.hpp"
 #include "soma/core/mesh.hpp"
 #include "soma/core/mesh_view.hpp"
@@ -103,14 +107,44 @@ struct FemPlan {
   std::vector<LO> cell_slots;
   LO orphans = 0;    ///< owned vertices no cell here has: their rows are empty
   bool fits = true;  ///< false: a size exceeds Offset, and nothing else is set
+
+  /// Hanging constraints (u_h = sum_k w_k u_{m_k}): the space is that of the
+  /// free vertices, the matrix P^T A P and the load P^T b on their rows; a
+  /// hanging vertex's row is the identity's with load 0. Gather assembly
+  /// from per-row terms: values[row start + term_slot] += term_weight *
+  /// element[term_entry], the terms in an order fixed by gid.
+  bool constrained = false;
+  std::vector<Offset> term_offsets;  ///< per owned row
+  std::vector<Offset> term_entry;
+  std::vector<LO> term_slot;
+  std::vector<Real> term_weight;
+  std::vector<Offset> load_offsets;  ///< per owned row
+  std::vector<Offset> load_entry;
+  std::vector<Real> load_weight;
+  std::vector<LO> fixed_rows;  ///< owned hanging vertices
+  /// Every hanging vertex here, owned first, with its masters here.
+  std::vector<LO> hang;
+  std::vector<Offset> hang_offsets;
+  std::vector<LO> hang_masters;
+  std::vector<Real> hang_weights;
+  std::vector<std::uint8_t> hanging;  ///< per vertex: 1 if it hangs
+  std::vector<LO> star;               ///< per vertex: the cells around it here
+  std::vector<LO> needed;             ///< vertices whose cells must all be here
+  LO missing = 0;                     ///< masters a needed vertex has that are not here
+  /// The balance of the hanging terms: sum over owned hanging h, its masters
+  /// m, of w key(m, h), less, over owned rows m, each hanging h it took with
+  /// weight w, w key(m, h). Zero, summed over the ranks, when every master's
+  /// row took every hanging vertex.
+  ExactSums<1> balance;
 };
 
 /// The mesh is one of dimension 2 or 3, without high-order nodes, whose
 /// cells all have elements here.
 bool fem_supported(const Mesh<Kokkos::HostSpace>& mesh);
 
-/// Host only; the mesh supported.
-FemPlan fem_plan(const Mesh<Kokkos::HostSpace>& mesh, Assembly assembly);
+/// Host only; the mesh supported. With hanging constraints (`hc`, from
+/// hanging_constraints), the constrained plan; it gathers.
+FemPlan fem_plan(const Mesh<Kokkos::HostSpace>& mesh, Assembly assembly, const HangingConstraints* hc = nullptr);
 
 /// The number of cells of the mesh whose Jacobian is not positive throughout.
 template <class MemSpace>
@@ -125,11 +159,13 @@ LO bad_cells(const MeshView<MemSpace>& view) {
   return bad;
 }
 
-/// The element stiffness matrices of every cell, at matrix_offsets; `bad`
-/// counts the cells whose Jacobian is not positive throughout.
+/// The element stiffness matrices of every cell, at matrix_offsets, composite
+/// where `split` says (fem::stiffness); `bad` counts the cells whose Jacobian
+/// is not positive throughout.
 template <class MemSpace>
-View1<Real, MemSpace> element_matrices(const MeshView<MemSpace>& view, const View1<Offset, MemSpace>& at,
-                                       Offset total, const Kokkos::View<LO, MemSpace>& bad) {
+View1<Real, MemSpace> element_matrices(const MeshView<MemSpace>& view, const View1<std::uint16_t, MemSpace>& split,
+                                       const View1<Offset, MemSpace>& at, Offset total,
+                                       const Kokkos::View<LO, MemSpace>& bad) {
   using Exec = typename MemSpace::execution_space;
   const int dim = view.dim;
   View1<Real, MemSpace> out(Kokkos::view_alloc(Kokkos::WithoutInitializing, "soma::FemSpace::element_matrices"),
@@ -139,7 +175,7 @@ View1<Real, MemSpace> element_matrices(const MeshView<MemSpace>& view, const Vie
       KOKKOS_LAMBDA(const LO e) {
         const fem::Cell c = fem::cell_of(view, dim, e);
         Real k[fem::max_nodes][fem::max_nodes];
-        if (!(fem::stiffness(c, k) > 0)) Kokkos::atomic_inc(&bad());
+        if (!(fem::stiffness(c, split(e), k) > 0)) Kokkos::atomic_inc(&bad());
         for (int a = 0; a < c.n; ++a) {
           for (int b = 0; b < c.n; ++b) out(at(e) + a * c.n + b) = k[a][b];
         }
@@ -150,8 +186,9 @@ View1<Real, MemSpace> element_matrices(const MeshView<MemSpace>& view, const Vie
 /// The element load vectors of every cell, at vector_offsets; `bad` counts
 /// as element_matrices does.
 template <class MemSpace, class F>
-View1<Real, MemSpace> element_loads(const MeshView<MemSpace>& view, const View1<Offset, MemSpace>& at, Offset total,
-                                    const F& f, const Kokkos::View<LO, MemSpace>& bad) {
+View1<Real, MemSpace> element_loads(const MeshView<MemSpace>& view, const View1<std::uint16_t, MemSpace>& split,
+                                    const View1<Offset, MemSpace>& at, Offset total, const F& f,
+                                    const Kokkos::View<LO, MemSpace>& bad) {
   using Exec = typename MemSpace::execution_space;
   const int dim = view.dim;
   View1<Real, MemSpace> out(Kokkos::view_alloc(Kokkos::WithoutInitializing, "soma::FemSpace::element_loads"),
@@ -161,7 +198,7 @@ View1<Real, MemSpace> element_loads(const MeshView<MemSpace>& view, const View1<
       KOKKOS_LAMBDA(const LO e) {
         const fem::Cell c = fem::cell_of(view, dim, e);
         Real r[fem::max_nodes];
-        if (!(fem::load(c, f, r) > 0)) Kokkos::atomic_inc(&bad());
+        if (!(fem::load(c, split(e), f, r) > 0)) Kokkos::atomic_inc(&bad());
         for (int a = 0; a < c.n; ++a) out(at(e) + a) = r[a];
       });
   return out;
@@ -209,7 +246,8 @@ void gather_load(LO rows, const View1<Offset, MemSpace>& around_offsets, const V
 /// atomically or not; `bad` counts as element_matrices does. The caller
 /// fences.
 template <bool Atomic, class MemSpace>
-void scatter_cells(const MeshView<MemSpace>& view, LO rows, const View1<LO, MemSpace>& cells, Offset first,
+void scatter_cells(const MeshView<MemSpace>& view, const View1<std::uint16_t, MemSpace>& split, LO rows,
+                   const View1<LO, MemSpace>& cells, Offset first,
                    Offset last, const View1<Offset, MemSpace>& offsets, const View1<Offset, MemSpace>& slot_offsets,
                    const View1<LO, MemSpace>& cell_slots, const View1<Real, MemSpace>& values,
                    const Kokkos::View<LO, MemSpace>& bad) {
@@ -221,7 +259,7 @@ void scatter_cells(const MeshView<MemSpace>& view, LO rows, const View1<LO, MemS
         const LO e = cells(i);
         const fem::Cell c = fem::cell_of(view, dim, e);
         Real k[fem::max_nodes][fem::max_nodes];
-        if (!(fem::stiffness(c, k) > 0)) Kokkos::atomic_inc(&bad());
+        if (!(fem::stiffness(c, split(e), k) > 0)) Kokkos::atomic_inc(&bad());
         for (int a = 0; a < c.n; ++a) {
           const LO v = view.vertex(dim, e, a);
           if (v >= rows) continue;
@@ -269,11 +307,23 @@ struct Numbering {
 template <class MemSpace>
 class FemSpace {
  public:
-  /// Collective. Throws std::invalid_argument on every rank if any rank's
-  /// mesh is not of dimension 2 or 3, has unremoved edits, holds a cell
-  /// without elements here (only tri, quad, tet, hex) or one whose Jacobian
-  /// is not positive throughout, or, on more than one rank, has no ghost
-  /// layer through vertices, or if ranks differ in soma::reproducible().
+  /// Collective. Hanging vertices (refine_marked without conforming) are
+  /// constrained to their masters (hanging_constraints): the space assembles
+  /// P^T A P and P^T b on the free vertices' rows, a hanging vertex's row the
+  /// identity's with load 0, by gather whatever `assembly`; distribute() sets
+  /// the hanging values after a solve. On more than one rank that needs two
+  /// ghost layers through vertices. A hex some of whose sides two tets'
+  /// triangles tile (no pyramid between) is a composite element
+  /// (fem::stiffness with a split code), its owner's verdict.
+  ///
+  /// Throws std::invalid_argument on every rank if any rank's mesh is not of
+  /// dimension 2 or 3, has unremoved edits, holds a cell without elements here
+  /// (only tri, quad, tet, hex) or one whose Jacobian is not positive
+  /// throughout, a quad side that triangles tile only in part, a hanging vertex without
+  /// a birth record ("refine:birth"; infer_births), or, on more than one rank,
+  /// has no ghost layer through vertices or too few to hold the masters of the
+  /// hanging vertices it needs and the cells around them; or if ranks differ
+  /// in soma::reproducible().
   /// `assembly` is how laplacian() assembles, gather when reproducible.
   FemSpace(const Comm& comm, const Mesh<MemSpace>& mesh, Assembly assembly = Assembly::gather)
       : view_(mesh.view()), reproducible_(soma::reproducible()) {
@@ -288,26 +338,54 @@ class FemSpace {
     }
     const bool bad = mesh.edited() || !detail::fem_supported(*host) ||
                      (comm.size() > 1 && (mesh.ghost_layers() < 1 || mesh.ghost_bridge_dim() != 0));
-    detail::FemPlan p;
-    if (!bad) p = detail::fem_plan(*host, assembly_);
-    const bool usable = !bad && p.fits;
     const Real exact = reproducible_ ? Real{1} : Real{0};
-    Real flags[6] = {bad ? Real{1} : Real{0},
-                     p.fits ? Real{0} : Real{1},
-                     static_cast<Real>(p.orphans),
-                     usable ? static_cast<Real>(detail::bad_cells(view_)) : Real{0},
-                     exact,
-                     -exact};
-    comm.allreduce(std::span<Real>(flags), Op::max);
-    if (flags[4] != -flags[5]) throw std::invalid_argument("FemSpace: ranks differ in soma::reproducible()");
-    if (flags[0] != 0) {
-      throw std::invalid_argument(
-          "FemSpace: a rank's mesh is not of dimension 2 or 3, has edits or high-order nodes, holds a cell other "
-          "than a tri, quad, tet or hex or, on more than one rank, has no ghost layer through vertices");
+    {
+      Real flags[3] = {bad ? Real{1} : Real{0}, exact, -exact};
+      comm.allreduce(std::span<Real>(flags), Op::max);
+      if (flags[1] != -flags[2]) throw std::invalid_argument("FemSpace: ranks differ in soma::reproducible()");
+      if (flags[0] != 0) {
+        throw std::invalid_argument(
+            "FemSpace: a rank's mesh is not of dimension 2 or 3, has edits or high-order nodes, holds a cell other "
+            "than a tri, quad, tet or hex or, on more than one rank, has no ghost layer through vertices");
+      }
     }
-    if (flags[1] != 0) throw std::invalid_argument("FemSpace: a rank's element matrices do not fit Offset");
-    if (flags[2] != 0) throw std::invalid_argument("FemSpace: a rank owns a vertex that no cell there has");
-    if (flags[3] != 0) throw std::invalid_argument("FemSpace: a rank holds an inverted or degenerate cell");
+    // Hanging vertices: constrained by their births; any found by geometry
+    // without one refused, as is a quad that triangles tile only in part.
+    const HangingConstraints hc = hanging_constraints(comm, *host);
+    const detail::Nonconforming nc = detail::nonconforming(*host);
+    detail::SplitSides split = detail::split_sides(*host);
+    LO unrecorded = 0;
+    for (const LO v : nc.vertices) {
+      unrecorded += std::binary_search(hc.vertex.begin(), hc.vertex.end(), v) ? 0 : 1;
+    }
+    constrained_ = comm.allreduce(static_cast<Real>(hc.vertex.size()), Op::max) > 0;
+    if (constrained_) assembly_ = Assembly::gather;
+    detail::FemPlan p = detail::fem_plan(*host, assembly_, constrained_ ? &hc : nullptr);
+    Real flags[7] = {p.fits ? Real{0} : Real{1},
+                     static_cast<Real>(p.orphans),
+                     p.fits ? static_cast<Real>(detail::bad_cells(view_)) : Real{0},
+                     static_cast<Real>(split.odd),
+                     static_cast<Real>(unrecorded),
+                     static_cast<Real>(p.missing),
+                     0};
+    comm.allreduce(std::span<Real>(flags), Op::max);
+    if (flags[0] != 0) throw std::invalid_argument("FemSpace: a rank's element matrices do not fit Offset");
+    if (flags[1] != 0) throw std::invalid_argument("FemSpace: a rank owns a vertex that no cell there has");
+    if (flags[2] != 0) throw std::invalid_argument("FemSpace: a rank holds an inverted or degenerate cell");
+    if (flags[3] != 0) {
+      throw std::invalid_argument(
+          "FemSpace: a rank holds a quad side that triangles tile only in part: the space would not be continuous "
+          "there");
+    }
+    if (flags[4] != 0) {
+      throw std::invalid_argument(
+          "FemSpace: a rank holds a hanging vertex without a record of the side it was born on (\"refine:birth\"): "
+          "call infer_births, or refine with MarkedOptions::conforming");
+    }
+    if (flags[5] != 0) {
+      throw std::invalid_argument(
+          "FemSpace: a rank lacks a master of a hanging vertex it needs: add a ghost layer");
+    }
 
     rows_ = mesh.segment_table(0).owned_end;
     cols_ = mesh.count(0);
@@ -327,6 +405,56 @@ class FemSpace {
     group_offsets_ = p.group_offsets;
     group_cells_ = detail::to_space<LO, MemSpace>(p.group_cells, "soma::FemSpace::group_cells");
     if (comm.size() > 1) halo_.emplace(comm, mesh, 0);
+    {
+      // Owners' codes: a ghost hex may lack the tets against its far sides.
+      View2<LO, Kokkos::HostSpace> code("soma::FemSpace::split", split.code.size(), 1);
+      for (std::size_t e = 0; e < split.code.size(); ++e) code(e, 0) = split.code[e];
+      if (comm.size() > 1) HaloExchange<Kokkos::HostSpace>(comm, *host, host->dim()).update(comm, code);
+      for (std::size_t e = 0; e < split.code.size(); ++e) split.code[e] = static_cast<std::uint16_t>(code(e, 0));
+      composite_ = comm.allreduce(static_cast<Real>(std::count_if(split.code.begin(), split.code.end(),
+                                                                  [](std::uint16_t k) { return k != 0; })),
+                                  Op::sum) > 0;
+      split_ = detail::to_space<std::uint16_t, MemSpace>(split.code, "soma::FemSpace::split");
+      // A side two triangles tile is between cells, not boundary.
+      if (composite_ && !constrained_) p.skin = detail::conforming_skin(*host);
+    }
+    if (constrained_) {
+      // Every cell around a hanging vertex a row takes is here (its owner's
+      // count), and every master's row took every hanging vertex it masters.
+      View2<Real, Kokkos::HostSpace> star("soma::FemSpace::star", p.star.size(), 1);
+      for (std::size_t v = 0; v < p.star.size(); ++v) star(v, 0) = static_cast<Real>(p.star[v]);
+      if (halo_) {
+        if constexpr (std::is_same_v<MemSpace, Kokkos::HostSpace>) {
+          halo_->update(comm, star);
+        } else {
+          auto d = Kokkos::create_mirror_view_and_copy(MemSpace{}, star);
+          halo_->update(comm, d);
+          Kokkos::deep_copy(star, d);
+        }
+      }
+      LO short_star = 0;
+      for (const LO h : p.needed) {
+        short_star += static_cast<Real>(p.star[static_cast<std::size_t>(h)]) == star(static_cast<std::size_t>(h), 0) ? 0 : 1;
+      }
+      if (comm.allreduce(static_cast<Real>(short_star), Op::max) != 0 ||
+          allreduce_exact(comm, p.balance)[0] != 0) {
+        throw std::invalid_argument(
+            "FemSpace: a rank lacks cells around a hanging vertex a row it owns needs: add a ghost layer");
+      }
+      term_offsets_ = detail::to_space<Offset, MemSpace>(p.term_offsets, "soma::FemSpace::term_offsets");
+      term_entry_ = detail::to_space<Offset, MemSpace>(p.term_entry, "soma::FemSpace::term_entry");
+      term_slot_ = detail::to_space<LO, MemSpace>(p.term_slot, "soma::FemSpace::term_slot");
+      term_weight_ = detail::to_space<Real, MemSpace>(p.term_weight, "soma::FemSpace::term_weight");
+      load_offsets_ = detail::to_space<Offset, MemSpace>(p.load_offsets, "soma::FemSpace::load_offsets");
+      load_entry_ = detail::to_space<Offset, MemSpace>(p.load_entry, "soma::FemSpace::load_entry");
+      load_weight_ = detail::to_space<Real, MemSpace>(p.load_weight, "soma::FemSpace::load_weight");
+      fixed_rows_ = detail::to_space<LO, MemSpace>(p.fixed_rows, "soma::FemSpace::fixed_rows");
+      hang_ = detail::to_space<LO, MemSpace>(p.hang, "soma::FemSpace::hang");
+      hang_offsets_ = detail::to_space<Offset, MemSpace>(p.hang_offsets, "soma::FemSpace::hang_offsets");
+      hang_masters_ = detail::to_space<LO, MemSpace>(p.hang_masters, "soma::FemSpace::hang_masters");
+      hang_weights_ = detail::to_space<Real, MemSpace>(p.hang_weights, "soma::FemSpace::hang_weights");
+      hanging_ = detail::to_space<std::uint8_t, MemSpace>(p.hanging, "soma::FemSpace::hanging");
+    }
     // Owners' verdicts: a ghost's far corners look like skin here.
     boundary_ = detail::to_space<std::uint8_t, MemSpace>(p.skin, "soma::FemSpace::boundary");
     if (halo_) halo_->update(comm, View2<std::uint8_t, MemSpace>(boundary_.data(), boundary_.extent(0), 1));
@@ -356,8 +484,29 @@ class FemSpace {
   CsrMatrix<MemSpace> laplacian(const Comm& comm) const {
     CsrMatrix<MemSpace> a = pattern();
     const Kokkos::View<LO, MemSpace> bad("soma::FemSpace::bad");
+    if (constrained_) {
+      using Exec = typename MemSpace::execution_space;
+      const auto element = detail::element_matrices(view_, split_, matrix_offsets_, matrix_total_, bad);
+      const auto offsets = offsets_, to = term_offsets_, entry = term_entry_;
+      const auto slot = term_slot_;
+      const auto weight = term_weight_;
+      const auto values = a.values;
+      Kokkos::parallel_for(
+          "soma::FemSpace::gather_constrained", Kokkos::RangePolicy<Exec, Kokkos::IndexType<LO>>(0, rows_),
+          KOKKOS_LAMBDA(const LO v) {
+            for (Offset k = offsets(v); k < offsets(v + 1); ++k) values(k) = 0;
+            for (Offset t = to(v); t < to(v + 1); ++t) values(offsets(v) + slot(t)) += weight(t) * element(entry(t));
+          });
+      const auto fixed = fixed_rows_;
+      Kokkos::parallel_for(
+          "soma::FemSpace::fixed_rows", Kokkos::RangePolicy<Exec, Kokkos::IndexType<LO>>(0, static_cast<LO>(fixed.extent(0))),
+          KOKKOS_LAMBDA(const LO i) { values(offsets(fixed(i))) = 1; });
+      Exec{}.fence();
+      check_cells(comm, bad);
+      return a;
+    }
     if (assembly_ == Assembly::gather) {
-      const auto element = detail::element_matrices(view_, matrix_offsets_, matrix_total_, bad);
+      const auto element = detail::element_matrices(view_, split_, matrix_offsets_, matrix_total_, bad);
       detail::gather_rows(rows_, offsets_, around_offsets_, around_cells_, around_corner_, slot_offsets_, slots_,
                           matrix_offsets_, element, a.values);
       check_cells(comm, bad);
@@ -367,10 +516,10 @@ class FemSpace {
     for (std::size_t g = 0; g + 1 < group_offsets_.size(); ++g) {
       const Offset first = group_offsets_[g], last = group_offsets_[g + 1];
       if (assembly_ == Assembly::atomic) {
-        detail::scatter_cells<true>(view_, rows_, group_cells_, first, last, offsets_, cell_slot_offsets_,
+        detail::scatter_cells<true>(view_, split_, rows_, group_cells_, first, last, offsets_, cell_slot_offsets_,
                                     cell_slots_, a.values, bad);
       } else {
-        detail::scatter_cells<false>(view_, rows_, group_cells_, first, last, offsets_, cell_slot_offsets_,
+        detail::scatter_cells<false>(view_, split_, rows_, group_cells_, first, last, offsets_, cell_slot_offsets_,
                                      cell_slots_, a.values, bad);
       }
     }
@@ -386,8 +535,22 @@ class FemSpace {
   View1<Real, MemSpace> load(const Comm& comm, const F& f) const {
     View1<Real, MemSpace> b = vector("soma::FemSpace::load");
     const Kokkos::View<LO, MemSpace> bad("soma::FemSpace::bad");
-    const auto element = detail::element_loads(view_, vector_offsets_, vector_total_, f, bad);
-    detail::gather_load(rows_, around_offsets_, around_cells_, around_corner_, vector_offsets_, element, b);
+    const auto element = detail::element_loads(view_, split_, vector_offsets_, vector_total_, f, bad);
+    if (constrained_) {
+      using Exec = typename MemSpace::execution_space;
+      const auto to = load_offsets_, entry = load_entry_;
+      const auto weight = load_weight_;
+      Kokkos::parallel_for(
+          "soma::FemSpace::load_constrained", Kokkos::RangePolicy<Exec, Kokkos::IndexType<LO>>(0, rows_),
+          KOKKOS_LAMBDA(const LO v) {
+            Real s = 0;
+            for (Offset t = to(v); t < to(v + 1); ++t) s += weight(t) * element(entry(t));
+            b(v) = s;
+          });
+      Exec{}.fence();
+    } else {
+      detail::gather_load(rows_, around_offsets_, around_cells_, around_corner_, vector_offsets_, element, b);
+    }
     check_cells(comm, bad);
     return b;
   }
@@ -395,6 +558,41 @@ class FemSpace {
   /// Per vertex, 1 on the mesh's boundary: a corner of a side of dimension
   /// dim - 1 that only one cell has, as its owner finds it.
   View1<const std::uint8_t, MemSpace> boundary() const { return boundary_; }
+
+  /// Whether the mesh has hanging vertices: the space is then constrained
+  /// (see the class comment), and assembles by gather.
+  bool constrained() const noexcept { return constrained_; }
+
+  /// Whether a hex here or on another rank has sides that two triangles tile:
+  /// those hexes are composite elements (fem::stiffness with a split code).
+  bool composite() const noexcept { return composite_; }
+
+  /// Per cell, its split code (0 for a cell that is not composite).
+  View1<const std::uint16_t, MemSpace> split_sides() const { return split_; }
+
+  /// Per vertex, 1 where it hangs (empty when not constrained()).
+  View1<const std::uint8_t, MemSpace> hanging() const { return hanging_; }
+
+  /// Collective: each hanging vertex's value from its masters', u_h =
+  /// sum_k w_k u_{m_k}, then each owner's entries to its copies and ghosts
+  /// (two updates). Call it on a solution of the constrained system, whose
+  /// hanging rows hold no value of their own. Nothing when not constrained().
+  void distribute(const Comm& comm, const View1<Real, MemSpace>& x) const {
+    if (!constrained_) return;
+    using Exec = typename MemSpace::execution_space;
+    update(comm, x);
+    const auto hang = hang_, offsets = hang_offsets_, masters = hang_masters_;
+    const auto weights = hang_weights_;
+    Kokkos::parallel_for(
+        "soma::FemSpace::distribute", Kokkos::RangePolicy<Exec, Kokkos::IndexType<LO>>(0, static_cast<LO>(hang.extent(0))),
+        KOKKOS_LAMBDA(const LO i) {
+          Real s = 0;
+          for (Offset k = offsets(i); k < offsets(i + 1); ++k) s += weights(k) * x(masters(k));
+          x(hang(i)) = s;
+        });
+    Exec{}.fence();
+    update(comm, x);
+  }
 
   /// Collective: each owner's entries of x overwrite its copies and ghosts.
   void update(const Comm& comm, const View1<Real, MemSpace>& x) const {
@@ -466,6 +664,22 @@ class FemSpace {
   View1<LO, MemSpace> group_cells_;
   View1<std::uint8_t, MemSpace> boundary_;
   std::optional<HaloExchange<MemSpace>> halo_;
+  bool constrained_ = false;
+  View1<Offset, MemSpace> term_offsets_;
+  View1<Offset, MemSpace> term_entry_;
+  View1<LO, MemSpace> term_slot_;
+  View1<Real, MemSpace> term_weight_;
+  View1<Offset, MemSpace> load_offsets_;
+  View1<Offset, MemSpace> load_entry_;
+  View1<Real, MemSpace> load_weight_;
+  View1<LO, MemSpace> fixed_rows_;
+  View1<LO, MemSpace> hang_;
+  View1<Offset, MemSpace> hang_offsets_;
+  View1<LO, MemSpace> hang_masters_;
+  View1<Real, MemSpace> hang_weights_;
+  View1<std::uint8_t, MemSpace> hanging_;
+  View1<std::uint16_t, MemSpace> split_;
+  bool composite_ = false;
 };
 
 }  // namespace soma

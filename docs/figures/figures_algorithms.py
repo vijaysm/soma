@@ -579,3 +579,135 @@ def soma_read_parts(data, path):
 
 def matplotlib_rect(corner, w, h, colour):
     return Rectangle(corner, w, h, fc=colour, ec="#333333", lw=0.6)
+
+
+def plane_cells(ax, cells, levels, colours=("#ffffff", "#e8eef6", "#c9d8ec")):
+    """A plane mesh's cells, filled by refinement level, with their outlines."""
+    for corners, level in zip(cells, levels):
+        ax.fill(*zip(*corners), fc=colours[min(level, len(colours) - 1)], ec="#555555", lw=0.8, zorder=1)
+
+
+@figure("hanging-constraints", ["nonconforming"], "svg")
+def hanging_constraints(data, path):
+    d = load_json(data / "nonconforming" / "nonconforming.json")
+    fig, ax = style.svg_figure(6.4, 6.4)
+    plane_cells(ax, d["cells"], d["levels"])
+    masters = set()
+    for h in d["hanging"]:
+        for mx, my, _ in h["masters"]:
+            ax.plot([h["at"][0], mx], [h["at"][1], my], color=style.OKABE_ITO[1], lw=2.4, zorder=2)
+            masters.add((mx, my))
+    ax.scatter(*zip(*masters), s=46, marker="s", color="#222222", zorder=3, label="masters")
+    ax.scatter(*zip(*[h["at"] for h in d["hanging"]]), s=60, color=style.OKABE_ITO[6], zorder=4,
+               label="hanging vertices")
+    h = max(d["hanging"], key=lambda h: (h["at"][0] + h["at"][1]))
+    (ax_, ay), (bx, by) = [m[:2] for m in h["masters"]]
+    ax.annotate(r"$u_h = \frac{1}{2}u_a + \frac{1}{2}u_b$", xy=h["at"], xytext=(h["at"][0] + 0.12, h["at"][1] + 0.1),
+                fontsize=12, arrowprops={"arrowstyle": "->", "color": "#333333"}, zorder=5)
+    for name, (px, py) in (("a", (ax_, ay)), ("b", (bx, by))):
+        ax.text(px + 0.012, py + 0.012, name, fontsize=12, weight="bold", zorder=5)
+    ax.legend(loc="upper right", fontsize=10, frameon=True)
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, 1.02)
+    style.save_svg(fig, path)
+
+
+@figure("coarse-fine-faces", ["nonconforming"], "svg")
+def coarse_fine_faces(data, path):
+    d = load_json(data / "nonconforming" / "nonconforming.json")
+    fig, ax = style.svg_figure(6.4, 6.4)
+    plane_cells(ax, d["cells"], d["levels"])
+    # Every face between two cells, as its area vector (shortened) at its centroid.
+    for f in d["faces"]:
+        if f["right"] < 0:
+            continue
+        (x, y), (u, v) = f["at"], f["area"]
+        norm = (u * u + v * v) ** 0.5
+        ax.arrow(x - 0.018 * u / norm, y - 0.018 * v / norm, 0.036 * u / norm, 0.036 * v / norm, width=0.0015,
+                 head_width=0.01, length_includes_head=True, color="#9a9a9a", zorder=2)
+    # A coarse cell beside the refined block, its faces numbered: two of its sides are tiled by two fine
+    # sides each, so it has more faces than sides.
+    e = max((e for e, faces in enumerate(d["cell_faces"]) if len(faces) > 4 and d["levels"][e] == 0),
+            key=lambda e: sum(p[0] + p[1] for p in d["cells"][e]))
+    ax.fill(*zip(*d["cells"][e]), fc=style.OKABE_ITO[4], ec="#333333", lw=1.6, alpha=0.6, zorder=1)
+    for k, f in enumerate(d["cell_faces"][e]):
+        x, y = d["faces"][f]["at"]
+        ax.scatter([x], [y], s=150, color=style.OKABE_ITO[6], zorder=3)
+        ax.text(x, y, str(k + 1), ha="center", va="center", color="white", fontsize=9, weight="bold", zorder=4)
+    cx = sum(p[0] for p in d["cells"][e]) / 4
+    cy = sum(p[1] for p in d["cells"][e]) / 4
+    ax.text(cx, cy, f"{len(d['cell_faces'][e])} faces", ha="center", va="center", fontsize=11, weight="bold", zorder=5)
+    ax.set_xlim(-0.02, 1.02)
+    ax.set_ylim(-0.02, 1.02)
+    style.save_svg(fig, path)
+
+
+# A hex's sides, canonical (MOAB) order and corners, outward.
+HEX_SIDES = [(0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7), (0, 3, 2, 1), (4, 5, 6, 7)]
+
+
+def solid(ax, cells, faces_of, colour, alpha=0.35):
+    """Each cell's faces (lists of corner indices) as translucent polygons with dark edges."""
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    polys = [[cell[i] for i in face] for cell in cells for face in faces_of(cell)]
+    ax.add_collection3d(Poly3DCollection(polys, facecolor=colour, edgecolor="#333333", linewidths=0.8, alpha=alpha))
+
+
+def tet_faces(_):
+    return [(0, 1, 2), (0, 1, 3), (1, 2, 3), (0, 2, 3)]
+
+
+def pyramid_faces(_):
+    return [(0, 1, 2, 3), (0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 0, 4)]
+
+
+@figure("composite-hex", ["nonconforming"], "svg")
+def composite_hex(data, path):
+    import matplotlib.pyplot as plt
+
+    d = load_json(data / "nonconforming" / "nonconforming.json")
+    hexc, split = d["hex"]["corners"], d["hex"]["split"]
+    fig = plt.figure(figsize=(12, 5.4))
+    left = fig.add_subplot(1, 2, 1, projection="3d")
+    right = fig.add_subplot(1, 2, 2, projection="3d")
+    # Left: the hex and the tets against its side x = 1, apart a little.
+    solid(left, [hexc], lambda _: HEX_SIDES, style.OKABE_ITO[2], 0.25)
+    gap = 0.7
+    left.computed_zorder = False  # the diagonal over the faces
+    tets = [[[p[0] + gap, p[1], p[2]] for p in t] for t in d["tets"]]
+    solid(left, tets, tet_faces, style.OKABE_ITO[1], 0.2)
+    for s, side in enumerate(HEX_SIDES):
+        code = (split >> (2 * s)) & 3
+        if code:
+            a, b = (side[0], side[2]) if code == 1 else (side[1], side[3])
+            for shift in (0.0, gap):
+                left.plot(*[[hexc[a][q] + (shift if q == 0 else 0), hexc[b][q] + (shift if q == 0 else 0)]
+                            for q in range(3)], color=style.OKABE_ITO[6], lw=3.0, zorder=10)
+    left.set_title("a hex side that two tets' triangles tile (diagonal in red)", fontsize=11)
+    # Right: the composite hex's sub-cells about its centre, pushed out along their sides.
+    c = [sum(p[q] for p in hexc) / 8 for q in range(3)]
+    pyramids, halves = [], []
+    for s, side in enumerate(HEX_SIDES):
+        b = [side[0], side[3], side[2], side[1]]
+        code = (split >> (2 * s)) & 3
+        mid = [sum(hexc[i][q] for i in side) / 4 for q in range(3)]
+        push = [0.7 * (mid[q] - c[q]) for q in range(3)]
+        moved = lambda i: [hexc[i][q] + push[q] for q in range(3)]  # noqa: E731
+        apex = [c[q] + push[q] for q in range(3)]
+        if code == 0:
+            pyramids.append([moved(i) for i in b] + [apex])
+        else:
+            pairs = [(b[0], b[1], b[2]), (b[0], b[2], b[3])] if code == 1 else [(b[0], b[1], b[3]), (b[1], b[2], b[3])]
+            halves += [[moved(i) for i in t] + [apex] for t in pairs]
+    solid(right, pyramids, pyramid_faces, style.OKABE_ITO[2], 0.3)
+    solid(right, halves, tet_faces, style.OKABE_ITO[1], 0.75)
+    right.set_title("the composite element: five pyramids (blue) and, on the\n"
+                    "split side, two tets (orange), all meeting at the centre", fontsize=11)
+    for ax, (lo, hi), azim in ((left, (-0.2, 2.8), -62), (right, (-0.6, 1.6), -30)):
+        ax.set_xlim(lo, hi)
+        ax.set_ylim(-0.6 if ax is right else -0.6, 1.6)
+        ax.set_zlim(-0.6 if ax is right else -0.6, 1.6)
+        ax.set_box_aspect((hi - lo, 2.2, 2.2))
+        ax.view_init(elev=20, azim=azim)
+        ax.set_axis_off()
+    style.save_svg(fig, path)

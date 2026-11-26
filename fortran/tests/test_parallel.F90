@@ -19,6 +19,8 @@ program test_parallel
   block
     type(soma_comm) :: comm
     type(soma_mesh) :: m, moved, even, q
+    type(soma_edit) :: ed
+    type(soma_renumbering) :: r
     integer, allocatable :: dest(:)
     real(c_double), allocatable :: c(:, :)
     real(c_double), pointer :: x(:, :)
@@ -62,6 +64,22 @@ program test_parallel
     call check(m%count(3) == held, 'ghosts removed')
     call m%add_ghosts(comm, 1, 7, ierr=ierr)
     call check(ierr == SOMA_ERR_INVALID_ARGUMENT, 'bridge_dim above the mesh')
+
+    ! An edit on one rank, then the sync every rank needs.
+    call m%add_ghosts(comm, 1, 0)
+    if (my_rank() == 0) then
+      ed = soma_edit(m)
+      call ed%remove(3, [1_soma_lo])
+      call ed%apply()
+    end if
+    call check(m%needs_sync() .eqv. (my_rank() == 0), 'the edited part needs a sync')
+    if (nranks() > 1) then
+      call m%add_ghosts(comm, 1, 0, ierr=ierr)
+      call check(ierr /= SOMA_OK, 'ghosts are refused until then')
+    end if
+    call m%sync(comm, renumbering=r)
+    call check(.not. m%needs_sync(), 'synced')
+    call check(allsum(int(m%owned_count(3), 8)) == cells - 1, 'one cell less')
 
     ! Ranks holding nothing: zero-size arrays.
     q = soma_box_mesh(comm, 2, 2, 1, element=SOMA_QUAD)

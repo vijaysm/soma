@@ -12,20 +12,22 @@ The elements are P1 on triangles and tets and Q1 on quads and hexes, with corner
 canonical order. The reference cells are the unit triangle $(0,0), (1,0), (0,1)$ and tet
 $(0,0,0), (1,0,0), (0,1,0), (0,0,1)$, and $[-1, 1]^d$ for quads and hexes. Cells of
 dimension 2 must lie in a plane $z = \text{const}$. No other topology, and no high-order
-nodes, are supported.
+nodes, are supported. A hex some of whose faces the triangles of two tets tile is a composite
+element (see [hexes against tets](#hexes-against-tets)).
 
 Everything in `fem.hpp` is in namespace `soma::fem`, device-callable and allocation-free:
 
 | Function | What it gives |
 | --- | --- |
-| `quadrature(Topology t, int degree)` | The smallest rule exact for polynomials of `degree` on the reference cell: Gauss-Legendre products on quads and hexes (up to degree 5), rules up to degree 4 on triangles and tets. |
-| `shape(t, xi, n, dn)` | Shape function values and reference gradients at `xi`; the node count. |
+| `quadrature(Topology t, int degree)` | The smallest rule exact for polynomials of `degree` on the reference cell: Gauss-Legendre products on quads and hexes (up to degree 5), rules up to degree 4 on triangles and tets; on the pyramid (base $[-1,1]^2$ at $\xi_3 = 0$, apex $(0,0,1)$), the collapsed rule of 27 points, exact to degree 3, whatever `degree`. |
+| `shape(t, xi, n, dn)` | Shape function values and reference gradients at `xi`; the node count. On the pyramid, the rational basis (not at the apex), for the composite hex. |
 | `cell_of(view, dim, e)` | A `fem::Cell`: topology, dimension, node count and corner coordinates of cell `e` of a `MeshView`. |
 | `at_point(c, xi, n, g)` | Shape values, physical gradients and the Jacobian determinant at `xi`. |
 | `least_jacobian(c)` | The smallest Jacobian determinant over the corners and Gauss points. |
 | `stiffness(c, k)` | $k_{ab} = \int \nabla N_a \cdot \nabla N_b$. |
 | `mass(c, m)` | $m_{ab} = \int N_a N_b$, exact on affine cells. |
 | `load(c, f, r)` | $r_a = \int f N_a$ by the degree-2 rule; `f(x, y, z)` device-callable. |
+| `stiffness(c, split, k)`, `load(c, split, f, r)` | The composite hex's, its faces split as `split` says; with `split` 0, the hex's own. |
 | `squared_error(c, u, exact)` | $\int (\sum_a u_a N_a - u_\text{exact})^2$ by a degree-4 rule (5 on quads and hexes). |
 
 The stiffness matrix is exact for simplices and for parallelogram-shaped quads and hexes.
@@ -68,6 +70,11 @@ class FemSpace {
   CsrMatrix<MemSpace> laplacian(const Comm& comm) const;
   template <class F> View1<Real, MemSpace> load(const Comm& comm, const F& f) const;
   View1<const std::uint8_t, MemSpace> boundary() const;
+  bool constrained() const noexcept;                        // hanging vertices
+  View1<const std::uint8_t, MemSpace> hanging() const;      // per vertex
+  void distribute(const Comm& comm, const View1<Real, MemSpace>& x) const;
+  bool composite() const noexcept;                          // hexes against tets
+  View1<const std::uint16_t, MemSpace> split_sides() const;  // per cell
   void update(const Comm& comm, const View1<Real, MemSpace>& x) const;
   void multiply(const Comm& comm, const CsrMatrix<MemSpace>& a, const View1<Real, MemSpace>& x,
                 const View1<Real, MemSpace>& y) const;
@@ -88,7 +95,12 @@ are [`CsrMatrix`](linear-algebra.md) in the same layout.
 | `pattern()` | The sparsity of the owned rows (each owned vertex with the vertices that share a cell with it), values zero. |
 | `laplacian(comm)` | Collective. The stiffness matrix of $-\nabla \cdot \nabla$, without boundary conditions. |
 | `load(comm, f)` | Collective. $b_v = \int f N_v$ for the owned vertices, 0 for the others. `f(x, y, z)` must be device-callable. |
-| `boundary()` | Per vertex, 1 on the mesh's boundary (a corner of a side of dimension `dim - 1` that only one cell has), as its owner finds it. |
+| `boundary()` | Per vertex, 1 on the mesh's boundary (a corner of a side of dimension `dim - 1` that only one cell has; with hanging vertices, one that no other such side lies in or has in it), as its owner finds it. Never a hanging vertex. |
+| `constrained()` | Whether the mesh has hanging vertices (see [hanging vertices](#hanging-vertices)). |
+| `hanging()` | Per vertex, 1 where it hangs; empty when not constrained. |
+| `composite()` | Whether a hex on any rank is a composite element (see [hexes against tets](#hexes-against-tets)). |
+| `split_sides()` | Per cell, its split code, 0 for a cell that is not composite. |
+| `distribute(comm, x)` | Collective. Each hanging vertex's value from its masters', then each owner's entries to its copies and ghosts (two updates); nothing when not constrained. Call it on a solution. |
 | `update(comm, x)` | Collective. Each owner's entries of `x` overwrite its copies and ghosts. |
 | `multiply(comm, a, x, y)` | Collective. Updates `x`, then $y = A x$ over the owned rows. |
 | `numbering(comm)` | Collective. A global numbering: owned vertices numbered rank by rank, copies and ghosts their owners' numbers (one exscan, one allreduce, one update). |
@@ -99,6 +111,11 @@ are [`CsrMatrix`](linear-algebra.md) in the same layout.
 - Dimension 2 or 3, cells all triangles, quads, tets or hexes, no high-order nodes, not edited
   (changed by `MeshEdit::apply` and not compressed since).
 - Every cell positively oriented (`least_jacobian > 0`).
+- A quad face that triangles tile, they tile it as two halves of a diagonal (a hex face against
+  two tets, which makes the hex a [composite element](#hexes-against-tets)); one triangle on
+  half of it and something else on the other half is refused.
+- Hanging vertices, if any, with a record of the side each was born on (`"refine:birth"`, which
+  `refine_marked` writes and `infer_births` recovers); see [hanging vertices](#hanging-vertices).
 - On more than one rank, a ghost layer through vertices, `GhostOptions{1, 0}` (see
   [ghosts and halos](../parallel/ghosts-and-halos.md)). Every cell around an owned vertex is
   then present, and owners assemble their rows whole, without messages. The mesh must also
@@ -106,8 +123,10 @@ are [`CsrMatrix`](linear-algebra.md) in the same layout.
 - Every owned vertex belongs to some cell on its rank.
 
 The constructor is collective and throws `std::invalid_argument` on every rank if any rank's
-mesh breaks one of these, if a rank's element matrices would not fit `Offset`, or if ranks
-differ in `soma::reproducible()`.
+mesh breaks one of these, if a rank's element matrices would not fit `Offset`, if ranks
+differ in `soma::reproducible()`, or, with hanging vertices on more than one rank, if a rank
+lacks a master of a hanging vertex it needs or a cell around one (add a ghost layer: two
+suffice).
 
 A space keeps views into the mesh: it is valid while the mesh is alive and its topology
 unchanged. Coordinates may move between assemblies, provided copies and ghosts hold their
@@ -117,6 +136,112 @@ assemble has become inverted or degenerate since the space was made.
 
 `update()` throws `std::invalid_argument` on a rank whose vector does not hold exactly
 `cols()` entries; that rank leaves the exchange and the others complete it.
+
+## Hanging vertices
+
+`refine_marked` without `MarkedOptions::conforming` leaves vertices on edges and faces that a
+neighbouring cell still has whole. A space of independent values there would not be continuous.
+`FemSpace` constrains them instead, as `hanging_constraints` (`soma/algorithms/refine.hpp`,
+see [hanging constraints](refinement.md#hanging-constraints)) gives them: a vertex born on a side that a cell still has whole takes the average of the side's
+corners,
+
+$$
+u_h = \sum_k w_k\, u_{m_k}, \qquad w_k = 1/n \text{ over the side's } n \text{ corners},
+$$
+
+a corner that hangs itself (one level up) taking its own masters in turn.
+
+```{figure} ../figures/img/hanging-constraints.svg
+:alt: A 4 by 4 grid of squares refined at its lower left block and again at that block's corner cell, the hanging vertices on the edges between levels drawn as orange dots, each joined by orange lines to the two black squares at the ends of the coarse edge it lies on
+:width: 60%
+
+A grid of 4 x 4 quads refined by `refine_marked` (no `conforming`) at its lower left block, then at
+that block's corner: the hanging vertices (dots) and their masters (squares), as `hanging_constraints`
+gives them. Each lies on a coarse edge and takes half of each of its ends.
+```
+
+These are the traces
+of the coarse cell's linear, bilinear or trilinear element at the edge midpoint or face centre,
+so the constrained space is continuous: a linear function is reproduced exactly, and the error
+falls at the uniform meshes' rate.
+
+With $P$ the map from the free vertices to all of them, the space assembles $P^T A P$ and
+$P^T b$ on the free vertices' rows. A hanging vertex's row is the identity's, its load 0, so the
+matrix stays symmetric (to rounding: $P^T A P$ sums the same products in other orders) and
+positive definite after Dirichlet elimination, and CG solves it as before. Hanging vertices are
+never boundary vertices: Dirichlet values reach them through their masters. After solving, call
+`distribute(comm, x)` to set them:
+
+```cpp
+const soma::FemSpace<Kokkos::HostSpace> space(comm, mesh);  // mesh from refine_marked
+soma::CsrMatrix<Kokkos::HostSpace> a = space.laplacian(comm);
+auto b = space.load(comm, f);
+soma::apply_dirichlet(a, b, space.boundary(), g);
+soma::cg(comm, space, a, b, x);
+space.distribute(comm, x);  // hanging vertices from their masters
+```
+
+A constrained space assembles by gather, whatever `Assembly` it was given: each owned row sums
+its terms (its own cells', then each hanging vertex it masters, by gid, weighted, a hanging
+corner spread to its masters) in an order fixed by gid, so the matrix and load are the same bit
+for bit on any number of ranks and threads.
+
+Its row for a master needs the cells around the hanging vertices it masters, which lie one layer
+further out than its own: on more than one rank give the mesh two ghost layers through vertices,
+`GhostOptions{2, 0}`. The constructor checks it: each needed hanging vertex's cell count against
+its owner's, and an exact balance (the sum, over each hanging vertex's owner, of
+$w_k\,\kappa(m_k, h)$ over its masters, less the same over each master's row of the hanging
+vertices it took, for a number $\kappa$ fixed by the two gids) that is zero only when every
+master's row took every hanging vertex. `hanging_constraints` gathers every hanging vertex's
+record on every rank (five gids each), to resolve masters that hang.
+
+Measured (`FemSpace.ConvergesWithHangingVertices`): $-\Delta u = f$ with
+$u = \prod_i \sin(\pi x_i)$ on boxes refined once where $x < 0.4$; the largest error at a vertex
+falls at rates 2.09, 1.96 (tri), 1.93, 1.96 (quad), 2.03, 2.18 (tet), 1.98, 2.02 (hex).
+
+## Hexes against tets
+
+A hex face against the two triangles of two tets, with no pyramid between, would leave a
+space of Q1 hexes and P1 tets discontinuous there: the hex's trace on the face is bilinear, the
+tets' piecewise linear. Such a hex becomes a composite element instead. It is cut about its
+centre $c$ (the mean of its corners) into six pyramids, one on each face, and the pyramid on a
+split face into the two tets of that face's diagonal. The space on it is the rational pyramid
+basis and P1 on those tets:
+
+- across a whole face its trace is bilinear, as a neighbouring hex's;
+- across a split face it is linear on each triangle, as the tets';
+- inside, the sub-cells meet on triangles, where every trace is linear.
+
+So it is continuous, and it holds linear functions: the pyramids are isoparametric.
+
+```{figure} ../figures/img/composite-hex.svg
+:alt: Left, a unit cube of hexes beside a unit cube cut into six tets, the shared side's diagonal in red on both; right, the hex cut about its centre into five blue pyramids and two orange tets, pushed apart along their sides
+:width: 95%
+
+A hex against a cube of six tets (left): its side at $x = 1$ is tiled by two triangles, along the
+diagonal in red, which `detail::split_sides` finds (code 1 on side 1). The composite element (right):
+pyramids on its five whole sides and the two tets of the split side, all with their apex at the centre,
+drawn pushed apart.
+```
+
+The centre's value is tied to the mean of the corners', $u_c = \tfrac18 \sum_a u_a$, exact for
+linear functions. The element's $9 \times 9$ matrix and load reduce to $8 \times 8$,
+$k = T^T k_9 T$ and $r = T^T r_9$, with $T$ the identity on the corners and $\tfrac18$ each
+for the centre. The sparsity is the hex's, and every assembly mode works unchanged. The
+pyramids are integrated by the collapsed rule of 27 points, exact for a pyramid with a
+parallelogram base. A hex that no split face touches stays Q1.
+
+The split codes hold 2 bits a face, in canonical face order: 0 for a whole face, 1 for one split
+by the diagonal through the face's corners 0 and 2, and 2 for the other diagonal. They are
+found on each hex's owner, from the one-sided triangles on its one-sided quads
+(`detail::split_sides`), and sent to its ghosts: a ghost hex may lack the tets against its far
+faces. A side two triangles tile is between cells, so its corners are not boundary.
+
+Measured (`FemSpace.HexesAgainstTetsAreCompositeElements` and `ConvergesOnHexesAgainstTets`):
+on the unit cube, hexes where $x < 1/2$ and six tets a cell elsewhere, a linear function solves
+Laplace's equation to rounding, perturbed or not. The matrix and load are the serial ones bit
+for bit on 1 to 8 ranks. For $-\Delta u = f$ with $u = \prod_i \sin(\pi x_i)$, the largest
+error at a vertex falls at rates 2.07 and 2.05 over $n = 6, 12, 24$ cells a side.
 
 ## Assembly modes
 

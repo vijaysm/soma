@@ -10,6 +10,30 @@ module soma_c_api
   implicit none
   public
 
+  !> Entities a field rule gives values to (soma_entity_batch_t): count of
+  !> them, of dimension dim; entity i (0-based) has the corners
+  !> offsets(i) .. offsets(i + 1) - 1 of xyz (three coordinates each). For
+  !> dim 0 each is a point. topology and gid are c_null_ptr when absent.
+  type, bind(C) :: soma_entity_batch
+    integer(c_int) :: dim
+    integer(soma_lo) :: count
+    type(c_ptr) :: topology
+    type(c_ptr) :: offsets
+    type(c_ptr) :: xyz
+    type(c_ptr) :: gid
+  end type
+
+  abstract interface
+    !> A field rule (soma_rule_fn): writes count * ncomp values of the field's
+    !> type to values, interleaved (component fastest), and returns 0.
+    integer(c_int) function soma_rule(batch, ncomp, values, context) bind(C)
+      import :: c_int, c_ptr, soma_entity_batch
+      type(soma_entity_batch), intent(in) :: batch
+      integer(c_int), value :: ncomp
+      type(c_ptr), value :: values, context
+    end function
+  end interface
+
   interface
 
     ! ---- Runtime
@@ -275,6 +299,18 @@ module soma_c_api
       type(c_ptr), value :: m
       type(c_ptr), intent(out) :: out
     end function
+    integer(c_int) function c_mesh_needs_sync(m, needs) bind(C, name='soma_mesh_needs_sync')
+      import :: c_int, c_ptr
+      type(c_ptr), value :: m
+      integer(c_int), intent(out) :: needs
+    end function
+    integer(c_int) function c_mesh_sync(comm, m, tolerance, ghosts, fields, out) bind(C, name='soma_mesh_sync')
+      import :: c_int, c_ptr, c_double
+      type(c_ptr), value :: comm, m
+      real(c_double), value :: tolerance
+      integer(c_int), value :: ghosts, fields
+      type(c_ptr), intent(out) :: out
+    end function
     integer(c_int) function c_renumbering_new_lids(r, d, lids, n) bind(C, name='soma_renumbering_new_lids')
       import :: c_int, c_ptr, soma_lo
       type(c_ptr), value :: r
@@ -293,6 +329,31 @@ module soma_c_api
     end subroutine
 
     ! ---- Fields
+    integer(c_int) function c_mesh_set_rule(m, name, dtype, rule, context) bind(C, name='soma_mesh_set_rule')
+      import :: c_int, c_ptr, c_char, c_funptr
+      type(c_ptr), value :: m
+      character(kind=c_char), intent(in) :: name(*)
+      integer(c_int), value :: dtype
+      type(c_funptr), value :: rule
+      type(c_ptr), value :: context
+    end function
+    integer(c_int) function c_mesh_has_rule(m, name, dim, has) bind(C, name='soma_mesh_has_rule')
+      import :: c_int, c_ptr, c_char
+      type(c_ptr), value :: m
+      character(kind=c_char), intent(in) :: name(*)
+      integer(c_int), value :: dim
+      integer(c_int), intent(out) :: has
+    end function
+    integer(c_int) function c_mesh_sample(m, name, dim, dtype, rule, context, mode, degree) &
+        bind(C, name='soma_mesh_sample')
+      import :: c_int, c_ptr, c_char, c_funptr
+      type(c_ptr), value :: m
+      character(kind=c_char), intent(in) :: name(*)
+      integer(c_int), value :: dim, dtype
+      type(c_funptr), value :: rule
+      type(c_ptr), value :: context
+      integer(c_int), value :: mode, degree
+    end function
     integer(c_int) function c_mesh_add_field(m, name, dim, ncomp, dtype, data, rows) bind(C, name='soma_mesh_add_field')
       import :: c_int, c_ptr, c_char, soma_lo
       type(c_ptr), value :: m

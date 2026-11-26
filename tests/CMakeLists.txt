@@ -53,6 +53,7 @@ soma_add_test(test_key_ranks SOURCES unit/test_key_ranks.cpp RANKS 1 2 3 4 5 7 8
 soma_add_test(test_partition SOURCES unit/test_partition.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_sharing SOURCES unit/test_sharing.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_point_match SOURCES unit/test_point_match.cpp RANKS 1 2 3 4 5 7 8)
+soma_add_test(test_sync SOURCES unit/test_sync.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_merge SOURCES unit/test_merge.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_point_key SOURCES unit/test_point_key.cpp)
 soma_add_test(test_distributed_mesh SOURCES unit/test_distributed_mesh.cpp RANKS 1 2 3 4 5 7 8)
@@ -109,8 +110,15 @@ soma_add_test(test_remap3d SOURCES unit/test_remap3d.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_remap_sphere SOURCES unit/test_remap_sphere.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_refine SOURCES unit/test_refine.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_refine_marked SOURCES unit/test_refine_marked.cpp RANKS 1 2 3 4 5 7 8)
+soma_add_test(test_sample SOURCES unit/test_sample.cpp RANKS 1 2 3 4)
 soma_add_test(test_refine_quads SOURCES unit/test_refine_quads.cpp RANKS 1 2 3 4 5 7 8)
 soma_add_test(test_fv SOURCES unit/test_fv.cpp RANKS 1 2 3 4 5 7 8)
+# The convergence studies and coarse-fine tests take over two minutes on 8 ranks of one machine.
+foreach(np 1 2 3 4 5 7 8)
+  if(TEST test_fv.np${np})
+    set_tests_properties(test_fv.np${np} PROPERTIES TIMEOUT 300)
+  endif()
+endforeach()
 # Upwind steps are the same bit for bit at any number of threads.
 add_test(NAME test_fv.threads COMMAND ${CMAKE_COMMAND} -DEXE=$<TARGET_FILE:test_fv> -DFILTER=Fv.SolutionDigests
   -P ${CMAKE_CURRENT_SOURCE_DIR}/unit/compare_threads.cmake)
@@ -184,6 +192,15 @@ soma_add_test(test_domain SOURCES unit/test_domain.cpp)
 soma_add_test(test_lid_runs SOURCES unit/test_lid_runs.cpp)
 soma_add_test(test_space SOURCES unit/test_space.cpp)
 soma_add_test(test_field_registry SOURCES unit/test_field_registry.cpp)
+soma_add_test(test_field_rule SOURCES unit/test_field_rule.cpp)
+# A rule whose values are not of the field's value type must not compile:
+# the test builds the target and expects FieldRule's static_assert to stop it.
+add_library(soma_compile_fail_rule_type OBJECT EXCLUDE_FROM_ALL compile_fail/rule_wrong_type.cpp)
+target_link_libraries(soma_compile_fail_rule_type PRIVATE soma)
+add_test(NAME compile_fail.rule_type
+  COMMAND ${CMAKE_COMMAND} --build ${CMAKE_BINARY_DIR} --config $<CONFIG> --target soma_compile_fail_rule_type)
+set_tests_properties(compile_fail.rule_type PROPERTIES RUN_SERIAL TRUE
+  PASS_REGULAR_EXPRESSION "must return std::vector<T>, T being exactly the field's value type")
 soma_add_test(test_var_field SOURCES unit/test_var_field.cpp)
 soma_add_test(test_handle_ref SOURCES unit/test_handle_ref.cpp)
 soma_add_test(test_family SOURCES unit/test_family.cpp)

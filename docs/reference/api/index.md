@@ -55,6 +55,7 @@ fields/domain
 fields/domain_mesh
 fields/errors
 fields/field
+fields/field_rule
 fields/layout
 fields/node_tables
 fields/registry
@@ -106,6 +107,7 @@ io/vtk_writer
 
 algorithms/arborx_index
 algorithms/cg
+algorithms/conformity
 algorithms/csr
 algorithms/fem
 algorithms/fem_space
@@ -117,6 +119,7 @@ algorithms/quality_smooth
 algorithms/petsc
 algorithms/refine
 algorithms/remap
+algorithms/sample
 ```
 
 ## `soma/sem`

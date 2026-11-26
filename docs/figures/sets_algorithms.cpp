@@ -24,6 +24,7 @@
 #include "../../tests/unit/sphere_meshes.hpp"
 #include "figure_data.hpp"
 #include "soma/algorithms/cg.hpp"
+#include "soma/algorithms/conformity.hpp"
 #include "soma/algorithms/csr.hpp"
 #include "soma/algorithms/fem_space.hpp"
 #include "soma/algorithms/fv.hpp"
@@ -924,12 +925,145 @@ void set_regional(const soma::Comm& comm, const fs::path& out) {
 
 }  // namespace
 
+// nonconforming: a 4 x 4 grid of unit-square quads refined by refine_marked,
+// without conforming, at the lower-left block and then at its corner cell:
+// the cells and their levels, each hanging vertex's masters and weights
+// (hanging_constraints), and FvSpace's faces (fv_plan: each face's centroid
+// and cells). Then a unit hex against a unit cube of six tets: the hex's
+// split code (split_sides) and the tets, which FemSpace takes as a composite
+// element. Checked: every weight 1/2, the coarse cells beside the refined
+// block more faces than sides, one split side.
+void set_nonconforming(const soma::Comm& comm, const fs::path& out) {
+  constexpr int n = 4;
+  soma::MeshBuilder b(2);
+  std::vector<soma::GO> vg, cg, conn;
+  std::vector<double> xyz;
+  for (int j = 0; j <= n; ++j) {
+    for (int i = 0; i <= n; ++i) {
+      vg.push_back(1 + i + (n + 1) * j);
+      xyz.insert(xyz.end(), {static_cast<double>(i) / n, static_cast<double>(j) / n, 0.0});
+    }
+  }
+  for (int j = 0; j < n; ++j) {
+    for (int i = 0; i < n; ++i) {
+      cg.push_back(1 + i + n * j);
+      const soma::GO v = 1 + i + (n + 1) * j;
+      conn.insert(conn.end(), {v, v + 1, v + n + 2, v + n + 1});
+    }
+  }
+  b.add_vertices(vg, xyz);
+  b.add_elements(soma::Topology::quad, cg, conn);
+  soma::HostMesh mesh = soma::build_local_part(comm, std::move(b));
+  for (const double reach : {0.5, 0.25}) {
+    std::vector<std::int8_t> marks(static_cast<std::size_t>(mesh.count(2)), 0);
+    for (soma::LO e = 0; e < mesh.count(2); ++e) {
+      const auto c = centre(mesh, e);
+      marks[static_cast<std::size_t>(e)] = c[0] < reach && c[1] < reach ? 1 : 0;
+    }
+    mesh = soma::refine_marked(comm, mesh, marks, {}).mesh;
+  }
+  const auto level = mesh.fields().get<std::int32_t>("refine:level", 2).view();
+  const auto x = mesh.coords();
+  const auto gid = mesh.gid(0);
+  std::map<soma::GO, soma::LO> by_gid;
+  for (soma::LO v = 0; v < mesh.count(0); ++v) by_gid[gid(v)] = v;
+  std::string js = "{\"cells\": " + cells_json(mesh) + ",\n \"levels\": [";
+  for (soma::LO e = 0; e < mesh.count(2); ++e) js += std::string(e ? ", " : "") + std::to_string(level(e, 0));
+  const soma::HangingConstraints hc = soma::hanging_constraints(comm, mesh);
+  require(!hc.vertex.empty(), "nonconforming: hanging vertices");
+  js += "],\n \"hanging\": [";
+  for (std::size_t i = 0; i < hc.vertex.size(); ++i) {
+    const soma::LO v = hc.vertex[i];
+    js += std::string(i ? ",\n    " : "\n    ") + "{\"at\": [" + number(x(v, 0)) + ", " + number(x(v, 1)) +
+          "], \"masters\": [";
+    for (soma::Offset k = hc.offsets[i]; k < hc.offsets[i + 1]; ++k) {
+      const soma::LO m = by_gid.at(hc.masters[static_cast<std::size_t>(k)]);
+      const double w = hc.weights[static_cast<std::size_t>(k)];
+      require(w == 0.5, "nonconforming: a hanging vertex takes half of each of its edge's ends");
+      js += std::string(k > hc.offsets[i] ? ", " : "") + "[" + number(x(m, 0)) + ", " + number(x(m, 1)) + ", " +
+            number(w) + "]";
+    }
+    js += "]}";
+  }
+  const soma::detail::FvPlan plan = soma::detail::fv_plan(mesh);
+  require(plan.supported && plan.hanging == 0, "nonconforming: FvSpace takes the mesh");
+  js += "],\n \"faces\": [";
+  for (std::size_t f = 0; f < plan.left.size(); ++f) {
+    js += std::string(f ? ",\n    " : "\n    ") + "{\"at\": [" + number(plan.centroid[3 * f]) + ", " +
+          number(plan.centroid[3 * f + 1]) + "], \"area\": [" + number(plan.area[3 * f]) + ", " +
+          number(plan.area[3 * f + 1]) + "], \"left\": " + std::to_string(plan.left[f]) +
+          ", \"right\": " + std::to_string(plan.right[f]) + "}";
+  }
+  js += "],\n \"cell_faces\": [";
+  int more = 0;
+  for (std::size_t e = 0; e + 1 < plan.cell_offsets.size(); ++e) {
+    const auto count = plan.cell_offsets[e + 1] - plan.cell_offsets[e];
+    more += count > 4 ? 1 : 0;
+    js += std::string(e ? ", " : "") + "[";
+    for (soma::Offset k = plan.cell_offsets[e]; k < plan.cell_offsets[e + 1]; ++k) {
+      js += std::string(k > plan.cell_offsets[e] ? ", " : "") + std::to_string(plan.cell_faces[static_cast<std::size_t>(k)]);
+    }
+    js += "]";
+  }
+  require(more > 0, "nonconforming: a coarse cell beside the refined block has more faces than sides");
+
+  // The hex [0,1]^3 and the cube [1,2] x [0,1]^2 in six tets about its diagonal.
+  soma::MeshBuilder c3(3);
+  std::vector<soma::GO> g3;
+  std::vector<double> x3;
+  for (int k = 0; k < 2; ++k) {
+    for (int j = 0; j < 2; ++j) {
+      for (int i = 0; i < 3; ++i) {
+        g3.push_back(1 + i + 3 * (j + 2 * k));
+        x3.insert(x3.end(), {static_cast<double>(i), static_cast<double>(j), static_cast<double>(k)});
+      }
+    }
+  }
+  const auto id = [](int i, int j, int k) { return static_cast<soma::GO>(1 + i + 3 * (j + 2 * k)); };
+  const int corner[8][3] = {{0, 0, 0}, {1, 0, 0}, {1, 1, 0}, {0, 1, 0}, {0, 0, 1}, {1, 0, 1}, {1, 1, 1}, {0, 1, 1}};
+  std::vector<soma::GO> hex, tets;
+  for (const auto& r : corner) hex.push_back(id(r[0], r[1], r[2]));
+  const int six[6][4] = {{0, 1, 2, 6}, {0, 2, 3, 6}, {0, 3, 7, 6}, {0, 7, 4, 6}, {0, 4, 5, 6}, {0, 5, 1, 6}};
+  for (const auto& q : six) {
+    for (const int r : q) tets.push_back(id(1 + corner[r][0], corner[r][1], corner[r][2]));
+  }
+  c3.add_vertices(g3, x3);
+  const std::vector<soma::GO> hex_gid{1}, tet_gids{2, 3, 4, 5, 6, 7};
+  c3.add_elements(soma::Topology::hex, hex_gid, hex);
+  c3.add_elements(soma::Topology::tet, tet_gids, tets);
+  const soma::HostMesh mixed = soma::build_local_part(comm, std::move(c3));
+  const soma::detail::SplitSides split = soma::detail::split_sides(mixed);
+  const soma::FemSpace<Host> space(comm, mixed);
+  require(space.composite(), "nonconforming: FemSpace takes the hex as a composite element");
+  const auto m3 = mixed.view();
+  const auto y = mixed.coords();
+  int sides = 0;
+  std::string hexjs, tetjs;
+  for (soma::LO e = 0; e < mixed.count(3); ++e) {
+    std::string cs = "[";
+    for (soma::LO k = 0; k < m3.num_vertices(3, e); ++k) {
+      const soma::LO v = m3.vertex(3, e, k);
+      cs += (k ? ", [" : "[") + number(y(v, 0)) + ", " + number(y(v, 1)) + ", " + number(y(v, 2)) + "]";
+    }
+    cs += "]";
+    if (m3.topology(3, e) == soma::Topology::hex) {
+      for (int s = 0; s < 6; ++s) sides += ((split.code[static_cast<std::size_t>(e)] >> (2 * s)) & 3u) != 0 ? 1 : 0;
+      hexjs = "{\"corners\": " + cs + ", \"split\": " + std::to_string(split.code[static_cast<std::size_t>(e)]) + "}";
+    } else {
+      tetjs += std::string(tetjs.empty() ? "" : ", ") + cs;
+    }
+  }
+  require(sides == 1 && split.odd == 0, "nonconforming: one side of the hex split, by the tets' diagonal");
+  write_json(comm, out / "nonconforming.json", js + "],\n \"hex\": " + hexjs + ",\n \"tets\": [" + tetjs + "]}");
+}
+
 void add_algorithm_sets(Sets& sets) {
   sets["advect"] = {1, set_advect};
   sets["children"] = {1, set_children};
   sets["coarsefine"] = {1, set_coarsefine};
   sets["hierarchy"] = {1, set_hierarchy};
   sets["marked"] = {1, set_marked};
+  sets["nonconforming"] = {1, set_nonconforming};
   sets["overlap"] = {1, set_overlap};
   sets["readparts"] = {4, set_readparts};
   sets["regional"] = {1, set_regional};

@@ -330,7 +330,14 @@ void detail::add_sharing_fields(HostMesh& mesh, int dim, const std::vector<Offse
   for (std::size_t r = 0; r < owners.size(); ++r) owner.view()(r, 0) = owners[r];
 }
 
+void detail::require_synced(const Comm& comm, bool needs, const char* who) {
+  if (comm.size() > 1 && comm.allreduce(static_cast<std::int32_t>(needs ? 1 : 0), Op::max) != 0) {
+    throw std::logic_error(std::string(who) + ": a rank's mesh was edited since its sharing was made; call sync_mesh first");
+  }
+}
+
 void build_distributed_adjacencies(const Comm& comm, HostMesh& mesh, AdjacencyRequest request) {
+  detail::require_synced(comm, mesh.needs_sync(), "build_distributed_adjacencies");
   build_and_distribute(comm, mesh, request, [&](int k, const std::vector<GO>& given, const std::vector<GO>& ghosts) {
     distribute_dimension(comm, mesh, k, given, ghosts);
   });

@@ -7,12 +7,15 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
+#include "soma/algorithms/sample.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/fields/registry.hpp"
 #include "soma/parallel/distributed.hpp"
@@ -161,47 +164,112 @@ const Pattern& pattern(Topology t) {
 }
 
 
-// Carries a dense field of dimension d from `in` to `out`: a cell's children
-// take its value; a vertex keeps its value, a new one takes its corners'
-// weighted sum (or average).
+// For each entity of dimension d of `out`, the local id in `in` of the entity
+// with its vertices (by gid), or -1 for an entity new to `out`.
+std::vector<LO> same_entities(const HostMesh& in, const HostMesh& out, int d) {
+  std::vector<LO> same(static_cast<std::size_t>(out.count(d)), -1);
+  if (d == 0) {
+    const auto table = lid_table(in, 0, in.count(0));
+    const auto gid = out.gid(0);
+    for (LO v = 0; v < out.count(0); ++v) {
+      const auto it = std::lower_bound(table.begin(), table.end(),
+                                       std::pair<GO, LO>{gid(v), std::numeric_limits<LO>::min()});
+      if (it != table.end() && it->first == gid(v)) same[static_cast<std::size_t>(v)] = it->second;
+    }
+    return same;
+  }
+  const auto key = [d](const HostMesh& m, LO e) {
+    const MeshView<Host> view = m.view();
+    std::vector<GO> k;
+    for (LO i = 0; i < view.num_vertices(d, e); ++i) k.push_back(view.gid(0, view.vertex(d, e, i)));
+    std::sort(k.begin(), k.end());
+    return k;
+  };
+  std::vector<std::pair<std::vector<GO>, LO>> table;
+  for (LO e = 0; e < in.count(d); ++e) table.emplace_back(key(in, e), e);
+  std::sort(table.begin(), table.end());
+  for (LO e = 0; e < out.count(d); ++e) {
+    std::pair<std::vector<GO>, LO> probe{key(out, e), std::numeric_limits<LO>::min()};
+    const auto it = std::lower_bound(table.begin(), table.end(), probe);
+    if (it != table.end() && it->first == probe.first) same[static_cast<std::size_t>(e)] = it->second;
+  }
+  return same;
+}
+
+// Whether carry keeps a dense field of dimension d: a vertex field needs a
+// way to give new vertices values (a rule, floating values to interpolate, or
+// a default). The same on every rank when the ranks set the same rules, as
+// refine.hpp asks: rules are each rank's own.
+bool carried(const HostMesh& in, const FieldInfo& info, int d) {
+  if (d != 0 || info.type == DataType::f32 || info.type == DataType::f64 || in.fields().has_rule(info.id)) {
+    return true;
+  }
+  bool has_default = false;
+  dispatch_data_type(info.type,
+                     [&]<class T>() { has_default = in.fields().template get<T>(info.id).has_default(); });
+  return has_default;
+}
+
+// Carries a dense field of dimension d from `in` to `out`. An entity `out`
+// shares with `in` (same[e] >= 0) keeps its value. A new one takes the
+// field's rule, given all of them at once; without a rule a cell takes its
+// parent's value and a vertex its corners' weighted sum (or average) if the
+// values are floating, else the default.
 template <class T>
 void carry(const HostMesh& in, HostMesh& out, const FieldInfo& info, int d, const std::vector<LO>& parent,
-           const std::vector<std::pair<GO, LO>>& in_vertex, const std::vector<NewVertex>& added) {
+           const std::vector<std::pair<GO, LO>>& in_vertex, const std::vector<NewVertex>& added,
+           const std::vector<LO>& same) {
   const auto source = in.fields().template get<T>(info.id);
   const auto from = source.view();
+  const FieldRule<T> rule = in.fields().template rule<T>(info.id);
   FieldOptions<T> options;
   if (source.has_default()) options.default_value = source.default_value();
   if (source.has_global()) options.global_value = source.global_value();
+  options.rule = rule;
   auto to = out.fields().template add_tag<T>(info.name, d, info.ncomp, std::move(options)).view();
   const auto ncomp = static_cast<std::size_t>(info.ncomp);
-  if (d != 0) {
-    for (std::size_t c = 0; c < parent.size(); ++c) {
-      for (std::size_t k = 0; k < ncomp; ++k) to(c, k) = from(static_cast<std::size_t>(parent[c]), k);
+  std::vector<LO> fresh;
+  for (std::size_t e = 0; e < same.size(); ++e) {
+    if (same[e] >= 0) {
+      for (std::size_t k = 0; k < ncomp; ++k) to(e, k) = from(static_cast<std::size_t>(same[e]), k);
+    } else {
+      fresh.push_back(static_cast<LO>(e));
+    }
+  }
+  if (fresh.empty()) return;
+  if (rule) {
+    const EntityBatchData data = entity_batch(out, d, fresh);
+    const std::vector<T> values = rule(data.batch(), info.ncomp);
+    for (std::size_t i = 0; i < fresh.size(); ++i) {
+      for (std::size_t k = 0; k < ncomp; ++k) to(static_cast<std::size_t>(fresh[i]), k) = values[i * ncomp + k];
     }
     return;
   }
-  const auto gid = out.gid(0);
-  for (LO v = 0; v < out.count(0); ++v) {
-    const GO g = gid(v);
-    const auto vi = static_cast<std::size_t>(v);
-    // A vertex of the input keeps its value; one added (or reused from
-    // another rank) takes its corners' average.
-    const auto it = std::lower_bound(added.begin(), added.end(), g,
-                                     [](const NewVertex& a, GO b) { return a.gid < b; });
-    const auto held =
-        std::lower_bound(in_vertex.begin(), in_vertex.end(), std::pair<GO, LO>{g, std::numeric_limits<LO>::min()});
-    if (it == added.end() || it->gid != g || (held != in_vertex.end() && held->first == g)) {
-      const auto lid = static_cast<std::size_t>(find_lid(in_vertex, g));
-      for (std::size_t k = 0; k < ncomp; ++k) to(vi, k) = from(lid, k);
-      continue;
+  if (d != 0) {
+    for (const LO c : fresh) {
+      const auto p = static_cast<std::size_t>(parent[static_cast<std::size_t>(c)]);
+      for (std::size_t k = 0; k < ncomp; ++k) to(static_cast<std::size_t>(c), k) = from(p, k);
     }
-    for (std::size_t k = 0; k < ncomp; ++k) {
-      Real s = 0;
-      for (std::size_t j = 0; j < it->corners.size(); ++j) {
-        const auto value = static_cast<Real>(from(static_cast<std::size_t>(find_lid(in_vertex, it->corners[j])), k));
-        s += it->weights.empty() ? value : it->weights[j] * value;
+    return;
+  }
+  if constexpr (!std::is_floating_point_v<T>) {
+    return;  // the default, which add_tag filled in
+  } else {
+    const auto gid = out.gid(0);
+    for (const LO v : fresh) {
+      const GO g = gid(v);
+      const auto it = std::lower_bound(added.begin(), added.end(), g,
+                                       [](const NewVertex& a, GO b) { return a.gid < b; });
+      if (it == added.end() || it->gid != g) throw std::logic_error("refinement: a new vertex has no record");
+      for (std::size_t k = 0; k < ncomp; ++k) {
+        Real sum = 0;
+        for (std::size_t j = 0; j < it->corners.size(); ++j) {
+          const auto value = static_cast<Real>(from(static_cast<std::size_t>(find_lid(in_vertex, it->corners[j])), k));
+          sum += it->weights.empty() ? value : it->weights[j] * value;
+        }
+        to(static_cast<std::size_t>(v), k) =
+            static_cast<T>(it->weights.empty() ? sum / static_cast<Real>(it->corners.size()) : sum);
       }
-      to(vi, k) = static_cast<T>(it->weights.empty() ? s / static_cast<Real>(it->corners.size()) : s);
     }
   }
 }
@@ -328,26 +396,20 @@ Level assemble(const Comm& comm, const HostMesh& mesh, const HostMesh& work, std
 
   // Fields.
   const auto in_vertex = lid_table(mesh, 0, mesh.count(0));
+  std::array<std::optional<std::vector<LO>>, 4> kept;
   for (const FieldInfo& info : mesh.fields().list()) {
     if (info.name.rfind("soma:", 0) == 0 || info.name.rfind("refine:", 0) == 0) continue;
     const bool dense = !info.variable && !info.handle && info.layout == Layout::per_entity() && info.dims.size() == 1 &&
                        (info.dims[0] == 0 || info.dims[0] == dim) && info.rows == mesh.count(info.dims[0]);
-    const bool real = info.type == DataType::f32 || info.type == DataType::f64;
-    if (!dense || (info.dims[0] == 0 && !real)) {
+    if (!dense || !carried(mesh, info, info.dims[0])) {
       out.dropped.push_back(info.name);
       continue;
     }
     const int d = info.dims[0];
-    switch (info.type) {
-      case DataType::i8: carry<std::int8_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
-      case DataType::u8: carry<std::uint8_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
-      case DataType::i32: carry<std::int32_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
-      case DataType::u32: carry<std::uint32_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
-      case DataType::i64: carry<std::int64_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
-      case DataType::u64: carry<std::uint64_t>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
-      case DataType::f32: carry<float>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
-      case DataType::f64: carry<double>(mesh, out.mesh, info, d, out.parent, in_vertex, added); break;
-    }
+    if (!kept[static_cast<std::size_t>(d)]) kept[static_cast<std::size_t>(d)] = same_entities(mesh, out.mesh, d);
+    dispatch_data_type(info.type, [&]<class T>() {
+      carry<T>(mesh, out.mesh, info, d, out.parent, in_vertex, added, *kept[static_cast<std::size_t>(d)]);
+    });
   }
   return out;
 }
@@ -487,7 +549,7 @@ void check(const Comm& comm, const HostMesh& mesh, int levels, const char* who, 
   int bad = 0;
   if (dim != 2 && dim != 3) {
     bad = 1;
-  } else if (mesh.edited() || mesh.has_nodes(dim)) {
+  } else if (mesh.edited() || (comm.size() > 1 && mesh.needs_sync()) || mesh.has_nodes(dim)) {
     bad = 2;
   } else {
     const MeshView<Host> m = mesh.view();

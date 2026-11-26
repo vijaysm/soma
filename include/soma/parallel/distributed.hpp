@@ -70,6 +70,10 @@ inline constexpr const char* owner_field = "soma:owner";
                                         Ordering ordering = default_ordering);
 
 namespace detail {
+/// Collective on more than one rank: throws std::logic_error on every rank if
+/// `needs` (Mesh::needs_sync) is true on any.
+void require_synced(const Comm& comm, bool needs, const char* who);
+
 /// The overload above for a caller that reports failures in its own
 /// reductions: `before`, this rank's failure so far, joins the build's checks
 /// (every rank throws if any rank failed: the failing ones their own, the

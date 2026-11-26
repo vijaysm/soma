@@ -54,6 +54,7 @@ described below.
 | `default_value` | none | `ncomp` values: the value of an entity that was never set, and the initial fill. Without one, fields start zeroed and `has_default()` is false |
 | `global_value` | none | one value per mesh, as MOAB tags can carry |
 | `handle` | `false` | the values are [handles](mesh-model.md) of entities or sets (`make_handle`; 0 for none); needs `T = GO` |
+| `rule` | none | a [rule](#rules-values-for-new-entities-and-sampling) that gives values to entities the field has none for yet |
 
 From `tests/unit/test_mesh_edit.cpp`:
 
@@ -62,6 +63,51 @@ auto all = m.fields().add<double>(
     "a", soma::make_space(m, soma::Domain<Kokkos::HostSpace>::all(m, 0), soma::Layout::per_entity()),
     1, {.default_value = std::vector<double>{-5}});
 ```
+
+## Rules: values for new entities, and sampling
+
+A rule (`soma/fields/field_rule.hpp`) is a function that gives a field its values from where entities
+are. It is called once with every entity at hand, as an `EntityBatch`: for each entity its corners'
+coordinates (`x(i, c, k)`, `center(i)`), and its topology and gid. A rule for a field of value type `T`
+must return exactly `std::vector<T>`, `ncomp` values per entity. A `static_assert` checks that when the
+rule is built, so a `double` field cannot take a rule that returns `float`. `soma::pointwise(f)` makes
+a rule of a function of one point, `f(x, y, z)` returning `T` or `std::array<T, N>`, evaluated at each
+entity's centre:
+
+```cpp
+soma::FieldOptions<double> o;
+o.rule = soma::pointwise([](double x, double y, double) { return std::sin(x) * std::cos(y); });
+auto u = mesh.fields().add_tag<double>("u", 0, 1, std::move(o));
+mesh.fields().set_rule(gid_field, [](const soma::EntityBatch& b) {  // integers from the entities
+  return std::vector<std::int64_t>(b.gid.begin(), b.gid.end());
+});
+```
+
+A rule belongs to the field's family: every field of that name, value type, `ncomp` and layout shares
+it, and it goes when the family's last field is removed. Clones, mirrors, `compress`, migration and
+ghosts carry it. Rules then give values to:
+
+- the vertices and cells [refinement](../algorithms/refinement.md) makes, hanging vertices included,
+  in place of the parent's value or the corners' average;
+- the entities [`MeshEdit`](editing.md) adds;
+- every member of a field, by `soma::sample` (`soma/algorithms/sample.hpp`).
+
+`sample(mesh, field, rule, options)` uses the field's own rule when none is given:
+
+| `options.mode` | Values |
+| --- | --- |
+| `Sampling::point` | the rule of each member entity; for an `element_nodes` field, of each node, placed by the element's map (where `SemSpace` puts its GLL points) |
+| `Sampling::average` | `(1/|e|) ∫_e f`, by a quadrature exact for polynomials of `options.degree` on the reference cell, through the element's map; on a mesh on a sphere, the sphere's area |
+| `Sampling::integral` | `∫_e f`, the same way |
+
+Cell averages are what a finite volume method holds, and a centre value is only second order: use
+averages for initial states and for the exact solution in convergence studies of order above two.
+
+Files cannot hold functions. `write_soma` records the names of the fields that had a rule in the mesh
+value `soma:rules`, and `soma::missing_rules(mesh)` lists those a mesh read back is without. Rules run
+on the host; C (`soma_mesh_set_rule`, `soma_mesh_sample`), Python (`mesh.set_rule`, `mesh.sample`) and
+Fortran (`%set_rule`, `%sample`) pass functions of the same batch. There the value type is declared with
+the rule and checked when it is set (C, Fortran) or when it returns (Python).
 
 ## Domains: which entities
 
@@ -258,7 +304,8 @@ the fields along or marks them stale:
 | `mesh.clone()` | deep copy of every field |
 | [`build_adjacencies`](topology.md) | deriving a dimension a live field uses, or one that held explicit entities, advances the epoch: every field becomes stale |
 | `bump_epoch()` | every field becomes stale |
-| [`MeshEdit::apply`](editing.md) | fields over every entity of a dimension grow, added entities at the default; other fields keep their members; sides derived again keep their values through their gids; the epoch does not change |
+| [`MeshEdit::apply`](editing.md) | fields over every entity of a dimension grow, added entities at their rule's values or else the default; other fields keep their members; sides derived again keep their values through their gids; the epoch does not change |
+| [refinement](../algorithms/refinement.md) | a new mesh: vertex and cell fields carry over, new entities at their rule's values, else the parent's value (cells), the corners' average (floating-point vertex fields) or the default (integer ones) |
 | [`compress()`](editing.md) and `permute_entities` | values follow their entities; the epoch advances and the fields move to it, so they stay current (handles must be fetched again) |
 | [`add_ghosts`](../parallel/ghosts-and-halos.md) | ghosts and shared copies hold their owners' values; fetch field handles again |
 | [`migrate`, `rebalance`](../parallel/distributed-meshes.md) | each entity's values are those its owner held; a field's domain is full where it was full on every rank |

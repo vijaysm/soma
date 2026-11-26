@@ -78,6 +78,15 @@ Renumbering compress(Mesh<Kokkos::HostSpace>& mesh);
 /// build_adjacencies on a host mesh holding removed entities.
 void build_edited(Mesh<Kokkos::HostSpace>& mesh, AdjacencyRequest req);
 struct TopologyAccess;
+
+/// What sync_mesh has to know of the edits of a distributed part.
+struct UnsyncedEdits {
+  bool unsynced = false;
+  bool adds = false;  ///< entities were added, under gids chosen or given
+  std::array<int, 2> ghosts{0, 0};         ///< the ghosts the mesh had: layers and bridge_dim
+  std::array<LO, 4> dropped{};             ///< ghosts whose slots are still here: compress() clears them
+  std::array<std::vector<GO>, 4> chosen;   ///< gids MeshEdit chose for added entities, this rank's alone
+};
 /// Defined in soma/topology/build.hpp, which this header includes at its end.
 template <class MemSpace>
 void rebuild_adjacencies(Mesh<MemSpace>& mesh, AdjacencyRequest req);
@@ -216,6 +225,11 @@ class Mesh {
   /// 0 and 0 for a mesh without ghosts. Copies and mirrors keep them.
   int ghost_layers() const noexcept { return ghosts_[0]; }
   int ghost_bridge_dim() const noexcept { return ghosts_[1]; }
+  /// True for a distributed part that MeshEdit changed after its sharing was
+  /// made: no ghosts, and the calls that use the sharing throw
+  /// std::logic_error on every rank, until sync_mesh (soma/parallel/merge.hpp).
+  /// Compression, copies and mirrors keep it.
+  bool needs_sync() const noexcept { return edits_.unsynced; }
   /// True for the dimensions MeshBuilder was given entities of (vertices
   /// always), also after derivation adopts them; false for derived-only ones.
   bool input(int d) const { return block(d).input; }
@@ -330,6 +344,7 @@ class Mesh {
     std::swap(corner_ends_, o.corner_ends_);
     std::swap(ordering_, o.ordering_);
     std::swap(ghosts_, o.ghosts_);
+    std::swap(edits_, o.edits_);
     for (std::size_t d = 0; d < 4; ++d) std::swap(ents_[d], o.ents_[d]);
     std::swap(coords_, o.coords_);
     std::swap(epoch_, o.epoch_);
@@ -416,6 +431,7 @@ class Mesh {
     }
     out.ordering_ = ordering_;
     out.ghosts_ = ghosts_;
+    out.edits_ = edits_;
     if (o.dims[0]) out.corner_ends_ = corner_ends_;
     if (o.coordinates) transfer(out.coords_, coords_, alias);
     if (o.adj_source == TransferOptions::AdjSource::copy) {
@@ -463,6 +479,7 @@ class Mesh {
   std::array<LO, 4> corner_ends_{};  ///< by Ownership
   Ordering ordering_ = default_ordering;
   std::array<int, 2> ghosts_{0, 0};  ///< add_ghosts' layers and bridge_dim
+  detail::UnsyncedEdits edits_;
   std::array<EntityBlock<MemSpace>, 4> ents_{};
   CoordView<MemSpace> coords_;
   std::uint64_t epoch_ = 1;

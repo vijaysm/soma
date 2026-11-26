@@ -23,6 +23,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "soma/algorithms/remap.hpp"
+#include "soma/algorithms/sample.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/parallel/distributed.hpp"
 
@@ -157,6 +158,17 @@ Real smooth(const std::array<Real, 3>& p) { return 1 + std::sin(3 * p[0]) * std:
 Vector field(const soma::HostMesh& mesh) {
   Vector u("u", static_cast<std::size_t>(mesh.segment_table(mesh.dim()).owned_end));
   for (std::size_t e = 0; e < u.extent(0); ++e) u(e) = smooth(centre(mesh, static_cast<LO>(e)));
+  return u;
+}
+
+// Exact averages of smooth over the owned cells (soma::sample, degree 6).
+Vector averages(const soma::HostMesh& mesh) {
+  soma::HostMesh m = mesh.clone();
+  const auto f = m.fields().add_tag<Real>("exact", m.dim(), 1);
+  soma::sample(m, f, soma::pointwise([](Real x, Real y, Real z) { return smooth({x, y, z}); }),
+               {.mode = soma::Sampling::average, .degree = 6});
+  Vector u("u", static_cast<std::size_t>(m.segment_table(m.dim()).owned_end));
+  for (std::size_t e = 0; e < u.extent(0); ++e) u(e) = f.view()(e, 0);
   return u;
 }
 
@@ -333,6 +345,7 @@ TEST(Remap3d, ARefinementFarFromTheOriginIsRecoveredExactly) {
   EXPECT_LE(c.allreduce(worst, soma::Op::max), 1e-14);
 }
 
+// Cell averages, against the target's exact averages.
 TEST(Remap3d, TheErrorFallsAtFirstOrder) {
   const Comm c = Comm::world();
   std::vector<Real> errors;
@@ -341,9 +354,10 @@ TEST(Remap3d, TheErrorFallsAtFirstOrder) {
     const soma::HostMesh target = build(c, grid(n + 1, n, n + 1, Topology::tet, 2), 1);
     const Remap remap(c, source, target);
     Vector v("v", static_cast<std::size_t>(remap.rows()));
-    remap.apply(c, CVector(field(source)), v);
+    remap.apply(c, CVector(averages(source)), v);
+    const Vector exact = averages(target);
     Real local = 0;
-    for (LO r = 0; r < remap.rows(); ++r) local += remap.target_area()(r) * std::abs(v(r) - smooth(centre(target, r)));
+    for (LO r = 0; r < remap.rows(); ++r) local += remap.target_area()(r) * std::abs(v(r) - exact(r));
     errors.push_back(c.allreduce(local, soma::Op::sum));
     if (c.rank() == 0) std::printf("n %d L1 error %.4e\n", n, errors.back());
   }

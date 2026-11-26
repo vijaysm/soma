@@ -48,17 +48,23 @@
 /// therefore the same, gid for gid and bit for bit, on any number of ranks.
 ///
 /// Each rank refines the cells it owns; the result has no ghosts (add them
-/// again as needed). Fields carry over where they are dense (one value per
-/// entity of a full domain, per-entity layout, not variable, not handles),
-/// with their default and global values: a cell field's children take the
-/// parent's value (so integrals of cell averages are kept), a vertex field of
-/// floating values keeps the values of the old vertices and gives a new one
-/// the average of its corners (exact for linear, bilinear and trilinear
-/// fields). Vertex values are read where a rank holds them, shared copies and
+/// again as needed). Vertex and cell fields carry over where they are dense
+/// (one value per entity of a full domain, per-entity layout, not variable,
+/// not handles), with their default and global values and their rule
+/// (soma/fields/field_rule.hpp). Vertices and cells the input has (by their
+/// vertices' gids) keep their values. The new ones take the field's rule,
+/// called once with all of them, when it has one (hanging vertices too);
+/// otherwise a child takes its parent's value (so integrals of cell averages
+/// are kept), and a new vertex of a floating-point field the average of its
+/// corners (exact for linear, bilinear and trilinear fields; for a hanging
+/// vertex, the coarse side's interpolation), of an integer one the field's
+/// default. Vertex values are read where a rank holds them, shared copies and
 /// ghosts included, so these must hold their owners' values (update them
-/// first) for ranks to agree. Other fields, edge and face fields, and integer
-/// vertex fields are dropped and named in `dropped`; the internal soma:
-/// fields are rebuilt.
+/// first) for ranks to agree. Fields that have no way to give new vertices
+/// values (integer vertex fields with neither a rule nor a default), other
+/// fields, and edge and face fields are dropped and named in `dropped`; the
+/// internal soma: fields are rebuilt. Rules are each rank's own: set the same
+/// rules on every rank, or ranks may keep different fields.
 ///
 /// Each level is refine_marked (below) with every cell marked, so it keeps the
 /// refinement state: "refine:level" one up, "refine:birth" recorded for each
@@ -268,6 +274,25 @@ struct QuadRefineOptions {
 /// is not found. Collective; throws as refine_marked does and as match_points
 /// does for tol.
 void infer_births(const Comm& comm, HostMesh& mesh, PointTolerance tol = {});
+
+/// The hanging vertices of a mesh, each as a combination of vertices that do
+/// not hang: a vertex refine_marked made (or infer_births recorded, in
+/// "refine:birth") on an edge or face that some cell still has whole takes
+/// the average of that side's corners, a corner that hangs itself (one level
+/// up) taking its own masters in turn. Exact for the traces of linear,
+/// bilinear and trilinear elements, so a finite element space that so
+/// constrains them is continuous (FemSpace).
+struct HangingConstraints {
+  std::vector<LO> vertex;          ///< the hanging vertices here, owned or not, ascending
+  std::vector<Offset> offsets{0};  ///< vertex i's masters: [offsets[i], offsets[i + 1])
+  std::vector<GO> masters;         ///< by gid, ascending; none hanging
+  std::vector<Real> weights;       ///< adding up to 1
+};
+
+/// Collective: the hanging constraints of the vertices here. Every rank gets
+/// every hanging vertex's record (an allgather of five gids per vertex), to
+/// resolve masters that hang. Empty when no rank's mesh has "refine:birth".
+[[nodiscard]] HangingConstraints hanging_constraints(const Comm& comm, const HostMesh& mesh);
 
 /// Marks for refine_marked from an indicator per owned cell (local id order).
 /// mark_threshold marks the cells whose indicator exceeds `threshold`.

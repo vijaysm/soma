@@ -212,6 +212,7 @@ class FieldRegistry {
                          options.default_value.value_or(std::vector<T>{}),
                          options.global_value.value_or(std::vector<T>{}), 0, serial_);
     insert(std::move(name), data_type_of<T>(), ncomp, options.handle, space, std::any(f));
+    if (options.rule) families_[entries_.back().info.family].rule = std::move(options.rule);
     return f;
   }
 
@@ -226,6 +227,7 @@ class FieldRegistry {
       throw std::invalid_argument("field '" + name + "': a variable-length field needs a per_entity layout");
     }
     check_handle<T>(name, options.handle);
+    if (options.rule) throw std::invalid_argument("field '" + name + "': a variable-length field takes no rule");
     check_new(name, data_type_of<T>(), 0, options.handle, space);
     const auto rows = static_cast<std::size_t>(space.rows());
     if (offsets.size() != rows + 1) {
@@ -346,6 +348,61 @@ class FieldRegistry {
     for (const Entry& e : entries_) {
       if (e.alive) out.push_back(e.info);
     }
+    return out;
+  }
+
+  // ---- rules (soma/fields/field_rule.hpp) ---------------------------------
+  // A rule belongs to a family: every field of its name, value type, ncomp
+  // and layout shares it. It goes when the family's last field is removed.
+
+  /// Sets the rule of f's family, replacing any; an empty rule clears it.
+  /// The rule's value type is f's, checked when the rule is built.
+  template <class T>
+  void set_rule(const Field<T, MemSpace>& f, std::type_identity_t<FieldRule<T>> rule) {
+    families_[entry(f.id()).info.family].rule = rule ? std::any(std::move(rule)) : std::any{};
+  }
+
+  /// Sets the rule of every family called `name` (one per layout and ncomp).
+  /// Throws std::out_of_range when no live field is called so, and
+  /// std::invalid_argument when one of them is not of value type T or is
+  /// variable-length; nothing changes then.
+  template <class T>
+  void set_rule(std::string_view name, FieldRule<T> rule) {
+    std::vector<FamilyId> fams;
+    for (const Entry& e : entries_) {
+      if (!e.alive || e.info.name != name) continue;
+      if (e.info.type != data_type_of<T>() || e.info.variable) {
+        throw std::invalid_argument("set_rule: field '" + std::string(name) + "' is " +
+                                    type_text(e.info.type, e.info.ncomp) + ", not of " +
+                                    soma::name(data_type_of<T>()) + " values of fixed length");
+      }
+      fams.push_back(e.info.family);
+    }
+    if (fams.empty()) throw std::out_of_range("set_rule: no field named '" + std::string(name) + "'");
+    for (const FamilyId fam : fams) families_[fam].rule = rule ? std::any(rule) : std::any{};
+  }
+
+  /// The rule of the field's family; an empty one when it has none. Throws
+  /// std::invalid_argument when T is not the field's value type.
+  template <class T>
+  FieldRule<T> rule(FieldId id) const {
+    const Entry& e = entry(id);
+    if (e.info.type != data_type_of<T>()) {
+      throw std::invalid_argument("rule: field '" + e.info.name + "' holds " + soma::name(e.info.type) +
+                                  " values, not " + soma::name(data_type_of<T>()));
+    }
+    const std::any& r = family_at(e.info.family).rule;
+    return r.has_value() ? std::any_cast<const FieldRule<T>&>(r) : FieldRule<T>{};
+  }
+  bool has_rule(FieldId id) const { return family_at(entry(id).info.family).rule.has_value(); }
+  /// Names of the live fields whose family has a rule, sorted, each once.
+  std::vector<std::string> rule_names() const {
+    std::vector<std::string> out;
+    for (const Entry& e : entries_) {
+      if (e.alive && family_at(e.info.family).rule.has_value()) out.push_back(e.info.name);
+    }
+    std::sort(out.begin(), out.end());
+    out.erase(std::unique(out.begin(), out.end()), out.end());
     return out;
   }
 
@@ -542,6 +599,7 @@ class FieldRegistry {
     Family& fam = families_[e.info.family];
     std::erase(fam.members, id);
     ++fam.version;
+    if (fam.members.empty()) fam.rule.reset();
     e.alive = false;
     e.field.reset();
     e.space = Space<MemSpace>();
@@ -593,6 +651,7 @@ class FieldRegistry {
     for (const Family& f : families_) {
       built.families_.push_back(typename FieldRegistry<Dst>::Family{f.key});
       built.families_.back().format = f.format;
+      built.families_.back().rule = f.rule;
     }
 
     std::map<const void*, Domain<Dst>> domains;
@@ -628,6 +687,9 @@ class FieldRegistry {
         built.families_[out.info.family].members.push_back(out.info.id);
       }
       built.entries_.push_back(std::move(out));
+    }
+    for (auto& f : built.families_) {
+      if (f.members.empty()) f.rule.reset();
     }
     dst.entries_.swap(built.entries_);
     dst.families_.swap(built.families_);
@@ -665,6 +727,7 @@ class FieldRegistry {
     for (const Family& f : families_) {
       built.families_.push_back(Family{f.key});
       built.families_.back().format = f.format;
+      built.families_.back().rule = f.rule;
     }
     std::map<const void*, Domain<MemSpace>> domains;
     std::map<const void*, Space<MemSpace>> spaces;
@@ -703,6 +766,9 @@ class FieldRegistry {
       out.alive = true;
       built.families_[out.info.family].members.push_back(out.info.id);
       built.entries_.push_back(std::move(out));
+    }
+    for (auto& f : built.families_) {
+      if (f.members.empty()) f.rule.reset();
     }
     dst.entries_.swap(built.entries_);
     dst.families_.swap(built.families_);
@@ -745,6 +811,7 @@ class FieldRegistry {
     explicit Family(FamilyKey k) : key(std::move(k)) {}
     FamilyKey key;
     TagFormat format{};
+    std::any rule{};               ///< FieldRule<T> of the key's type, or empty
     std::vector<FieldId> members;  ///< live fields, in id order
     std::uint64_t version = 1;     ///< bumped when the membership or the epoch changes
     mutable std::array<std::shared_ptr<const detail::FamilyDimData<MemSpace>>, num_field_slots> index;

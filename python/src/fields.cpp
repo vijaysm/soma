@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <algorithm>
+#include <memory>
 #include <optional>
 #include <stdexcept>
 #include <string>
@@ -16,7 +17,9 @@
 #include <nanobind/stl/vector.h>
 
 #include "common.hpp"
+#include "soma/algorithms/sample.hpp"
 #include "soma/fields/data_type.hpp"
+#include "soma/fields/field_rule.hpp"
 #include "soma/parallel/halo_exchange.hpp"
 
 namespace soma_py {
@@ -125,6 +128,81 @@ void bind_exchange_type(nb::class_<Guarded<HostHalo>>& c) {
           "Collective: every holder gets all holders' values combined by op, in rank order, in place.");
 }
 
+const char* numpy_dtype(DataType t) {
+  switch (t) {
+    case DataType::f64: return "float64";
+    case DataType::f32: return "float32";
+    case DataType::i32: return "int32";
+    case DataType::i64: return "int64";
+    case DataType::i8: return "int8";
+    case DataType::u8: return "uint8";
+    case DataType::u32: return "uint32";
+    case DataType::u64: return "uint64";
+  }
+  return "?";
+}
+
+// A Python callable as the rule of field `field` (ncomp components): called
+// with the batch as a namespace of arrays, it returns an array of exactly the
+// field's dtype holding ncomp values per entity (shape (n,) or (n, ncomp)).
+template <class T>
+soma::FieldRule<T> py_rule(nb::object fn, int ncomp, const std::string& field) {
+  std::shared_ptr<nb::object> held(new nb::object(std::move(fn)), [](nb::object* p) {
+    if (Py_IsInitialized() == 0) return;  // at exit: left to the operating system
+    nb::gil_scoped_acquire gil;
+    delete p;
+  });
+  return [held, ncomp, field](const soma::EntityBatch& b) {
+    nb::gil_scoped_acquire gil;
+    const std::size_t n = b.size();
+    const nb::module_ np = nb::module_::import_("numpy");
+    nb::dict kw;
+    kw["dim"] = b.dim;
+    kw["count"] = n;
+    kw["offsets"] = vector_array(std::vector<soma::LO>(b.offsets.begin(), b.offsets.end()));
+    kw["xyz"] = nb::cast(vector_array(std::vector<double>(b.xyz.begin(), b.xyz.end()))).attr("reshape")(-1, 3);
+    std::vector<double> centers;
+    centers.reserve(3 * n);
+    for (std::size_t i = 0; i < n; ++i) {
+      const auto c = b.center(i);
+      centers.insert(centers.end(), c.begin(), c.end());
+    }
+    kw["centers"] = nb::cast(vector_array(std::move(centers))).attr("reshape")(-1, 3);
+    if (b.topology.empty()) {
+      kw["topology"] = nb::none();
+    } else {
+      std::vector<std::uint8_t> t;
+      for (const soma::Topology x : b.topology) t.push_back(static_cast<std::uint8_t>(x));
+      kw["topology"] = vector_array(std::move(t));
+    }
+    kw["gid"] = b.gid.empty() ? nb::object(nb::none())
+                              : nb::cast(vector_array(std::vector<std::int64_t>(b.gid.begin(), b.gid.end())));
+    const nb::object batch = nb::module_::import_("types").attr("SimpleNamespace")(**kw);
+    const nb::object got = np.attr("asarray")((*held)(batch));
+    const std::string dtype = nb::cast<std::string>(got.attr("dtype").attr("name"));
+    if (dtype != numpy_dtype(soma::data_type_of<T>())) {
+      throw nb::type_error(("the rule of field '" + field + "' returned " + dtype + " values; it must return " +
+                            numpy_dtype(soma::data_type_of<T>()) + ", the field's dtype")
+                               .c_str());
+    }
+    const nb::object flat = np.attr("ascontiguousarray")(got).attr("reshape")(-1);
+    const auto a = nb::cast<nb::ndarray<const T, nb::ndim<1>, nb::c_contig, nb::device::cpu>>(flat);
+    if (a.shape(0) != n * static_cast<std::size_t>(ncomp)) {
+      throw std::invalid_argument("the rule of field '" + field + "' returned " + std::to_string(a.shape(0)) +
+                                  " values for " + std::to_string(n) + " entities of " + std::to_string(ncomp) +
+                                  " components");
+    }
+    return std::vector<T>(a.data(), a.data() + a.shape(0));
+  };
+}
+
+soma::Sampling sampling_of(const std::string& mode) {
+  if (mode == "point") return soma::Sampling::point;
+  if (mode == "average") return soma::Sampling::average;
+  if (mode == "integral") return soma::Sampling::integral;
+  throw std::invalid_argument("sample: mode '" + mode + "' is not 'point', 'average' or 'integral'");
+}
+
 }  // namespace
 
 void bind_fields(nb::module_& m, nb::class_<PyMesh>& mesh) {
@@ -175,7 +253,57 @@ void bind_fields(nb::module_& m, nb::class_<PyMesh>& mesh) {
             self.get().fields().remove(find(self.get(), name, dim, all).id);
           },
           nb::arg("name"), nb::arg("dim") = nb::none(),
-          "Removes the field; arrays taken before keep the old storage.");
+          "Removes the field; arrays taken before keep the old storage.")
+      .def(
+          "set_rule",
+          [](PyMesh& self, const std::string& name, nb::object rule) {
+            soma::HostMesh& m = self.get();
+            std::vector<soma::FieldInfo> named;
+            for (const soma::FieldInfo& f : m.fields().list()) {
+              if (f.name != name) continue;
+              if (f.variable) throw nb::type_error(("field '" + name + "' has variable length").c_str());
+              named.push_back(f);
+            }
+            if (named.empty()) throw std::out_of_range("set_rule: no field '" + name + "'");
+            for (const soma::FieldInfo& f : named) {
+              dispatch(f.type, [&](auto v) {
+                using T = decltype(v);
+                m.fields().set_rule(m.fields().get<T>(f.id),
+                                    rule.is_none() ? soma::FieldRule<T>{} : py_rule<T>(rule, f.ncomp, f.name));
+              });
+            }
+          },
+          nb::arg("name"), nb::arg("rule").none(),
+          "Sets the rule of every field named name (None clears it): rule(batch) gives values to the entities "
+          "refinement, edits and sample() give it, all at once. batch has dim, count, offsets (entity i's corners "
+          "are rows offsets[i]:offsets[i + 1] of xyz), xyz (corners, 3), centers (count, 3), topology and gid "
+          "(None for points). The rule returns an array of exactly the field's dtype, shape (count,) or "
+          "(count, ncomp); another dtype is a TypeError.")
+      .def(
+          "has_rule",
+          [](const PyMesh& self, const std::string& name, std::optional<int> dim) {
+            std::vector<soma::FieldInfo> all;
+            return self.get().fields().has_rule(find(self.get(), name, dim, all).id);
+          },
+          nb::arg("name"), nb::arg("dim") = nb::none(), "Whether the field has a rule.")
+      .def(
+          "sample",
+          [](PyMesh& self, const std::string& name, nb::object rule, const std::string& mode, int degree,
+             std::optional<int> dim) {
+            std::vector<soma::FieldInfo> all;
+            const soma::FieldInfo& f = find(self.get(), name, dim, all);
+            const soma::SampleOptions options{sampling_of(mode), degree};
+            dispatch(f.type, [&](auto v) {
+              using T = decltype(v);
+              soma::sample(self.get(), self.get().fields().get<T>(f.id),
+                           rule.is_none() ? soma::FieldRule<T>{} : py_rule<T>(rule, f.ncomp, f.name), options);
+            });
+          },
+          nb::arg("name"), nb::arg("rule").none() = nb::none(), nb::arg("mode") = "point", nb::arg("degree") = 4,
+          nb::arg("dim") = nb::none(),
+          "Gives the field the values of rule (the field's own when None) on every member: mode 'point' at the "
+          "entities (their corners) or element nodes, 'average' or 'integral' over each cell by a quadrature exact "
+          "for polynomials of degree, the rule then called with points (dim 0).");
 
   nb::enum_<soma::Op>(m, "Op", "Reductions.")
       .value("sum", soma::Op::sum)

@@ -12,6 +12,8 @@
 #include <vector>
 
 #include "handles.hpp"
+#include "soma/algorithms/sample.hpp"
+#include "soma/fields/field_rule.hpp"
 #include "soma/parallel/halo_exchange.hpp"
 
 using HostHalo = soma::HaloExchange<Kokkos::HostSpace>;
@@ -107,6 +109,26 @@ void check_column_major(const V& v, const std::string& name) {
   if (v.extent(0) > 1 && v.extent(1) > 1 && v.stride(1) != v.extent(0)) {
     throw std::runtime_error("field '" + name + "': padded storage");
   }
+}
+
+// A rule of a C function for a field of ncomp components: the batch as a
+// soma_entity_batch_t, the values interleaved; a return other than 0 throws.
+template <class T>
+FieldRule<T> c_rule(soma_rule_fn fn, void* context, int ncomp) {
+  static_assert(sizeof(Topology) == sizeof(std::uint8_t));
+  return [fn, context, ncomp](const EntityBatch& b) {
+    std::vector<T> v(b.size() * static_cast<std::size_t>(ncomp));
+    const soma_entity_batch_t cb{b.dim,
+                                 static_cast<soma_lo_t>(b.size()),
+                                 b.topology.empty() ? nullptr : reinterpret_cast<const std::uint8_t*>(b.topology.data()),
+                                 b.offsets.data(),
+                                 b.xyz.data(),
+                                 b.gid.empty() ? nullptr : b.gid.data()};
+    if (const int code = fn(&cb, ncomp, v.data(), context); code != 0) {
+      throw std::runtime_error("field rule: the C function returned " + std::to_string(code));
+    }
+    return v;
+  };
 }
 
 }  // namespace
@@ -326,5 +348,66 @@ int soma_halo_clone(const soma_halo_t* halo, soma_halo_t** result) {
 }
 
 void soma_halo_free(soma_halo_t* halo) { delete halo; }
+
+int soma_mesh_set_rule(soma_mesh_t* mesh, const char* name, int dtype, soma_rule_fn rule, void* context) {
+  return call([&] {
+    constexpr const char* what = "soma_mesh_set_rule";
+    soma::HostMesh& m = need(mesh, what).get();
+    const std::string n = soma::c::name_of(name, what);
+    const soma::DataType t = soma::c::dtype_of(dtype, what);
+    std::vector<soma::FieldInfo> named;
+    for (const soma::FieldInfo& f : m.fields().list()) {
+      if (f.name != n) continue;
+      if (f.type != t || f.variable) {
+        throw soma::c::TypeError(std::string(what) + ": field '" + n + "' holds " +
+                                 (f.variable ? std::string("variable-length ") : std::string()) +
+                                 soma::name(f.type) + " values, not " + soma::name(t));
+      }
+      named.push_back(f);
+    }
+    if (named.empty()) throw std::out_of_range(std::string(what) + ": no field '" + n + "'");
+    soma::c::dispatch(t, [&](auto v) {
+      using T = decltype(v);
+      for (const soma::FieldInfo& f : named) {
+        const auto field = m.fields().get<T>(f.id);
+        m.fields().set_rule(field, rule == nullptr ? soma::FieldRule<T>{}
+                                                   : soma::c::c_rule<T>(rule, context, f.ncomp));
+      }
+    });
+  });
+}
+
+int soma_mesh_has_rule(const soma_mesh_t* mesh, const char* name, int dim, int* has) {
+  return call([&] {
+    constexpr const char* what = "soma_mesh_has_rule";
+    const soma::HostMesh& m = need(mesh, what).get();
+    const soma::FieldInfo f = soma::c::find(m, soma::c::name_of(name, what), dim);
+    out(has, what) = m.fields().has_rule(f.id) ? 1 : 0;
+  });
+}
+
+int soma_mesh_sample(soma_mesh_t* mesh, const char* name, int dim, int dtype, soma_rule_fn rule, void* context,
+                     int mode, int degree) {
+  return call([&] {
+    constexpr const char* what = "soma_mesh_sample";
+    soma::HostMesh& m = need(mesh, what).get();
+    const soma::FieldInfo f = soma::c::find(m, soma::c::name_of(name, what), dim);
+    if (f.variable) throw soma::c::TypeError(std::string(what) + ": field '" + f.name + "' has variable length");
+    // A negative dtype: the values are the field's own type (Fortran's dtype absent).
+    if (rule != nullptr && dtype >= 0 && soma::c::dtype_of(dtype, what) != f.type) {
+      throw soma::c::TypeError(std::string(what) + ": field '" + f.name + "' holds " + soma::name(f.type) +
+                               " values, not " + soma::name(static_cast<soma::DataType>(dtype)));
+    }
+    if (mode < SOMA_SAMPLE_POINT || mode > SOMA_SAMPLE_INTEGRAL) {
+      throw std::invalid_argument(std::string(what) + ": " + std::to_string(mode) + " is not a sampling mode");
+    }
+    const soma::SampleOptions options{static_cast<soma::Sampling>(mode), degree};
+    soma::c::dispatch(f.type, [&](auto v) {
+      using T = decltype(v);
+      soma::sample(m, m.fields().get<T>(f.id),
+                   rule == nullptr ? soma::FieldRule<T>{} : soma::c::c_rule<T>(rule, context, f.ncomp), options);
+    });
+  });
+}
 
 }  // extern "C"

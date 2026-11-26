@@ -3,6 +3,7 @@
 
 // The C API's fields and halo exchange.
 
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -279,3 +280,114 @@ TEST(CApiHalo, OutlivesMeshHandle) {
 }
 
 }  // namespace
+
+namespace {
+
+// u = (x + 2y, gid or -1): ncomp 2, f64.
+int rule_u(const soma_entity_batch_t* b, int ncomp, void* values, void* context) {
+  ++*static_cast<int*>(context);
+  auto* v = static_cast<double*>(values);
+  for (soma_lo_t i = 0; i < b->count; ++i) {
+    const double* p = b->xyz + 3 * b->offsets[i];
+    v[ncomp * i] = p[0] + 2 * p[1];
+    v[ncomp * i + 1] = b->gid != nullptr ? static_cast<double>(b->gid[i]) : -1;
+  }
+  return 0;
+}
+
+// k = corners * 10 + topology: i32.
+int rule_k(const soma_entity_batch_t* b, int, void* values, void*) {
+  auto* v = static_cast<std::int32_t*>(values);
+  for (soma_lo_t i = 0; i < b->count; ++i) {
+    v[i] = static_cast<std::int32_t>(10 * (b->offsets[i + 1] - b->offsets[i]) + b->topology[i]);
+  }
+  return 0;
+}
+
+int rule_x(const soma_entity_batch_t* b, int, void* values, void*) {
+  auto* v = static_cast<double*>(values);
+  for (soma_lo_t i = 0; i < b->count; ++i) v[i] = b->xyz[3 * b->offsets[i]];
+  return 0;
+}
+
+int rule_fails(const soma_entity_batch_t*, int, void*, void*) { return 7; }
+
+}  // namespace
+
+// Rules: set with their value type, used by sampling and refinement; a type
+// that is not the field's, or a rule that fails, is an error.
+TEST(CApiFields, RulesSampleAndRefine) {
+  World w;
+  soma_mesh_t* m = box(w, 2, 2, 2);
+  void* data = nullptr;
+  soma_lo_t rows = -1;
+  ASSERT_EQ(soma_mesh_add_field(m, "u", 0, 2, SOMA_F64, &data, &rows), SOMA_OK);
+  ASSERT_EQ(soma_mesh_add_field(m, "k", 3, 1, SOMA_I32, &data, &rows), SOMA_OK);
+  ASSERT_EQ(soma_mesh_add_field(m, "xm", 3, 1, SOMA_F64, &data, &rows), SOMA_OK);
+  int calls = 0;
+  EXPECT_EQ(soma_mesh_set_rule(m, "u", SOMA_F32, rule_u, &calls), SOMA_ERR_TYPE);
+  EXPECT_EQ(soma_mesh_set_rule(m, "none", SOMA_F64, rule_u, &calls), SOMA_ERR_OUT_OF_RANGE);
+  ASSERT_EQ(soma_mesh_set_rule(m, "u", SOMA_F64, rule_u, &calls), SOMA_OK) << last_error();
+  ASSERT_EQ(soma_mesh_set_rule(m, "k", SOMA_I32, rule_k, nullptr), SOMA_OK);
+  int has = -1;
+  ASSERT_EQ(soma_mesh_has_rule(m, "u", -1, &has), SOMA_OK);
+  EXPECT_EQ(has, 1);
+  ASSERT_EQ(soma_mesh_has_rule(m, "xm", -1, &has), SOMA_OK);
+  EXPECT_EQ(has, 0);
+
+  ASSERT_EQ(soma_mesh_sample(m, "u", -1, 0, nullptr, nullptr, SOMA_SAMPLE_POINT, 0), SOMA_OK) << last_error();
+  EXPECT_EQ(calls, count(m, 0) > 0 ? 1 : 0);  // no call without entities
+  ASSERT_EQ(soma_mesh_sample(m, "k", -1, 0, nullptr, nullptr, SOMA_SAMPLE_POINT, 0), SOMA_OK);
+  EXPECT_EQ(soma_mesh_sample(m, "xm", -1, 0, nullptr, nullptr, SOMA_SAMPLE_POINT, 0), SOMA_ERR_INVALID_ARGUMENT);
+  EXPECT_EQ(soma_mesh_sample(m, "xm", -1, SOMA_I32, rule_x, nullptr, SOMA_SAMPLE_AVERAGE, 2), SOMA_ERR_TYPE);
+  ASSERT_EQ(soma_mesh_sample(m, "xm", -1, SOMA_F64, rule_x, nullptr, SOMA_SAMPLE_AVERAGE, 1), SOMA_OK);
+  // A negative dtype: the field's own (Fortran's mesh%sample without dtype).
+  ASSERT_EQ(soma_mesh_sample(m, "xm", -1, -1, rule_x, nullptr, SOMA_SAMPLE_AVERAGE, 1), SOMA_OK) << last_error();
+  if (count(m, 3) > 0) {
+    EXPECT_EQ(soma_mesh_sample(m, "xm", -1, SOMA_F64, rule_fails, nullptr, SOMA_SAMPLE_POINT, 0), SOMA_ERR_RUNTIME);
+    EXPECT_NE(last_error().find("returned 7"), std::string::npos) << last_error();
+  }
+
+  double* x = nullptr;
+  soma_lo_t nv = 0;
+  ASSERT_EQ(soma_mesh_coords(m, &x, &nv), SOMA_OK);
+  int dtype = -1, ncomp = -1;
+  ASSERT_EQ(soma_mesh_field(m, "u", -1, &dtype, &data, &rows, &ncomp), SOMA_OK);
+  const auto* u = static_cast<const double*>(data);
+  const soma_go_t* g = gids(m, 0);
+  int wrong = 0;
+  for (soma_lo_t v = 0; v < nv; ++v) {
+    wrong += u[v] == x[v] + 2 * x[v + nv] && u[v + rows] == static_cast<double>(g[v]) ? 0 : 1;
+  }
+  ASSERT_EQ(soma_mesh_field(m, "k", -1, &dtype, &data, &rows, &ncomp), SOMA_OK);
+  for (soma_lo_t e = 0; e < rows; ++e) wrong += static_cast<const std::int32_t*>(data)[e] == 80 + SOMA_HEX ? 0 : 1;
+  // Hex averages of x are the x of their centres (box cells are 0.5 wide).
+  ASSERT_EQ(soma_mesh_field(m, "xm", -1, &dtype, &data, &rows, &ncomp), SOMA_OK);
+  for (soma_lo_t e = 0; e < rows; ++e) {
+    const double c = static_cast<const double*>(data)[e];
+    wrong += std::abs(c - (std::floor(2 * c) + 0.5) / 2) < 1e-14 ? 0 : 1;
+  }
+  EXPECT_EQ(wrong, 0);
+
+  // Refinement gives the new vertices the rule's values.
+  soma_refine_t* r = nullptr;
+  ASSERT_EQ(soma_refine_uniform(w.comm, m, 1, &r), SOMA_OK) << last_error();
+  soma_mesh_t* fine = nullptr;
+  ASSERT_EQ(soma_refine_mesh(r, &fine), SOMA_OK);
+  ASSERT_EQ(soma_mesh_has_rule(fine, "u", -1, &has), SOMA_OK);
+  EXPECT_EQ(has, 1);
+  ASSERT_EQ(soma_mesh_coords(fine, &x, &nv), SOMA_OK);
+  ASSERT_EQ(soma_mesh_field(fine, "u", -1, &dtype, &data, &rows, &ncomp), SOMA_OK);
+  u = static_cast<const double*>(data);
+  g = gids(fine, 0);
+  for (soma_lo_t v = 0; v < nv; ++v) {
+    wrong += u[v] == x[v] + 2 * x[v + nv] && u[v + rows] == static_cast<double>(g[v]) ? 0 : 1;
+  }
+  EXPECT_EQ(wrong, 0);
+  ASSERT_EQ(soma_mesh_set_rule(fine, "u", SOMA_F64, nullptr, nullptr), SOMA_OK);
+  ASSERT_EQ(soma_mesh_has_rule(fine, "u", -1, &has), SOMA_OK);
+  EXPECT_EQ(has, 0);
+  soma_mesh_free(fine);
+  soma_refine_free(r);
+  soma_mesh_free(m);
+}

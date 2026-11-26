@@ -87,3 +87,23 @@ def test_ghosts_with_empty_ranks():
     m.add_ghosts(comm, 1, 0)
     assert owned_totals(m) == owned
     m.remove_ghosts(comm)
+
+
+def test_edits_need_a_sync():
+    comm = comm_world()
+    m = soma.box_mesh(comm, 3, 3, 4)
+    m.add_ghosts(comm, 1, 0)
+    owned = owned_totals(m)
+    if comm.rank == 0:
+        e = soma.MeshEdit(m)
+        e.remove(3, np.array([0]))
+        e.apply()
+    assert m.needs_sync == (comm.rank == 0)
+    if comm.size > 1:
+        with pytest.raises(RuntimeError, match="sync_mesh"):
+            m.add_ghosts(comm, 1, 0)
+    lids = m.sync(comm)
+    assert not m.needs_sync
+    assert owned_totals(m)[0] == owned[0] - 1
+    if comm.rank == 0:
+        assert lids[3][0] == -1

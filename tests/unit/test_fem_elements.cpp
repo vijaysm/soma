@@ -272,6 +272,26 @@ TEST(FemElements, QuadratureIntegratesEveryMonomialOfItsDegree) {
   }
 }
 
+// The pyramid's collapsed rule: x^a y^b z^c integrates to
+// line(a) line(b) c! (a + b + 2)! / (a + b + c + 3)!, exactly to degree 3.
+TEST(FemElements, PyramidRuleIntegratesMonomialsToDegreeThree) {
+  const fem::Quadrature q = fem::quadrature(Topology::pyramid, 0);
+  ASSERT_EQ(q.n, 27);
+  auto line = [](int p) { return p % 2 == 1 ? Real{0} : Real{2} / (p + 1); };
+  for (int a = 0; a <= 3; ++a) {
+    for (int b = 0; a + b <= 3; ++b) {
+      for (int c = 0; a + b + c <= 3; ++c) {
+        Real sum = 0;
+        for (int p = 0; p < q.n; ++p) {
+          sum += q.w[p] * std::pow(q.xi[p][0], a) * std::pow(q.xi[p][1], b) * std::pow(q.xi[p][2], c);
+        }
+        const Real want = line(a) * line(b) * factorial(c) * factorial(a + b + 2) / factorial(a + b + c + 3);
+        EXPECT_NEAR(sum, want, 1e-15) << "monomial " << a << b << c;
+      }
+    }
+  }
+}
+
 TEST(FemElements, ShapeFunctionsInterpolateCornersAndSumToOne) {
   std::mt19937 rng(7);
   std::uniform_real_distribution<Real> u(0.05, 0.3);
@@ -373,6 +393,55 @@ TEST(FemElements, EnergyOfALinearFunctionIsExactOnAffineCells) {
       EXPECT_NEAR(energy, g2 * measure, 1e-12 * g2 * measure) << static_cast<int>(t);
     }
   }
+}
+
+// The composite hex (a hex whose sides two triangles tile) under every
+// split of its six sides, affine and distorted: split 0 is the Q1 hex bit for
+// bit; otherwise the matrix is symmetric bit for bit, takes constants to
+// zero and gives a linear function its exact energy |grad|^2 V, V the cell's
+// volume, which the load of f = 1 adds up to (V = 8 det when affine). Code 3
+// is no split.
+TEST(FemElements, CompositeHexHoldsLinearFunctionsUnderEverySplit) {
+  std::mt19937 rng(29);
+  const Real grad[3] = {-0.4, 1.1, 0.6};
+  const Real g2 = grad[0] * grad[0] + grad[1] * grad[1] + grad[2] * grad[2];
+  auto one = [](Real, Real, Real) { return Real{1}; };
+  for (int trial = 0; trial < 3; ++trial) {
+    const Affine m = random_affine(3, rng);
+    const fem::Cell c = trial < 2 ? cell(Topology::hex, m) : distorted(Topology::hex, rng);
+    Real u[fem::max_nodes];
+    for (int a = 0; a < 8; ++a) u[a] = 3 + grad[0] * c.x[a][0] + grad[1] * c.x[a][1] + grad[2] * c.x[a][2];
+    Matrix plain, k;
+    fem::stiffness(c, plain);
+    for (int all_splits = 0; all_splits < 729; ++all_splits) {
+      unsigned split = 0;
+      for (int s = 0, rest = all_splits; s < 6; ++s, rest /= 3) split |= static_cast<unsigned>(rest % 3) << (2 * s);
+      SCOPED_TRACE(testing::Message() << "trial " << trial << " split " << split);
+      ASSERT_GT(fem::stiffness(c, split, k), 0);
+      Real r[fem::max_nodes];
+      ASSERT_GT(fem::load(c, split, one, r), 0);
+      Real volume = 0, energy = 0, big = 0;
+      for (int a = 0; a < 8; ++a) {
+        volume += r[a];
+        Real row = 0;
+        for (int b = 0; b < 8; ++b) {
+          EXPECT_EQ(std::bit_cast<std::uint64_t>(k[a][b]), std::bit_cast<std::uint64_t>(k[b][a]));
+          if (split == 0) EXPECT_EQ(std::bit_cast<std::uint64_t>(k[a][b]), std::bit_cast<std::uint64_t>(plain[a][b]));
+          row += k[a][b];
+          energy += u[a] * k[a][b] * u[b];
+          big = std::max(big, std::abs(k[a][b]));
+        }
+        EXPECT_LE(std::abs(row), 1e-13 * big);
+      }
+      if (trial < 2) EXPECT_NEAR(volume, 8 * m.det, 1e-13 * volume);
+      EXPECT_NEAR(energy, g2 * volume, 1e-11 * g2 * volume);
+      if (::testing::Test::HasFailure()) return;
+    }
+  }
+  const fem::Cell c = cell(Topology::hex, Affine{});
+  Matrix k;
+  EXPECT_TRUE(std::isnan(fem::stiffness(c, 3u << 4, k)));
+  EXPECT_EQ(k[0][0], 0);
 }
 
 TEST(FemElements, MassIsExactForLinearFunctionsAndSumsToTheMeasure) {

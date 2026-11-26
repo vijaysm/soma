@@ -16,6 +16,7 @@
 
 #include "common.hpp"
 #include "soma/core/mesh_edit.hpp"
+#include "soma/parallel/merge.hpp"
 
 namespace soma_py {
 
@@ -110,6 +111,23 @@ void bind_edit(nb::module_& m, nb::class_<PyMesh>& mesh) {
   mesh.def(
       "compress", [](PyMesh& self) { return renumbering(self.get().compress()); },
       "Drops removed entities: for each dimension, the new lid of each old lid (-1: removed).");
+  mesh.def_prop_ro(
+      "needs_sync", [](const PyMesh& self) { return self.get().needs_sync(); },
+      "True for a distributed part edited since its sharing was made, until sync().");
+  mesh.def(
+      "sync",
+      [](PyMesh& self, const soma::Comm& comm, Real tol, bool ghosts, bool fields) {
+        soma::SyncOptions options;
+        options.tol.tol = tol;
+        options.ghosts = ghosts;
+        options.fields = fields;
+        return renumbering(soma::sync_mesh(comm, self.get(), options));
+      },
+      nb::arg("comm"), nb::arg("tol") = 0.0, nb::arg("ghosts") = true, nb::arg("fields") = true,
+      "Collective, in place: makes the part whole again after edits on any rank: compressed, its sharing, graphs "
+      "and (with ghosts) ghost layers made again; vertices added are matched by place, within tol; with fields, "
+      "owners' values of whole-dimension fields reach every copy. For each "
+      "dimension, the new lid of each old lid (-1: removed), empty where no rank's part needed it.");
 }
 
 }  // namespace soma_py

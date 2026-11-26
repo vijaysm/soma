@@ -23,6 +23,7 @@
 #include <Kokkos_Core.hpp>
 
 #include "soma/algorithms/remap.hpp"
+#include "soma/algorithms/sample.hpp"
 #include "soma/core/mesh_builder.hpp"
 #include "soma/parallel/distributed.hpp"
 
@@ -158,6 +159,17 @@ Vector field(const soma::HostMesh& mesh) {
     const auto p = centre(mesh, static_cast<LO>(e));
     u(e) = smooth(p[0], p[1]);
   }
+  return u;
+}
+
+// Exact averages of smooth over the owned cells (soma::sample, degree 6).
+Vector averages(const soma::HostMesh& mesh) {
+  soma::HostMesh m = mesh.clone();
+  const auto f = m.fields().add_tag<Real>("exact", 2, 1);
+  soma::sample(m, f, soma::pointwise([](Real x, Real y, Real) { return smooth(x, y); }),
+               {.mode = soma::Sampling::average, .degree = 6});
+  Vector u("u", static_cast<std::size_t>(m.segment_table(2).owned_end));
+  for (std::size_t e = 0; e < u.extent(0); ++e) u(e) = f.view()(e, 0);
   return u;
 }
 
@@ -361,8 +373,8 @@ TEST(Remap, TheCornerOrderOfACellDoesNotMatter) {
   }
 }
 
-// A smooth field's cell values remapped between unrelated meshes: the error
-// falls at first order.
+// A smooth field's cell averages remapped between unrelated meshes, against
+// the target's exact averages: the error falls at first order.
 TEST(Remap, TheErrorFallsAtFirstOrder) {
   const Comm c = Comm::world();
   std::vector<Real> errors;
@@ -370,12 +382,10 @@ TEST(Remap, TheErrorFallsAtFirstOrder) {
     const soma::HostMesh source = build(c, grid(n, n, false, 1), 0), target = build(c, grid(n + 3, n + 1, true, 2), 1);
     const Remap remap(c, source, target);
     Vector v("v", static_cast<std::size_t>(remap.rows()));
-    remap.apply(c, CVector(field(source)), v);
+    remap.apply(c, CVector(averages(source)), v);
+    const Vector exact = averages(target);
     Real local = 0;
-    for (LO r = 0; r < remap.rows(); ++r) {
-      const auto p = centre(target, r);
-      local += remap.target_area()(r) * std::abs(v(r) - smooth(p[0], p[1]));
-    }
+    for (LO r = 0; r < remap.rows(); ++r) local += remap.target_area()(r) * std::abs(v(r) - exact(r));
     errors.push_back(c.allreduce(local, soma::Op::sum));
     if (c.rank() == 0) std::printf("n %d L1 error %.4e\n", n, errors.back());
   }

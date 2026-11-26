@@ -96,3 +96,46 @@ def test_halo_bad_array_is_collective():
     arg = np.zeros((m.count(0), 2)) if comm.rank == 0 else v  # row-major on rank 0 only
     with pytest.raises(ValueError):
         soma.HaloExchange(comm, m, 0).update(comm, arg)
+
+
+def test_rules_sample_and_refine():
+    comm = comm_world()
+    m = soma.box_mesh(comm, 2, 2, 2)
+    u = m.add_field("u", 0, 2)
+    m.add_field("k", 3, 1, np.int32)
+    m.add_field("avg", 3)
+    calls = []
+
+    def rule_u(b):
+        calls.append(b.count)
+        assert b.dim == 0 and b.topology is None and b.xyz.shape == (b.count, 3)
+        return np.stack([b.xyz[:, 0] + 2 * b.xyz[:, 1], b.gid.astype(np.float64)], axis=1)
+
+    m.set_rule("u", rule_u)
+    m.set_rule("k", lambda b: (np.diff(b.offsets) * 10 + b.topology).astype(np.int32))
+    assert m.has_rule("u") and m.has_rule("k") and not m.has_rule("avg")
+    m.sample("u")
+    m.sample("k")
+    x = m.coords()
+    assert np.array_equal(u[:, 0], x[:, 0] + 2 * x[:, 1])
+    assert np.array_equal(u[:, 1], m.gids(0).astype(np.float64))
+    assert np.all(m.field("k")[:, 0] == 8 * 10 + soma.Topology.hex.value)
+    # Cell averages of x on the box's hexes are their centres' x.
+    m.sample("avg", lambda b: b.xyz[:, 0].copy(), mode="average", degree=1)
+    c = m.field("avg")[:, 0]
+    assert np.allclose(c, (np.floor(2 * c) + 0.5) / 2, atol=1e-14)
+    # Values of another dtype than the field's are refused, not converted
+    # (where there are cells to call the rule for).
+    if m.count(3) > 0:
+        with pytest.raises(TypeError):
+            m.sample("k", lambda b: np.zeros(b.count))
+    with pytest.raises(ValueError):
+        m.sample("avg", lambda b: b.xyz[:, 0], mode="nearest")
+    # Refinement gives the new vertices the rule's values.
+    fine = soma.refine_uniform(comm, m).mesh
+    assert fine.has_rule("u")
+    fu, fx = fine.field("u"), fine.coords()
+    assert np.array_equal(fu[:, 0], fx[:, 0] + 2 * fx[:, 1])
+    assert np.array_equal(fu[:, 1], fine.gids(0).astype(np.float64))
+    fine.set_rule("u", None)
+    assert not fine.has_rule("u")
