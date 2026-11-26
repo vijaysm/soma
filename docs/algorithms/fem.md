@@ -70,6 +70,11 @@ class FemSpace {
   CsrMatrix<MemSpace> laplacian(const Comm& comm) const;
   template <class F> View1<Real, MemSpace> load(const Comm& comm, const F& f) const;
   View1<const std::uint8_t, MemSpace> boundary() const;
+  bool constrained() const noexcept;                        // hanging vertices
+  View1<const std::uint8_t, MemSpace> hanging() const;      // per vertex
+  void distribute(const Comm& comm, const View1<Real, MemSpace>& x) const;
+  bool composite() const noexcept;                          // hexes against tets
+  View1<const std::uint16_t, MemSpace> split_sides() const;  // per cell
   void update(const Comm& comm, const View1<Real, MemSpace>& x) const;
   void multiply(const Comm& comm, const CsrMatrix<MemSpace>& a, const View1<Real, MemSpace>& x,
                 const View1<Real, MemSpace>& y) const;
@@ -136,15 +141,26 @@ assemble has become inverted or degenerate since the space was made.
 
 `refine_marked` without `MarkedOptions::conforming` leaves vertices on edges and faces that a
 neighbouring cell still has whole. A space of independent values there would not be continuous.
-`FemSpace` constrains them instead, as `hanging_constraints` (`soma/algorithms/refine.hpp`)
-gives them: a vertex born on a side that a cell still has whole takes the average of the side's
+`FemSpace` constrains them instead, as `hanging_constraints` (`soma/algorithms/refine.hpp`,
+see [hanging constraints](refinement.md#hanging-constraints)) gives them: a vertex born on a side that a cell still has whole takes the average of the side's
 corners,
 
 $$
 u_h = \sum_k w_k\, u_{m_k}, \qquad w_k = 1/n \text{ over the side's } n \text{ corners},
 $$
 
-a corner that hangs itself (one level up) taking its own masters in turn. These are the traces
+a corner that hangs itself (one level up) taking its own masters in turn.
+
+```{figure} ../figures/img/hanging-constraints.svg
+:alt: A 4 by 4 grid of squares refined at its lower left block and again at that block's corner cell, the hanging vertices on the edges between levels drawn as orange dots, each joined by orange lines to the two black squares at the ends of the coarse edge it lies on
+:width: 60%
+
+A grid of 4 x 4 quads refined by `refine_marked` (no `conforming`) at its lower left block, then at
+that block's corner: the hanging vertices (dots) and their masters (squares), as `hanging_constraints`
+gives them. Each lies on a coarse edge and takes half of each of its ends.
+```
+
+These are the traces
 of the coarse cell's linear, bilinear or trilinear element at the edge midpoint or face centre,
 so the constrained space is continuous: a linear function is reproduced exactly, and the error
 falls at the uniform meshes' rate.
@@ -197,6 +213,16 @@ basis and P1 on those tets:
 - inside, the sub-cells meet on triangles, where every trace is linear.
 
 So it is continuous, and it holds linear functions: the pyramids are isoparametric.
+
+```{figure} ../figures/img/composite-hex.svg
+:alt: Left, a unit cube of hexes beside a unit cube cut into six tets, the shared side's diagonal in red on both; right, the hex cut about its centre into five blue pyramids and two orange tets, pushed apart along their sides
+:width: 95%
+
+A hex against a cube of six tets (left): its side at $x = 1$ is tiled by two triangles, along the
+diagonal in red, which `detail::split_sides` finds (code 1 on side 1). The composite element (right):
+pyramids on its five whole sides and the two tets of the split side, all with their apex at the centre,
+drawn pushed apart.
+```
 
 The centre's value is tied to the mean of the corners', $u_c = \tfrac18 \sum_a u_a$, exact for
 linear functions. The element's $9 \times 9$ matrix and load reduce to $8 \times 8$,

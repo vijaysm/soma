@@ -224,6 +224,15 @@ quad against four quads, a triangle against four triangles, over any number of l
 hex face against the two triangles of two tets. Nothing else changes: the faces of a coarse cell
 are more than its sides, and the kernels loop over faces.
 
+```{figure} ../figures/img/coarse-fine-faces.svg
+:alt: The refined grid of quads with a grey arrow on every face between two cells; one coarse cell above the refined block shaded yellow, its five faces numbered, two of them the halves of its lower side
+:width: 60%
+
+The faces of the mesh of the [hanging vertices figure](fem.md#hanging-vertices), as `FvSpace` makes
+them: each arrow is a face's area vector at its centroid. The coarse cell shaded has four sides and
+five faces: its lower side is tiled by two fine sides, each a face between it and a fine cell.
+```
+
 - **Which sides.** A side with no exact match is one-sided. The one-sided sides of other cells
   whose corners all lie on it (to rounding of its size; a warped quad's warp allowed) are its
   tiles, found from its corners through the tiles' corners, so that a tile touching none of its

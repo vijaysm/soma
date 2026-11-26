@@ -51,6 +51,9 @@ All notable changes to SOMA are recorded here. The format follows
   six pyramids about its centre and two tets on each split face, the centre tied to the mean of the corners
   (`fem::stiffness(c, split, k)`, `fem::load(c, split, f, r)`). Continuous (linear solutions exact), second order
   in the max norm, bit for bit on any partition; a quad that triangles tile only in part is refused.
+- Documentation: what `FvSpace` and `FemSpace` take of refined and mixed meshes (a table in mesh refinement),
+  `hanging_constraints`, and figures of hanging constraints, coarse-fine faces and the composite hex, drawn from
+  a new figure data set (`nonconforming`) that runs the library on them.
 
 ### Visualization
 
