@@ -13,6 +13,7 @@
 ///   space.dss(comm, grad);                        // continuous
 ///   soma::sem::divergence(space, u, div);
 ///   soma::sem::vorticity(space, u, zeta);
+///   soma::sem::divergence_weak(comm, space, u, div);  // weak form, assembled
 ///   soma::sem::laplacian(comm, space, h, lap);     // weak form, assembled
 ///   soma::sem::hyperviscosity(comm, space, h, del4);
 ///   soma::sem::vector_hyperviscosity(comm, space, u, del4u);  // HOMME's form
@@ -36,6 +37,9 @@
 /// with a boundary it imposes a zero normal derivative there. It and
 /// hyperviscosity (the Laplacian applied twice) are collective and read only
 /// the owned elements; every element's result is written, as dss does.
+/// divergence_weak is the weak divergence, -sum w J v . grad(phi) per element,
+/// assembled the same way: zero flux through the mesh boundary is built in, so
+/// its integral over the mesh is zero to rounding whatever the flow at the walls.
 
 #include <cstddef>
 #include <stdexcept>
@@ -194,6 +198,40 @@ void project_tangent(const SemSpace<MemSpace>& s, const detail::Out<MemSpace>& v
         for (int k = 0; k < 3; ++k) v(r, k) -= along * n[k];
       });
   typename MemSpace::execution_space{}.fence();
+}
+
+/// Collective. v: 3 components (Cartesian); div: 1. The weak divergence as
+/// HOMME's divergence_sphere_wk: at each point k of an element,
+/// -sum_q m_q v_q . grad(phi_k)(q), grad(phi_k) from the contravariant vectors
+/// and the derivative matrix; summed over the elements holding the point
+/// (dss's sum, not its average) and divided by the assembled mass. Continuous,
+/// every element's points written. Zero flux through the mesh boundary is
+/// built in: the integral of div is zero to rounding, so a mass or tracer
+/// equation kept in this form conserves on a mesh with coasts.
+template <class MemSpace>
+void divergence_weak(const Comm& comm, const SemSpace<MemSpace>& s, const detail::In<MemSpace>& v,
+                     const detail::Out<MemSpace>& div) {
+  detail::check_values(s, v, 3, "divergence_weak", "v");
+  detail::check_values(s, div, 1, "divergence_weak", "div");
+  const auto flux = detail::scratch(s, 2, "soma::sem::divergence_weak::flux");
+  const auto b = s.contravariant();
+  const auto m = s.local_mass();
+  const LO owned = s.owned_elements() * s.points_per_element();
+  // m (v . a^i): the integrand of each reference direction.
+  Kokkos::parallel_for(
+      "soma::sem::divergence_weak::flux", detail::PointPolicy<MemSpace>(0, owned), KOKKOS_LAMBDA(const LO r) {
+        for (int a = 0; a < 2; ++a) {
+          flux(r, a) = m(r, 0) * (v(r, 0) * b(r, 3 * a) + v(r, 1) * b(r, 3 * a + 1) + v(r, 2) * b(r, 3 * a + 2));
+        }
+      });
+  // Each element's -sum m v . grad(phi), over its local mass: dss then sums
+  // the elements' integrals and divides by the assembled mass.
+  const detail::Derivatives<MemSpace> d{s.derivative(), s.order() + 1};
+  Kokkos::parallel_for(
+      "soma::sem::divergence_weak", detail::PointPolicy<MemSpace>(0, owned),
+      KOKKOS_LAMBDA(const LO r) { div(r, 0) = -(d.xi_t(flux, r, 0) + d.eta_t(flux, r, 1)) / m(r, 0); });
+  typename MemSpace::execution_space{}.fence();
+  s.dss(comm, div);
 }
 
 /// Collective. f, lap: 1 component. The weak Laplacian,

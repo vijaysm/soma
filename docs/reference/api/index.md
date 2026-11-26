@@ -107,6 +107,7 @@ io/vtk_writer
 
 algorithms/arborx_index
 algorithms/cg
+algorithms/components
 algorithms/conformity
 algorithms/csr
 algorithms/fem
@@ -118,6 +119,7 @@ algorithms/laplacian
 algorithms/quality_smooth
 algorithms/petsc
 algorithms/refine
+algorithms/refine_graded
 algorithms/remap
 algorithms/sample
 ```
@@ -127,6 +129,7 @@ algorithms/sample
 ```{toctree}
 :maxdepth: 1
 
+sem/boundary
 sem/cubed_sphere
 sem/gll
 sem/operators

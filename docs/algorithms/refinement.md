@@ -403,6 +403,21 @@ for (;;) {
 }
 ```
 
+The passes, the transition bands and the reruns below are `soma::refine_graded`
+(`soma/algorithms/refine_graded.hpp`); the example gives it the boxes as its target, a callback
+that answers, per cell, whether the cell lies within the growth asked of the target, so another
+target (a coastline, say) refines the same way:
+
+```cpp
+soma::GradedOptions o{.spacing = 12, .length = km};  // km: unit-sphere length -> km on the Earth
+const auto boxes = [&](const soma::HostMesh& m, const std::vector<soma::Real>& grow) {
+  std::vector<std::uint8_t> in(grow.size(), 0);  // grow[e] < 0: no refinement needed
+  for (std::size_t e = 0; e < grow.size(); ++e) in[e] = grow[e] >= 0 && overlaps(corners(m, e), box, grow[e]);
+  return in;
+};
+soma::GradedResult r = soma::refine_graded(comm, start, o, boxes);
+```
+
 - **Spacing** is that of the GLL points of spectral elements with `--np` points per edge
   (default 4): $\sqrt{A}/(n_p - 1)$ for a cell of area $A$. This is E3SM's convention: ne30
   (elements about 300 km across) is about 100 km. Each pass divides the spacing by 3, and a cell
